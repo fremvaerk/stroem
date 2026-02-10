@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stroem-common",
+    "crates/stroem-db",
+    "crates/stroem-runner",
+    "crates/stroem-server",
+    "crates/stroem-worker",
+    "crates/stroem-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Shared across crates
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0.12"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
+
+# Web
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+# Templates
+tera = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+stroem-common = { path = "crates/stroem-common" }
+stroem-db = { path = "crates/stroem-db" }
+stroem-runner = { path = "crates/stroem-runner" }

@@ -1,0 +1,16 @@
+[package]
+name = "stroem-runner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+stroem-common.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
