@@ -1,0 +1,25 @@
+# Example worker configuration for Strøm
+# Copy this file to worker-config.yaml and customize for your environment
+
+# URL of the Strøm server to connect to
+server_url: "http://localhost:8080"
+
+# Authentication token for the worker (shared secret)
+worker_token: "your-worker-token-here"
+
+# Name of this worker instance (for identification)
+worker_name: "worker-1"
+
+# Maximum number of concurrent step executions
+max_concurrent: 4
+
+# How often to poll for new jobs (in seconds)
+poll_interval_secs: 2
+
+# Directory where steps will be executed
+workspace_dir: "/tmp/stroem-workspace"
+
+# List of capabilities this worker supports
+# Currently supported: ["shell"]
+capabilities:
+  - shell

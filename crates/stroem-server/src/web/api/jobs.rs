@@ -1,0 +1,209 @@
+use crate::log_storage::LogStorage;
+use crate::state::AppState;
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::Arc;
+use stroem_db::{JobRepo, JobStepRepo};
+use uuid::Uuid;
+
+#[derive(Debug, Deserialize)]
+pub struct ListJobsQuery {
+    pub workspace: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+/// GET /api/jobs - List jobs
+#[tracing::instrument(skip(state))]
+pub async fn list_jobs(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListJobsQuery>,
+) -> impl IntoResponse {
+    match JobRepo::list(
+        &state.pool,
+        query.workspace.as_deref(),
+        query.limit,
+        query.offset,
+    )
+    .await
+    {
+        Ok(jobs) => {
+            let jobs_json: Vec<serde_json::Value> = jobs
+                .iter()
+                .map(|job| {
+                    json!({
+                        "job_id": job.job_id,
+                        "workspace": job.workspace,
+                        "task_name": job.task_name,
+                        "mode": job.mode,
+                        "status": job.status,
+                        "source_type": job.source_type,
+                        "source_id": job.source_id,
+                        "created_at": job.created_at,
+                        "started_at": job.started_at,
+                        "completed_at": job.completed_at,
+                    })
+                })
+                .collect();
+
+            Json(jobs_json).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list jobs: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to list jobs: {}", e)})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobDetailResponse {
+    pub job_id: Uuid,
+    pub workspace: String,
+    pub task_name: String,
+    pub mode: String,
+    pub input: Option<serde_json::Value>,
+    pub output: Option<serde_json::Value>,
+    pub status: String,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub steps: Vec<serde_json::Value>,
+}
+
+/// GET /api/jobs/:id - Get job detail with steps
+#[tracing::instrument(skip(state))]
+pub async fn get_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let job_id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid job ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Get job
+    let job = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to get job: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get job: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    // Get steps
+    let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to get job steps: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get job steps: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let steps_json: Vec<serde_json::Value> = steps
+        .iter()
+        .map(|step| {
+            json!({
+                "step_name": step.step_name,
+                "action_name": step.action_name,
+                "action_type": step.action_type,
+                "action_image": step.action_image,
+                "status": step.status,
+                "worker_id": step.worker_id,
+                "started_at": step.started_at,
+                "completed_at": step.completed_at,
+                "error_message": step.error_message,
+            })
+        })
+        .collect();
+
+    let response = JobDetailResponse {
+        job_id: job.job_id,
+        workspace: job.workspace,
+        task_name: job.task_name,
+        mode: job.mode,
+        input: job.input,
+        output: job.output,
+        status: job.status,
+        source_type: job.source_type,
+        source_id: job.source_id,
+        created_at: job.created_at.to_rfc3339(),
+        started_at: job.started_at.map(|dt| dt.to_rfc3339()),
+        completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
+        steps: steps_json,
+    };
+
+    Json(response).into_response()
+}
+
+/// GET /api/jobs/:id/logs - Get log file contents
+#[tracing::instrument(skip(state))]
+pub async fn get_job_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let job_id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid job ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Create log storage
+    let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
+
+    // Get logs
+    match log_storage.get_log(job_id).await {
+        Ok(logs) => Json(json!({"logs": logs})).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to get logs: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get logs: {}", e)})),
+            )
+                .into_response()
+        }
+    }
+}

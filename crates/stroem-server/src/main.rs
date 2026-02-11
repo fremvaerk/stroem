@@ -1,3 +1,74 @@
-fn main() {
-    println!("stroem-server");
+use anyhow::{Context, Result};
+use stroem_db::{create_pool, run_migrations};
+use stroem_server::config::ServerConfig;
+use stroem_server::state::AppState;
+use stroem_server::workspace::load_folder_workspace;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    tracing::info!("Starting Strøm server");
+
+    // Load configuration
+    let config_path =
+        std::env::var("STROEM_CONFIG").unwrap_or_else(|_| "server-config.yaml".to_string());
+
+    tracing::info!("Loading config from: {}", config_path);
+
+    let config_content = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read config file: {}", config_path))?;
+
+    let config: ServerConfig = serde_yml::from_str(&config_content)
+        .with_context(|| format!("Failed to parse config file: {}", config_path))?;
+
+    tracing::info!("Config loaded successfully");
+
+    // Create database pool
+    tracing::info!("Connecting to database...");
+    let pool = create_pool(&config.db.url)
+        .await
+        .context("Failed to create database pool")?;
+
+    // Run migrations
+    tracing::info!("Running database migrations...");
+    run_migrations(&pool)
+        .await
+        .context("Failed to run migrations")?;
+
+    // Load workspace
+    tracing::info!("Loading workspace from: {}", config.workspace.path);
+    let workspace = load_folder_workspace(&config.workspace.path)
+        .await
+        .context("Failed to load workspace")?;
+
+    tracing::info!(
+        "Workspace loaded: {} actions, {} tasks, {} triggers",
+        workspace.actions.len(),
+        workspace.tasks.len(),
+        workspace.triggers.len()
+    );
+
+    // Build application state
+    let state = AppState::new(pool, workspace, config.clone());
+
+    // Build router
+    let app = stroem_server::web::build_router(state);
+
+    // Start server
+    let listener = tokio::net::TcpListener::bind(&config.listen)
+        .await
+        .with_context(|| format!("Failed to bind to {}", config.listen))?;
+
+    tracing::info!("Server listening on {}", config.listen);
+
+    axum::serve(listener, app).await.context("Server error")?;
+
+    Ok(())
 }

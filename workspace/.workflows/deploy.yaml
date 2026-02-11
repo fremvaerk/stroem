@@ -1,0 +1,43 @@
+actions:
+  check-status:
+    type: shell
+    cmd: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
+
+  deploy:
+    type: shell
+    script: actions/deploy.sh
+    input:
+      env:
+        type: string
+        default: "staging"
+
+  notify:
+    type: shell
+    cmd: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}' && echo 'OUTPUT: {\"notified\": true}'"
+    input:
+      env:
+        type: string
+      status:
+        type: string
+
+tasks:
+  deploy-pipeline:
+    mode: distributed
+    input:
+      env:
+        type: string
+        default: "staging"
+    flow:
+      health-check:
+        action: check-status
+      deploy-app:
+        action: deploy
+        depends_on: [health-check]
+        input:
+          env: "{{ input.env }}"
+      send-notification:
+        action: notify
+        depends_on: [deploy-app]
+        input:
+          env: "{{ input.env }}"
+          status: "success"

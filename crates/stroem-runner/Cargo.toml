@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait = "0.1"
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 stroem-common.workspace = true

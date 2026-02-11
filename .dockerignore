@@ -1,0 +1,8 @@
+target/
+.git/
+*.md
+workspace/
+docker-compose.yml
+Dockerfile.*
+*.yaml
+!crates/

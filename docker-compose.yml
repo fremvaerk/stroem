@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: stroem
+      POSTGRES_PASSWORD: stroem
+      POSTGRES_DB: stroem
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stroem"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./workspace:/workspace
+      - ./server-config.yaml:/etc/stroem/server-config.yaml
+      - logs:/var/stroem/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      STROEM_CONFIG: /etc/stroem/server-config.yaml
+      RUST_LOG: info
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    volumes:
+      - ./workspace:/workspace
+      - ./worker-config.yaml:/etc/stroem/worker-config.yaml
+    depends_on:
+      - server
+    environment:
+      STROEM_CONFIG: /etc/stroem/worker-config.yaml
+      RUST_LOG: info
+
+volumes:
+  pgdata:
+  logs:
