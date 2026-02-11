@@ -1,0 +1,8 @@
+server_url: "http://server:8080"
+worker_token: "dev-worker-token-change-in-production"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_dir: /workspace
+capabilities:
+  - shell

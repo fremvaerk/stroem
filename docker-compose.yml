@@ -22,8 +22,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./workspace:/workspace
-      - ./server-config.yaml:/etc/stroem/server-config.yaml
+      - ./workspace:/workspace:ro
+      - ./docker/server-config.yaml:/etc/stroem/server-config.yaml:ro
       - logs:/var/stroem/logs
     depends_on:
       postgres:
@@ -31,16 +31,23 @@ services:
     environment:
       STROEM_CONFIG: /etc/stroem/server-config.yaml
       RUST_LOG: info
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/tasks || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
 
   worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
     volumes:
-      - ./workspace:/workspace
-      - ./worker-config.yaml:/etc/stroem/worker-config.yaml
+      - ./workspace:/workspace:ro
+      - ./docker/worker-config.yaml:/etc/stroem/worker-config.yaml:ro
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     environment:
       STROEM_CONFIG: /etc/stroem/worker-config.yaml
       RUST_LOG: info

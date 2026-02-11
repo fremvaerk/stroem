@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stroem.fullname" . }}-worker
+  labels:
+    {{- include "stroem.labels" . | nindent 4 }}
+data:
+  worker-config.yaml: |
+    server_url: "http://{{ include "stroem.fullname" . }}-server:{{ .Values.server.service.port }}"
+    worker_token: "PLACEHOLDER_WORKER_TOKEN"
+    worker_name: "k8s-worker"
+    max_concurrent: {{ .Values.worker.config.maxConcurrent }}
+    poll_interval_secs: {{ .Values.worker.config.pollIntervalSecs }}
+    workspace_dir: /workspace
+    capabilities:
+    {{- range .Values.worker.config.capabilities }}
+      - {{ . | quote }}
+    {{- end }}

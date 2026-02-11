@@ -72,6 +72,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
                 let client_clone = client.clone();
                 let executor_clone = executor.clone();
+                let step_worker_id = worker_id;
 
                 // Spawn a task to execute the step
                 tokio::spawn(async move {
@@ -79,7 +80,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
                     // Report step start
                     if let Err(e) = client_clone
-                        .report_step_start(step.job_id, &step.step_name)
+                        .report_step_start(step.job_id, &step.step_name, step_worker_id)
                         .await
                     {
                         tracing::error!("Failed to report step start: {}", e);

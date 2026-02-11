@@ -3,25 +3,19 @@ actions:
     type: shell
     cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
-      name:
-        type: string
-        required: true
+      name: { type: string, required: true }
 
   shout:
     type: shell
-    cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]' && echo 'OUTPUT: {\"shouted\": \"'$(echo {{ input.message }} | tr '[:lower:]' '[:upper:]')'\"}'"
+    cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
-      message:
-        type: string
-        required: true
+      message: { type: string, required: true }
 
 tasks:
   hello-world:
     mode: distributed
     input:
-      name:
-        type: string
-        default: "World"
+      name: { type: string, default: "World" }
     flow:
       say-hello:
         action: greet
@@ -31,13 +25,4 @@ tasks:
         action: shout
         depends_on: [say-hello]
         input:
-          message: "hello {{ input.name }}"
-
-triggers:
-  every-minute:
-    type: scheduler
-    cron: "0 * * * * *"
-    task: hello-world
-    input:
-      name: "Cron"
-    enabled: false
+          message: "{{ say_hello.output.greeting }}"

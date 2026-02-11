@@ -22,6 +22,18 @@ pub struct ClaimedStep {
     pub input: Option<serde_json::Value>,
 }
 
+/// Raw claim response from server (job_id is Option since it's null when no work)
+#[derive(Debug, Deserialize)]
+struct ClaimResponse {
+    pub job_id: Option<String>,
+    pub step_name: Option<String>,
+    pub action_name: Option<String>,
+    pub action_type: Option<String>,
+    pub action_image: Option<String>,
+    pub action_spec: Option<serde_json::Value>,
+    pub input: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize)]
 struct RegisterRequest {
     name: String,
@@ -152,21 +164,38 @@ impl ServerClient {
             anyhow::bail!("Claim failed with status {}: {}", status, body);
         }
 
-        // Check if we got a 204 No Content (no work available)
-        if response.status() == reqwest::StatusCode::NO_CONTENT {
-            return Ok(None);
-        }
-
-        let step: ClaimedStep = response
+        let resp: ClaimResponse = response
             .json()
             .await
-            .context("Failed to parse claimed step response")?;
+            .context("Failed to parse claim response")?;
+
+        // No work available if job_id is None
+        let job_id_str = match resp.job_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let step = ClaimedStep {
+            job_id: Uuid::parse_str(&job_id_str).context("Invalid job_id in claim response")?,
+            step_name: resp.step_name.context("Missing step_name in claim response")?,
+            action_name: resp.action_name.context("Missing action_name in claim response")?,
+            action_type: resp.action_type.context("Missing action_type in claim response")?,
+            action_image: resp.action_image,
+            action_spec: resp.action_spec,
+            input: resp.input,
+        };
+
         Ok(Some(step))
     }
 
     /// Report that a step has started
     #[tracing::instrument(skip(self))]
-    pub async fn report_step_start(&self, job_id: Uuid, step_name: &str) -> Result<()> {
+    pub async fn report_step_start(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        worker_id: Uuid,
+    ) -> Result<()> {
         let url = format!(
             "{}/worker/jobs/{}/steps/{}/start",
             self.base_url, job_id, step_name
@@ -176,6 +205,7 @@ impl ServerClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
+            .json(&serde_json::json!({ "worker_id": worker_id.to_string() }))
             .send()
             .await
             .context("Failed to send step start request")?;
@@ -242,11 +272,19 @@ impl ServerClient {
 
         let url = format!("{}/worker/jobs/{}/logs", self.base_url, job_id);
 
+        // Format log lines into a single chunk string for the server
+        let chunk: String = lines
+            .iter()
+            .filter_map(|v| v.get("line").and_then(|l| l.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
-            .json(&lines)
+            .json(&serde_json::json!({ "chunk": chunk }))
             .send()
             .await
             .context("Failed to send logs request")?;

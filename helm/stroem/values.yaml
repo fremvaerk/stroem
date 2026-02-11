@@ -1,0 +1,65 @@
+server:
+  image:
+    repository: stroem-server
+    tag: latest
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  config:
+    logStorageDir: /var/stroem/logs
+  resources: {}
+
+worker:
+  image:
+    repository: stroem-worker
+    tag: latest
+  replicas: 2
+  config:
+    maxConcurrent: 4
+    pollIntervalSecs: 2
+    capabilities: ["shell"]
+  resources: {}
+  dind:
+    enabled: true
+    image: docker:27-dind
+    resources: {}
+
+# Shared auth token between server and workers
+workerToken: "change-me-in-production"
+
+# Workspace volume (workflows YAML + scripts)
+workspace:
+  # "emptyDir" for dev, "pvc" for production
+  type: emptyDir
+  pvc:
+    existingClaim: ""
+    storageClass: ""
+    size: 1Gi
+
+# External PostgreSQL (required)
+database:
+  url: "postgres://stroem:stroem@postgres:5432/stroem"
+
+# RBAC for pod creation
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+# Optional Ingress for UI and webhook triggers
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: stroem.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: stroem-tls
+  #    hosts:
+  #      - stroem.example.com

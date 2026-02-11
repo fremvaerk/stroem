@@ -342,6 +342,39 @@ mod tests {
     }
 
     #[test]
+    fn test_render_step_output_with_sanitized_hyphen() {
+        // Step names like "say-hello" must be sanitized to "say_hello" in context
+        // because Tera interprets hyphens as subtraction
+        let template = "{{ say_hello.output.greeting }}";
+        let context = json!({
+            "say_hello": {
+                "output": {
+                    "greeting": "Hello World"
+                }
+            }
+        });
+
+        let result = render_template(template, &context).unwrap();
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn test_render_hyphenated_name_fails() {
+        // Proves that hyphens in variable names DON'T work in Tera
+        let template = "{{ say-hello.output.greeting }}";
+        let context = json!({
+            "say-hello": {
+                "output": {
+                    "greeting": "Hello World"
+                }
+            }
+        });
+
+        let result = render_template(template, &context);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_render_string_opt_none() {
         let template: Option<String> = None;
         let context = json!({});

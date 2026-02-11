@@ -1,0 +1,21 @@
+Strøm has been deployed!
+
+Server:
+  {{ .Values.server.replicas }} replica(s) running
+
+Workers:
+  {{ .Values.worker.replicas }} replica(s) running (max {{ .Values.worker.config.maxConcurrent }} concurrent per worker)
+  DinD sidecar: {{ if .Values.worker.dind.enabled }}enabled{{ else }}disabled{{ end }}
+
+{{- if .Values.ingress.enabled }}
+
+Ingress:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+Access the server via port-forward:
+  kubectl port-forward svc/{{ include "stroem.fullname" . }}-server {{ .Values.server.service.port }}:{{ .Values.server.service.port }} -n {{ .Release.Namespace }}
+  Then open: http://localhost:{{ .Values.server.service.port }}
+{{- end }}

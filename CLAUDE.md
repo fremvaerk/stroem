@@ -12,7 +12,7 @@ This is Phase 1 (MVP): end-to-end workflow execution via API.
 - **stroem-runner**: Execution backends (ShellRunner for MVP)
 - **stroem-server**: Axum API server, orchestrator, workspace loader, log storage
 - **stroem-worker**: Worker process: polls server, executes steps, streams logs
-- **stroem-cli**: CLI tool (stub in MVP)
+- **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs)
 
 ## Conventions
 
@@ -22,6 +22,27 @@ This is Phase 1 (MVP): end-to-end workflow execution via API.
 - **YAML parsing**: `serde_yml`
 - **Database**: sqlx with runtime queries (`sqlx::query()` / `sqlx::query_as()`), NOT compile-time macros.
 - **Tests**: Unit tests in-module (`#[cfg(test)] mod tests`). Integration tests in `tests/` dirs using `testcontainers` for Postgres.
+
+## Development Rules
+
+### Mandatory Test Coverage
+Every new feature or functionality **must** be accompanied by tests:
+- **Unit tests**: Cover the happy path, edge cases, and error conditions. Place in-module under `#[cfg(test)] mod tests`.
+- **Edge cases**: Think about empty inputs, missing fields, invalid data, boundary conditions, and concurrent access.
+- **Integration tests**: When the feature touches the database or cross-crate boundaries, add integration tests.
+- **E2E tests**: When the feature affects the workflow execution pipeline (server ↔ worker ↔ runner), update `tests/e2e.sh` to verify it end-to-end.
+- **Regression tests**: When fixing a bug, add a test that would have caught it.
+
+### Mandatory Documentation Updates
+Every new feature or significant change **must** include documentation updates:
+- Update this `CLAUDE.md` if architecture, conventions, or key patterns change.
+- Update `docs/stroem-v2-plan.md` if the plan status changes.
+- Add/update user-facing docs (README, CLI help text, workflow authoring guides) for anything users interact with.
+- Keep code comments minimal — only where logic isn't self-evident.
+
+### Tera Templating
+- Step names with hyphens (e.g., `say-hello`) are sanitized to underscores (`say_hello`) in the template context because Tera interprets hyphens as subtraction.
+- Workflow YAML must use underscored names in template references: `{{ say_hello.output.greeting }}`, not `{{ say-hello.output.greeting }}`.
 
 ## Build & Test
 
@@ -42,6 +63,9 @@ cargo fmt --check --all
 
 # Lint
 cargo clippy --workspace -- -D warnings
+
+# E2E tests (needs Docker)
+./tests/e2e.sh
 ```
 
 ## Key Patterns

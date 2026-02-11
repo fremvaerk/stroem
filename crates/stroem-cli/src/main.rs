@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use reqwest::Client;
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(name = "stroem", version, about = "Strøm CLI - workflow orchestration")]
@@ -21,9 +23,6 @@ enum Commands {
     },
     /// Trigger a task execution
     Trigger {
-        /// Workspace name
-        #[arg(long, default_value = "default")]
-        workspace: String,
         /// Task name
         task: String,
         /// Input as JSON string
@@ -35,25 +34,15 @@ enum Commands {
         /// Job ID
         job_id: String,
     },
-    /// Stream job logs
+    /// Get job logs
     Logs {
         /// Job ID
         job_id: String,
-        /// Follow log output
-        #[arg(short, long)]
-        follow: bool,
     },
     /// List tasks
-    Tasks {
-        /// Workspace name
-        #[arg(long, default_value = "default")]
-        workspace: String,
-    },
+    Tasks,
     /// List jobs
     Jobs {
-        /// Workspace filter
-        #[arg(long)]
-        workspace: Option<String>,
         /// Maximum number of jobs to show
         #[arg(long, default_value = "20")]
         limit: i64,
@@ -65,45 +54,252 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+    let client = Client::new();
 
     match cli.command {
         Commands::Validate { path } => {
             validate_workflows(&path)?;
         }
-        Commands::Trigger {
-            workspace,
-            task,
-            input,
-        } => {
-            println!(
-                "TODO: Trigger task '{}' in workspace '{}' on {}",
-                task, workspace, cli.server
-            );
-            if let Some(input) = input {
-                println!("  Input: {}", input);
-            }
+        Commands::Trigger { task, input } => {
+            cmd_trigger(&client, &cli.server, &task, input.as_deref()).await?;
         }
         Commands::Status { job_id } => {
-            println!("TODO: Get status for job '{}' from {}", job_id, cli.server);
+            cmd_status(&client, &cli.server, &job_id).await?;
         }
-        Commands::Logs { job_id, follow } => {
-            println!(
-                "TODO: Get logs for job '{}' from {} (follow={})",
-                job_id, cli.server, follow
-            );
+        Commands::Logs { job_id } => {
+            cmd_logs(&client, &cli.server, &job_id).await?;
         }
-        Commands::Tasks { workspace } => {
-            println!(
-                "TODO: List tasks in workspace '{}' from {}",
-                workspace, cli.server
-            );
+        Commands::Tasks => {
+            cmd_tasks(&client, &cli.server).await?;
         }
-        Commands::Jobs { workspace, limit } => {
-            println!(
-                "TODO: List jobs (workspace={:?}, limit={}) from {}",
-                workspace, limit, cli.server
-            );
+        Commands::Jobs { limit } => {
+            cmd_jobs(&client, &cli.server, limit).await?;
         }
+    }
+
+    Ok(())
+}
+
+async fn cmd_trigger(client: &Client, server: &str, task: &str, input: Option<&str>) -> Result<()> {
+    let body: Value = match input {
+        Some(json_str) => {
+            let input_val: Value =
+                serde_json::from_str(json_str).context("Invalid JSON input")?;
+            serde_json::json!({ "input": input_val })
+        }
+        None => serde_json::json!({ "input": {} }),
+    };
+
+    let resp = client
+        .post(format!("{}/api/tasks/{}/execute", server, task))
+        .json(&body)
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+
+    let job_id = body
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    println!("Job created: {}", job_id);
+    Ok(())
+}
+
+async fn cmd_status(client: &Client, server: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/jobs/{}", server, job_id))
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+
+    println!(
+        "Job:    {}",
+        body.get("job_id").and_then(|v| v.as_str()).unwrap_or("-")
+    );
+    println!(
+        "Task:   {}",
+        body.get("task_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+    );
+    println!(
+        "Status: {}",
+        body.get("status").and_then(|v| v.as_str()).unwrap_or("-")
+    );
+    println!(
+        "Mode:   {}",
+        body.get("mode").and_then(|v| v.as_str()).unwrap_or("-")
+    );
+    println!(
+        "Created: {}",
+        body.get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+    );
+
+    if let Some(started) = body.get("started_at").and_then(|v| v.as_str()) {
+        println!("Started: {}", started);
+    }
+    if let Some(completed) = body.get("completed_at").and_then(|v| v.as_str()) {
+        println!("Done:    {}", completed);
+    }
+
+    // Print steps
+    if let Some(steps) = body.get("steps").and_then(|v| v.as_array()) {
+        if !steps.is_empty() {
+            println!("\nSteps:");
+            for step in steps {
+                let name = step
+                    .get("step_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                let st = step
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                let action = step
+                    .get("action_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                let err = step.get("error_message").and_then(|v| v.as_str());
+
+                print!("  {:20} {:12} (action: {})", name, st, action);
+                if let Some(e) = err {
+                    print!("  ERROR: {}", e);
+                }
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_logs(client: &Client, server: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/jobs/{}/logs", server, job_id))
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+
+    let logs = body
+        .get("logs")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    print!("{}", logs);
+    Ok(())
+}
+
+async fn cmd_tasks(client: &Client, server: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/tasks", server))
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+
+    let tasks = body.as_array().context("Expected array response")?;
+
+    if tasks.is_empty() {
+        println!("No tasks found.");
+        return Ok(());
+    }
+
+    println!("{:30} MODE", "NAME");
+    println!("{}", "-".repeat(45));
+    for task in tasks {
+        let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+        let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
+        println!("{:30} {}", name, mode);
+    }
+
+    Ok(())
+}
+
+async fn cmd_jobs(client: &Client, server: &str, limit: i64) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/jobs?limit={}", server, limit))
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+
+    let jobs = body.as_array().context("Expected array response")?;
+
+    if jobs.is_empty() {
+        println!("No jobs found.");
+        return Ok(());
+    }
+
+    println!("{:36} {:20} {:12} CREATED", "JOB ID", "TASK", "STATUS");
+    println!("{}", "-".repeat(85));
+    for job in jobs {
+        let id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("-");
+        let task = job
+            .get("task_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let st = job.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+        let created = job
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        println!("{:36} {:20} {:12} {}", id, task, st, created);
     }
 
     Ok(())

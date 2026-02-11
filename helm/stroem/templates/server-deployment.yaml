@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stroem.fullname" . }}-server
+  labels:
+    {{- include "stroem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.server.replicas }}
+  selector:
+    matchLabels:
+      {{- include "stroem.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "stroem.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/server-configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: stroem-server
+          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.service.port }}
+              protocol: TCP
+          env:
+            - name: STROEM_CONFIG
+              value: /etc/stroem/server-config.yaml
+            - name: RUST_LOG
+              value: info
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: database-url
+            - name: WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: worker-token
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/stroem
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+            - name: logs
+              mountPath: {{ .Values.server.config.logStorageDir }}
+          {{- with .Values.server.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "stroem.fullname" . }}-server
+        - name: logs
+          emptyDir: {}
+        - name: workspace
+          {{- if eq .Values.workspace.type "pvc" }}
+          persistentVolumeClaim:
+            {{- if .Values.workspace.pvc.existingClaim }}
+            claimName: {{ .Values.workspace.pvc.existingClaim }}
+            {{- else }}
+            claimName: {{ include "stroem.fullname" . }}-workspace
+            {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

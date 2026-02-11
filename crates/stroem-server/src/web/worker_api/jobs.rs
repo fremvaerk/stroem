@@ -208,6 +208,8 @@ pub async fn claim_job(
         }
 
         // Add completed step outputs to context
+        // Step names are sanitized (hyphens → underscores) so Tera can resolve
+        // dotted paths like {{ step_name.output.key }}
         if let Ok(all_steps) = JobStepRepo::get_steps_for_job(&state.pool, step.job_id).await {
             for s in &all_steps {
                 if s.status == "completed" {
@@ -215,7 +217,8 @@ pub async fn claim_job(
                     if let Some(output) = &s.output {
                         step_ctx.insert("output".to_string(), output.clone());
                     }
-                    context.insert(s.step_name.clone(), serde_json::Value::Object(step_ctx));
+                    let safe_name = s.step_name.replace('-', "_");
+                    context.insert(safe_name, serde_json::Value::Object(step_ctx));
                 }
             }
         }
