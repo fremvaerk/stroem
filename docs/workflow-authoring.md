@@ -157,7 +157,14 @@ flow:
       status: "deploy finished"
 ```
 
-In this example, `notify` runs regardless of whether `deploy` succeeds or fails. The job is still marked `failed` if any step failed.
+In this example, `notify` runs regardless of whether `deploy` succeeds or fails.
+
+The `continue_on_failure` flag has dual semantics (similar to GitHub Actions' `continue-on-error`):
+
+1. **Dependency tolerance**: The step runs even if its dependencies fail (as shown above).
+2. **Job tolerance**: If the step itself fails, its failure is considered *tolerable* -- the job can still be marked `completed` as long as all non-tolerable steps succeed.
+
+For example, if a step with `continue_on_failure: true` fails but every other step succeeds, the job status is `completed` (not `failed`). The UI shows a warning banner listing the failed tolerable steps. If any step *without* the flag fails, the job is marked `failed` as usual.
 
 ### Parallel execution
 

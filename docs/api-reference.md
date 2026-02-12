@@ -667,7 +667,7 @@ Reports step completion or failure. Triggers the orchestrator to promote depende
 }
 ```
 
-When a step completes successfully, the orchestrator checks if any downstream steps now have all their dependencies met and promotes them to `ready` status. When a step fails, downstream steps that depend on it are marked `skipped` (unless they have `continue_on_failure: true`, in which case they are promoted). When all steps are in a terminal state, the job is marked `completed` (or `failed` if any step failed).
+When a step completes successfully, the orchestrator checks if any downstream steps now have all their dependencies met and promotes them to `ready` status. When a step fails, downstream steps that depend on it are marked `skipped` (unless they have `continue_on_failure: true`, in which case they are promoted). When all steps are in a terminal state, the job is marked `completed` or `failed` depending on the failures: if every failed step has `continue_on_failure: true`, the job is `completed` (with tolerable failures); if any failed step does not have the flag, the job is `failed`.
 
 ---
 

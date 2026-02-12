@@ -3859,6 +3859,186 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     Ok(())
 }
 
+// ─── Test: continue_on_failure step fails but job succeeds ────────────
+
+#[tokio::test]
+async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+    let worker_id = register_test_worker(&pool).await;
+
+    // step1: continue_on_failure=true, no deps -> will fail
+    // step2: no deps, independent -> will succeed
+    let task = {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "step1".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: true,
+            },
+        );
+        flow.insert(
+            "step2".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        }
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo ok"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Fail step1 (tolerable)
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // Job should still be running (step2 not done yet)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "pending");
+
+    // Complete step2 successfully
+    JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+
+    // Job should be completed (step1's failure is tolerable)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+
+    Ok(())
+}
+
+// ─── Test: mixed tolerable and intolerable failures ───────────────────
+
+#[tokio::test]
+async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+    let worker_id = register_test_worker(&pool).await;
+
+    // step1: continue_on_failure=true -> will fail (tolerable)
+    // step2: continue_on_failure=false -> will fail (intolerable)
+    let task = {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "step1".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: true,
+            },
+        );
+        flow.insert(
+            "step2".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        }
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Fail step1 (tolerable)
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // Fail step2 (intolerable)
+    JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step2", "Command failed").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+
+    // Job should be failed (step2's failure is intolerable)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
 // ─── Test: Cascading skip ─────────────────────────────────────────────
 
 #[tokio::test]
@@ -4971,9 +5151,7 @@ async fn test_list_jobs_with_workspace_filter() -> Result<()> {
     assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "deploy-app");
 
     // No filter — should return both jobs
-    let resp = router
-        .oneshot(api_get("/api/jobs"))
-        .await?;
+    let resp = router.oneshot(api_get("/api/jobs")).await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let jobs = body.as_array().unwrap();
@@ -5012,7 +5190,10 @@ async fn test_list_jobs_workspace_filter_nonexistent() -> Result<()> {
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let jobs = body.as_array().unwrap();
-    assert!(jobs.is_empty(), "Nonexistent workspace filter should return empty array");
+    assert!(
+        jobs.is_empty(),
+        "Nonexistent workspace filter should return empty array"
+    );
 
     Ok(())
 }
@@ -5188,9 +5369,7 @@ async fn test_list_jobs_shows_workspace_field() -> Result<()> {
     assert_eq!(resp.status(), 200);
 
     // List all jobs
-    let resp = router
-        .oneshot(api_get("/api/jobs"))
-        .await?;
+    let resp = router.oneshot(api_get("/api/jobs")).await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
     let jobs = body.as_array().unwrap();

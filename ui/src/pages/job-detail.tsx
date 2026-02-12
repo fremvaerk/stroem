@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, TriangleAlert } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
@@ -102,6 +102,21 @@ export function JobDetailPage() {
           </Link>
         </Button>
       </div>
+
+      {job.status === "completed" &&
+        job.steps.filter((s) => s.status === "failed").length > 0 && (
+          <div className="flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-4 py-3 dark:border-yellow-700 dark:bg-yellow-950">
+            <TriangleAlert className="h-4 w-4 shrink-0 text-yellow-600 dark:text-yellow-400" />
+            <p className="text-sm text-yellow-800 dark:text-yellow-200">
+              {job.steps.filter((s) => s.status === "failed").length} step(s)
+              failed with continue_on_failure:{" "}
+              {job.steps
+                .filter((s) => s.status === "failed")
+                .map((s) => s.step_name)
+                .join(", ")}
+            </p>
+          </div>
+        )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         {[

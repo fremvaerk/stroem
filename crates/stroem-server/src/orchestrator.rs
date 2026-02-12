@@ -42,52 +42,69 @@ pub async fn on_step_completed(
 
     if all_terminal {
         // 4. Check if any step failed
-        let any_failed = JobStepRepo::any_step_failed(pool, job_id)
+        let failed_names = JobStepRepo::get_failed_step_names(pool, job_id)
             .await
-            .context("Failed to check if any step failed")?;
+            .context("Failed to get failed step names")?;
 
-        if any_failed {
-            tracing::info!("Job {} failed (one or more steps failed)", job_id);
-            JobRepo::mark_failed(pool, job_id)
-                .await
-                .context("Failed to mark job as failed")?;
+        if !failed_names.is_empty() {
+            // Check if ALL failures are tolerable (continue_on_failure steps)
+            let all_tolerable = failed_names.iter().all(|name| {
+                task.flow
+                    .get(name)
+                    .map(|fs| fs.continue_on_failure)
+                    .unwrap_or(false)
+            });
+
+            if !all_tolerable {
+                tracing::info!("Job {} failed (one or more steps failed)", job_id);
+                JobRepo::mark_failed(pool, job_id)
+                    .await
+                    .context("Failed to mark job as failed")?;
+                return Ok(());
+            }
+
+            tracing::info!(
+                "Job {} completed with {} tolerable failure(s)",
+                job_id,
+                failed_names.len()
+            );
         } else {
             tracing::info!("Job {} completed successfully", job_id);
+        }
 
-            // Collect output from terminal steps (steps no other step depends on)
-            let depended_on: HashSet<&str> = task
-                .flow
-                .iter()
-                .flat_map(|(_, fs)| fs.depends_on.iter().map(|s| s.as_str()))
-                .collect();
-            let terminal_steps: HashSet<&str> = task
-                .flow
-                .keys()
-                .filter(|name| !depended_on.contains(name.as_str()))
-                .map(|s| s.as_str())
-                .collect();
+        // Collect output from terminal steps (steps no other step depends on)
+        let depended_on: HashSet<&str> = task
+            .flow
+            .iter()
+            .flat_map(|(_, fs)| fs.depends_on.iter().map(|s| s.as_str()))
+            .collect();
+        let terminal_steps: HashSet<&str> = task
+            .flow
+            .keys()
+            .filter(|name| !depended_on.contains(name.as_str()))
+            .map(|s| s.as_str())
+            .collect();
 
-            let steps = JobStepRepo::get_steps_for_job(pool, job_id)
-                .await
-                .context("Failed to get steps for job output aggregation")?;
-            let mut job_output = serde_json::Map::new();
-            for step in &steps {
-                if terminal_steps.contains(step.step_name.as_str()) {
-                    if let Some(ref output) = step.output {
-                        job_output.insert(step.step_name.clone(), output.clone());
-                    }
+        let steps = JobStepRepo::get_steps_for_job(pool, job_id)
+            .await
+            .context("Failed to get steps for job output aggregation")?;
+        let mut job_output = serde_json::Map::new();
+        for step in &steps {
+            if terminal_steps.contains(step.step_name.as_str()) {
+                if let Some(ref output) = step.output {
+                    job_output.insert(step.step_name.clone(), output.clone());
                 }
             }
-            let output = if job_output.is_empty() {
-                None
-            } else {
-                Some(serde_json::Value::Object(job_output))
-            };
-
-            JobRepo::mark_completed(pool, job_id, output)
-                .await
-                .context("Failed to mark job as completed")?;
         }
+        let output = if job_output.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(job_output))
+        };
+
+        JobRepo::mark_completed(pool, job_id, output)
+            .await
+            .context("Failed to mark job as completed")?;
     }
 
     Ok(())

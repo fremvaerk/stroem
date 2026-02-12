@@ -251,6 +251,17 @@ impl JobStepRepo {
         Ok(row.0 == 0)
     }
 
+    /// Get the names of all failed steps for a job
+    pub async fn get_failed_step_names(pool: &PgPool, job_id: Uuid) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT step_name FROM job_step WHERE job_id = $1 AND status = 'failed'",
+        )
+        .bind(job_id)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+
     /// Check if any step failed
     pub async fn any_step_failed(pool: &PgPool, job_id: Uuid) -> Result<bool> {
         let row: (i64,) = sqlx::query_as(
