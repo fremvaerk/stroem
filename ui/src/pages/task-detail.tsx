@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Play } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { TaskRunDialog } from "@/components/task-run-dialog";
 import { getTask } from "@/lib/api";
 import type { TaskDetail } from "@/lib/types";
 
@@ -84,11 +83,12 @@ export function TaskDetailPage() {
             </span>
           </div>
         </div>
-        <TaskRunDialog
-          workspace={workspace!}
-          taskName={task.name}
-          inputSchema={task.input}
-        />
+        <Button asChild>
+          <Link to="run">
+            <Play className="mr-2 h-4 w-4" />
+            Run Task
+          </Link>
+        </Button>
       </div>
 
       {inputFields.length > 0 && (

@@ -8,6 +8,7 @@ import { TasksPage } from "@/pages/tasks";
 import { TaskDetailPage } from "@/pages/task-detail";
 import { JobsPage } from "@/pages/jobs";
 import { JobDetailPage } from "@/pages/job-detail";
+import { TaskRunPage } from "@/pages/task-run";
 import { WorkspacesPage } from "@/pages/workspaces";
 
 export default function App() {
@@ -23,6 +24,10 @@ export default function App() {
             <Route
               path="workspaces/:workspace/tasks/:name"
               element={<TaskDetailPage />}
+            />
+            <Route
+              path="workspaces/:workspace/tasks/:name/run"
+              element={<TaskRunPage />}
             />
             <Route path="jobs" element={<JobsPage />} />
             <Route path="jobs/:id" element={<JobDetailPage />} />
