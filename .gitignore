@@ -8,3 +8,4 @@ crates/stroem-server/static/*
 
 /workspace
 /workspace-ops
+/ui/test-results

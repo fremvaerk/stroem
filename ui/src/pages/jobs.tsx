@@ -135,7 +135,7 @@ export function JobsPage() {
                       <StatusBadge status={job.status} />
                     </TableCell>
                     <TableCell className="text-muted-foreground">
-                      {job.source_type}
+                      {job.source_id ? `${job.source_type} (${job.source_id})` : job.source_type}
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {formatTime(job.created_at)}

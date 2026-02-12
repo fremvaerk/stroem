@@ -156,7 +156,7 @@ pub async fn execute_task(
             Some(t) if state.config.auth.is_some() => {
                 let secret = &state.config.auth.as_ref().unwrap().jwt_secret;
                 match validate_access_token(t, secret) {
-                    Ok(claims) => ("user", Some(claims.sub)),
+                    Ok(claims) => ("user", Some(claims.email)),
                     Err(_) => ("api", None),
                 }
             }
