@@ -1,7 +1,8 @@
+use crate::auth::validate_access_token;
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -91,9 +92,10 @@ pub async fn get_task(
 }
 
 /// POST /api/tasks/:name/execute - Trigger task execution
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, headers))]
 pub async fn execute_task(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
     Json(req): Json<ExecuteTaskRequest>,
 ) -> impl IntoResponse {
@@ -111,15 +113,32 @@ pub async fn execute_task(
         }
     };
 
-    // 2. Create job
+    // 2. Determine source based on authentication
+    let (source_type, source_id) = {
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+
+        match token {
+            Some(t) if state.config.auth.is_some() => {
+                let secret = &state.config.auth.as_ref().unwrap().jwt_secret;
+                match validate_access_token(t, secret) {
+                    Ok(claims) => ("user", Some(claims.sub)),
+                    Err(_) => ("api", None),
+                }
+            }
+            _ => ("api", None),
+        }
+    };
     let job_id = match JobRepo::create(
         &state.pool,
         "default", // workspace name - hardcoded for now
         &name,
         &task.mode,
         Some(serde_json::to_value(&req.input).unwrap_or_default()),
-        "api",
-        None,
+        source_type,
+        source_id.as_deref(),
     )
     .await
     {

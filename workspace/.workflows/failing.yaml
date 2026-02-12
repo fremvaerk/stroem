@@ -1,0 +1,44 @@
+actions:
+  always-fail:
+    type: shell
+    cmd: "echo 'About to fail' && echo 'Error details' >&2 && exit 1"
+
+  simple-greet:
+    type: shell
+    cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
+    input:
+      name: { type: string, required: true }
+
+tasks:
+  always-failing:
+    mode: distributed
+    flow:
+      doom:
+        action: always-fail
+
+  fail-in-chain:
+    mode: distributed
+    input:
+      name: { type: string, default: "test" }
+    flow:
+      step-fail:
+        action: always-fail
+      step-after:
+        action: simple-greet
+        depends_on: [step-fail]
+        input:
+          name: "{{ input.name }}"
+
+  fail-continue:
+    mode: distributed
+    input:
+      name: { type: string, default: "test" }
+    flow:
+      step-fail:
+        action: always-fail
+      step-after:
+        action: simple-greet
+        depends_on: [step-fail]
+        continue_on_failure: true
+        input:
+          name: "{{ input.name }}"

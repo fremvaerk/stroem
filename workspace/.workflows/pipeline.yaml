@@ -1,0 +1,28 @@
+actions:
+  transform:
+    type: shell
+    cmd: "echo Processing {{ input.data }} && echo 'OUTPUT: {\"result\": \"processed-{{ input.data }}\"}'"
+    input:
+      data: { type: string, required: true }
+
+  summarize:
+    type: shell
+    cmd: "echo Summarizing {{ input.value }} && echo 'OUTPUT: {\"summary\": \"{{ input.value }} done\"}'"
+    input:
+      value: { type: string, required: true }
+
+tasks:
+  data-pipeline:
+    mode: distributed
+    input:
+      data: { type: string, default: "test" }
+    flow:
+      transform:
+        action: transform
+        input:
+          data: "{{ input.data }}"
+      summarize:
+        action: summarize
+        depends_on: [transform]
+        input:
+          value: "{{ transform.output.result }}"

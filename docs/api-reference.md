@@ -179,6 +179,8 @@ Returns job metadata and all steps with their statuses.
       "action_name": "greet",
       "action_type": "shell",
       "action_image": null,
+      "input": { "name": "World" },
+      "output": { "greeting": "Hello World" },
       "status": "completed",
       "worker_id": "w1w2w3w4-w5w6-7890-abcd-ef1234567890",
       "started_at": "2025-02-10T12:00:01Z",
@@ -190,6 +192,8 @@ Returns job metadata and all steps with their statuses.
       "action_name": "shout",
       "action_type": "shell",
       "action_image": null,
+      "input": { "message": "Hello World" },
+      "output": null,
       "status": "completed",
       "worker_id": "w1w2w3w4-w5w6-7890-abcd-ef1234567890",
       "started_at": "2025-02-10T12:00:02Z",
@@ -204,6 +208,8 @@ Returns job metadata and all steps with their statuses.
 
 **Step statuses:** `pending`, `ready`, `running`, `completed`, `failed`, `skipped`
 
+- `skipped` -- The step was not executed because a dependency failed (or was itself skipped). Steps with `continue_on_failure: true` are promoted instead of skipped when dependencies fail.
+
 ---
 
 ### Get Job Logs
@@ -212,7 +218,7 @@ Returns job metadata and all steps with their statuses.
 GET /api/jobs/{id}/logs
 ```
 
-Returns the combined log output from all steps of a job.
+Returns the combined log output from all steps of a job in JSONL format. Each line is a JSON object with `ts`, `stream`, `step`, and `line` fields.
 
 **Path parameters:**
 - `id` -- Job ID (UUID)
@@ -221,14 +227,55 @@ Returns the combined log output from all steps of a job.
 
 ```json
 {
-  "logs": "Hello World\nOUTPUT: {\"greeting\": \"Hello World\"}\nHELLO WORLD\n"
+  "logs": "{\"ts\":\"2025-02-12T10:56:45.123Z\",\"stream\":\"stdout\",\"step\":\"say-hello\",\"line\":\"Hello World\"}\n{\"ts\":\"2025-02-12T10:56:45.456Z\",\"stream\":\"stdout\",\"step\":\"say-hello\",\"line\":\"OUTPUT: {\\\"greeting\\\": \\\"Hello World\\\"}\"}\n"
 }
 ```
+
+**JSONL line format:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | string | ISO 8601 timestamp of when the line was captured |
+| `stream` | string | `"stdout"` or `"stderr"` |
+| `step` | string | Step name that produced this line |
+| `line` | string | The log line content |
+
+**Backward compatibility:** For jobs created before JSONL format was introduced, the `logs` field may contain legacy plain text. Clients should attempt to parse each line as JSON and fall back to rendering plain text for unparseable lines.
 
 **Example:**
 
 ```bash
 curl -s http://localhost:8080/api/jobs/JOB_ID/logs | jq -r .logs
+```
+
+---
+
+### Get Step Logs
+
+```
+GET /api/jobs/{id}/steps/{step}/logs
+```
+
+Returns the JSONL log output for a specific step within a job. Lines are filtered by the `step` field in each JSON log entry.
+
+**Path parameters:**
+- `id` -- Job ID (UUID)
+- `step` -- Step name
+
+**Response:**
+
+```json
+{
+  "logs": "{\"ts\":\"2025-02-12T10:56:45.123Z\",\"stream\":\"stdout\",\"step\":\"say-hello\",\"line\":\"Hello World\"}\n"
+}
+```
+
+For jobs created before JSONL log format was introduced, this endpoint returns an empty string (legacy plain-text lines are skipped).
+
+**Example:**
+
+```bash
+curl -s http://localhost:8080/api/jobs/JOB_ID/steps/say-hello/logs | jq -r .logs
 ```
 
 ---
@@ -247,9 +294,10 @@ Opens a WebSocket connection for real-time log streaming. On connect, the server
 **Protocol:** WebSocket (upgrade from HTTP)
 
 **Behavior:**
-1. Server sends existing log content as a text message (backfill)
-2. Server forwards new log chunks as text messages in real-time
+1. Server sends existing JSONL log content as a text message (backfill)
+2. Server forwards new JSONL log chunks as text messages in real-time
 3. Connection stays open until the client disconnects or the server shuts down
+4. Each message contains one or more JSONL lines (one JSON object per line)
 
 **Example (websocat):**
 
@@ -583,7 +631,7 @@ Reports step completion or failure. Triggers the orchestrator to promote depende
 }
 ```
 
-When a step completes successfully, the orchestrator checks if any downstream steps now have all their dependencies met and promotes them to `ready` status. When all steps are in a terminal state, the job is marked `completed` (or `failed` if any step failed).
+When a step completes successfully, the orchestrator checks if any downstream steps now have all their dependencies met and promotes them to `ready` status. When a step fails, downstream steps that depend on it are marked `skipped` (unless they have `continue_on_failure: true`, in which case they are promoted). When all steps are in a terminal state, the job is marked `completed` (or `failed` if any step failed).
 
 ---
 
@@ -593,7 +641,7 @@ When a step completes successfully, the orchestrator checks if any downstream st
 POST /worker/jobs/{id}/logs
 ```
 
-Appends a chunk of log output to the job's log file. Called periodically (~1s) during step execution.
+Appends structured log lines to the job's JSONL log file. Called periodically (~1s) during step execution.
 
 **Path parameters:**
 - `id` -- Job ID (UUID)
@@ -602,9 +650,23 @@ Appends a chunk of log output to the job's log file. Called periodically (~1s) d
 
 ```json
 {
-  "chunk": "Hello World\nOUTPUT: {\"greeting\": \"Hello World\"}\n"
+  "step_name": "say-hello",
+  "lines": [
+    {"ts": "2025-02-12T10:56:45.123Z", "stream": "stdout", "line": "Hello World"},
+    {"ts": "2025-02-12T10:56:45.456Z", "stream": "stderr", "line": "warning: unused var"}
+  ]
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step_name` | string (optional) | Step name to attach to each log line |
+| `lines` | array | Array of log line objects |
+| `lines[].ts` | string | ISO 8601 timestamp |
+| `lines[].stream` | string | `"stdout"` or `"stderr"` |
+| `lines[].line` | string | The log line content |
+
+The server converts each line into a JSONL entry with a `step` field added (from `step_name`), appends to the job's `.jsonl` file, and broadcasts via WebSocket.
 
 **Response:**
 

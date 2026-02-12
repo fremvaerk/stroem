@@ -137,6 +137,26 @@ tasks:
 
 This creates a linear pipeline: `health-check` -> `deploy-app` -> `send-notification`.
 
+### Handling step failures
+
+By default, when a step fails, all downstream steps that depend on it are automatically **skipped**. The job is marked as `failed` once all steps reach a terminal state.
+
+If you want a step to run even when its dependency fails (e.g., cleanup steps, notifications), use `continue_on_failure: true`:
+
+```yaml
+flow:
+  deploy:
+    action: deploy-app
+  notify:
+    action: send-notification
+    depends_on: [deploy]
+    continue_on_failure: true
+    input:
+      status: "deploy finished"
+```
+
+In this example, `notify` runs regardless of whether `deploy` succeeds or fails. The job is still marked `failed` if any step failed.
+
 ### Parallel execution
 
 Steps without mutual dependencies run in parallel:

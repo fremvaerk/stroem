@@ -5,6 +5,12 @@ actions:
     input:
       name: { type: string, required: true }
 
+  greet-with-warning:
+    type: shell
+    cmd: "echo Hello {{ input.name }} && echo 'this is a warning' >&2 && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
+    input:
+      name: { type: string, required: true }
+
   shout:
     type: shell
     cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
@@ -26,3 +32,13 @@ tasks:
         depends_on: [say-hello]
         input:
           message: "{{ say_hello.output.greeting }}"
+
+  hello-with-warning:
+    mode: distributed
+    input:
+      name: { type: string, default: "World" }
+    flow:
+      warn-hello:
+        action: greet-with-warning
+        input:
+          name: "{{ input.name }}"

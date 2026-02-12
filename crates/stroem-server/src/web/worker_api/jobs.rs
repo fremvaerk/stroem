@@ -60,8 +60,16 @@ pub struct CompleteStepRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LogLineEntry {
+    pub ts: String,
+    pub stream: String,
+    pub line: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AppendLogRequest {
-    pub chunk: String,
+    pub lines: Vec<LogLineEntry>,
+    pub step_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +242,18 @@ pub async fn claim_job(
         }
     };
 
+    // Persist rendered input to DB so the job detail API can return it
+    if let Err(e) = JobStepRepo::update_input(
+        &state.pool,
+        step.job_id,
+        &step.step_name,
+        rendered_input.clone(),
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist rendered input: {}", e);
+    }
+
     // Render action_spec env/cmd/script templates at claim time
     let rendered_action_spec = 'render_spec: {
         let original_spec = match &step.action_spec {
@@ -368,7 +388,13 @@ pub async fn start_step(
     };
 
     match JobStepRepo::mark_running(&state.pool, job_id, &step_name, worker_id).await {
-        Ok(_) => Json(json!({"status": "ok"})).into_response(),
+        Ok(_) => {
+            // Also transition the job itself to running (idempotent — no-op if already running)
+            if let Err(e) = JobRepo::mark_running_if_pending(&state.pool, job_id, worker_id).await {
+                tracing::warn!("Failed to transition job to running: {}", e);
+            }
+            Json(json!({"status": "ok"})).into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to mark step as running: {}", e);
             (
@@ -493,7 +519,25 @@ pub async fn append_log(
 
     let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
 
-    match log_storage.append_log(job_id, &req.chunk).await {
+    // Convert structured log lines to JSONL with step field
+    let step = req.step_name.as_deref().unwrap_or("");
+    let jsonl_chunk: String = req
+        .lines
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "ts": entry.ts,
+                "stream": entry.stream,
+                "step": step,
+                "line": entry.line,
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    match log_storage.append_log(job_id, &jsonl_chunk).await {
         Ok(_) => {
             // Update log path in database (idempotent)
             let log_path = log_storage.get_log_path(job_id);
@@ -504,7 +548,7 @@ pub async fn append_log(
             // Broadcast to WebSocket subscribers
             state
                 .log_broadcast
-                .broadcast(job_id, req.chunk.clone())
+                .broadcast(job_id, jsonl_chunk.clone())
                 .await;
 
             Json(json!({"status": "ok"})).into_response()

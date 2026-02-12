@@ -30,6 +30,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
+        .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
         // WebSocket log streaming
         .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
         // Auth routes

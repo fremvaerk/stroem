@@ -5,7 +5,7 @@ test.describe("Login", () => {
   test("successful login redirects to dashboard", async ({ page }) => {
     await login(page);
     await expect(page).toHaveURL("/");
-    await expect(page.locator("text=Dashboard")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   });
 
   test("wrong password shows error", async ({ page }) => {

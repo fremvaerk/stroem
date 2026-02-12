@@ -97,6 +97,7 @@ mod tests {
             action: action.to_string(),
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             input: HashMap::new(),
+            continue_on_failure: false,
         }
     }
 

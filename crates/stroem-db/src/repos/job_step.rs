@@ -266,6 +266,29 @@ impl JobStepRepo {
         Ok(row.0 > 0)
     }
 
+    /// Update the input field for a step (used to persist rendered template input)
+    pub async fn update_input(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        input: Option<JsonValue>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job_step
+            SET input = $1
+            WHERE job_id = $2 AND step_name = $3
+            "#,
+        )
+        .bind(input)
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Update steps from pending to ready based on completed dependencies
     /// This is called by the orchestrator after a step completes
     /// Returns the names of newly promoted steps
@@ -289,14 +312,20 @@ impl JobStepRepo {
         for step in steps.iter().filter(|s| s.status == "pending") {
             // Check if all dependencies are completed
             if let Some(flow_step) = flow.get(&step.step_name) {
-                let all_deps_completed = flow_step.depends_on.iter().all(|dep| {
+                let deps_met = flow_step.depends_on.iter().all(|dep| {
                     status_map
                         .get(dep)
-                        .map(|status| status == "completed")
+                        .map(|status| {
+                            if flow_step.continue_on_failure {
+                                status == "completed" || status == "failed"
+                            } else {
+                                status == "completed"
+                            }
+                        })
                         .unwrap_or(false)
                 });
 
-                if all_deps_completed {
+                if deps_met {
                     // Promote this step to ready
                     sqlx::query(
                         r#"
@@ -316,5 +345,59 @@ impl JobStepRepo {
         }
 
         Ok(promoted)
+    }
+
+    /// Mark a step as skipped (unreachable due to failed dependency)
+    pub async fn mark_skipped(pool: &PgPool, job_id: Uuid, step_name: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'skipped', completed_at = NOW()
+            WHERE job_id = $1 AND step_name = $2
+            "#,
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Skip pending steps that are unreachable due to failed/skipped dependencies.
+    /// A step is unreachable if any dependency is failed or skipped and the step
+    /// does not have `continue_on_failure: true`.
+    /// Returns the names of newly skipped steps (call in a loop until empty for cascading).
+    pub async fn skip_unreachable_steps(
+        pool: &PgPool,
+        job_id: Uuid,
+        flow: &HashMap<String, FlowStep>,
+    ) -> Result<Vec<String>> {
+        let steps = Self::get_steps_for_job(pool, job_id).await?;
+        let status_map: HashMap<String, String> = steps
+            .iter()
+            .map(|s| (s.step_name.clone(), s.status.clone()))
+            .collect();
+
+        let mut skipped = Vec::new();
+        for step in steps.iter().filter(|s| s.status == "pending") {
+            if let Some(flow_step) = flow.get(&step.step_name) {
+                if flow_step.continue_on_failure {
+                    continue;
+                }
+                let has_failed_dep = flow_step.depends_on.iter().any(|dep| {
+                    status_map
+                        .get(dep)
+                        .map(|s| s == "failed" || s == "skipped")
+                        .unwrap_or(false)
+                });
+
+                if has_failed_dep {
+                    Self::mark_skipped(pool, job_id, &step.step_name).await?;
+                    skipped.push(step.step_name.clone());
+                }
+            }
+        }
+        Ok(skipped)
     }
 }

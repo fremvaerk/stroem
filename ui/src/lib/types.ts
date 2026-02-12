@@ -14,6 +14,7 @@ export interface FlowStep {
   action: string;
   input?: Record<string, unknown>;
   depends_on?: string[];
+  continue_on_failure?: boolean;
 }
 
 export interface TaskDetail {
@@ -41,6 +42,8 @@ export interface JobStep {
   action_name: string;
   action_type: string;
   action_image: string | null;
+  input: Record<string, unknown> | null;
+  output: Record<string, unknown> | null;
   status: string;
   worker_id: string | null;
   started_at: string | null;

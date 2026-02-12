@@ -94,6 +94,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     let buffer_clone = log_buffer.clone();
                     let log_client = client_clone.clone();
                     let log_job_id = step.job_id;
+                    let log_step_name = step.step_name.clone();
                     let log_handle = tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
                         loop {
@@ -103,7 +104,10 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                                 buf.drain(..).collect()
                             };
                             if !lines.is_empty() {
-                                if let Err(e) = log_client.push_logs(log_job_id, lines).await {
+                                if let Err(e) = log_client
+                                    .push_logs(log_job_id, &log_step_name, lines)
+                                    .await
+                                {
                                     tracing::warn!("Failed to push logs: {}", e);
                                 }
                             }
@@ -117,7 +121,10 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     log_handle.abort();
                     let remaining: Vec<_> = log_buffer.lock().unwrap().drain(..).collect();
                     if !remaining.is_empty() {
-                        if let Err(e) = client_clone.push_logs(step.job_id, remaining).await {
+                        if let Err(e) = client_clone
+                            .push_logs(step.job_id, &step.step_name, remaining)
+                            .await
+                        {
                             tracing::warn!("Failed to push final logs: {}", e);
                         }
                     }

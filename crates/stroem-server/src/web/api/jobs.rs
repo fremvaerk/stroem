@@ -8,6 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
@@ -138,7 +139,7 @@ pub async fn get_job(
         }
     };
 
-    let steps_json: Vec<serde_json::Value> = steps
+    let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
         .map(|step| {
             json!({
@@ -146,6 +147,8 @@ pub async fn get_job(
                 "action_name": step.action_name,
                 "action_type": step.action_type,
                 "action_image": step.action_image,
+                "input": step.input,
+                "output": step.output,
                 "status": step.status,
                 "worker_id": step.worker_id,
                 "started_at": step.started_at,
@@ -154,6 +157,53 @@ pub async fn get_job(
             })
         })
         .collect();
+
+    // Sort steps by topological order (dependency-first) using the task flow
+    let workspace = state.workspace.read().await;
+    if let Some(task) = workspace.tasks.get(&job.task_name) {
+        let mut in_deg: HashMap<&str, usize> = task
+            .flow
+            .iter()
+            .map(|(name, fs)| (name.as_str(), fs.depends_on.len()))
+            .collect();
+
+        let mut queue: Vec<&str> = in_deg
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&n, _)| n)
+            .collect();
+        queue.sort();
+
+        let mut topo_order: Vec<&str> = Vec::new();
+        while let Some(node) = queue.first().copied() {
+            queue.remove(0);
+            topo_order.push(node);
+            for (name, fs) in &task.flow {
+                if fs.depends_on.iter().any(|d| d == node) {
+                    if let Some(deg) = in_deg.get_mut(name.as_str()) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push(name.as_str());
+                            queue.sort();
+                        }
+                    }
+                }
+            }
+        }
+
+        let pos: HashMap<&str, usize> = topo_order
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, i))
+            .collect();
+        steps_json.sort_by_key(|s| {
+            s["step_name"]
+                .as_str()
+                .and_then(|n| pos.get(n).copied())
+                .unwrap_or(usize::MAX)
+        });
+    }
+    drop(workspace);
 
     let response = JobDetailResponse {
         job_id: job.job_id,
@@ -172,6 +222,38 @@ pub async fn get_job(
     };
 
     Json(response).into_response()
+}
+
+/// GET /api/jobs/:id/steps/:step/logs - Get per-step logs
+#[tracing::instrument(skip(state))]
+pub async fn get_step_logs(
+    State(state): State<Arc<AppState>>,
+    Path((id, step_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let job_id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid job ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
+
+    match log_storage.get_step_log(job_id, &step_name).await {
+        Ok(logs) => Json(json!({"logs": logs})).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to get step logs: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get step logs: {}", e)})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// GET /api/jobs/:id/logs - Get log file contents

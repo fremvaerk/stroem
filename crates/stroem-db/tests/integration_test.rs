@@ -288,6 +288,48 @@ async fn test_step_lifecycle() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_update_input() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "input-test",
+        "distributed",
+        None,
+        "user",
+        None,
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "render-step".to_string(),
+        action_name: "action1".to_string(),
+        action_type: "shell".to_string(),
+        action_image: None,
+        action_spec: None,
+        input: None,
+        status: "ready".to_string(),
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Input should be null initially
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert!(steps[0].input.is_none());
+
+    // Update input
+    let rendered = serde_json::json!({"greeting": "hello world"});
+    JobStepRepo::update_input(&pool, job_id, "render-step", Some(rendered.clone())).await?;
+
+    // Verify input was persisted
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps[0].input, Some(rendered));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_promote_ready_steps() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
@@ -357,6 +399,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action: "action1".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -365,6 +408,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action: "action2".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -373,6 +417,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action: "action3".to_string(),
             depends_on: vec!["step2".to_string(), "step4".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -381,6 +426,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action: "action4".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
 

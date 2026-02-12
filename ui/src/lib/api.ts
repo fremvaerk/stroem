@@ -209,3 +209,12 @@ export async function getJobLogs(
 ): Promise<{ logs: string }> {
   return apiFetch<{ logs: string }>(`/api/jobs/${id}/logs`);
 }
+
+export async function getStepLogs(
+  jobId: string,
+  stepName: string,
+): Promise<{ logs: string }> {
+  return apiFetch<{ logs: string }>(
+    `/api/jobs/${jobId}/steps/${encodeURIComponent(stepName)}/logs`,
+  );
+}

@@ -1,12 +1,46 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
+
+interface ParsedLogLine {
+  ts: string;
+  stream: string;
+  step: string;
+  line: string;
+}
 
 interface LogViewerProps {
   logs: string;
   isStreaming: boolean;
 }
 
+function parseLogLine(raw: string): ParsedLogLine | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.line === "string") {
+      return {
+        ts: parsed.ts || "",
+        stream: parsed.stream || "stdout",
+        step: parsed.step || "",
+        line: parsed.line,
+      };
+    }
+  } catch {
+    // Not JSON — legacy plain text line
+  }
+  return null;
+}
+
+function formatTimestamp(ts: string): string {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts);
+    return d.toISOString().substring(11, 23); // HH:MM:SS.mmm
+  } catch {
+    return "";
+  }
+}
+
 export function LogViewer({ logs, isStreaming }: LogViewerProps) {
-  const containerRef = useRef<HTMLPreElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
 
   useEffect(() => {
@@ -22,6 +56,11 @@ export function LogViewer({ logs, isStreaming }: LogViewerProps) {
     autoScrollRef.current = atBottom;
   }
 
+  const lines = useMemo(() => {
+    if (!logs) return [];
+    return logs.split("\n").filter((l) => l.length > 0);
+  }, [logs]);
+
   return (
     <div className="relative">
       {isStreaming && (
@@ -32,15 +71,44 @@ export function LogViewer({ logs, isStreaming }: LogViewerProps) {
           </span>
         </div>
       )}
-      <pre
+      <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="max-h-[500px] min-h-[200px] overflow-auto rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-300"
+        className="max-h-[500px] min-h-[200px] overflow-auto rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed"
       >
-        {logs || (
+        {lines.length === 0 ? (
           <span className="text-zinc-600">Waiting for logs...</span>
+        ) : (
+          lines.map((raw, i) => {
+            const parsed = parseLogLine(raw);
+            if (parsed) {
+              const ts = formatTimestamp(parsed.ts);
+              const isStderr = parsed.stream === "stderr";
+              return (
+                <div key={i} className="flex">
+                  {ts && (
+                    <span className="mr-3 shrink-0 select-none text-zinc-600">
+                      {ts}
+                    </span>
+                  )}
+                  <span
+                    className={isStderr ? "text-red-400" : "text-zinc-300"}
+                    data-stream={parsed.stream}
+                  >
+                    {parsed.line}
+                  </span>
+                </div>
+              );
+            }
+            // Legacy plain text line
+            return (
+              <div key={i} className="text-zinc-300">
+                {raw}
+              </div>
+            );
+          })
         )}
-      </pre>
+      </div>
     </div>
   );
 }

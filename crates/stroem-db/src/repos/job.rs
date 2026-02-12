@@ -152,6 +152,27 @@ impl JobRepo {
         Ok(())
     }
 
+    /// Transition job from pending to running (idempotent — no-op if already running/completed/failed)
+    pub async fn mark_running_if_pending(
+        pool: &PgPool,
+        job_id: Uuid,
+        worker_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job
+            SET status = 'running', worker_id = $1, started_at = NOW()
+            WHERE job_id = $2 AND status = 'pending'
+            "#,
+        )
+        .bind(worker_id)
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Mark job as completed
     pub async fn mark_completed(
         pool: &PgPool,

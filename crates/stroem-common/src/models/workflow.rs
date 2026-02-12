@@ -75,6 +75,8 @@ pub struct FlowStep {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub input: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub continue_on_failure: bool,
 }
 
 /// Task definition - represents a workflow with multiple steps
@@ -299,6 +301,38 @@ triggers:
         let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("test").unwrap();
         assert!(trigger.enabled);
+    }
+
+    #[test]
+    fn test_continue_on_failure_defaults_false() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: action1
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let task = config.tasks.get("test").unwrap();
+        let step = task.flow.get("step1").unwrap();
+        assert!(!step.continue_on_failure);
+    }
+
+    #[test]
+    fn test_continue_on_failure_true() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: action1
+        depends_on: [step0]
+        continue_on_failure: true
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let task = config.tasks.get("test").unwrap();
+        let step = task.flow.get("step1").unwrap();
+        assert!(step.continue_on_failure);
     }
 
     #[test]

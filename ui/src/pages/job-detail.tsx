@@ -5,8 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { StepTimeline } from "@/components/step-timeline";
-import { LogViewer } from "@/components/log-viewer";
-import { useJobLogs } from "@/hooks/use-job-logs";
+import { JsonViewer } from "@/components/json-viewer";
 import { getJob } from "@/lib/api";
 import type { JobDetail } from "@/lib/types";
 
@@ -34,7 +33,7 @@ export function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const { logs, isStreaming } = useJobLogs(id, job?.status ?? null);
+  const [selectedStep, setSelectedStep] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -121,29 +120,48 @@ export function JobDetailPage() {
         ))}
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Steps</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {job.steps.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No steps</p>
-            ) : (
-              <StepTimeline steps={job.steps} />
-            )}
-          </CardContent>
-        </Card>
+      {(job.input || job.output) && (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {job.input && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Job Input</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <JsonViewer data={job.input} />
+              </CardContent>
+            </Card>
+          )}
+          {job.output && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Job Output</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <JsonViewer data={job.output} />
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Logs</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <LogViewer logs={logs} isStreaming={isStreaming} />
-          </CardContent>
-        </Card>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Steps</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {job.steps.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No steps</p>
+          ) : (
+            <StepTimeline
+              jobId={job.job_id}
+              steps={job.steps}
+              selectedStep={selectedStep}
+              onSelectStep={setSelectedStep}
+            />
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

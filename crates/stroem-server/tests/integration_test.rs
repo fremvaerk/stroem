@@ -104,6 +104,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: hello_input,
+            continue_on_failure: false,
         },
     );
     let mut task_input = HashMap::new();
@@ -134,6 +135,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: greet_step_input,
+            continue_on_failure: false,
         },
     );
     let mut shout_step_input = HashMap::new();
@@ -144,6 +146,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "shout".to_string(),
             depends_on: vec!["greet".to_string()],
             input: shout_step_input,
+            continue_on_failure: false,
         },
     );
     let mut gs_task_input = HashMap::new();
@@ -172,6 +175,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     l3_flow.insert(
@@ -180,6 +184,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     l3_flow.insert(
@@ -188,6 +193,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     workspace.tasks.insert(
@@ -207,6 +213,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     d_flow.insert(
@@ -215,6 +222,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     d_flow.insert(
@@ -223,6 +231,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     d_flow.insert(
@@ -231,6 +240,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec!["step2".to_string(), "step3".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     workspace.tasks.insert(
@@ -250,6 +260,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "docker-build".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     workspace.tasks.insert(
@@ -271,6 +282,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: mi_greet_input,
+            continue_on_failure: false,
         },
     );
     let mut mi_process_input = HashMap::new();
@@ -283,6 +295,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "shout".to_string(),
             depends_on: vec!["greet".to_string()],
             input: mi_process_input,
+            continue_on_failure: false,
         },
     );
     let mut mi_task_input = HashMap::new();
@@ -311,6 +324,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     wfi_flow.insert(
@@ -319,6 +333,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     wfi_flow.insert(
@@ -327,6 +342,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     wfi_flow.insert(
@@ -339,6 +355,7 @@ fn test_workspace() -> WorkspaceConfig {
                 "step3".to_string(),
             ],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     workspace.tasks.insert(
@@ -398,6 +415,7 @@ fn test_workspace() -> WorkspaceConfig {
             action: "db-backup".to_string(),
             depends_on: vec![],
             input: bt_input,
+            continue_on_failure: false,
         },
     );
     let mut bt_task_input = HashMap::new();
@@ -428,6 +446,106 @@ fn test_workspace() -> WorkspaceConfig {
             "password": "ref+sops://secrets.enc.yaml#/db/password",
             "host": "db.internal.prod"
         }),
+    );
+
+    // Action: transform (shell with output)
+    let mut transform_input = HashMap::new();
+    transform_input.insert(
+        "data".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            required: true,
+            default: None,
+        },
+    );
+    workspace.actions.insert(
+        "transform".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            cmd: Some(
+                "echo Processing $DATA && echo 'OUTPUT: {\"result\": \"processed-'$DATA'\"}'"
+                    .to_string(),
+            ),
+            script: None,
+            image: None,
+            command: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: transform_input,
+            output: None,
+        },
+    );
+
+    // Action: summarize (shell with output)
+    let mut summarize_input = HashMap::new();
+    summarize_input.insert(
+        "value".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            required: true,
+            default: None,
+        },
+    );
+    workspace.actions.insert(
+        "summarize".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            cmd: Some(
+                "echo Summarizing $VALUE && echo 'OUTPUT: {\"summary\": \"'$VALUE' done\"}'"
+                    .to_string(),
+            ),
+            script: None,
+            image: None,
+            command: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: summarize_input,
+            output: None,
+        },
+    );
+
+    // Task: data-pipeline (2-step: transform → summarize, terminal step produces output)
+    let mut dp_flow = HashMap::new();
+    let mut dp_transform_input = HashMap::new();
+    dp_transform_input.insert("data".to_string(), json!("{{ input.data }}"));
+    dp_flow.insert(
+        "transform".to_string(),
+        FlowStep {
+            action: "transform".to_string(),
+            depends_on: vec![],
+            input: dp_transform_input,
+            continue_on_failure: false,
+        },
+    );
+    let mut dp_summarize_input = HashMap::new();
+    dp_summarize_input.insert("value".to_string(), json!("{{ transform.output.result }}"));
+    dp_flow.insert(
+        "summarize".to_string(),
+        FlowStep {
+            action: "summarize".to_string(),
+            depends_on: vec!["transform".to_string()],
+            input: dp_summarize_input,
+            continue_on_failure: false,
+        },
+    );
+    let mut dp_task_input = HashMap::new();
+    dp_task_input.insert(
+        "data".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            required: true,
+            default: Some(json!("test")),
+        },
+    );
+    workspace.tasks.insert(
+        "data-pipeline".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: dp_task_input,
+            flow: dp_flow,
+        },
     );
 
     workspace
@@ -500,6 +618,21 @@ fn api_get(uri: &str) -> Request<Body> {
 async fn body_json(response: axum::response::Response) -> Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+/// Helper to build a log push request body using the JSONL `lines` format.
+fn log_lines_body(step_name: &str, lines: &[(&str, &str)]) -> Value {
+    let entries: Vec<Value> = lines
+        .iter()
+        .map(|(stream, line)| {
+            json!({
+                "ts": "2025-02-12T10:00:00Z",
+                "stream": stream,
+                "line": line,
+            })
+        })
+        .collect();
+    json!({ "step_name": step_name, "lines": entries })
 }
 
 // ─── Test 1: Execute task creates job and steps ───────────────────────
@@ -736,10 +869,14 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         .await?;
     assert_eq!(response.status(), 200);
 
-    // Verify shout step stays pending (not promoted since dependency failed)
+    // Verify shout step was skipped (unreachable due to failed dependency)
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let shout = steps.iter().find(|s| s.step_name == "shout").unwrap();
-    assert_eq!(shout.status, "pending");
+    assert_eq!(shout.status, "skipped");
+
+    // Verify job is marked failed (all steps are terminal now)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
 
     // Verify no steps are claimable
     let worker_id = Uuid::new_v4();
@@ -959,13 +1096,13 @@ async fn test_log_append_and_retrieve() -> Result<()> {
     )
     .await?;
 
-    // Append log chunks via worker API
+    // Append log chunks via worker API (JSONL format)
     let response = router
         .clone()
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "Line 1\n"}),
+            log_lines_body("build", &[("stdout", "Line 1")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -975,7 +1112,7 @@ async fn test_log_append_and_retrieve() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "Line 2\n"}),
+            log_lines_body("build", &[("stdout", "Line 2")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -986,7 +1123,17 @@ async fn test_log_append_and_retrieve() -> Result<()> {
         .await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
-    assert_eq!(body["logs"].as_str().unwrap(), "Line 1\nLine 2\n");
+    let logs_str = body["logs"].as_str().unwrap();
+    // Logs are now JSONL — each line is a JSON object
+    let log_lines: Vec<Value> = logs_str
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(log_lines.len(), 2);
+    assert_eq!(log_lines[0]["line"], "Line 1");
+    assert_eq!(log_lines[0]["step"], "build");
+    assert_eq!(log_lines[1]["line"], "Line 2");
 
     Ok(())
 }
@@ -1110,6 +1257,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
 
@@ -1164,6 +1312,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action: "greet".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -1172,6 +1321,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action: "greet".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -1180,6 +1330,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action: "greet".to_string(),
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
 
@@ -1447,6 +1598,93 @@ async fn test_worker_start_step() -> Result<()> {
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     assert_eq!(steps[0].status, "running");
     assert!(steps[0].started_at.is_some());
+
+    // Verify job is now running with started_at set
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "running");
+    assert!(
+        job.started_at.is_some(),
+        "job.started_at should be set after first step starts"
+    );
+
+    Ok(())
+}
+
+// ─── Test: Job started_at set via API after step start ────────────────
+
+#[tokio::test]
+async fn test_job_started_at_visible_in_api() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Execute task
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/tasks/hello-world/execute",
+            json!({"input": {"name": "TimingTest"}}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+
+    // Job should be pending with no started_at
+    let response = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["status"], "pending");
+    assert!(
+        body["started_at"].is_null(),
+        "started_at should be null before step starts"
+    );
+
+    // Register worker
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "timing-worker", "capabilities": ["shell"]}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+
+    // Claim step
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Start step
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/start", job_id),
+            json!({"worker_id": worker_id}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Job should now be running with started_at set
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["status"], "running");
+    assert!(
+        body["started_at"].is_string(),
+        "started_at should be set in API response after step starts, got: {:?}",
+        body["started_at"]
+    );
 
     Ok(())
 }
@@ -2695,13 +2933,13 @@ async fn test_ws_backfill_existing_logs() -> Result<()> {
     )
     .await?;
 
-    // Append logs via worker API
+    // Append logs via worker API (JSONL format)
     let response = router
         .clone()
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "existing line 1\n"}),
+            log_lines_body("build", &[("stdout", "existing line 1")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2711,7 +2949,7 @@ async fn test_ws_backfill_existing_logs() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "existing line 2\n"}),
+            log_lines_body("build", &[("stdout", "existing line 2")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2734,7 +2972,7 @@ async fn test_ws_backfill_existing_logs() -> Result<()> {
         .expect("Failed to connect to WebSocket");
 
     use futures_util::StreamExt;
-    // Should receive backfill
+    // Should receive backfill (JSONL lines)
     let msg = ws_stream.next().await.unwrap()?;
     let text = msg.into_text()?;
     assert!(text.contains("existing line 1"));
@@ -2780,23 +3018,23 @@ async fn test_ws_live_log_streaming() -> Result<()> {
         .await
         .expect("Failed to connect to WebSocket");
 
-    // Push a log chunk via worker API (through a separate router instance)
+    // Push a log chunk via worker API (through a separate router instance, JSONL format)
     let response = router_for_push
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "live line\n"}),
+            log_lines_body("build", &[("stdout", "live line")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
 
     use futures_util::StreamExt;
-    // Should receive the live message
+    // Should receive the live message (JSONL)
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
         .await?
         .unwrap()?;
     let text = msg.into_text()?;
-    assert_eq!(text, "live line\n");
+    assert!(text.contains("live line"));
 
     drop(ws_stream);
     server.abort();
@@ -2819,13 +3057,13 @@ async fn test_ws_backfill_plus_live() -> Result<()> {
     )
     .await?;
 
-    // Append initial log
+    // Append initial log (JSONL format)
     let response = router
         .clone()
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "backfill\n"}),
+            log_lines_body("build", &[("stdout", "backfill")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2851,28 +3089,854 @@ async fn test_ws_backfill_plus_live() -> Result<()> {
 
     use futures_util::StreamExt;
 
-    // Should receive backfill first
+    // Should receive backfill first (JSONL)
     let msg = ws_stream.next().await.unwrap()?;
-    assert_eq!(msg.into_text()?, "backfill\n");
+    let backfill_text = msg.into_text()?;
+    assert!(backfill_text.contains("backfill"));
 
     // Now push a live chunk
     let response = router_for_push
         .oneshot(worker_request(
             "POST",
             &format!("/worker/jobs/{}/logs", job_id),
-            json!({"chunk": "live\n"}),
+            log_lines_body("build", &[("stdout", "live")]),
         ))
         .await?;
     assert_eq!(response.status(), 200);
 
-    // Should receive the live message
+    // Should receive the live message (JSONL)
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
         .await?
         .unwrap()?;
-    assert_eq!(msg.into_text()?, "live\n");
+    let live_text = msg.into_text()?;
+    assert!(live_text.contains("live"));
 
     drop(ws_stream);
     server.abort();
+
+    Ok(())
+}
+
+// ─── Test: Job output from terminal step ──────────────────────────────
+
+#[tokio::test]
+async fn test_job_output_from_terminal_step() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    // 2-step linear: step1 → step2 (step2 is terminal)
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    flow.insert(
+        "step2".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec!["step1".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+
+    let task = TaskDef {
+        mode: "distributed".to_string(),
+        input: HashMap::new(),
+        flow,
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 2"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Complete step1 with output
+    JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // Complete step2 (terminal) with output
+    JobStepRepo::mark_completed(&pool, job_id, "step2", Some(json!({"y": 2}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    // Job output should aggregate terminal step output: {"step2": {"y": 2}}
+    assert_eq!(job.output, Some(json!({"step2": {"y": 2}})));
+
+    Ok(())
+}
+
+// ─── Test: Job output null when terminal step has no output ───────────
+
+#[tokio::test]
+async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    // 2-step linear: step1 → step2 (step2 is terminal)
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    flow.insert(
+        "step2".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec!["step1".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+
+    let task = TaskDef {
+        mode: "distributed".to_string(),
+        input: HashMap::new(),
+        flow,
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 2"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Complete step1 with output
+    JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // Complete step2 (terminal) with NO output
+    JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    // Terminal step has no output → job output should be None
+    assert_eq!(job.output, None);
+
+    Ok(())
+}
+
+// ─── Test: Job output from multiple terminal steps ────────────────────
+
+#[tokio::test]
+async fn test_job_output_multiple_terminal_steps() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    // Diamond without join: step1 → step2, step1 → step3
+    // step2 and step3 are both terminal
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    flow.insert(
+        "step2".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec!["step1".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    flow.insert(
+        "step3".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec!["step1".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+
+    let task = TaskDef {
+        mode: "distributed".to_string(),
+        input: HashMap::new(),
+        flow,
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 2"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step3".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo 3"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Complete step1
+    JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // Complete step2 (terminal) with output
+    JobStepRepo::mark_completed(&pool, job_id, "step2", Some(json!({"a": 1}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+
+    // Complete step3 (terminal) with output
+    JobStepRepo::mark_completed(&pool, job_id, "step3", Some(json!({"b": 2}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step3", &task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    // Both terminal steps have output → job output includes both
+    let output = job.output.unwrap();
+    assert_eq!(output["step2"], json!({"a": 1}));
+    assert_eq!(output["step3"], json!({"b": 2}));
+
+    Ok(())
+}
+
+// ─── Test: JSONL logs contain stderr stream field ──────────────────────
+
+#[tokio::test]
+async fn test_jsonl_logs_contain_stderr_stream() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Push logs with both stdout and stderr
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            log_lines_body(
+                "build",
+                &[
+                    ("stdout", "compiling..."),
+                    ("stderr", "warning: unused var"),
+                    ("stdout", "done"),
+                ],
+            ),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Retrieve full logs via API
+    let response = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{}/logs", job_id)))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let logs_str = body["logs"].as_str().unwrap();
+
+    let log_lines: Vec<Value> = logs_str
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(log_lines.len(), 3);
+    assert_eq!(log_lines[0]["stream"], "stdout");
+    assert_eq!(log_lines[1]["stream"], "stderr");
+    assert_eq!(log_lines[1]["line"], "warning: unused var");
+    assert_eq!(log_lines[2]["stream"], "stdout");
+
+    // Retrieve step-filtered logs
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{}/steps/build/logs", job_id)))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let step_logs: Vec<Value> = body["logs"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(step_logs.len(), 3);
+    assert_eq!(step_logs[0]["step"], "build");
+
+    Ok(())
+}
+
+// ─── Test: Failing job status and error message ───────────────────────
+
+#[tokio::test]
+async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Create a single step
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "doom".to_string(),
+        action_name: "greet".to_string(),
+        action_type: "shell".to_string(),
+        action_image: None,
+        action_spec: Some(json!({"cmd": "exit 1"})),
+        input: None,
+        status: "ready".to_string(),
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Push stderr logs before step failure
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            log_lines_body(
+                "doom",
+                &[("stdout", "About to fail"), ("stderr", "Error details")],
+            ),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Simulate worker completing step with failure
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/doom/complete", job_id),
+            json!({"exit_code": 1, "error": "Exit code: 1\nStderr: Error details"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Check step is failed with error
+    let all_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(all_steps.len(), 1);
+    assert_eq!(all_steps[0].status, "failed");
+    assert!(all_steps[0]
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("Error details"));
+
+    // Check job is failed
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    // Check logs contain stderr
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{}/steps/doom/logs", job_id)))
+        .await?;
+    let body = body_json(response).await;
+    let logs_str = body["logs"].as_str().unwrap();
+    let log_lines: Vec<Value> = logs_str
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(log_lines.iter().any(|l| l["stream"] == "stderr"));
+
+    Ok(())
+}
+
+// ─── Test: Fail in chain stops job, first step OK ─────────────────────
+
+#[tokio::test]
+async fn test_fail_in_chain_stops_job() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let task = {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "step-ok".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "step-fail".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec!["step-ok".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        }
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "greet-and-shout",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step-ok".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo ok"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step-fail".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Complete first step successfully
+    JobStepRepo::mark_running(&pool, job_id, "step-ok", Uuid::new_v4()).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step-ok", Some(json!({"result": "ok"}))).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step-ok", &task).await?;
+
+    // Verify step-fail was promoted to ready
+    let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let fail_step = mid_steps
+        .iter()
+        .find(|s| s.step_name == "step-fail")
+        .unwrap();
+    assert_eq!(fail_step.status, "ready");
+
+    // Fail the second step
+    JobStepRepo::mark_running(&pool, job_id, "step-fail", Uuid::new_v4()).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step-fail", "Exit code: 1\nStderr: boom").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step-fail", &task).await?;
+
+    // Check final state
+    let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let ok_step = final_steps
+        .iter()
+        .find(|s| s.step_name == "step-ok")
+        .unwrap();
+    let fail_step = final_steps
+        .iter()
+        .find(|s| s.step_name == "step-fail")
+        .unwrap();
+    assert_eq!(ok_step.status, "completed");
+    assert_eq!(fail_step.status, "failed");
+    assert!(fail_step.error_message.as_ref().unwrap().contains("boom"));
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+// ─── Test: Step failure skips dependents ───────────────────────────────
+
+#[tokio::test]
+async fn test_step_failure_skips_dependents() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let task = {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "step1".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "step2".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec!["step1".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        }
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo ok"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Fail step1
+    JobStepRepo::mark_running(&pool, job_id, "step1", Uuid::new_v4()).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // step2 should be skipped
+    let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step2 = final_steps.iter().find(|s| s.step_name == "step2").unwrap();
+    assert_eq!(step2.status, "skipped");
+
+    // Job should be failed
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+// ─── Test: continue_on_failure promotes after fail ────────────────────
+
+#[tokio::test]
+async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let task = {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "step1".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "step2".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec!["step1".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: true,
+            },
+        );
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        }
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo ok"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Fail step1
+    JobStepRepo::mark_running(&pool, job_id, "step1", Uuid::new_v4()).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // step2 should be promoted to ready (continue_on_failure = true)
+    let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step2 = mid_steps.iter().find(|s| s.step_name == "step2").unwrap();
+    assert_eq!(step2.status, "ready");
+
+    // Complete step2 successfully
+    JobStepRepo::mark_running(&pool, job_id, "step2", Uuid::new_v4()).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+
+    // Job should be failed (step1 failed)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+// ─── Test: Cascading skip ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_cascading_skip() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let task = {
+        let mut flow = HashMap::new();
+        flow.insert(
+            "step1".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "step2".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec!["step1".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "step3".to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec!["step2".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        }
+    };
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step1".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "exit 1"})),
+            input: None,
+            status: "ready".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step2".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo ok"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step3".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo ok"})),
+            input: None,
+            status: "pending".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Fail step1
+    JobStepRepo::mark_running(&pool, job_id, "step1", Uuid::new_v4()).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+
+    // Both step2 and step3 should be skipped (cascading)
+    let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step2 = final_steps.iter().find(|s| s.step_name == "step2").unwrap();
+    let step3 = final_steps.iter().find(|s| s.step_name == "step3").unwrap();
+    assert_eq!(step2.status, "skipped");
+    assert_eq!(step3.status, "skipped");
+
+    // Job should be failed
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
 
     Ok(())
 }

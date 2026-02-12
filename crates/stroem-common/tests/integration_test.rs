@@ -345,6 +345,7 @@ fn test_dag_fan_out_fan_in() {
             action: "a".to_string(),
             depends_on: vec![],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -353,6 +354,7 @@ fn test_dag_fan_out_fan_in() {
             action: "a".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -361,6 +363,7 @@ fn test_dag_fan_out_fan_in() {
             action: "a".to_string(),
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
     flow.insert(
@@ -369,6 +372,7 @@ fn test_dag_fan_out_fan_in() {
             action: "a".to_string(),
             depends_on: vec!["step2".to_string(), "step3".to_string()],
             input: HashMap::new(),
+            continue_on_failure: false,
         },
     );
 

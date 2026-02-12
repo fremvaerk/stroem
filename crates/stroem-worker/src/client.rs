@@ -271,26 +271,35 @@ impl ServerClient {
 
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
-    pub async fn push_logs(&self, job_id: Uuid, lines: Vec<serde_json::Value>) -> Result<()> {
+    pub async fn push_logs(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        lines: Vec<serde_json::Value>,
+    ) -> Result<()> {
         if lines.is_empty() {
             return Ok(());
         }
 
         let url = format!("{}/worker/jobs/{}/logs", self.base_url, job_id);
 
-        // Format log lines into a single chunk string for the server
-        let chunk: String = lines
+        // Build structured log line entries for the server
+        let structured_lines: Vec<serde_json::Value> = lines
             .iter()
-            .filter_map(|v| v.get("line").and_then(|l| l.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
+            .map(|v| {
+                serde_json::json!({
+                    "ts": v.get("timestamp").and_then(|t| t.as_str()).unwrap_or(""),
+                    "stream": v.get("stream").and_then(|s| s.as_str()).unwrap_or("stdout"),
+                    "line": v.get("line").and_then(|l| l.as_str()).unwrap_or(""),
+                })
+            })
+            .collect();
 
         let response = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
-            .json(&serde_json::json!({ "chunk": chunk }))
+            .json(&serde_json::json!({ "lines": structured_lines, "step_name": step_name }))
             .send()
             .await
             .context("Failed to send logs request")?;

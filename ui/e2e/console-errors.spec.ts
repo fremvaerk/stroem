@@ -1,19 +1,18 @@
 import { test, expect } from "@playwright/test";
+import { login, triggerJob } from "./helpers";
 
-const BASE_URL = process.env.BASE_URL || "http://localhost:8080";
+test.describe("Console and network errors audit", () => {
+  test("no console errors or failed network requests across all pages", async ({
+    page,
+    baseURL,
+  }) => {
+    const consoleErrors: string[] = [];
+    const networkErrors: string[] = [];
 
-test.describe("Console errors audit", () => {
-  let consoleErrors: string[] = [];
-  let consoleWarnings: string[] = [];
-
-  test("capture console errors across all pages", async ({ page }) => {
-    // Collect all console messages
+    // Collect console errors and uncaught exceptions
     page.on("console", (msg) => {
       if (msg.type() === "error") {
-        consoleErrors.push(`[${msg.type()}] ${msg.text()}`);
-      }
-      if (msg.type() === "warning") {
-        consoleWarnings.push(`[${msg.type()}] ${msg.text()}`);
+        consoleErrors.push(`[console.error] ${msg.text()}`);
       }
     });
 
@@ -21,74 +20,93 @@ test.describe("Console errors audit", () => {
       consoleErrors.push(`[pageerror] ${err.message}`);
     });
 
-    // 1. Login page
-    console.log("--- Navigating to /login ---");
-    await page.goto(`${BASE_URL}/login`);
-    await page.waitForLoadState("networkidle");
+    // Collect failed network requests (status >= 400, excluding expected 401s during auth probe)
+    page.on("response", (response) => {
+      const status = response.status();
+      const url = response.url();
+      if (status >= 400) {
+        // Ignore auth probe (config endpoint may 401 before login, refresh may fail)
+        const isAuthProbe =
+          url.includes("/api/config") ||
+          url.includes("/api/auth/refresh");
+        if (!isAuthProbe) {
+          networkErrors.push(`[${status}] ${response.request().method()} ${url}`);
+        }
+      }
+    });
 
-    // Login
-    const emailInput = page.locator('input[type="email"]');
-    if (await emailInput.isVisible()) {
-      await emailInput.fill("admin@stroem.local");
-      await page.locator('input[type="password"]').fill("admin");
-      await page.locator('button[type="submit"]').click();
-      await page.waitForURL("**/", { timeout: 5000 }).catch(() => {});
-      await page.waitForLoadState("networkidle");
-    }
+    // Trigger a job first so we have data to render
+    const jobId = await triggerJob(baseURL!, "hello-world", {
+      name: "console-audit",
+    });
 
-    console.log("--- Dashboard ---");
+    // Wait for job to complete
+    await expect(async () => {
+      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
+      const data = await res.json();
+      expect(["completed", "failed"]).toContain(data.status);
+    }).toPass({ timeout: 30000 });
+
+    // 1. Login
+    await login(page);
+
     // 2. Dashboard
-    await page.goto(`${BASE_URL}/`);
+    await page.goto("/");
     await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(1000);
 
     // 3. Tasks page
-    console.log("--- Tasks ---");
-    await page.goto(`${BASE_URL}/tasks`);
+    await page.goto("/tasks");
     await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(1000);
 
-    // 4. Task detail (hello-world)
-    console.log("--- Task detail ---");
-    await page.goto(`${BASE_URL}/tasks/hello-world`);
+    // 4. Task detail
+    await page.goto("/tasks/hello-world");
     await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(1000);
 
     // 5. Jobs page
-    console.log("--- Jobs ---");
-    await page.goto(`${BASE_URL}/jobs`);
+    await page.goto("/jobs");
     await page.waitForLoadState("networkidle");
-    await page.waitForTimeout(1000);
 
-    // 6. Find a completed job and visit its detail page
-    console.log("--- Job detail ---");
-    const jobLinks = page.locator("a[href^='/jobs/']");
-    const firstJobHref = await jobLinks.first().getAttribute("href");
-    if (firstJobHref) {
-      await page.goto(`${BASE_URL}${firstJobHref}`);
+    // 6. Job detail page — exercises step timeline, job input/output cards
+    await page.goto(`/jobs/${jobId}`);
+    await page.waitForLoadState("networkidle");
+    // Wait for steps to render
+    await expect(page.getByText("Steps", { exact: true })).toBeVisible();
+
+    // 7. Expand a step — exercises StepDetail (per-step logs, input, output tabs)
+    const stepButton = page.locator("button").filter({ hasText: /say.hello/ }).first();
+    if (await stepButton.isVisible()) {
+      await stepButton.click();
+      // Wait for step detail tabs to appear
+      await expect(page.getByRole("tab", { name: "Logs" })).toBeVisible();
+      await expect(page.getByRole("tab", { name: "Input" })).toBeVisible();
+      await expect(page.getByRole("tab", { name: "Output" })).toBeVisible();
+      // Wait for step log fetch
       await page.waitForLoadState("networkidle");
-      await page.waitForTimeout(2000);
+
+      // Click Input tab
+      await page.getByRole("tab", { name: "Input" }).click();
+      await page.waitForTimeout(500);
+
+      // Click Output tab
+      await page.getByRole("tab", { name: "Output" }).click();
+      await page.waitForTimeout(500);
+
+      // Click Logs tab back
+      await page.getByRole("tab", { name: "Logs" }).click();
+      await page.waitForTimeout(500);
     }
 
-    // Print results
-    console.log("\n========== CONSOLE ERRORS ==========");
-    if (consoleErrors.length === 0) {
-      console.log("No console errors found!");
-    } else {
-      for (const err of consoleErrors) {
-        console.log(err);
-      }
+    // Assert zero errors
+    if (consoleErrors.length > 0) {
+      console.log("Console errors found:");
+      for (const err of consoleErrors) console.log("  ", err);
+    }
+    if (networkErrors.length > 0) {
+      console.log("Network errors found:");
+      for (const err of networkErrors) console.log("  ", err);
     }
 
-    console.log("\n========== CONSOLE WARNINGS ==========");
-    if (consoleWarnings.length === 0) {
-      console.log("No console warnings found!");
-    } else {
-      for (const warn of consoleWarnings) {
-        console.log(warn);
-      }
-    }
-
-    console.log(`\nTotal: ${consoleErrors.length} errors, ${consoleWarnings.length} warnings`);
+    expect(consoleErrors, "Expected no console errors").toHaveLength(0);
+    expect(networkErrors, "Expected no failed network requests").toHaveLength(0);
   });
 });
