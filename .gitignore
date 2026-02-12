@@ -1,1 +1,7 @@
 .claude
+.mcp.json
+target/
+ui/node_modules/
+crates/stroem-server/static/*
+!crates/stroem-server/static/.gitkeep
+

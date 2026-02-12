@@ -1,0 +1,29 @@
+import { Routes, Route } from "react-router";
+import { AuthProvider } from "@/context/auth-context";
+import { ProtectedRoute } from "@/components/protected-route";
+import { AppLayout } from "@/components/app-layout";
+import { LoginPage } from "@/pages/login";
+import { DashboardPage } from "@/pages/dashboard";
+import { TasksPage } from "@/pages/tasks";
+import { TaskDetailPage } from "@/pages/task-detail";
+import { JobsPage } from "@/pages/jobs";
+import { JobDetailPage } from "@/pages/job-detail";
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppLayout />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="tasks" element={<TasksPage />} />
+            <Route path="tasks/:name" element={<TaskDetailPage />} />
+            <Route path="jobs" element={<JobsPage />} />
+            <Route path="jobs/:id" element={<JobDetailPage />} />
+          </Route>
+        </Route>
+      </Routes>
+    </AuthProvider>
+  );
+}

@@ -5,11 +5,23 @@ pub mod tasks;
 pub mod ws;
 
 use crate::state::AppState;
-use axum::{routing::get, routing::post, Router};
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::{routing::get, routing::post, Json, Router};
+use serde_json::json;
 use std::sync::Arc;
+
+/// GET /api/config -- public endpoint returning server configuration for the UI
+async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(json!({
+        "auth_required": state.config.auth.is_some(),
+    }))
+}
 
 pub fn build_api_routes(state: Arc<AppState>) -> Router {
     Router::new()
+        // Public config endpoint
+        .route("/config", get(get_config))
         // Task routes
         .route("/tasks", get(tasks::list_tasks))
         .route("/tasks/{name}", get(tasks::get_task))

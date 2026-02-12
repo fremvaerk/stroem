@@ -1,11 +1,26 @@
+# Stage 1: Build frontend
+FROM oven/bun:1-alpine AS frontend
+
+WORKDIR /app/ui
+COPY ui/package.json ui/bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY ui/ ./
+RUN bun run build
+
+# Stage 2: Build Rust binary
 FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 
+# Copy built frontend into the static folder for rust-embed
+COPY --from=frontend /app/crates/stroem-server/static/ crates/stroem-server/static/
+
 RUN cargo build --release -p stroem-server
 
+# Stage 3: Runtime
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*

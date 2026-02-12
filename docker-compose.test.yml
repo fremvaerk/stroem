@@ -1,0 +1,16 @@
+services:
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.50.0-noble
+    ipc: host
+    init: true
+    working_dir: /app/ui
+    volumes:
+      - ./ui:/app/ui
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://server:8080
+      CI: "true"
+    command: >
+      bash -c "cd /app/ui && npx playwright install --with-deps chromium && npx playwright test"

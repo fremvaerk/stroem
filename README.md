@@ -1,6 +1,6 @@
 # Strøm
 
-A workflow and task orchestration platform. Define workflows as YAML, execute them via API or CLI, and monitor results through logs.
+A workflow and task orchestration platform. Define workflows as YAML, execute them via API, CLI, or web UI, and monitor results through live log streaming.
 
 Strøm replaces the need for multiple tools (RunDeck, Windmill, GitHub Actions, Kubernetes CronJobs) with a single, unified platform.
 
@@ -35,7 +35,7 @@ docker compose down -v
 
 ## Local Development
 
-Prerequisites: Rust (latest stable), PostgreSQL, Docker (for integration tests).
+Prerequisites: Rust (latest stable), Bun, PostgreSQL, Docker (for integration tests).
 
 ```bash
 # Start Postgres (via docker compose or locally)
@@ -55,6 +55,23 @@ STROEM_CONFIG=server-config.yaml cargo run -p stroem-server
 
 # Start a worker (in another terminal)
 STROEM_CONFIG=worker-config.yaml cargo run -p stroem-worker
+```
+
+### Frontend Development
+
+```bash
+# Install frontend dependencies
+cd ui && bun install
+
+# Start dev server (proxies API to backend on :8080)
+bun run dev
+
+# Build for production (outputs to crates/stroem-server/static/)
+bun run build
+
+# Build and serve embedded UI
+cd ui && bun run build && cd .. && cargo run -p stroem-server
+# Visit http://localhost:8080
 ```
 
 ### Configuration
@@ -204,7 +221,7 @@ Key concepts:
 | `stroem-common` | Shared types, YAML models, DAG walker, Tera templating, validation |
 | `stroem-db` | PostgreSQL layer (sqlx), migrations, repositories |
 | `stroem-runner` | Execution backends (ShellRunner for MVP) |
-| `stroem-server` | Axum API server, orchestrator, workspace loader, log storage |
+| `stroem-server` | Axum API server, orchestrator, workspace loader, log storage, embedded UI |
 | `stroem-worker` | Worker process: polls, executes, streams logs |
 | `stroem-cli` | CLI tool: validate, trigger, status, logs, tasks, jobs |
 
@@ -254,6 +271,13 @@ cargo test -p stroem-db
 # E2E tests (requires Docker Compose)
 ./tests/e2e.sh
 
+# Playwright browser E2E tests
+cd ui && bunx playwright test
+
+# Playwright in Docker
+docker compose -f docker-compose.yml -f docker-compose.test.yml \
+  up --build --abort-on-container-exit playwright
+
 # Lint
 cargo clippy --workspace -- -D warnings
 
@@ -271,8 +295,14 @@ cargo fmt --check --all
 - Auth is optional -- existing routes work without auth configured
 - WebSocket endpoint for real-time log streaming with backfill
 
+**Phase 2b (React UI)** -- Complete. Web UI embedded in the Rust binary.
+- React 19 + TypeScript + Vite + Tailwind v4 + shadcn/ui
+- Pages: Login, Dashboard, Tasks, Task Detail (with run form), Jobs, Job Detail (with live logs)
+- Auto-detects auth configuration; login page only shown when auth is enabled
+- UI embedded in server binary via rust-embed, served with SPA fallback
+- Playwright E2E browser tests
+
 Upcoming phases:
-- **Phase 2b**: React UI + OIDC provider endpoints
 - **Phase 3**: Multi-workspace, Docker/Kubernetes runners, Git workspace sources
 - **Phase 4**: Local execution mode, full k8s pod specs, RBAC, secret resolution
 

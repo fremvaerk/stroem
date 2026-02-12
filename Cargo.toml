@@ -46,6 +46,10 @@ argon2 = "0.5"
 jsonwebtoken = "9"
 sha2 = "0.10"
 
+# Static file embedding
+rust-embed = "8"
+mime_guess = "2"
+
 # Testing
 tempfile = "3"
 

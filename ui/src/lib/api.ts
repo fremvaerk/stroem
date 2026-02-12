@@ -1,0 +1,211 @@
+import type {
+  TaskListItem,
+  TaskDetail,
+  JobListItem,
+  JobDetail,
+  TokenResponse,
+  AuthUser,
+  ExecuteTaskResponse,
+} from "./types";
+
+let accessToken: string | null = null;
+let refreshPromise: Promise<boolean> | null = null;
+
+export function setAccessToken(token: string | null) {
+  accessToken = token;
+}
+
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+
+function getRefreshToken(): string | null {
+  return localStorage.getItem("stroem_refresh_token");
+}
+
+export function hasRefreshToken(): boolean {
+  return !!getRefreshToken();
+}
+
+function setRefreshToken(token: string | null) {
+  if (token) {
+    localStorage.setItem("stroem_refresh_token", token);
+  } else {
+    localStorage.removeItem("stroem_refresh_token");
+  }
+}
+
+async function refreshAccessToken(): Promise<boolean> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return false;
+
+  try {
+    const res = await fetch("/api/auth/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!res.ok) {
+      setRefreshToken(null);
+      setAccessToken(null);
+      return false;
+    }
+    const data: TokenResponse = await res.json();
+    setAccessToken(data.access_token);
+    setRefreshToken(data.refresh_token);
+    return true;
+  } catch {
+    setRefreshToken(null);
+    setAccessToken(null);
+    return false;
+  }
+}
+
+async function apiFetch<T>(
+  url: string,
+  options: RequestInit = {},
+): Promise<T> {
+  // Preemptively refresh if we have no access token but have a refresh token
+  if (!accessToken && getRefreshToken()) {
+    if (!refreshPromise) {
+      refreshPromise = refreshAccessToken().finally(() => {
+        refreshPromise = null;
+      });
+    }
+    await refreshPromise;
+  }
+
+  const headers: Record<string, string> = {
+    ...(options.headers as Record<string, string>),
+  };
+
+  if (accessToken) {
+    headers["Authorization"] = `Bearer ${accessToken}`;
+  }
+
+  if (options.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  let res = await fetch(url, { ...options, headers });
+
+  if (res.status === 401 && getRefreshToken()) {
+    if (!refreshPromise) {
+      refreshPromise = refreshAccessToken().finally(() => {
+        refreshPromise = null;
+      });
+    }
+    const refreshed = await refreshPromise;
+    if (refreshed) {
+      headers["Authorization"] = `Bearer ${accessToken}`;
+      res = await fetch(url, { ...options, headers });
+    }
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.error || res.statusText);
+  }
+
+  return res.json();
+}
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+// Auth
+export async function login(
+  email: string,
+  password: string,
+): Promise<TokenResponse> {
+  const res = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.error || "Login failed");
+  }
+  const data: TokenResponse = await res.json();
+  setAccessToken(data.access_token);
+  setRefreshToken(data.refresh_token);
+  return data;
+}
+
+export async function logout(): Promise<void> {
+  const refreshToken = getRefreshToken();
+  if (refreshToken) {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }).catch(() => {});
+  }
+  setAccessToken(null);
+  setRefreshToken(null);
+}
+
+export async function getMe(): Promise<AuthUser> {
+  return apiFetch<AuthUser>("/api/auth/me");
+}
+
+export async function checkAuthRequired(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok) return false;
+    const data = await res.json();
+    return !!data.auth_required;
+  } catch {
+    return false;
+  }
+}
+
+// Tasks
+export async function listTasks(): Promise<TaskListItem[]> {
+  return apiFetch<TaskListItem[]>("/api/tasks");
+}
+
+export async function getTask(name: string): Promise<TaskDetail> {
+  return apiFetch<TaskDetail>(`/api/tasks/${encodeURIComponent(name)}`);
+}
+
+export async function executeTask(
+  name: string,
+  input: Record<string, unknown>,
+): Promise<ExecuteTaskResponse> {
+  return apiFetch<ExecuteTaskResponse>(
+    `/api/tasks/${encodeURIComponent(name)}/execute`,
+    {
+      method: "POST",
+      body: JSON.stringify({ input }),
+    },
+  );
+}
+
+// Jobs
+export async function listJobs(
+  limit = 50,
+  offset = 0,
+): Promise<JobListItem[]> {
+  return apiFetch<JobListItem[]>(
+    `/api/jobs?limit=${limit}&offset=${offset}`,
+  );
+}
+
+export async function getJob(id: string): Promise<JobDetail> {
+  return apiFetch<JobDetail>(`/api/jobs/${id}`);
+}
+
+export async function getJobLogs(
+  id: string,
+): Promise<{ logs: string }> {
+  return apiFetch<{ logs: string }>(`/api/jobs/${id}/logs`);
+}

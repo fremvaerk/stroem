@@ -2,16 +2,17 @@
 
 ## Project Overview
 
-Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in React (Phase 2b).
+Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in React.
 Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
 Phase 2a complete: JWT authentication backend + WebSocket log streaming.
+Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
 
 ## Architecture
 
 - **stroem-common**: Shared types, models, DAG walker, Tera templating, validation
 - **stroem-db**: PostgreSQL layer via sqlx (runtime queries), migrations, repositories
 - **stroem-runner**: Execution backends (ShellRunner for MVP)
-- **stroem-server**: Axum API server, orchestrator, workspace loader, log storage
+- **stroem-server**: Axum API server, orchestrator, workspace loader, log storage, embedded UI via rust-embed
 - **stroem-worker**: Worker process: polls server, executes steps, streams logs
 - **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs)
 
@@ -23,6 +24,8 @@ Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 - **YAML parsing**: `serde_yml`
 - **Database**: sqlx with runtime queries (`sqlx::query()` / `sqlx::query_as()`), NOT compile-time macros.
 - **Tests**: Unit tests in-module (`#[cfg(test)] mod tests`). Integration tests in `tests/` dirs using `testcontainers` for Postgres.
+- **Frontend**: React 19 + TypeScript + Vite + Tailwind v4 + shadcn/ui in `ui/` directory. Package manager: `bun`.
+- **Static serving**: UI built to `crates/stroem-server/static/`, embedded via `rust-embed` with SPA fallback.
 
 ## Development Rules
 
@@ -69,6 +72,26 @@ cargo clippy --workspace -- -D warnings
 ./tests/e2e.sh
 ```
 
+### Frontend (ui/)
+
+```bash
+# Install dependencies
+cd ui && bun install
+
+# Dev server (proxy to backend on :8080)
+bun run dev
+
+# Build (outputs to crates/stroem-server/static/)
+bun run build
+
+# Playwright E2E tests (needs backend running)
+bunx playwright test
+
+# Playwright E2E in Docker
+docker compose -f docker-compose.yml -f docker-compose.test.yml \
+  up --build --abort-on-container-exit playwright
+```
+
 ## Key Patterns
 
 ### Workflow YAML structure
@@ -96,3 +119,11 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `GET /api/jobs/{id}/logs/stream` -- WebSocket upgrade endpoint
 - Sends existing log content (backfill) on connect, then streams live chunks
 - Per-job broadcast channels via `tokio::sync::broadcast` in `LogBroadcast`
+
+### React UI
+- Pages: Login, Dashboard, Tasks, Task Detail (with run dialog), Jobs, Job Detail (with live logs)
+- Auth-aware: detects if server has auth enabled, shows login page accordingly
+- SPA routing with react-router, embedded in Rust binary via rust-embed with SPA fallback
+- `ui/src/lib/api.ts` handles token management (access token in memory, refresh in localStorage, auto-refresh on 401)
+- `ui/src/hooks/use-job-logs.ts` WebSocket hook for live log streaming
+- Playwright E2E tests in `ui/e2e/`, can run locally or in Docker
