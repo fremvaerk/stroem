@@ -83,8 +83,7 @@ async fn main() -> Result<()> {
 async fn cmd_trigger(client: &Client, server: &str, task: &str, input: Option<&str>) -> Result<()> {
     let body: Value = match input {
         Some(json_str) => {
-            let input_val: Value =
-                serde_json::from_str(json_str).context("Invalid JSON input")?;
+            let input_val: Value = serde_json::from_str(json_str).context("Invalid JSON input")?;
             serde_json::json!({ "input": input_val })
         }
         None => serde_json::json!({ "input": {} }),
@@ -176,10 +175,7 @@ async fn cmd_status(client: &Client, server: &str, job_id: &str) -> Result<()> {
                     .get("step_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("-");
-                let st = step
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
+                let st = step.get("status").and_then(|v| v.as_str()).unwrap_or("-");
                 let action = step
                     .get("action_name")
                     .and_then(|v| v.as_str())
@@ -216,10 +212,7 @@ async fn cmd_logs(client: &Client, server: &str, job_id: &str) -> Result<()> {
         anyhow::bail!("Server returned {}: {}", status, err);
     }
 
-    let logs = body
-        .get("logs")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let logs = body.get("logs").and_then(|v| v.as_str()).unwrap_or("");
 
     print!("{}", logs);
     Ok(())
@@ -290,10 +283,7 @@ async fn cmd_jobs(client: &Client, server: &str, limit: i64) -> Result<()> {
     println!("{}", "-".repeat(85));
     for job in jobs {
         let id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("-");
-        let task = job
-            .get("task_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
+        let task = job.get("task_name").and_then(|v| v.as_str()).unwrap_or("-");
         let st = job.get("status").and_then(|v| v.as_str()).unwrap_or("-");
         let created = job
             .get("created_at")

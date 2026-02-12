@@ -501,6 +501,12 @@ pub async fn append_log(
                 tracing::warn!("Failed to update log path: {}", e);
             }
 
+            // Broadcast to WebSocket subscribers
+            state
+                .log_broadcast
+                .broadcast(job_id, req.chunk.clone())
+                .await;
+
             Json(json!({"status": "ok"})).into_response()
         }
         Err(e) => {

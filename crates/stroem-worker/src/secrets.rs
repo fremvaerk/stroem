@@ -125,8 +125,8 @@ mod tests {
         let result = resolve_secrets(&mut env).await;
         // We can't guarantee vals is installed, so just verify the function
         // either succeeds (vals installed) or returns an error (vals not installed)
-        if result.is_err() {
-            let err_msg = result.unwrap_err().to_string();
+        if let Err(e) = result {
+            let err_msg = e.to_string();
             assert!(
                 err_msg.contains("vals") || err_msg.contains("No such file"),
                 "Error should mention vals: {}",

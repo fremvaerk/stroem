@@ -1,4 +1,5 @@
 use crate::config::ServerConfig;
+use crate::log_broadcast::LogBroadcast;
 use sqlx::PgPool;
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
@@ -10,6 +11,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub workspace: Arc<RwLock<WorkspaceConfig>>,
     pub config: Arc<ServerConfig>,
+    pub log_broadcast: Arc<LogBroadcast>,
 }
 
 impl AppState {
@@ -19,6 +21,7 @@ impl AppState {
             pool,
             workspace: Arc::new(RwLock::new(workspace)),
             config: Arc::new(config),
+            log_broadcast: Arc::new(LogBroadcast::new()),
         }
     }
 }

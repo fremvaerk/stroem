@@ -2,8 +2,9 @@
 
 ## Project Overview
 
-Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in React (Phase 2).
-This is Phase 1 (MVP): end-to-end workflow execution via API.
+Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in React (Phase 2b).
+Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
+Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 
 ## Architecture
 
@@ -84,6 +85,14 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Migrations in `crates/stroem-db/migrations/`
 - Job claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`
 
-### API auth (MVP)
-- No user auth in MVP
-- Worker auth: bearer token from config (`worker_token`)
+### Authentication
+- **User auth**: Optional JWT-based auth (access tokens 15min, refresh tokens 30 day with rotation)
+- Auth is enabled by adding an `auth` section to `server-config.yaml`
+- Handlers use `AuthUser` extractor for protected endpoints; handlers without it remain open
+- Password hashing: argon2id via the `argon2` crate
+- **Worker auth**: Bearer token from config (`worker_token`)
+
+### WebSocket Log Streaming
+- `GET /api/jobs/{id}/logs/stream` -- WebSocket upgrade endpoint
+- Sends existing log content (backfill) on connect, then streams live chunks
+- Per-job broadcast channels via `tokio::sync::broadcast` in `LogBroadcast`

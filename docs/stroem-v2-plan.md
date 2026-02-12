@@ -789,8 +789,8 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 
 1. **React project setup**: Vite + React + shadcn/ui + TailwindCSS
 2. **Pages**: Login, Dashboard, Tasks list, Task detail, Jobs list, Job detail
-3. **WebSocket log streaming**: Server endpoint + React hook
-4. **Auth**: JWT + refresh tokens, internal provider (email/password)
+3. ~~**WebSocket log streaming**: Server endpoint + React hook~~ **DONE** (Phase 2a) -- Server-side WebSocket endpoint with backfill + live streaming via `tokio::sync::broadcast`
+4. ~~**Auth**: JWT + refresh tokens, internal provider (email/password)~~ **DONE** (Phase 2a) -- JWT access tokens (15min), refresh token rotation (30 day, SHA256 hashed), argon2id password hashing, optional auth config, initial user seeding
 5. **UI embedding**: Build UI -> copy to `stroem-server/static/` -> `rust_embed`
 6. **Auto-generated run form**: Parse task input schema -> render form in UI
 

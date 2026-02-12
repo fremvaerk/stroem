@@ -41,6 +41,11 @@ tera = "1"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
+# Auth
+argon2 = "0.5"
+jsonwebtoken = "9"
+sha2 = "0.10"
+
 # Testing
 tempfile = "3"
 

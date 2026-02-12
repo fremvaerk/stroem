@@ -1,8 +1,12 @@
 use anyhow::Result;
+use chrono::{Duration, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
+use stroem_db::{
+    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, UserRepo,
+    WorkerRepo,
+};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -721,6 +725,154 @@ async fn test_claim_with_capability_filter() -> Result<()> {
     let nothing =
         JobStepRepo::claim_ready_step(&pool, &["shell".to_string()], shell_worker).await?;
     assert!(nothing.is_none());
+
+    Ok(())
+}
+
+// ─── User repo tests ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_user_and_get_by_email() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        user_id,
+        "alice@example.com",
+        Some("$argon2id$hashed"),
+        Some("Alice"),
+    )
+    .await?;
+
+    let user = UserRepo::get_by_email(&pool, "alice@example.com")
+        .await?
+        .expect("User should exist");
+    assert_eq!(user.user_id, user_id);
+    assert_eq!(user.email, "alice@example.com");
+    assert_eq!(user.name.as_deref(), Some("Alice"));
+    assert_eq!(user.password_hash.as_deref(), Some("$argon2id$hashed"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_user_by_id() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "bob@example.com", None, None).await?;
+
+    let user = UserRepo::get_by_id(&pool, user_id)
+        .await?
+        .expect("User should exist");
+    assert_eq!(user.email, "bob@example.com");
+    assert!(user.password_hash.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_nonexistent_user() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let result = UserRepo::get_by_email(&pool, "nobody@example.com").await?;
+    assert!(result.is_none());
+
+    let result = UserRepo::get_by_id(&pool, Uuid::new_v4()).await?;
+    assert!(result.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_duplicate_email_fails() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    UserRepo::create(&pool, Uuid::new_v4(), "dup@example.com", None, None).await?;
+    let result = UserRepo::create(&pool, Uuid::new_v4(), "dup@example.com", None, None).await;
+    assert!(result.is_err());
+
+    Ok(())
+}
+
+// ─── Refresh token repo tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_and_get_refresh_token() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "token@example.com", None, None).await?;
+
+    let expires_at = Utc::now() + Duration::days(30);
+    RefreshTokenRepo::create(&pool, "hash123", user_id, expires_at).await?;
+
+    let row = RefreshTokenRepo::get_by_hash(&pool, "hash123")
+        .await?
+        .expect("Token should exist");
+    assert_eq!(row.user_id, user_id);
+    assert_eq!(row.token_hash, "hash123");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_delete_refresh_token() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "del@example.com", None, None).await?;
+
+    let expires_at = Utc::now() + Duration::days(30);
+    RefreshTokenRepo::create(&pool, "delhash", user_id, expires_at).await?;
+
+    RefreshTokenRepo::delete(&pool, "delhash").await?;
+    let result = RefreshTokenRepo::get_by_hash(&pool, "delhash").await?;
+    assert!(result.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_delete_all_tokens_for_user() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "alltoken@example.com", None, None).await?;
+
+    let expires_at = Utc::now() + Duration::days(30);
+    RefreshTokenRepo::create(&pool, "tok1", user_id, expires_at).await?;
+    RefreshTokenRepo::create(&pool, "tok2", user_id, expires_at).await?;
+
+    RefreshTokenRepo::delete_all_for_user(&pool, user_id).await?;
+
+    assert!(RefreshTokenRepo::get_by_hash(&pool, "tok1")
+        .await?
+        .is_none());
+    assert!(RefreshTokenRepo::get_by_hash(&pool, "tok2")
+        .await?
+        .is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_expired_token_still_retrievable() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "expired@example.com", None, None).await?;
+
+    // Create a token that's already expired
+    let expires_at = Utc::now() - Duration::hours(1);
+    RefreshTokenRepo::create(&pool, "exphash", user_id, expires_at).await?;
+
+    // Token exists in DB (app logic checks expiry)
+    let row = RefreshTokenRepo::get_by_hash(&pool, "exphash")
+        .await?
+        .expect("Expired token should still be retrievable");
+    assert!(row.expires_at < Utc::now());
 
     Ok(())
 }

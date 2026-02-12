@@ -177,9 +177,15 @@ impl ServerClient {
 
         let step = ClaimedStep {
             job_id: Uuid::parse_str(&job_id_str).context("Invalid job_id in claim response")?,
-            step_name: resp.step_name.context("Missing step_name in claim response")?,
-            action_name: resp.action_name.context("Missing action_name in claim response")?,
-            action_type: resp.action_type.context("Missing action_type in claim response")?,
+            step_name: resp
+                .step_name
+                .context("Missing step_name in claim response")?,
+            action_name: resp
+                .action_name
+                .context("Missing action_name in claim response")?,
+            action_type: resp
+                .action_type
+                .context("Missing action_type in claim response")?,
             action_image: resp.action_image,
             action_spec: resp.action_spec,
             input: resp.input,

@@ -9,8 +9,13 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::{
     ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
-use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
-use stroem_server::config::{DbConfig, LogStorageConfig, ServerConfig, WorkspaceSourceConfig};
+use stroem_db::{
+    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserRepo, WorkerRepo,
+};
+use stroem_server::auth::hash_password;
+use stroem_server::config::{
+    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, ServerConfig, WorkspaceSourceConfig,
+};
 use stroem_server::orchestrator;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
@@ -455,6 +460,7 @@ async fn setup() -> Result<(
             path: temp_dir.path().to_string_lossy().to_string(),
         },
         worker_token: "test-token-secret".to_string(),
+        auth: None,
     };
 
     let workspace = test_workspace();
@@ -2365,6 +2371,508 @@ async fn test_secret_not_leaked_in_job_output() -> Result<()> {
     // The raw vault ref should be in the stored action_spec (that's fine - it's just a ref)
     // But actual secret values should never appear
     assert!(!body_str.contains("actual-secret-password"));
+
+    Ok(())
+}
+
+// ─── Auth helpers ─────────────────────────────────────────────────────
+
+const AUTH_JWT_SECRET: &str = "test-jwt-secret-key";
+const AUTH_REFRESH_SECRET: &str = "test-refresh-secret-key";
+const AUTH_USER_EMAIL: &str = "admin@test.com";
+const AUTH_USER_PASSWORD: &str = "test-password-123";
+
+async fn setup_with_auth() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspace: WorkspaceSourceConfig {
+            source_type: "folder".to_string(),
+            path: temp_dir.path().to_string_lossy().to_string(),
+        },
+        worker_token: "test-token-secret".to_string(),
+        auth: Some(AuthConfig {
+            jwt_secret: AUTH_JWT_SECRET.to_string(),
+            refresh_secret: AUTH_REFRESH_SECRET.to_string(),
+            providers: HashMap::new(),
+            initial_user: Some(InitialUserConfig {
+                email: AUTH_USER_EMAIL.to_string(),
+                password: AUTH_USER_PASSWORD.to_string(),
+            }),
+        }),
+    };
+
+    // Seed initial user
+    let password_hash = hash_password(AUTH_USER_PASSWORD)?;
+    UserRepo::create(
+        &pool,
+        Uuid::new_v4(),
+        AUTH_USER_EMAIL,
+        Some(&password_hash),
+        None,
+    )
+    .await?;
+
+    let workspace = test_workspace();
+    let state = AppState::new(pool.clone(), workspace, config);
+    let router = build_router(state);
+
+    Ok((router, pool, temp_dir, container))
+}
+
+// ─── Test 40: Login success ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_login_success() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert!(body["access_token"].is_string());
+    assert!(body["refresh_token"].is_string());
+
+    Ok(())
+}
+
+// ─── Test 41: Login wrong password ────────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_login_wrong_password() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": AUTH_USER_EMAIL, "password": "wrong-password"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test 42: Login nonexistent email ─────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_login_nonexistent_email() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": "nobody@test.com", "password": "any-password"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test 43: Refresh success ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_refresh_success() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    // Login first
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap().to_string();
+
+    // Refresh
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/refresh",
+            json!({"refresh_token": refresh_token}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert!(body["access_token"].is_string());
+    let new_refresh = body["refresh_token"].as_str().unwrap().to_string();
+    assert_ne!(new_refresh, refresh_token); // new token issued
+
+    // Old refresh token should be invalid now (rotation)
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/refresh",
+            json!({"refresh_token": refresh_token}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test 44: Refresh invalid token ───────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_refresh_invalid_token() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/refresh",
+            json!({"refresh_token": "bogus-token"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test 45: Logout revokes refresh token ────────────────────────────
+
+#[tokio::test]
+async fn test_auth_logout() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    // Login
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let refresh_token = body["refresh_token"].as_str().unwrap().to_string();
+
+    // Logout
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/logout",
+            json!({"refresh_token": refresh_token}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Refresh should now fail
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/refresh",
+            json!({"refresh_token": refresh_token}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test 46: GET /api/auth/me with valid token ───────────────────────
+
+#[tokio::test]
+async fn test_auth_me_with_valid_token() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    // Login
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let access_token = body["access_token"].as_str().unwrap().to_string();
+
+    // GET /api/auth/me with Bearer token
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/auth/me")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(body["email"], AUTH_USER_EMAIL);
+
+    Ok(())
+}
+
+// ─── Test 47: GET /api/auth/me without token ──────────────────────────
+
+#[tokio::test]
+async fn test_auth_me_without_token() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router.oneshot(api_get("/api/auth/me")).await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test 48: Existing API routes still work without auth ─────────────
+
+#[tokio::test]
+async fn test_existing_routes_work_without_auth() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    // /api/tasks should work without auth (no AuthUser extractor)
+    let response = router.oneshot(api_get("/api/tasks")).await?;
+    assert_eq!(response.status(), 200);
+
+    Ok(())
+}
+
+// ─── Test 49: Login when auth not configured ──────────────────────────
+
+#[tokio::test]
+async fn test_login_when_auth_not_configured() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": "any@test.com", "password": "any"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+// ─── WebSocket integration tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_ws_backfill_existing_logs() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Append logs via worker API
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            json!({"chunk": "existing line 1\n"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            json!({"chunk": "existing line 2\n"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Start server on a real port for WS
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect via WebSocket
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("Failed to connect to WebSocket");
+
+    use futures_util::StreamExt;
+    // Should receive backfill
+    let msg = ws_stream.next().await.unwrap()?;
+    let text = msg.into_text()?;
+    assert!(text.contains("existing line 1"));
+    assert!(text.contains("existing line 2"));
+
+    drop(ws_stream);
+    server.abort();
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_live_log_streaming() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let router_for_push = router.clone();
+
+    // Start server on a real port for WS
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect via WebSocket
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("Failed to connect to WebSocket");
+
+    // Push a log chunk via worker API (through a separate router instance)
+    let response = router_for_push
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            json!({"chunk": "live line\n"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    use futures_util::StreamExt;
+    // Should receive the live message
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await?
+        .unwrap()?;
+    let text = msg.into_text()?;
+    assert_eq!(text, "live line\n");
+
+    drop(ws_stream);
+    server.abort();
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_backfill_plus_live() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Append initial log
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            json!({"chunk": "backfill\n"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let router_for_push = router.clone();
+
+    // Start server
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect via WebSocket
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("Failed to connect to WebSocket");
+
+    use futures_util::StreamExt;
+
+    // Should receive backfill first
+    let msg = ws_stream.next().await.unwrap()?;
+    assert_eq!(msg.into_text()?, "backfill\n");
+
+    // Now push a live chunk
+    let response = router_for_push
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            json!({"chunk": "live\n"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Should receive the live message
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await?
+        .unwrap()?;
+    assert_eq!(msg.into_text()?, "live\n");
+
+    drop(ws_stream);
+    server.abort();
 
     Ok(())
 }

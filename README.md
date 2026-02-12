@@ -71,6 +71,16 @@ workspace:
   source_type: folder
   path: ./workspace
 worker_token: "dev-worker-token-change-in-production"
+# Optional: enable authentication
+# auth:
+#   jwt_secret: "your-jwt-secret"
+#   refresh_secret: "your-refresh-secret"
+#   providers:
+#     internal:
+#       provider_type: internal
+#   initial_user:
+#     email: admin@stroem.local
+#     password: admin
 ```
 
 **Worker** (`worker-config.yaml`):
@@ -212,6 +222,11 @@ See [docs/api-reference.md](docs/api-reference.md) for the full API documentatio
 | `GET` | `/api/jobs` | List jobs |
 | `GET` | `/api/jobs/{id}` | Get job detail with steps |
 | `GET` | `/api/jobs/{id}/logs` | Get job logs |
+| `WS` | `/api/jobs/{id}/logs/stream` | WebSocket live log stream |
+| `POST` | `/api/auth/login` | Email/password login |
+| `POST` | `/api/auth/refresh` | Refresh JWT token |
+| `POST` | `/api/auth/logout` | Revoke refresh token |
+| `GET` | `/api/auth/me` | Get current user info |
 
 ### Worker API
 
@@ -250,8 +265,14 @@ cargo fmt --check --all
 
 **Phase 1 (MVP)** -- Complete. End-to-end workflow execution via API and CLI.
 
+**Phase 2a (Auth + WebSocket)** -- Complete. JWT authentication backend + WebSocket log streaming.
+- JWT access tokens (15min) + refresh token rotation (30 day)
+- Internal auth provider (email/password with argon2id hashing)
+- Auth is optional -- existing routes work without auth configured
+- WebSocket endpoint for real-time log streaming with backfill
+
 Upcoming phases:
-- **Phase 2**: React UI + authentication (JWT, OIDC)
+- **Phase 2b**: React UI + OIDC provider endpoints
 - **Phase 3**: Multi-workspace, Docker/Kubernetes runners, Git workspace sources
 - **Phase 4**: Local execution mode, full k8s pod specs, RBAC, secret resolution
 

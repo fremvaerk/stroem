@@ -82,20 +82,17 @@ impl StepExecutor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let script = action_spec
-            .get("script")
-            .and_then(|v| v.as_str())
-            .map(|s| {
-                let p = std::path::Path::new(s);
-                if p.is_relative() {
-                    std::path::Path::new(&self.workspace_dir)
-                        .join(s)
-                        .to_string_lossy()
-                        .to_string()
-                } else {
-                    s.to_string()
-                }
-            });
+        let script = action_spec.get("script").and_then(|v| v.as_str()).map(|s| {
+            let p = std::path::Path::new(s);
+            if p.is_relative() {
+                std::path::Path::new(&self.workspace_dir)
+                    .join(s)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                s.to_string()
+            }
+        });
 
         if cmd.is_none() && script.is_none() {
             anyhow::bail!("Action spec must contain either 'cmd' or 'script'");
@@ -197,7 +194,10 @@ mod tests {
         let config = executor.build_run_config(&step).unwrap();
         assert_eq!(config.cmd, None);
         // Relative paths are resolved against workspace_dir
-        assert_eq!(config.script, Some("/workspace/actions/deploy.sh".to_string()));
+        assert_eq!(
+            config.script,
+            Some("/workspace/actions/deploy.sh".to_string())
+        );
     }
 
     #[test]

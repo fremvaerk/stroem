@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use stroem_db::{create_pool, run_migrations};
+use stroem_db::{create_pool, run_migrations, UserRepo};
+use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
 use stroem_server::state::AppState;
 use stroem_server::workspace::load_folder_workspace;
@@ -41,6 +42,37 @@ async fn main() -> Result<()> {
     run_migrations(&pool)
         .await
         .context("Failed to run migrations")?;
+
+    // Seed initial user if configured
+    if let Some(auth_config) = &config.auth {
+        if let Some(initial_user) = &auth_config.initial_user {
+            match UserRepo::get_by_email(&pool, &initial_user.email).await {
+                Ok(Some(_)) => {
+                    tracing::info!(
+                        "Initial user '{}' already exists, skipping seed",
+                        initial_user.email
+                    );
+                }
+                Ok(None) => {
+                    let password_hash = hash_password(&initial_user.password)
+                        .context("Failed to hash initial user password")?;
+                    UserRepo::create(
+                        &pool,
+                        uuid::Uuid::new_v4(),
+                        &initial_user.email,
+                        Some(&password_hash),
+                        None,
+                    )
+                    .await
+                    .context("Failed to create initial user")?;
+                    tracing::info!("Created initial user: {}", initial_user.email);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to check for initial user: {}", e);
+                }
+            }
+        }
+    }
 
     // Load workspace
     tracing::info!("Loading workspace from: {}", config.workspace.path);

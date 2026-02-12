@@ -4,7 +4,7 @@ Base URL: `http://localhost:8080` (configurable via `server-config.yaml`)
 
 ## Public API
 
-No authentication required in Phase 1 (MVP).
+Task, job, and log endpoints do not require authentication. Auth endpoints are available when the server is configured with an `auth` section (see Configuration below).
 
 ---
 
@@ -230,6 +230,167 @@ Returns the combined log output from all steps of a job.
 ```bash
 curl -s http://localhost:8080/api/jobs/JOB_ID/logs | jq -r .logs
 ```
+
+---
+
+### Stream Job Logs (WebSocket)
+
+```
+GET /api/jobs/{id}/logs/stream
+```
+
+Opens a WebSocket connection for real-time log streaming. On connect, the server sends any existing log content (backfill), then streams new log chunks as they arrive from workers.
+
+**Path parameters:**
+- `id` -- Job ID (UUID)
+
+**Protocol:** WebSocket (upgrade from HTTP)
+
+**Behavior:**
+1. Server sends existing log content as a text message (backfill)
+2. Server forwards new log chunks as text messages in real-time
+3. Connection stays open until the client disconnects or the server shuts down
+
+**Example (websocat):**
+
+```bash
+websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream
+```
+
+**Error responses:**
+- `400` -- Invalid job ID format
+
+---
+
+## Auth API
+
+Auth endpoints are only available when the server is configured with an `auth` section. Without auth configuration, these endpoints return `404`.
+
+---
+
+### Login
+
+```
+POST /api/auth/login
+```
+
+Authenticates with email and password. Returns a JWT access token and a refresh token.
+
+**Request body:**
+
+```json
+{
+  "email": "admin@stroem.local",
+  "password": "admin"
+}
+```
+
+**Response:**
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+**Error responses:**
+- `401` -- Invalid email or password
+- `404` -- Auth not configured on this server
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@stroem.local", "password": "admin"}'
+```
+
+---
+
+### Refresh Token
+
+```
+POST /api/auth/refresh
+```
+
+Exchanges a refresh token for a new access token and refresh token pair. The old refresh token is revoked (rotation).
+
+**Request body:**
+
+```json
+{
+  "refresh_token": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+**Response:**
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "f1e2d3c4-b5a6-0987-dcba-0987654321fe"
+}
+```
+
+**Error responses:**
+- `401` -- Invalid or expired refresh token
+
+---
+
+### Logout
+
+```
+POST /api/auth/logout
+```
+
+Revokes a refresh token.
+
+**Request body:**
+
+```json
+{
+  "refresh_token": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+**Response:**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+### Get Current User
+
+```
+GET /api/auth/me
+```
+
+Returns the authenticated user's information. Requires a valid JWT access token.
+
+**Headers:**
+
+```
+Authorization: Bearer <access_token>
+```
+
+**Response:**
+
+```json
+{
+  "user_id": "d1e2f3a4-b5c6-7890-abcd-ef1234567890",
+  "name": null,
+  "email": "admin@stroem.local",
+  "created_at": "2025-02-11T10:00:00Z"
+}
+```
+
+**Error responses:**
+- `401` -- Missing or invalid access token
 
 ---
 
@@ -496,6 +657,33 @@ All endpoints return errors in a consistent format:
 
 Common HTTP status codes:
 - `400` -- Bad request (invalid input, missing fields)
-- `401` -- Unauthorized (missing or invalid worker token)
+- `401` -- Unauthorized (missing or invalid token)
 - `404` -- Not found (unknown task, job, or step)
 - `500` -- Internal server error
+
+---
+
+## Configuration
+
+### Auth (optional)
+
+Add an `auth` section to `server-config.yaml` to enable authentication:
+
+```yaml
+auth:
+  jwt_secret: "your-jwt-secret"
+  refresh_secret: "your-refresh-secret"
+  providers:
+    internal:
+      provider_type: internal
+  initial_user:
+    email: admin@stroem.local
+    password: admin
+```
+
+- **jwt_secret**: Secret used to sign JWT access tokens (15-minute TTL)
+- **refresh_secret**: Secret used for refresh token operations (30-day TTL, rotation on use)
+- **providers**: Authentication providers. Currently only `internal` (email/password) is supported. OIDC is planned.
+- **initial_user** (optional): Seeds an initial user on server startup if one doesn't already exist
+
+Without the `auth` section, existing API routes continue to work without authentication and auth endpoints return `404`.
