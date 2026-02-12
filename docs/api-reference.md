@@ -8,13 +8,43 @@ Task, job, and log endpoints do not require authentication. Auth endpoints are a
 
 ---
 
+### List Workspaces
+
+```
+GET /api/workspaces
+```
+
+Returns all configured workspaces with task and action counts.
+
+**Response:**
+
+```json
+[
+  {
+    "name": "default",
+    "task_count": 3,
+    "action_count": 5
+  },
+  {
+    "name": "data-team",
+    "task_count": 2,
+    "action_count": 4
+  }
+]
+```
+
+---
+
 ### List Tasks
 
 ```
-GET /api/tasks
+GET /api/workspaces/{ws}/tasks
 ```
 
-Returns all tasks loaded from workspace workflow files.
+Returns all tasks from the specified workspace.
+
+**Path parameters:**
+- `ws` -- Workspace name (e.g., `default`)
 
 **Response:**
 
@@ -22,10 +52,12 @@ Returns all tasks loaded from workspace workflow files.
 [
   {
     "name": "hello-world",
+    "workspace": "default",
     "mode": "distributed"
   },
   {
     "name": "deploy-pipeline",
+    "workspace": "default",
     "mode": "distributed"
   }
 ]
@@ -36,10 +68,11 @@ Returns all tasks loaded from workspace workflow files.
 ### Get Task Detail
 
 ```
-GET /api/tasks/{name}
+GET /api/workspaces/{ws}/tasks/{name}
 ```
 
 **Path parameters:**
+- `ws` -- Workspace name (e.g., `default`)
 - `name` -- Task name (e.g., `hello-world`)
 
 **Response:**
@@ -70,12 +103,13 @@ GET /api/tasks/{name}
 ### Execute Task
 
 ```
-POST /api/tasks/{name}/execute
+POST /api/workspaces/{ws}/tasks/{name}/execute
 ```
 
-Creates a new job for the given task.
+Creates a new job for the given task in the specified workspace.
 
 **Path parameters:**
+- `ws` -- Workspace name
 - `name` -- Task name
 
 **Request body:**
@@ -101,7 +135,7 @@ The `input` object is matched against the task's input definition. Missing field
 **Example:**
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/hello-world/execute \
+curl -X POST http://localhost:8080/api/workspaces/default/tasks/hello-world/execute \
   -H "Content-Type: application/json" \
   -d '{"input": {"name": "World"}}'
 ```
@@ -529,6 +563,7 @@ Claims the next ready step that matches the worker's capabilities. Uses `SELECT 
 ```json
 {
   "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "workspace": "default",
   "step_name": "say-hello",
   "action_name": "greet",
   "action_type": "shell",
@@ -543,13 +578,14 @@ Claims the next ready step that matches the worker's capabilities. Uses `SELECT 
 }
 ```
 
-The `action_spec` contains the fully resolved action definition with templates already rendered against the job context.
+The `action_spec` contains the fully resolved action definition with templates already rendered against the job context. The `workspace` field tells the worker which workspace tarball to download.
 
 **Response (no work available):**
 
 ```json
 {
   "job_id": null,
+  "workspace": null,
   "step_name": null,
   "action_name": null,
   "action_type": null,
@@ -678,6 +714,48 @@ The server converts each line into a JSONL entry with a `step` field added (from
 
 ---
 
+### Download Workspace Tarball
+
+```
+GET /worker/workspace/{ws}.tar.gz
+```
+
+Downloads a workspace as a gzipped tar archive. Workers use this to get workspace files before executing steps.
+
+**Path parameters:**
+- `ws` -- Workspace name (e.g., `default`)
+
+**Headers:**
+- `If-None-Match` (optional) -- Revision ETag for conditional fetch. If the workspace hasn't changed, the server returns `304 Not Modified`.
+
+**Response headers:**
+- `Content-Type: application/gzip`
+- `X-Revision: {revision}` -- The current workspace revision (content hash for folder sources, commit OID for git sources)
+- `ETag: "{revision}"`
+
+**Response:** Binary gzipped tar archive of the workspace directory.
+
+**Status codes:**
+- `200` -- Tarball returned
+- `304` -- Not Modified (workspace unchanged since the revision in `If-None-Match`)
+- `404` -- Workspace not found
+
+**Example:**
+
+```bash
+# Download workspace tarball
+curl -o workspace.tar.gz \
+  -H "Authorization: Bearer <worker_token>" \
+  http://localhost:8080/worker/workspace/default.tar.gz
+
+# Conditional fetch (only download if changed)
+curl -H "Authorization: Bearer <worker_token>" \
+  -H 'If-None-Match: "abc123"' \
+  http://localhost:8080/worker/workspace/default.tar.gz
+```
+
+---
+
 ### Complete Job (Local Mode)
 
 ```
@@ -749,3 +827,28 @@ auth:
 - **initial_user** (optional): Seeds an initial user on server startup if one doesn't already exist
 
 Without the `auth` section, existing API routes continue to work without authentication and auth endpoints return `404`.
+
+### Workspaces
+
+Workspaces define where workflow files are loaded from. The `workspaces` map supports multiple named workspaces with different source types:
+
+```yaml
+workspaces:
+  default:
+    type: folder
+    path: ./workspace
+  data-team:
+    type: git
+    url: https://github.com/org/data-workflows.git
+    ref: main
+    poll_interval_secs: 60
+    auth:
+      type: token
+      token: "ghp_xxx"
+```
+
+**Folder source**: Loads workflow files from a local directory path. Computes a content hash as the revision for tarball caching. Supports file watching for hot-reload.
+
+**Git source**: Clones a git repository and loads workflow files from it. Polls for changes at the configured interval. Supports SSH key and token authentication.
+
+Workers download workspace files as tarballs from the server and cache them locally. The tarball endpoint uses ETag-based caching so workers only re-download when the workspace changes.

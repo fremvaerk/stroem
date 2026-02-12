@@ -59,7 +59,7 @@ test.describe("Console and network errors audit", () => {
     await page.waitForLoadState("networkidle");
 
     // 4. Task detail
-    await page.goto("/tasks/hello-world");
+    await page.goto("/workspaces/default/tasks/hello-world");
     await page.waitForLoadState("networkidle");
 
     // 5. Jobs page

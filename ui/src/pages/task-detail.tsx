@@ -9,18 +9,18 @@ import { getTask } from "@/lib/api";
 import type { TaskDetail } from "@/lib/types";
 
 export function TaskDetailPage() {
-  const { name } = useParams<{ name: string }>();
+  const { workspace, name } = useParams<{ workspace: string; name: string }>();
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!name) return;
+    if (!workspace || !name) return;
     let cancelled = false;
 
     async function load() {
       try {
-        const data = await getTask(name!);
+        const data = await getTask(workspace!, name!);
         if (!cancelled) setTask(data);
       } catch (err) {
         if (!cancelled)
@@ -34,7 +34,7 @@ export function TaskDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [name]);
+  }, [workspace, name]);
 
   if (loading) {
     return (
@@ -74,12 +74,21 @@ export function TaskDetailPage() {
             <Badge variant="outline" className="font-mono text-xs">
               {task.mode}
             </Badge>
+            {workspace && (
+              <Badge variant="secondary" className="font-mono text-xs">
+                {workspace}
+              </Badge>
+            )}
             <span className="text-sm text-muted-foreground">
               {flowSteps.length} step{flowSteps.length !== 1 ? "s" : ""}
             </span>
           </div>
         </div>
-        <TaskRunDialog taskName={task.name} inputSchema={task.input} />
+        <TaskRunDialog
+          workspace={workspace!}
+          taskName={task.name}
+          inputSchema={task.input}
+        />
       </div>
 
       {inputFields.length > 0 && (

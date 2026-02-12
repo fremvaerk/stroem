@@ -23,6 +23,7 @@ services:
       - "8080:8080"
     volumes:
       - ./workspace:/workspace:ro
+      - ./workspace-ops:/workspace-ops:ro
       - ./docker/server-config.yaml:/etc/stroem/server-config.yaml:ro
       - logs:/var/stroem/logs
     depends_on:
@@ -43,7 +44,6 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     volumes:
-      - ./workspace:/workspace:ro
       - ./docker/worker-config.yaml:/etc/stroem/worker-config.yaml:ro
     depends_on:
       server:

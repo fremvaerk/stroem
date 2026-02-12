@@ -1,4 +1,5 @@
 import type {
+  WorkspaceInfo,
   TaskListItem,
   TaskDetail,
   JobListItem,
@@ -168,21 +169,42 @@ export async function checkAuthRequired(): Promise<boolean> {
   }
 }
 
-// Tasks
-export async function listTasks(): Promise<TaskListItem[]> {
-  return apiFetch<TaskListItem[]>("/api/tasks");
+// Workspaces
+export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
+  return apiFetch<WorkspaceInfo[]>("/api/workspaces");
 }
 
-export async function getTask(name: string): Promise<TaskDetail> {
-  return apiFetch<TaskDetail>(`/api/tasks/${encodeURIComponent(name)}`);
+// Tasks
+export async function listTasks(workspace: string): Promise<TaskListItem[]> {
+  return apiFetch<TaskListItem[]>(
+    `/api/workspaces/${encodeURIComponent(workspace)}/tasks`,
+  );
+}
+
+export async function listAllTasks(): Promise<TaskListItem[]> {
+  const workspaces = await listWorkspaces();
+  const results = await Promise.all(
+    workspaces.map((ws) => listTasks(ws.name)),
+  );
+  return results.flat();
+}
+
+export async function getTask(
+  workspace: string,
+  name: string,
+): Promise<TaskDetail> {
+  return apiFetch<TaskDetail>(
+    `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(name)}`,
+  );
 }
 
 export async function executeTask(
+  workspace: string,
   name: string,
   input: Record<string, unknown>,
 ): Promise<ExecuteTaskResponse> {
   return apiFetch<ExecuteTaskResponse>(
-    `/api/tasks/${encodeURIComponent(name)}/execute`,
+    `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(name)}/execute`,
     {
       method: "POST",
       body: JSON.stringify({ input }),

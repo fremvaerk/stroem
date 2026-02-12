@@ -97,14 +97,15 @@ export function JobDetailPage() {
           </p>
         </div>
         <Button variant="outline" asChild>
-          <Link to={`/tasks/${encodeURIComponent(job.task_name)}`}>
+          <Link to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}>
             Re-run
           </Link>
         </Button>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         {[
+          { label: "Workspace", value: job.workspace },
           { label: "Source", value: job.source_type },
           { label: "Created", value: formatTime(job.created_at) },
           { label: "Started", value: formatTime(job.started_at) },

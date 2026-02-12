@@ -159,51 +159,51 @@ pub async fn get_job(
         .collect();
 
     // Sort steps by topological order (dependency-first) using the task flow
-    let workspace = state.workspace.read().await;
-    if let Some(task) = workspace.tasks.get(&job.task_name) {
-        let mut in_deg: HashMap<&str, usize> = task
-            .flow
-            .iter()
-            .map(|(name, fs)| (name.as_str(), fs.depends_on.len()))
-            .collect();
+    if let Some(workspace) = state.get_workspace(&job.workspace).await {
+        if let Some(task) = workspace.tasks.get(&job.task_name) {
+            let mut in_deg: HashMap<&str, usize> = task
+                .flow
+                .iter()
+                .map(|(name, fs)| (name.as_str(), fs.depends_on.len()))
+                .collect();
 
-        let mut queue: Vec<&str> = in_deg
-            .iter()
-            .filter(|(_, &d)| d == 0)
-            .map(|(&n, _)| n)
-            .collect();
-        queue.sort();
+            let mut queue: Vec<&str> = in_deg
+                .iter()
+                .filter(|(_, &d)| d == 0)
+                .map(|(&n, _)| n)
+                .collect();
+            queue.sort();
 
-        let mut topo_order: Vec<&str> = Vec::new();
-        while let Some(node) = queue.first().copied() {
-            queue.remove(0);
-            topo_order.push(node);
-            for (name, fs) in &task.flow {
-                if fs.depends_on.iter().any(|d| d == node) {
-                    if let Some(deg) = in_deg.get_mut(name.as_str()) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push(name.as_str());
-                            queue.sort();
+            let mut topo_order: Vec<&str> = Vec::new();
+            while let Some(node) = queue.first().copied() {
+                queue.remove(0);
+                topo_order.push(node);
+                for (name, fs) in &task.flow {
+                    if fs.depends_on.iter().any(|d| d == node) {
+                        if let Some(deg) = in_deg.get_mut(name.as_str()) {
+                            *deg -= 1;
+                            if *deg == 0 {
+                                queue.push(name.as_str());
+                                queue.sort();
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let pos: HashMap<&str, usize> = topo_order
-            .iter()
-            .enumerate()
-            .map(|(i, &n)| (n, i))
-            .collect();
-        steps_json.sort_by_key(|s| {
-            s["step_name"]
-                .as_str()
-                .and_then(|n| pos.get(n).copied())
-                .unwrap_or(usize::MAX)
-        });
+            let pos: HashMap<&str, usize> = topo_order
+                .iter()
+                .enumerate()
+                .map(|(i, &n)| (n, i))
+                .collect();
+            steps_json.sort_by_key(|s| {
+                s["step_name"]
+                    .as_str()
+                    .and_then(|n| pos.get(n).copied())
+                    .unwrap_or(usize::MAX)
+            });
+        }
     }
-    drop(workspace);
 
     let response = JobDetailResponse {
         job_id: job.job_id,

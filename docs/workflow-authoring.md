@@ -4,9 +4,11 @@ This guide covers how to write workflow YAML files for Strøm.
 
 ## File Location
 
-Workflow files go in `workspace/.workflows/` and must have a `.yaml` or `.yml` extension. The server loads all files from this directory on startup.
+Workflow files go in the `.workflows/` directory of each workspace and must have a `.yaml` or `.yml` extension. The server loads all files from this directory on startup.
 
 A single YAML file can contain multiple actions and tasks.
+
+For the default folder workspace, files are at `workspace/.workflows/`. For git-sourced workspaces, the repository must contain a `.workflows/` directory at the root.
 
 ## YAML Structure
 
@@ -266,7 +268,7 @@ input:
 When triggering a task via API:
 
 ```bash
-curl -X POST http://localhost:8080/api/tasks/deploy-pipeline/execute \
+curl -X POST http://localhost:8080/api/workspaces/default/tasks/deploy-pipeline/execute \
   -H "Content-Type: application/json" \
   -d '{"input": {"env": "production"}}'
 ```
@@ -289,6 +291,36 @@ The validator checks:
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow
 - No cycles in the dependency graph
+
+## Multi-Workspace Setup
+
+Strøm supports multiple workspaces, each with its own set of workflow files. Configure workspaces in `server-config.yaml`:
+
+```yaml
+workspaces:
+  default:
+    type: folder
+    path: ./workspace
+  data-team:
+    type: git
+    url: https://github.com/org/data-workflows.git
+    ref: main
+    poll_interval_secs: 60
+```
+
+Each workspace is independent -- tasks, actions, and scripts are scoped to their workspace. Tasks are accessed via workspace-scoped API routes:
+
+```bash
+# List tasks in a specific workspace
+curl http://localhost:8080/api/workspaces/data-team/tasks
+
+# Trigger a task in a specific workspace
+curl -X POST http://localhost:8080/api/workspaces/data-team/tasks/etl-pipeline/execute \
+  -H "Content-Type: application/json" \
+  -d '{"input": {"date": "2025-01-01"}}'
+```
+
+Workers automatically download the correct workspace files before executing each step.
 
 ## Complete Example
 

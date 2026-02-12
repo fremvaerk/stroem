@@ -51,7 +51,7 @@ $COMPOSE up -d
 info "Waiting for server to become healthy..."
 MAX_WAIT=120
 WAITED=0
-until curl -sf "$BASE_URL/api/tasks" >/dev/null 2>&1; do
+until curl -sf "$BASE_URL/api/workspaces/default/tasks" >/dev/null 2>&1; do
     sleep 2
     WAITED=$((WAITED + 2))
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
@@ -70,7 +70,7 @@ sleep 3
 
 # --- 2. List tasks ---
 info "Listing tasks..."
-TASKS=$(curl -sf "$BASE_URL/api/tasks")
+TASKS=$(curl -sf "$BASE_URL/api/workspaces/default/tasks")
 TASK_COUNT=$(echo "$TASKS" | jq 'length')
 
 if [ "$TASK_COUNT" -lt 1 ]; then
@@ -87,7 +87,7 @@ pass "hello-world task is registered"
 
 # --- 3. Execute hello-world task ---
 info "Triggering hello-world task..."
-EXEC_RESP=$(curl -sf -X POST "$BASE_URL/api/tasks/hello-world/execute" \
+EXEC_RESP=$(curl -sf -X POST "$BASE_URL/api/workspaces/default/tasks/hello-world/execute" \
     -H "Content-Type: application/json" \
     -d '{"input": {"name": "E2E Test"}}')
 
@@ -187,7 +187,7 @@ pass "Jobs list returned $JOBS_COUNT job(s)"
 
 # --- 8. Run deploy-pipeline task ---
 info "Triggering deploy-pipeline task..."
-EXEC_RESP2=$(curl -sf -X POST "$BASE_URL/api/tasks/deploy-pipeline/execute" \
+EXEC_RESP2=$(curl -sf -X POST "$BASE_URL/api/workspaces/default/tasks/deploy-pipeline/execute" \
     -H "Content-Type: application/json" \
     -d '{"input": {"env": "test"}}')
 

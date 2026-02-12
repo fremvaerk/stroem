@@ -1,6 +1,14 @@
+export interface WorkspaceInfo {
+  name: string;
+  tasks_count: number;
+  actions_count: number;
+  revision?: string;
+}
+
 export interface TaskListItem {
   name: string;
   mode: string;
+  workspace: string;
 }
 
 export interface InputField {

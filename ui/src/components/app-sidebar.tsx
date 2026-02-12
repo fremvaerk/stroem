@@ -1,5 +1,6 @@
 import { Link, useLocation } from "react-router";
 import {
+  FolderOpen,
   LayoutDashboard,
   ListChecks,
   Play,
@@ -22,6 +23,7 @@ import {
 
 const navItems = [
   { title: "Dashboard", href: "/", icon: LayoutDashboard },
+  { title: "Workspaces", href: "/workspaces", icon: FolderOpen },
   { title: "Tasks", href: "/tasks", icon: ListChecks },
   { title: "Jobs", href: "/jobs", icon: Play },
 ];

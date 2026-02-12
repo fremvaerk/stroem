@@ -12,6 +12,7 @@ export async function triggerJob(
   baseURL: string,
   taskName: string,
   input: Record<string, unknown> = {},
+  workspace = "default",
 ): Promise<string> {
   // Login to get token
   const loginRes = await fetch(`${baseURL}/api/auth/login`, {
@@ -33,7 +34,7 @@ export async function triggerJob(
   }
 
   const res = await fetch(
-    `${baseURL}/api/tasks/${encodeURIComponent(taskName)}/execute`,
+    `${baseURL}/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(taskName)}/execute`,
     {
       method: "POST",
       headers,

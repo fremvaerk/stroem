@@ -1,6 +1,87 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use async_trait::async_trait;
+use blake2::{Blake2s256, Digest};
+use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use stroem_common::models::workflow::{WorkflowConfig, WorkspaceConfig};
+
+use super::WorkspaceSource;
+
+/// Folder-based workspace source
+pub struct FolderSource {
+    path: PathBuf,
+    revision: RwLock<Option<String>>,
+}
+
+impl FolderSource {
+    pub fn new(path: &str) -> Self {
+        Self {
+            path: PathBuf::from(path),
+            revision: RwLock::new(None),
+        }
+    }
+
+    fn compute_revision(path: &Path) -> Option<String> {
+        let mut hasher = Blake2s256::new();
+        let scan_dir = {
+            let workflows_dir = path.join(".workflows");
+            if workflows_dir.exists() && workflows_dir.is_dir() {
+                workflows_dir
+            } else {
+                path.to_path_buf()
+            }
+        };
+
+        let entries = match std::fs::read_dir(&scan_dir) {
+            Ok(e) => e,
+            Err(_) => return None,
+        };
+
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "yaml" || ext == "yml")
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path())
+            .collect();
+
+        paths.sort();
+
+        for p in &paths {
+            hasher.update(p.to_string_lossy().as_bytes());
+            if let Ok(content) = std::fs::read(p) {
+                hasher.update(&content);
+            }
+        }
+
+        let hash = hasher.finalize();
+        Some(hex::encode(hash))
+    }
+}
+
+#[async_trait]
+impl WorkspaceSource for FolderSource {
+    async fn load(&self) -> Result<WorkspaceConfig> {
+        let config = load_folder_workspace(self.path.to_str().unwrap_or("")).await?;
+        if let Some(rev) = Self::compute_revision(&self.path) {
+            if let Ok(mut lock) = self.revision.write() {
+                *lock = Some(rev);
+            }
+        }
+        Ok(config)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn revision(&self) -> Option<String> {
+        self.revision.read().ok().and_then(|r| r.clone())
+    }
+}
 
 /// Load workspace from a folder containing workflow YAML files
 /// Looks for .workflows/ subdirectory, or scans the folder itself if it contains YAML files
@@ -58,6 +139,17 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
     );
 
     Ok(workspace)
+}
+
+/// Hex-encode helper (avoids adding another dep)
+mod hex {
+    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
+        bytes
+            .as_ref()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +300,226 @@ actions:
     async fn test_nonexistent_path() {
         let result = load_folder_workspace("/nonexistent/path/12345").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_folder_source_revision() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("test.yaml"),
+            r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+"#,
+        )
+        .unwrap();
+
+        let source = FolderSource::new(temp_dir.path().to_str().unwrap());
+        assert!(source.revision().is_none()); // no revision before load
+
+        source.load().await.unwrap();
+        assert!(source.revision().is_some()); // revision set after load
+    }
+
+    #[test]
+    fn test_compute_revision_deterministic() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("test.yaml"),
+            "actions:\n  greet:\n    type: shell\n    cmd: echo hi\n",
+        )
+        .unwrap();
+
+        let rev1 = FolderSource::compute_revision(temp_dir.path());
+        let rev2 = FolderSource::compute_revision(temp_dir.path());
+        assert!(rev1.is_some());
+        assert_eq!(rev1, rev2, "Same content should produce same revision");
+    }
+
+    #[test]
+    fn test_compute_revision_changes_on_content_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let yaml_path = temp_dir.path().join("test.yaml");
+
+        fs::write(
+            &yaml_path,
+            "actions:\n  greet:\n    type: shell\n    cmd: echo v1\n",
+        )
+        .unwrap();
+        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        fs::write(
+            &yaml_path,
+            "actions:\n  greet:\n    type: shell\n    cmd: echo v2\n",
+        )
+        .unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        assert_ne!(
+            rev1, rev2,
+            "Different content should produce different revision"
+        );
+    }
+
+    #[test]
+    fn test_compute_revision_changes_on_file_added() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("a.yaml"),
+            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+        )
+        .unwrap();
+        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        fs::write(
+            temp_dir.path().join("b.yaml"),
+            "actions:\n  b:\n    type: shell\n    cmd: echo b\n",
+        )
+        .unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        assert_ne!(rev1, rev2, "Adding a file should change revision");
+    }
+
+    #[test]
+    fn test_compute_revision_changes_on_file_removed() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("a.yaml"),
+            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+        )
+        .unwrap();
+        let b_path = temp_dir.path().join("b.yaml");
+        fs::write(
+            &b_path,
+            "actions:\n  b:\n    type: shell\n    cmd: echo b\n",
+        )
+        .unwrap();
+        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        fs::remove_file(&b_path).unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        assert_ne!(rev1, rev2, "Removing a file should change revision");
+    }
+
+    #[test]
+    fn test_compute_revision_ignores_non_yaml_files() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("test.yaml"),
+            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+        )
+        .unwrap();
+        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        // Add a non-YAML file — revision should NOT change
+        fs::write(temp_dir.path().join("README.md"), "# Hello").unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        assert_eq!(rev1, rev2, "Non-YAML files should not affect revision");
+    }
+
+    #[test]
+    fn test_compute_revision_uses_workflows_subdir() {
+        let temp_dir = TempDir::new().unwrap();
+        let workflows_dir = temp_dir.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+        fs::write(
+            workflows_dir.join("test.yaml"),
+            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+        )
+        .unwrap();
+
+        let rev = FolderSource::compute_revision(temp_dir.path());
+        assert!(rev.is_some());
+
+        // Revision should be based on .workflows/ content, not root
+        // Add a YAML file in root — revision should NOT change
+        fs::write(
+            temp_dir.path().join("other.yaml"),
+            "actions:\n  b:\n    type: shell\n    cmd: echo b\n",
+        )
+        .unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path());
+        assert_eq!(
+            rev, rev2,
+            "Root YAML should be ignored when .workflows/ exists"
+        );
+    }
+
+    #[test]
+    fn test_compute_revision_empty_dir_returns_some() {
+        let temp_dir = TempDir::new().unwrap();
+        // No YAML files at all
+        let rev = FolderSource::compute_revision(temp_dir.path());
+        // Should still return Some (hash of empty input)
+        assert!(rev.is_some());
+    }
+
+    #[test]
+    fn test_compute_revision_nonexistent_dir_returns_none() {
+        let rev = FolderSource::compute_revision(Path::new("/nonexistent/path/12345"));
+        assert!(rev.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_folder_source_reload_updates_config_and_revision() {
+        let temp_dir = TempDir::new().unwrap();
+        let yaml_path = temp_dir.path().join("test.yaml");
+
+        // Initial load with one action
+        fs::write(
+            &yaml_path,
+            "actions:\n  greet:\n    type: shell\n    cmd: echo v1\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+        )
+        .unwrap();
+
+        let source = FolderSource::new(temp_dir.path().to_str().unwrap());
+        let config1 = source.load().await.unwrap();
+        let rev1 = source.revision().unwrap();
+
+        assert_eq!(config1.actions.len(), 1);
+        assert!(config1.actions.contains_key("greet"));
+
+        // Modify file: add another action
+        fs::write(
+            &yaml_path,
+            "actions:\n  greet:\n    type: shell\n    cmd: echo v2\n  build:\n    type: shell\n    cmd: make\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+        )
+        .unwrap();
+
+        let config2 = source.load().await.unwrap();
+        let rev2 = source.revision().unwrap();
+
+        // Config should reflect the new file
+        assert_eq!(config2.actions.len(), 2);
+        assert!(config2.actions.contains_key("greet"));
+        assert!(config2.actions.contains_key("build"));
+
+        // Revision should have changed
+        assert_ne!(rev1, rev2, "Revision should change after reload");
+    }
+
+    #[test]
+    fn test_compute_revision_is_hex_string() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(
+            temp_dir.path().join("test.yaml"),
+            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+        )
+        .unwrap();
+
+        let rev = FolderSource::compute_revision(temp_dir.path()).unwrap();
+        assert!(!rev.is_empty());
+        assert!(
+            rev.chars().all(|c| c.is_ascii_hexdigit()),
+            "Revision should be hex-encoded: {}",
+            rev
+        );
+        // Blake2s256 produces 32 bytes = 64 hex chars
+        assert_eq!(rev.len(), 64, "Blake2s256 should produce 64 hex chars");
     }
 }

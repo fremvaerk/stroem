@@ -14,11 +14,12 @@ use stroem_db::{
 };
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
-    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, ServerConfig, WorkspaceSourceConfig,
+    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::orchestrator;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
+use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -573,19 +574,32 @@ async fn setup() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
         },
-        workspace: WorkspaceSourceConfig {
-            source_type: "folder".to_string(),
-            path: temp_dir.path().to_string_lossy().to_string(),
-        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
     };
 
     let workspace = test_workspace();
-    let state = AppState::new(pool.clone(), workspace, config);
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let state = AppState::new(pool.clone(), mgr, config);
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
+}
+
+/// Register a test worker in the DB and return its UUID.
+/// Use this to satisfy foreign key constraints when calling `mark_running`.
+async fn register_test_worker(pool: &PgPool) -> Uuid {
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(pool, worker_id, "test-worker", &["shell".to_string()])
+        .await
+        .expect("Failed to register test worker");
+    worker_id
 }
 
 fn worker_request(method: &str, uri: &str, body: Value) -> Request<Body> {
@@ -644,7 +658,7 @@ async fn test_execute_task_creates_job_and_steps() -> Result<()> {
     let response = router
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "Alice"}}),
         ))
         .await?;
@@ -740,7 +754,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/greet-and-shout/execute",
+            "/api/workspaces/default/tasks/greet-and-shout/execute",
             json!({"input": {"name": "World"}}),
         ))
         .await?;
@@ -808,7 +822,7 @@ async fn test_step_failure_marks_job_failed() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "Fail"}}),
         ))
         .await?;
@@ -851,7 +865,7 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/greet-and-shout/execute",
+            "/api/workspaces/default/tasks/greet-and-shout/execute",
             json!({"input": {"name": "Blocked"}}),
         ))
         .await?;
@@ -905,7 +919,7 @@ async fn test_orchestrator_linear_flow() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/linear-3/execute",
+            "/api/workspaces/default/tasks/linear-3/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -988,7 +1002,7 @@ async fn test_orchestrator_diamond_dag() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/diamond/execute",
+            "/api/workspaces/default/tasks/diamond/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -1188,7 +1202,9 @@ async fn test_worker_auth_invalid_token() -> Result<()> {
 async fn test_list_tasks_from_workspace() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup().await?;
 
-    let response = router.oneshot(api_get("/api/tasks")).await?;
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks"))
+        .await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
 
@@ -1213,7 +1229,7 @@ async fn test_get_job_with_steps() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/greet-and-shout/execute",
+            "/api/workspaces/default/tasks/greet-and-shout/execute",
             json!({"input": {"name": "Detail"}}),
         ))
         .await?;
@@ -1420,7 +1436,7 @@ async fn test_execute_nonexistent_task() -> Result<()> {
     let response = router
         .oneshot(api_request(
             "POST",
-            "/api/tasks/nonexistent/execute",
+            "/api/workspaces/default/tasks/nonexistent/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -1438,7 +1454,7 @@ async fn test_get_task_detail() -> Result<()> {
 
     let response = router
         .clone()
-        .oneshot(api_get("/api/tasks/hello-world"))
+        .oneshot(api_get("/api/workspaces/default/tasks/hello-world"))
         .await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
@@ -1452,7 +1468,7 @@ async fn test_get_task_detail() -> Result<()> {
 
     // Nonexistent task returns 404
     let response = router
-        .oneshot(api_get("/api/tasks/nonexistent-task"))
+        .oneshot(api_get("/api/workspaces/default/tasks/nonexistent-task"))
         .await?;
     assert_eq!(response.status(), 404);
 
@@ -1476,7 +1492,7 @@ async fn test_list_jobs() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "A"}}),
         ))
         .await?;
@@ -1486,7 +1502,7 @@ async fn test_list_jobs() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "B"}}),
         ))
         .await?;
@@ -1552,7 +1568,7 @@ async fn test_worker_start_step() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "Start"}}),
         ))
         .await?;
@@ -1621,7 +1637,7 @@ async fn test_job_started_at_visible_in_api() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "TimingTest"}}),
         ))
         .await?;
@@ -1730,7 +1746,7 @@ async fn test_docker_action_type_flow() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/docker-build-task/execute",
+            "/api/workspaces/default/tasks/docker-build-task/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -1783,7 +1799,7 @@ async fn test_capability_mismatch_no_claim() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/docker-build-task/execute",
+            "/api/workspaces/default/tasks/docker-build-task/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -1827,7 +1843,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "Multi"}}),
         ))
         .await?;
@@ -1837,7 +1853,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/docker-build-task/execute",
+            "/api/workspaces/default/tasks/docker-build-task/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -1910,7 +1926,7 @@ async fn test_exit_code_zero_with_error() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "ErrorTest"}}),
         ))
         .await?;
@@ -1948,7 +1964,7 @@ async fn test_exit_code_nonzero_no_error_message() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "ExitCode"}}),
         ))
         .await?;
@@ -1986,7 +2002,7 @@ async fn test_complete_step_success_no_output() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "NoOutput"}}),
         ))
         .await?;
@@ -2027,7 +2043,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/mixed-input/execute",
+            "/api/workspaces/default/tasks/mixed-input/execute",
             json!({"input": {"name": "MixedTest"}}),
         ))
         .await?;
@@ -2091,7 +2107,7 @@ async fn test_first_step_template_rendering() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/hello-world/execute",
+            "/api/workspaces/default/tasks/hello-world/execute",
             json!({"input": {"name": "FirstStep"}}),
         ))
         .await?;
@@ -2129,7 +2145,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/greet-and-shout/execute",
+            "/api/workspaces/default/tasks/greet-and-shout/execute",
             json!({"input": {"name": "NullOutput"}}),
         ))
         .await?;
@@ -2269,7 +2285,7 @@ async fn test_wide_fan_in_three_deps() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/wide-fan-in/execute",
+            "/api/workspaces/default/tasks/wide-fan-in/execute",
             json!({"input": {}}),
         ))
         .await?;
@@ -2377,7 +2393,7 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/backup-task/execute",
+            "/api/workspaces/default/tasks/backup-task/execute",
             json!({"input": {"host": "localhost"}}),
         ))
         .await?;
@@ -2417,7 +2433,7 @@ async fn test_secret_reference_in_env() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/backup-task/execute",
+            "/api/workspaces/default/tasks/backup-task/execute",
             json!({"input": {"host": "db.example.com"}}),
         ))
         .await?;
@@ -2455,7 +2471,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/backup-task/execute",
+            "/api/workspaces/default/tasks/backup-task/execute",
             json!({"input": {"host": "db.example.com"}}),
         ))
         .await?;
@@ -2503,7 +2519,7 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/backup-task/execute",
+            "/api/workspaces/default/tasks/backup-task/execute",
             json!({"input": {"host": "myhost.local"}}),
         ))
         .await?;
@@ -2540,7 +2556,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/backup-task/execute",
+            "/api/workspaces/default/tasks/backup-task/execute",
             json!({"input": {"host": "prod-db.internal"}}),
         ))
         .await?;
@@ -2587,7 +2603,7 @@ async fn test_secret_not_leaked_in_job_output() -> Result<()> {
         .clone()
         .oneshot(api_request(
             "POST",
-            "/api/tasks/backup-task/execute",
+            "/api/workspaces/default/tasks/backup-task/execute",
             json!({"input": {"host": "db.example.com"}}),
         ))
         .await?;
@@ -2642,10 +2658,12 @@ async fn setup_with_auth() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
         },
-        workspace: WorkspaceSourceConfig {
-            source_type: "folder".to_string(),
-            path: temp_dir.path().to_string_lossy().to_string(),
-        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
         worker_token: "test-token-secret".to_string(),
         auth: Some(AuthConfig {
             jwt_secret: AUTH_JWT_SECRET.to_string(),
@@ -2670,7 +2688,8 @@ async fn setup_with_auth() -> Result<(
     .await?;
 
     let workspace = test_workspace();
-    let state = AppState::new(pool.clone(), workspace, config);
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let state = AppState::new(pool.clone(), mgr, config);
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -2892,7 +2911,9 @@ async fn test_existing_routes_work_without_auth() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup_with_auth().await?;
 
     // /api/tasks should work without auth (no AuthUser extractor)
-    let response = router.oneshot(api_get("/api/tasks")).await?;
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks"))
+        .await?;
     assert_eq!(response.status(), 200);
 
     Ok(())
@@ -3559,6 +3580,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
 #[tokio::test]
 async fn test_fail_in_chain_stops_job() -> Result<()> {
     let (_router, pool, _tmp, _container) = setup().await?;
+    let worker_id = register_test_worker(&pool).await;
 
     let task = {
         let mut flow = HashMap::new();
@@ -3623,7 +3645,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Complete first step successfully
-    JobStepRepo::mark_running(&pool, job_id, "step-ok", Uuid::new_v4()).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step-ok", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step-ok", Some(json!({"result": "ok"}))).await?;
     orchestrator::on_step_completed(&pool, job_id, "step-ok", &task).await?;
 
@@ -3636,7 +3658,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
     assert_eq!(fail_step.status, "ready");
 
     // Fail the second step
-    JobStepRepo::mark_running(&pool, job_id, "step-fail", Uuid::new_v4()).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step-fail", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step-fail", "Exit code: 1\nStderr: boom").await?;
     orchestrator::on_step_completed(&pool, job_id, "step-fail", &task).await?;
 
@@ -3665,6 +3687,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
 #[tokio::test]
 async fn test_step_failure_skips_dependents() -> Result<()> {
     let (_router, pool, _tmp, _container) = setup().await?;
+    let worker_id = register_test_worker(&pool).await;
 
     let task = {
         let mut flow = HashMap::new();
@@ -3729,7 +3752,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Fail step1
-    JobStepRepo::mark_running(&pool, job_id, "step1", Uuid::new_v4()).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
     orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
 
@@ -3750,6 +3773,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
 #[tokio::test]
 async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     let (_router, pool, _tmp, _container) = setup().await?;
+    let worker_id = register_test_worker(&pool).await;
 
     let task = {
         let mut flow = HashMap::new();
@@ -3814,7 +3838,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Fail step1
-    JobStepRepo::mark_running(&pool, job_id, "step1", Uuid::new_v4()).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
     orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
 
@@ -3824,7 +3848,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     assert_eq!(step2.status, "ready");
 
     // Complete step2 successfully
-    JobStepRepo::mark_running(&pool, job_id, "step2", Uuid::new_v4()).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
     orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
 
@@ -3840,6 +3864,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
 #[tokio::test]
 async fn test_cascading_skip() -> Result<()> {
     let (_router, pool, _tmp, _container) = setup().await?;
+    let worker_id = register_test_worker(&pool).await;
 
     let task = {
         let mut flow = HashMap::new();
@@ -3923,7 +3948,7 @@ async fn test_cascading_skip() -> Result<()> {
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Fail step1
-    JobStepRepo::mark_running(&pool, job_id, "step1", Uuid::new_v4()).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
     orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
 
@@ -3937,6 +3962,1252 @@ async fn test_cascading_skip() -> Result<()> {
     // Job should be failed
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+// ─── Multi-workspace helper ─────────────────────────────────────────
+
+/// A second workspace config with different actions/tasks for multi-workspace tests
+fn test_workspace_ops() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    workspace.actions.insert(
+        "deploy".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            cmd: Some("echo deploying...".to_string()),
+            script: None,
+            image: None,
+            command: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run-deploy".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy-app".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            input: HashMap::new(),
+            flow,
+        },
+    );
+
+    workspace
+}
+
+/// Setup with two workspaces: "default" and "ops"
+async fn setup_multi_workspace() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([
+            (
+                "default".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "ops".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+        ]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+    };
+
+    let ws_default = test_workspace();
+    let ws_ops = test_workspace_ops();
+
+    // Build workspace manager with two workspaces using from_entries
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use stroem_server::workspace::WorkspaceEntry;
+    use tokio::sync::RwLock;
+
+    // Helper in-memory source
+    struct InMemSource(WorkspaceConfig);
+    #[async_trait::async_trait]
+    impl stroem_server::workspace::WorkspaceSource for InMemSource {
+        async fn load(&self) -> Result<WorkspaceConfig> {
+            Ok(self.0.clone())
+        }
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("/dev/null")
+        }
+        fn revision(&self) -> Option<String> {
+            Some("test-rev".to_string())
+        }
+    }
+
+    let src_default: Arc<dyn stroem_server::workspace::WorkspaceSource> =
+        Arc::new(InMemSource(ws_default.clone()));
+    let src_ops: Arc<dyn stroem_server::workspace::WorkspaceSource> =
+        Arc::new(InMemSource(ws_ops.clone()));
+
+    let mut entries = HashMap::new();
+    entries.insert(
+        "default".to_string(),
+        WorkspaceEntry {
+            config: Arc::new(RwLock::new(ws_default)),
+            source: src_default,
+            name: "default".to_string(),
+            source_path: PathBuf::from("/dev/null"),
+        },
+    );
+    entries.insert(
+        "ops".to_string(),
+        WorkspaceEntry {
+            config: Arc::new(RwLock::new(ws_ops)),
+            source: src_ops,
+            name: "ops".to_string(),
+            source_path: PathBuf::from("/dev/null"),
+        },
+    );
+
+    let mgr = WorkspaceManager::from_entries(entries);
+    let state = AppState::new(pool.clone(), mgr, config);
+    let router = build_router(state);
+
+    Ok((router, pool, temp_dir, container))
+}
+
+// ─── Multi-workspace: List workspaces ───────────────────────────────
+
+#[tokio::test]
+async fn test_list_workspaces() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    let response = router.oneshot(api_get("/api/workspaces")).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let workspaces = body.as_array().unwrap();
+    assert_eq!(workspaces.len(), 2);
+
+    let names: Vec<&str> = workspaces
+        .iter()
+        .map(|w| w["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"default"));
+    assert!(names.contains(&"ops"));
+
+    // Default workspace should have the test_workspace tasks/actions
+    let default_ws = workspaces.iter().find(|w| w["name"] == "default").unwrap();
+    assert!(default_ws["tasks_count"].as_u64().unwrap() > 0);
+    assert!(default_ws["actions_count"].as_u64().unwrap() > 0);
+
+    // Ops workspace should have 1 task and 1 action
+    let ops_ws = workspaces.iter().find(|w| w["name"] == "ops").unwrap();
+    assert_eq!(ops_ws["tasks_count"].as_u64().unwrap(), 1);
+    assert_eq!(ops_ws["actions_count"].as_u64().unwrap(), 1);
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Task isolation ────────────────────────────────
+
+#[tokio::test]
+async fn test_workspace_task_isolation() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // List tasks in "default" workspace
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/workspaces/default/tasks"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let default_tasks: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(default_tasks.contains(&"hello-world"));
+    assert!(!default_tasks.contains(&"deploy-app"));
+
+    // List tasks in "ops" workspace
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/workspaces/ops/tasks"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let ops_tasks: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(ops_tasks.contains(&"deploy-app"));
+    assert!(!ops_tasks.contains(&"hello-world"));
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Execute in specific workspace ─────────────────
+
+#[tokio::test]
+async fn test_execute_task_in_specific_workspace() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Execute deploy-app in "ops" workspace
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/ops/tasks/deploy-app/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    // Verify job was created with correct workspace
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.workspace, "ops");
+    assert_eq!(job.task_name, "deploy-app");
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Task not found in wrong workspace ─────────────
+
+#[tokio::test]
+async fn test_execute_task_wrong_workspace_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Try to execute "deploy-app" in "default" workspace (it's in "ops")
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-app/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    // Try to execute "hello-world" in "ops" workspace (it's in "default")
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/ops/tasks/hello-world/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Nonexistent workspace returns 404 ─────────────
+
+#[tokio::test]
+async fn test_nonexistent_workspace_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // List tasks in nonexistent workspace
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/workspaces/nonexistent/tasks"))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    // Execute task in nonexistent workspace
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/nonexistent/tasks/hello-world/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    // Get task detail in nonexistent workspace
+    let response = router
+        .oneshot(api_get("/api/workspaces/nonexistent/tasks/hello-world"))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Worker claim returns correct workspace ────────
+
+#[tokio::test]
+async fn test_worker_claim_has_workspace_field() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create a job in the "ops" workspace
+    let job_id = JobRepo::create(
+        &pool,
+        "ops",
+        "deploy-app",
+        "distributed",
+        Some(json!({})),
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "run-deploy".to_string(),
+        action_name: "deploy".to_string(),
+        action_type: "shell".to_string(),
+        action_image: None,
+        action_spec: Some(json!({"cmd": "echo deploying..."})),
+        input: None,
+        status: "ready".to_string(),
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Register worker
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "w1", "capabilities": ["shell"]}),
+        ))
+        .await?;
+    let reg_body = body_json(resp).await;
+    let worker_id = reg_body["worker_id"].as_str().unwrap();
+
+    // Claim step
+    let resp = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let claim_body = body_json(resp).await;
+
+    // Verify workspace field is "ops"
+    assert_eq!(claim_body["workspace"].as_str().unwrap(), "ops");
+    assert_eq!(claim_body["step_name"].as_str().unwrap(), "run-deploy");
+    assert_eq!(claim_body["action_name"].as_str().unwrap(), "deploy");
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Jobs show workspace ───────────────────────────
+
+#[tokio::test]
+async fn test_jobs_show_workspace_field() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create jobs in both workspaces
+    let resp1 = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Test"}}),
+        ))
+        .await?;
+    assert_eq!(resp1.status(), 200);
+    let body1 = body_json(resp1).await;
+    let job_id_default = body1["job_id"].as_str().unwrap().to_string();
+
+    let resp2 = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/ops/tasks/deploy-app/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp2.status(), 200);
+    let body2 = body_json(resp2).await;
+    let job_id_ops = body2["job_id"].as_str().unwrap().to_string();
+
+    // Get job details and verify workspace field
+    let resp = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id_default)))
+        .await?;
+    let job_body = body_json(resp).await;
+    assert_eq!(job_body["workspace"].as_str().unwrap(), "default");
+
+    let resp = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id_ops)))
+        .await?;
+    let job_body = body_json(resp).await;
+    assert_eq!(job_body["workspace"].as_str().unwrap(), "ops");
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Tarball endpoint ──────────────────────────────
+
+#[tokio::test]
+async fn test_workspace_tarball_download() -> Result<()> {
+    // Use folder-based setup so tarball has real files
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Create a workspace dir with some files
+    let ws_dir = TempDir::new()?;
+    let workflows_dir = ws_dir.path().join(".workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+    std::fs::write(
+        workflows_dir.join("test.yaml"),
+        "actions:\n  greet:\n    type: shell\n    cmd: echo hi\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+    )?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+    };
+
+    let mgr = WorkspaceManager::new(HashMap::from([(
+        "default".to_string(),
+        WorkspaceSourceDef::Folder {
+            path: ws_dir.path().to_string_lossy().to_string(),
+        },
+    )]))
+    .await?;
+
+    let state = AppState::new(pool, mgr, config);
+    let router = build_router(state);
+
+    // Download tarball
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+
+    // Verify content-type
+    let content_type = response.headers().get("content-type").unwrap().to_str()?;
+    assert_eq!(content_type, "application/gzip");
+
+    // Verify X-Revision header exists
+    assert!(response.headers().get("X-Revision").is_some());
+    let revision = response
+        .headers()
+        .get("X-Revision")
+        .unwrap()
+        .to_str()?
+        .to_string();
+
+    // Verify body is a valid gzip tarball
+    let body = response.into_body().collect().await?.to_bytes();
+    assert!(!body.is_empty());
+
+    // Verify 304 Not Modified with matching ETag
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .header("If-None-Match", format!("\"{}\"", revision))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(response.status(), 304);
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Tarball for nonexistent workspace ─────────────
+
+#[tokio::test]
+async fn test_workspace_tarball_nonexistent_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/nonexistent.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Get task detail from specific workspace ───────
+
+#[tokio::test]
+async fn test_get_task_detail_workspace_scoped() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Get task detail from "ops" workspace
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/workspaces/ops/tasks/deploy-app"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(body["name"].as_str().unwrap(), "deploy-app");
+
+    // Same task name doesn't exist in "default"
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks/deploy-app"))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Workspace revision in info ────────────────────
+
+#[tokio::test]
+async fn test_workspace_info_includes_revision() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    let response = router.oneshot(api_get("/api/workspaces")).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let workspaces = body.as_array().unwrap();
+    for ws in workspaces {
+        // Our InMemSource returns "test-rev"
+        assert_eq!(ws["revision"].as_str().unwrap(), "test-rev");
+    }
+
+    Ok(())
+}
+
+// ─── Tarball ETag caching: mismatched ETag returns 200 ──────────────
+
+#[tokio::test]
+async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let ws_dir = TempDir::new()?;
+    let workflows_dir = ws_dir.path().join(".workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+    std::fs::write(
+        workflows_dir.join("test.yaml"),
+        "actions:\n  greet:\n    type: shell\n    cmd: echo hi\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+    )?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+    };
+
+    let mgr = WorkspaceManager::new(HashMap::from([(
+        "default".to_string(),
+        WorkspaceSourceDef::Folder {
+            path: ws_dir.path().to_string_lossy().to_string(),
+        },
+    )]))
+    .await?;
+
+    let state = AppState::new(pool, mgr, config);
+    let router = build_router(state);
+
+    // Send a wrong ETag — should get 200 with full tarball, not 304
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .header("If-None-Match", "\"wrong-revision-value\"")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+
+    // Should still include ETag and X-Revision headers
+    assert!(response.headers().get("X-Revision").is_some());
+    assert!(response.headers().get("ETag").is_some());
+
+    // Verify body is non-empty (full tarball returned)
+    let body = response.into_body().collect().await?.to_bytes();
+    assert!(!body.is_empty());
+
+    Ok(())
+}
+
+// ─── Tarball ETag caching: bare (unquoted) ETag value also matches ──
+
+#[tokio::test]
+async fn test_tarball_bare_etag_matches() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let ws_dir = TempDir::new()?;
+    let workflows_dir = ws_dir.path().join(".workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+    std::fs::write(
+        workflows_dir.join("test.yaml"),
+        "actions:\n  a:\n    type: shell\n    cmd: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+    )?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+    };
+
+    let mgr = WorkspaceManager::new(HashMap::from([(
+        "default".to_string(),
+        WorkspaceSourceDef::Folder {
+            path: ws_dir.path().to_string_lossy().to_string(),
+        },
+    )]))
+    .await?;
+
+    let state = AppState::new(pool, mgr, config);
+    let router = build_router(state);
+
+    // First request — get the revision
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+    let revision = response
+        .headers()
+        .get("X-Revision")
+        .unwrap()
+        .to_str()?
+        .to_string();
+
+    // Send bare revision (no quotes) — trim_matches('"') should still match
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .header("If-None-Match", &revision)
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(
+        response.status(),
+        304,
+        "Bare (unquoted) ETag should also produce 304"
+    );
+
+    Ok(())
+}
+
+// ─── Tarball ETag caching: changed workspace content invalidates ETag ─
+
+#[tokio::test]
+async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let ws_dir = TempDir::new()?;
+    let workflows_dir = ws_dir.path().join(".workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+    let yaml_path = workflows_dir.join("test.yaml");
+    std::fs::write(
+        &yaml_path,
+        "actions:\n  greet:\n    type: shell\n    cmd: echo v1\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+    )?;
+
+    let ws_path_str = ws_dir.path().to_string_lossy().to_string();
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_path_str.clone(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+    };
+
+    let mgr = WorkspaceManager::new(HashMap::from([(
+        "default".to_string(),
+        WorkspaceSourceDef::Folder {
+            path: ws_path_str.clone(),
+        },
+    )]))
+    .await?;
+
+    // AppState is Clone and shares Arc<WorkspaceManager> across clones
+    let state = AppState::new(pool, mgr, config);
+    let router = build_router(state.clone());
+
+    // First request — get original revision
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+    let old_revision = response
+        .headers()
+        .get("X-Revision")
+        .unwrap()
+        .to_str()?
+        .to_string();
+
+    // Modify workspace content — change the YAML
+    std::fs::write(
+        &yaml_path,
+        "actions:\n  greet:\n    type: shell\n    cmd: echo v2\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+    )?;
+
+    // Reload the workspace so revision updates
+    state.workspaces.reload("default").await?;
+
+    // Old ETag should now return 200 (not 304) because revision changed
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .header("If-None-Match", format!("\"{}\"", old_revision))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(
+        response.status(),
+        200,
+        "Stale ETag after workspace change should return 200"
+    );
+
+    // New revision should differ from old
+    let new_revision = response
+        .headers()
+        .get("X-Revision")
+        .unwrap()
+        .to_str()?
+        .to_string();
+    assert_ne!(
+        old_revision, new_revision,
+        "Revision should change after workspace content changes"
+    );
+
+    // New ETag should produce 304
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .header("If-None-Match", format!("\"{}\"", new_revision))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(req).await?;
+    assert_eq!(
+        response.status(),
+        304,
+        "Current ETag should produce 304 after reload"
+    );
+
+    Ok(())
+}
+
+// ─── Tarball ETag: response includes proper ETag format ─────────────
+
+#[tokio::test]
+async fn test_tarball_etag_header_format() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let ws_dir = TempDir::new()?;
+    let workflows_dir = ws_dir.path().join(".workflows");
+    std::fs::create_dir_all(&workflows_dir)?;
+    std::fs::write(
+        workflows_dir.join("test.yaml"),
+        "actions:\n  a:\n    type: shell\n    cmd: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+    )?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+    };
+
+    let mgr = WorkspaceManager::new(HashMap::from([(
+        "default".to_string(),
+        WorkspaceSourceDef::Folder {
+            path: ws_dir.path().to_string_lossy().to_string(),
+        },
+    )]))
+    .await?;
+
+    let state = AppState::new(pool, mgr, config);
+    let router = build_router(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/worker/workspace/default.tar.gz")
+        .header("Authorization", "Bearer test-token-secret")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+
+    // Verify ETag is properly quoted per HTTP spec
+    let etag = response
+        .headers()
+        .get("ETag")
+        .expect("Response should include ETag header")
+        .to_str()?;
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "ETag should be quoted: got '{}'",
+        etag
+    );
+
+    // X-Revision should be the bare (unquoted) value
+    let revision = response
+        .headers()
+        .get("X-Revision")
+        .expect("Response should include X-Revision header")
+        .to_str()?;
+    assert!(
+        !revision.starts_with('"'),
+        "X-Revision should be bare (unquoted)"
+    );
+
+    // ETag inner value should match X-Revision
+    let etag_inner = etag.trim_matches('"');
+    assert_eq!(
+        etag_inner, revision,
+        "ETag inner value should match X-Revision"
+    );
+
+    // Verify it's a hex string (Blake2s256 output)
+    assert!(
+        revision.chars().all(|c| c.is_ascii_hexdigit()),
+        "Revision should be hex-encoded"
+    );
+    assert_eq!(revision.len(), 64, "Blake2s256 should produce 64 hex chars");
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Job listing with workspace filter ─────────────
+
+#[tokio::test]
+async fn test_list_jobs_with_workspace_filter() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create a job in "default" workspace
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Alice"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    // Create a job in "ops" workspace
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/ops/tasks/deploy-app/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    // Filter by "default" — should only return the default job
+    let resp = router
+        .clone()
+        .oneshot(api_get("/api/jobs?workspace=default"))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let jobs = body.as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "Should have exactly 1 default job");
+    assert_eq!(jobs[0]["workspace"].as_str().unwrap(), "default");
+    assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "hello-world");
+
+    // Filter by "ops" — should only return the ops job
+    let resp = router
+        .clone()
+        .oneshot(api_get("/api/jobs?workspace=ops"))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let jobs = body.as_array().unwrap();
+    assert_eq!(jobs.len(), 1, "Should have exactly 1 ops job");
+    assert_eq!(jobs[0]["workspace"].as_str().unwrap(), "ops");
+    assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "deploy-app");
+
+    // No filter — should return both jobs
+    let resp = router
+        .oneshot(api_get("/api/jobs"))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let jobs = body.as_array().unwrap();
+    assert_eq!(jobs.len(), 2, "Should have 2 jobs total");
+    let workspaces: Vec<&str> = jobs
+        .iter()
+        .map(|j| j["workspace"].as_str().unwrap())
+        .collect();
+    assert!(workspaces.contains(&"default"));
+    assert!(workspaces.contains(&"ops"));
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Nonexistent workspace filter returns empty ─────
+
+#[tokio::test]
+async fn test_list_jobs_workspace_filter_nonexistent() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create a job in "default" so there's at least one job in the system
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Bob"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    // Filter by nonexistent workspace — should return 200 with empty array
+    let resp = router
+        .oneshot(api_get("/api/jobs?workspace=nonexistent"))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let jobs = body.as_array().unwrap();
+    assert!(jobs.is_empty(), "Nonexistent workspace filter should return empty array");
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Worker claims from multiple workspaces ────────
+
+#[tokio::test]
+async fn test_worker_claim_across_workspaces() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create a job in "default" workspace via DB
+    let job_id_default = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Test"})),
+        "api",
+        None,
+    )
+    .await?;
+
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id: job_id_default,
+            step_name: "greet".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo Hello"})),
+            input: Some(json!({"name": "Test"})),
+            status: "ready".to_string(),
+        }],
+    )
+    .await?;
+
+    // Create a job in "ops" workspace via DB
+    let job_id_ops = JobRepo::create(
+        &pool,
+        "ops",
+        "deploy-app",
+        "distributed",
+        Some(json!({})),
+        "api",
+        None,
+    )
+    .await?;
+
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id: job_id_ops,
+            step_name: "run-deploy".to_string(),
+            action_name: "deploy".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo deploying..."})),
+            input: None,
+            status: "ready".to_string(),
+        }],
+    )
+    .await?;
+
+    // Register worker
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "multi-ws-worker", "capabilities": ["shell"]}),
+        ))
+        .await?;
+    let reg_body = body_json(resp).await;
+    let worker_id = reg_body["worker_id"].as_str().unwrap().to_string();
+
+    // First claim — should get one of the two ready steps
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": &worker_id, "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let claim1 = body_json(resp).await;
+    let ws1 = claim1["workspace"].as_str().unwrap().to_string();
+    let job_id1 = claim1["job_id"].as_str().unwrap().to_string();
+    let step1 = claim1["step_name"].as_str().unwrap().to_string();
+    assert!(
+        ws1 == "default" || ws1 == "ops",
+        "First claim should be from default or ops, got: {}",
+        ws1
+    );
+
+    // Complete the first step so the worker can claim the next one
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/{}/complete", job_id1, step1),
+            json!({"output": {"result": "done"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    // Second claim — should get the step from the other workspace
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": &worker_id, "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let claim2 = body_json(resp).await;
+    let ws2 = claim2["workspace"].as_str().unwrap().to_string();
+    assert!(
+        ws2 == "default" || ws2 == "ops",
+        "Second claim should be from default or ops, got: {}",
+        ws2
+    );
+    assert_ne!(
+        ws1, ws2,
+        "Worker should claim from both workspaces, got {ws1} twice",
+    );
+
+    // Third claim — no more steps available
+    let resp = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": &worker_id, "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let claim3 = body_json(resp).await;
+    assert!(
+        claim3["job_id"].is_null(),
+        "Third claim should return no job"
+    );
+
+    Ok(())
+}
+
+// ─── Multi-workspace: Job list shows correct workspace field ────────
+
+#[tokio::test]
+async fn test_list_jobs_shows_workspace_field() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create jobs in both workspaces via API
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Alice"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/ops/tasks/deploy-app/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    // List all jobs
+    let resp = router
+        .oneshot(api_get("/api/jobs"))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let body = body_json(resp).await;
+    let jobs = body.as_array().unwrap();
+    assert_eq!(jobs.len(), 2);
+
+    // Verify each job in the list has the correct workspace field
+    for job in jobs {
+        let workspace = job["workspace"].as_str().unwrap();
+        let task_name = job["task_name"].as_str().unwrap();
+        match workspace {
+            "default" => assert_eq!(task_name, "hello-world"),
+            "ops" => assert_eq!(task_name, "deploy-app"),
+            other => panic!("Unexpected workspace: {}", other),
+        }
+        // Verify workspace field is present and non-empty
+        assert!(!workspace.is_empty(), "workspace field should not be empty");
+    }
 
     Ok(())
 }

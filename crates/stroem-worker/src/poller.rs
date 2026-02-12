@@ -6,19 +6,21 @@ use tokio::sync::Semaphore;
 use crate::client::ServerClient;
 use crate::config::WorkerConfig;
 use crate::executor::StepExecutor;
+use crate::workspace_cache::WorkspaceCache;
 
 /// Main worker loop: register, heartbeat, and poll for jobs
 #[tracing::instrument(skip(config))]
 pub async fn run_worker(config: WorkerConfig) -> Result<()> {
     tracing::info!("Starting worker '{}'", config.worker_name);
 
-    // Create shared clients and executor
+    // Create shared clients, executor, and workspace cache
     let client = ServerClient::new(&config.server_url, &config.worker_token);
-    let executor = Arc::new(StepExecutor::new(&config.workspace_dir));
+    let executor = Arc::new(StepExecutor::new());
+    let workspace_cache = Arc::new(WorkspaceCache::new(&config.workspace_cache_dir));
 
-    // Ensure workspace directory exists
-    std::fs::create_dir_all(&config.workspace_dir)
-        .context("Failed to create workspace directory")?;
+    // Ensure workspace cache base directory exists
+    std::fs::create_dir_all(&config.workspace_cache_dir)
+        .context("Failed to create workspace cache directory")?;
 
     // Register with server
     let worker_id = client
@@ -64,19 +66,48 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
         match client.claim_step(worker_id, &config.capabilities).await {
             Ok(Some(step)) => {
                 tracing::info!(
-                    "Claimed step '{}' for job {} (action: {})",
+                    "Claimed step '{}' for job {} (workspace: {}, action: {})",
                     step.step_name,
                     step.job_id,
+                    step.workspace,
                     step.action_name
                 );
 
                 let client_clone = client.clone();
                 let executor_clone = executor.clone();
+                let ws_cache_clone = workspace_cache.clone();
                 let step_worker_id = worker_id;
 
                 // Spawn a task to execute the step
                 tokio::spawn(async move {
                     let _permit = permit; // Hold permit until done
+
+                    // Ensure workspace is downloaded and up-to-date
+                    let ws_dir = match ws_cache_clone
+                        .ensure_up_to_date(&client_clone, &step.workspace)
+                        .await
+                    {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to download workspace '{}': {}",
+                                step.workspace,
+                                e
+                            );
+                            // Report step failure
+                            let _ = client_clone
+                                .report_step_complete(
+                                    step.job_id,
+                                    &step.step_name,
+                                    -1,
+                                    None,
+                                    Some(format!("Failed to download workspace: {}", e)),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+                    let ws_dir_str = ws_dir.to_string_lossy().to_string();
 
                     // Report step start
                     if let Err(e) = client_clone
@@ -115,7 +146,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     });
 
                     // Execute the step
-                    let result = executor_clone.execute_step(&step, log_buffer.clone()).await;
+                    let result = executor_clone
+                        .execute_step(&step, &ws_dir_str, log_buffer.clone())
+                        .await;
 
                     // Stop log pusher, flush remaining logs
                     log_handle.abort();

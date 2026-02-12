@@ -2,6 +2,7 @@ pub mod auth;
 pub mod jobs;
 pub mod middleware;
 pub mod tasks;
+pub mod workspaces;
 pub mod ws;
 
 use crate::state::AppState;
@@ -22,11 +23,16 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
     Router::new()
         // Public config endpoint
         .route("/config", get(get_config))
-        // Task routes
-        .route("/tasks", get(tasks::list_tasks))
-        .route("/tasks/{name}", get(tasks::get_task))
-        .route("/tasks/{name}/execute", post(tasks::execute_task))
-        // Job routes
+        // Workspace listing
+        .route("/workspaces", get(workspaces::list_workspaces))
+        // Workspace-scoped task routes
+        .route("/workspaces/{ws}/tasks", get(tasks::list_tasks))
+        .route("/workspaces/{ws}/tasks/{name}", get(tasks::get_task))
+        .route(
+            "/workspaces/{ws}/tasks/{name}/execute",
+            post(tasks::execute_task),
+        )
+        // Job routes (jobs have workspace stored in DB)
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))

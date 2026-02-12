@@ -18,11 +18,12 @@ import { executeTask } from "@/lib/api";
 import type { InputField } from "@/lib/types";
 
 interface TaskRunDialogProps {
+  workspace: string;
   taskName: string;
   inputSchema: Record<string, InputField>;
 }
 
-export function TaskRunDialog({ taskName, inputSchema }: TaskRunDialogProps) {
+export function TaskRunDialog({ workspace, taskName, inputSchema }: TaskRunDialogProps) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState<Record<string, unknown>>(() => {
@@ -59,7 +60,7 @@ export function TaskRunDialog({ taskName, inputSchema }: TaskRunDialogProps) {
           input[key] = val;
         }
       }
-      const res = await executeTask(taskName, input);
+      const res = await executeTask(workspace, taskName, input);
       setOpen(false);
       navigate(`/jobs/${res.job_id}`);
     } catch (err) {

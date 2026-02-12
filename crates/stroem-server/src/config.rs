@@ -13,12 +13,39 @@ pub struct LogStorageConfig {
     pub local_dir: String,
 }
 
-/// Workspace source configuration
+/// Git auth configuration for workspace sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceSourceConfig {
+pub struct GitAuthConfig {
     #[serde(rename = "type")]
-    pub source_type: String, // "folder"
-    pub path: String,
+    pub auth_type: String, // "ssh_key" | "token"
+    pub key_path: Option<String>,
+    pub token: Option<String>,
+    pub username: Option<String>,
+}
+
+fn default_git_ref() -> String {
+    "main".to_string()
+}
+
+fn default_poll_interval() -> u64 {
+    60
+}
+
+/// Workspace source definition (folder or git)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WorkspaceSourceDef {
+    #[serde(rename = "folder")]
+    Folder { path: String },
+    #[serde(rename = "git")]
+    Git {
+        url: String,
+        #[serde(rename = "ref", default = "default_git_ref")]
+        git_ref: String,
+        #[serde(default = "default_poll_interval")]
+        poll_interval_secs: u64,
+        auth: Option<GitAuthConfig>,
+    },
 }
 
 /// OIDC/internal provider configuration
@@ -53,7 +80,7 @@ pub struct ServerConfig {
     pub listen: String, // "0.0.0.0:8080"
     pub db: DbConfig,
     pub log_storage: LogStorageConfig,
-    pub workspace: WorkspaceSourceConfig,
+    pub workspaces: HashMap<String, WorkspaceSourceDef>,
     pub worker_token: String, // shared secret for worker auth
     pub auth: Option<AuthConfig>,
 }
@@ -63,45 +90,141 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_config() {
+    fn test_parse_config_folder_workspace() {
         let yaml = r#"
 listen: "0.0.0.0:8080"
 db:
   url: "postgres://user:pass@localhost:5432/stroem"
 log_storage:
   local_dir: "/var/stroem/logs"
-workspace:
-  type: "folder"
-  path: "/var/stroem/workspace"
+workspaces:
+  default:
+    type: folder
+    path: "/var/stroem/workspace"
 worker_token: "secret-token-123"
 "#;
         let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.db.url, "postgres://user:pass@localhost:5432/stroem");
         assert_eq!(config.log_storage.local_dir, "/var/stroem/logs");
-        assert_eq!(config.workspace.source_type, "folder");
-        assert_eq!(config.workspace.path, "/var/stroem/workspace");
+        assert_eq!(config.workspaces.len(), 1);
+        match &config.workspaces["default"] {
+            WorkspaceSourceDef::Folder { path } => {
+                assert_eq!(path, "/var/stroem/workspace");
+            }
+            _ => panic!("Expected folder workspace"),
+        }
         assert_eq!(config.worker_token, "secret-token-123");
         assert!(config.auth.is_none());
     }
 
     #[test]
-    fn test_parse_minimal_config() {
+    fn test_parse_multiple_workspaces() {
         let yaml = r#"
-listen: "127.0.0.1:3000"
+listen: "0.0.0.0:8080"
 db:
-  url: "postgres://localhost/test"
+  url: "postgres://localhost/stroem"
 log_storage:
   local_dir: "./logs"
-workspace:
-  type: "folder"
-  path: "./workspace"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+  data-team:
+    type: git
+    url: "https://github.com/org/data-workflows.git"
+    ref: main
+    poll_interval_secs: 120
 worker_token: "token"
 "#;
         let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
-        assert_eq!(config.listen, "127.0.0.1:3000");
-        assert_eq!(config.worker_token, "token");
-        assert!(config.auth.is_none());
+        assert_eq!(config.workspaces.len(), 2);
+        match &config.workspaces["default"] {
+            WorkspaceSourceDef::Folder { path } => assert_eq!(path, "./workspace"),
+            _ => panic!("Expected folder"),
+        }
+        match &config.workspaces["data-team"] {
+            WorkspaceSourceDef::Git {
+                url,
+                git_ref,
+                poll_interval_secs,
+                auth,
+            } => {
+                assert_eq!(url, "https://github.com/org/data-workflows.git");
+                assert_eq!(git_ref, "main");
+                assert_eq!(*poll_interval_secs, 120);
+                assert!(auth.is_none());
+            }
+            _ => panic!("Expected git"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_workspace_with_auth() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  private:
+    type: git
+    url: "git@github.com:org/private.git"
+    auth:
+      type: ssh_key
+      key_path: "/home/user/.ssh/id_rsa"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        match &config.workspaces["private"] {
+            WorkspaceSourceDef::Git {
+                url,
+                git_ref,
+                poll_interval_secs,
+                auth,
+            } => {
+                assert_eq!(url, "git@github.com:org/private.git");
+                assert_eq!(git_ref, "main"); // default
+                assert_eq!(*poll_interval_secs, 60); // default
+                let auth = auth.as_ref().unwrap();
+                assert_eq!(auth.auth_type, "ssh_key");
+                assert_eq!(auth.key_path.as_deref(), Some("/home/user/.ssh/id_rsa"));
+            }
+            _ => panic!("Expected git"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_workspace_with_token_auth() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  private:
+    type: git
+    url: "https://github.com/org/private.git"
+    ref: develop
+    auth:
+      type: token
+      token: "ghp_xxxx"
+      username: "x-access-token"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        match &config.workspaces["private"] {
+            WorkspaceSourceDef::Git { auth, git_ref, .. } => {
+                assert_eq!(git_ref, "develop");
+                let auth = auth.as_ref().unwrap();
+                assert_eq!(auth.auth_type, "token");
+                assert_eq!(auth.token.as_deref(), Some("ghp_xxxx"));
+                assert_eq!(auth.username.as_deref(), Some("x-access-token"));
+            }
+            _ => panic!("Expected git"),
+        }
     }
 
     #[test]
@@ -112,9 +235,10 @@ db:
   url: "postgres://localhost/stroem"
 log_storage:
   local_dir: "./logs"
-workspace:
-  type: "folder"
-  path: "./workspace"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
 worker_token: "token"
 auth:
   jwt_secret: "my-jwt-secret"
@@ -145,9 +269,10 @@ db:
   url: "postgres://localhost/stroem"
 log_storage:
   local_dir: "./logs"
-workspace:
-  type: "folder"
-  path: "./workspace"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
 worker_token: "token"
 auth:
   jwt_secret: "secret"
@@ -158,5 +283,299 @@ auth:
         assert_eq!(auth.jwt_secret, "secret");
         assert!(auth.initial_user.is_none());
         assert!(auth.providers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_missing_workspaces_field_fails() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+"#;
+        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        assert!(
+            result.is_err(),
+            "Config without workspaces field should fail"
+        );
+    }
+
+    #[test]
+    fn test_parse_empty_workspaces_succeeds() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert!(config.workspaces.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unknown_workspace_type_fails() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: s3
+    bucket: my-bucket
+worker_token: "token"
+"#;
+        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        assert!(result.is_err(), "Unknown workspace type should fail");
+    }
+
+    #[test]
+    fn test_parse_missing_db_url_fails() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+"#;
+        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        assert!(result.is_err(), "Config without db section should fail");
+    }
+
+    #[test]
+    fn test_parse_missing_worker_token_fails() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+"#;
+        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        assert!(result.is_err(), "Config without worker_token should fail");
+    }
+
+    #[test]
+    fn test_parse_git_workspace_defaults() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  repo:
+    type: git
+    url: "https://github.com/org/repo.git"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        match &config.workspaces["repo"] {
+            WorkspaceSourceDef::Git {
+                url,
+                git_ref,
+                poll_interval_secs,
+                auth,
+            } => {
+                assert_eq!(url, "https://github.com/org/repo.git");
+                assert_eq!(git_ref, "main");
+                assert_eq!(*poll_interval_secs, 60);
+                assert!(auth.is_none());
+            }
+            _ => panic!("Expected git workspace"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_workspace_missing_url_fails() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  repo:
+    type: git
+    ref: main
+worker_token: "token"
+"#;
+        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        assert!(result.is_err(), "Git workspace without url should fail");
+    }
+
+    #[test]
+    fn test_parse_folder_workspace_missing_path_fails() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+worker_token: "token"
+"#;
+        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        assert!(result.is_err(), "Folder workspace without path should fail");
+    }
+
+    #[test]
+    fn test_parse_git_auth_ssh_key_without_key_path() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  private:
+    type: git
+    url: "git@github.com:org/private.git"
+    auth:
+      type: ssh_key
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        match &config.workspaces["private"] {
+            WorkspaceSourceDef::Git { auth, .. } => {
+                let auth = auth.as_ref().unwrap();
+                assert_eq!(auth.auth_type, "ssh_key");
+                assert!(auth.key_path.is_none());
+            }
+            _ => panic!("Expected git workspace"),
+        }
+    }
+
+    #[test]
+    fn test_parse_git_auth_token_without_username() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  private:
+    type: git
+    url: "https://github.com/org/private.git"
+    auth:
+      type: token
+      token: "ghp_xxxx"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        match &config.workspaces["private"] {
+            WorkspaceSourceDef::Git { auth, .. } => {
+                let auth = auth.as_ref().unwrap();
+                assert_eq!(auth.auth_type, "token");
+                assert_eq!(auth.token.as_deref(), Some("ghp_xxxx"));
+                assert!(auth.username.is_none());
+            }
+            _ => panic!("Expected git workspace"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_with_many_workspaces() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local-dev:
+    type: folder
+    path: "/opt/workflows"
+  data-team:
+    type: git
+    url: "https://github.com/org/data-workflows.git"
+    ref: main
+  ml-team:
+    type: git
+    url: "git@github.com:org/ml-workflows.git"
+    ref: production
+    poll_interval_secs: 300
+    auth:
+      type: ssh_key
+      key_path: "/keys/ml-deploy"
+  infra-team:
+    type: git
+    url: "https://gitlab.com/org/infra-workflows.git"
+    ref: stable
+    auth:
+      type: token
+      token: "glpat-xxxx"
+      username: "oauth2"
+  scratch:
+    type: folder
+    path: "/tmp/workflows"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.workspaces.len(), 5);
+
+        match &config.workspaces["local-dev"] {
+            WorkspaceSourceDef::Folder { path } => assert_eq!(path, "/opt/workflows"),
+            _ => panic!("Expected folder"),
+        }
+
+        match &config.workspaces["data-team"] {
+            WorkspaceSourceDef::Git {
+                url, git_ref, auth, ..
+            } => {
+                assert_eq!(url, "https://github.com/org/data-workflows.git");
+                assert_eq!(git_ref, "main");
+                assert!(auth.is_none());
+            }
+            _ => panic!("Expected git"),
+        }
+
+        match &config.workspaces["ml-team"] {
+            WorkspaceSourceDef::Git {
+                url,
+                git_ref,
+                poll_interval_secs,
+                auth,
+            } => {
+                assert_eq!(url, "git@github.com:org/ml-workflows.git");
+                assert_eq!(git_ref, "production");
+                assert_eq!(*poll_interval_secs, 300);
+                let auth = auth.as_ref().unwrap();
+                assert_eq!(auth.auth_type, "ssh_key");
+                assert_eq!(auth.key_path.as_deref(), Some("/keys/ml-deploy"));
+            }
+            _ => panic!("Expected git"),
+        }
+
+        match &config.workspaces["infra-team"] {
+            WorkspaceSourceDef::Git { auth, .. } => {
+                let auth = auth.as_ref().unwrap();
+                assert_eq!(auth.auth_type, "token");
+                assert_eq!(auth.token.as_deref(), Some("glpat-xxxx"));
+                assert_eq!(auth.username.as_deref(), Some("oauth2"));
+            }
+            _ => panic!("Expected git"),
+        }
+
+        match &config.workspaces["scratch"] {
+            WorkspaceSourceDef::Folder { path } => assert_eq!(path, "/tmp/workflows"),
+            _ => panic!("Expected folder"),
+        }
     }
 }

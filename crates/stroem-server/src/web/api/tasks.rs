@@ -16,6 +16,7 @@ use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 pub struct TaskListItem {
     pub name: String,
     pub mode: String,
+    pub workspace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,10 +38,22 @@ pub struct ExecuteTaskResponse {
     pub job_id: String,
 }
 
-/// GET /api/tasks - List all tasks from workspace
+/// GET /api/workspaces/:ws/tasks - List all tasks from a workspace
 #[tracing::instrument(skip(state))]
-pub async fn list_tasks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let workspace = state.workspace.read().await;
+pub async fn list_tasks(
+    State(state): State<Arc<AppState>>,
+    Path(ws): Path<String>,
+) -> impl IntoResponse {
+    let workspace = match state.get_workspace(&ws).await {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
+            )
+                .into_response()
+        }
+    };
 
     let tasks: Vec<TaskListItem> = workspace
         .tasks
@@ -48,19 +61,29 @@ pub async fn list_tasks(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .map(|(name, task)| TaskListItem {
             name: name.clone(),
             mode: task.mode.clone(),
+            workspace: ws.clone(),
         })
         .collect();
 
-    Json(tasks)
+    Json(tasks).into_response()
 }
 
-/// GET /api/tasks/:name - Get task detail with action info
+/// GET /api/workspaces/:ws/tasks/:name - Get task detail with action info
 #[tracing::instrument(skip(state))]
 pub async fn get_task(
     State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
+    Path((ws, name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let workspace = state.workspace.read().await;
+    let workspace = match state.get_workspace(&ws).await {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
+            )
+                .into_response()
+        }
+    };
 
     let task = match workspace.tasks.get(&name) {
         Some(t) => t,
@@ -91,15 +114,24 @@ pub async fn get_task(
     Json(detail).into_response()
 }
 
-/// POST /api/tasks/:name/execute - Trigger task execution
+/// POST /api/workspaces/:ws/tasks/:name/execute - Trigger task execution
 #[tracing::instrument(skip(state, headers))]
 pub async fn execute_task(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(name): Path<String>,
+    Path((ws, name)): Path<(String, String)>,
     Json(req): Json<ExecuteTaskRequest>,
 ) -> impl IntoResponse {
-    let workspace = state.workspace.read().await;
+    let workspace = match state.get_workspace(&ws).await {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
+            )
+                .into_response()
+        }
+    };
 
     // 1. Look up task in workspace
     let task = match workspace.tasks.get(&name) {
@@ -133,7 +165,7 @@ pub async fn execute_task(
     };
     let job_id = match JobRepo::create(
         &state.pool,
-        "default", // workspace name - hardcoded for now
+        &ws,
         &name,
         &task.mode,
         Some(serde_json::to_value(&req.input).unwrap_or_default()),

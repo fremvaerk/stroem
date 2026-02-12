@@ -1,4 +1,5 @@
 pub mod jobs;
+pub mod workspace;
 
 use crate::state::AppState;
 use axum::{
@@ -6,7 +7,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::json;
@@ -67,6 +68,7 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
         )
         .route("/jobs/{id}/logs", post(jobs::append_log))
         .route("/jobs/{id}/complete", post(jobs::complete_job))
+        .route("/workspace/{ws}", get(workspace::download_workspace))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

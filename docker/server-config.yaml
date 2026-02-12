@@ -6,9 +6,13 @@ db:
 log_storage:
   local_dir: /var/stroem/logs
 
-workspace:
-  type: folder
-  path: /workspace
+workspaces:
+  default:
+    type: folder
+    path: /workspace
+  ops:
+    type: folder
+    path: /workspace-ops
 
 worker_token: "dev-worker-token-change-in-production"
 

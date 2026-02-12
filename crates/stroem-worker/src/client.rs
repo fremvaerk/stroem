@@ -14,6 +14,7 @@ pub struct ServerClient {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimedStep {
     pub job_id: Uuid,
+    pub workspace: String,
     pub step_name: String,
     pub action_name: String,
     pub action_type: String,
@@ -25,6 +26,7 @@ pub struct ClaimedStep {
 /// Raw claim response from server (job_id is Option since it's null when no work)
 #[derive(Debug, Deserialize)]
 struct ClaimResponse {
+    pub workspace: Option<String>,
     pub job_id: Option<String>,
     pub step_name: Option<String>,
     pub action_name: Option<String>,
@@ -177,6 +179,9 @@ impl ServerClient {
 
         let step = ClaimedStep {
             job_id: Uuid::parse_str(&job_id_str).context("Invalid job_id in claim response")?,
+            workspace: resp
+                .workspace
+                .context("Missing workspace in claim response")?,
             step_name: resp
                 .step_name
                 .context("Missing step_name in claim response")?,
@@ -267,6 +272,59 @@ impl ServerClient {
         }
 
         Ok(())
+    }
+
+    /// Download workspace tarball from the server, returns (bytes, revision)
+    /// Sends If-None-Match header if a cached revision is provided.
+    /// Returns Ok(None) if the server returns 304 Not Modified.
+    #[tracing::instrument(skip(self))]
+    pub async fn download_workspace_tarball(
+        &self,
+        workspace: &str,
+        cached_revision: Option<&str>,
+    ) -> Result<Option<(Vec<u8>, String)>> {
+        let url = format!("{}/worker/workspace/{}.tar.gz", self.base_url, workspace);
+
+        let mut req = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token));
+
+        if let Some(rev) = cached_revision {
+            req = req.header("If-None-Match", format!("\"{}\"", rev));
+        }
+
+        let response = req
+            .send()
+            .await
+            .context("Failed to download workspace tarball")?;
+
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read body".to_string());
+            anyhow::bail!("Download workspace failed with status {}: {}", status, body);
+        }
+
+        let revision = response
+            .headers()
+            .get("X-Revision")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read workspace tarball bytes")?;
+
+        Ok(Some((bytes.to_vec(), revision)))
     }
 
     /// Push log lines to the server

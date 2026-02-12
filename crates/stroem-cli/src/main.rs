@@ -25,6 +25,9 @@ enum Commands {
     Trigger {
         /// Task name
         task: String,
+        /// Workspace name
+        #[arg(long, short, default_value = "default")]
+        workspace: String,
         /// Input as JSON string
         #[arg(long)]
         input: Option<String>,
@@ -40,13 +43,19 @@ enum Commands {
         job_id: String,
     },
     /// List tasks
-    Tasks,
+    Tasks {
+        /// Workspace name (lists all workspaces if not specified)
+        #[arg(long, short)]
+        workspace: Option<String>,
+    },
     /// List jobs
     Jobs {
         /// Maximum number of jobs to show
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+    /// List workspaces
+    Workspaces,
 }
 
 #[tokio::main]
@@ -60,8 +69,12 @@ async fn main() -> Result<()> {
         Commands::Validate { path } => {
             validate_workflows(&path)?;
         }
-        Commands::Trigger { task, input } => {
-            cmd_trigger(&client, &cli.server, &task, input.as_deref()).await?;
+        Commands::Trigger {
+            task,
+            workspace,
+            input,
+        } => {
+            cmd_trigger(&client, &cli.server, &workspace, &task, input.as_deref()).await?;
         }
         Commands::Status { job_id } => {
             cmd_status(&client, &cli.server, &job_id).await?;
@@ -69,18 +82,27 @@ async fn main() -> Result<()> {
         Commands::Logs { job_id } => {
             cmd_logs(&client, &cli.server, &job_id).await?;
         }
-        Commands::Tasks => {
-            cmd_tasks(&client, &cli.server).await?;
+        Commands::Tasks { workspace } => {
+            cmd_tasks(&client, &cli.server, workspace.as_deref()).await?;
         }
         Commands::Jobs { limit } => {
             cmd_jobs(&client, &cli.server, limit).await?;
+        }
+        Commands::Workspaces => {
+            cmd_workspaces(&client, &cli.server).await?;
         }
     }
 
     Ok(())
 }
 
-async fn cmd_trigger(client: &Client, server: &str, task: &str, input: Option<&str>) -> Result<()> {
+async fn cmd_trigger(
+    client: &Client,
+    server: &str,
+    workspace: &str,
+    task: &str,
+    input: Option<&str>,
+) -> Result<()> {
     let body: Value = match input {
         Some(json_str) => {
             let input_val: Value = serde_json::from_str(json_str).context("Invalid JSON input")?;
@@ -90,7 +112,10 @@ async fn cmd_trigger(client: &Client, server: &str, task: &str, input: Option<&s
     };
 
     let resp = client
-        .post(format!("{}/api/tasks/{}/execute", server, task))
+        .post(format!(
+            "{}/api/workspaces/{}/tasks/{}/execute",
+            server, workspace, task
+        ))
         .json(&body)
         .send()
         .await
@@ -135,35 +160,41 @@ async fn cmd_status(client: &Client, server: &str, job_id: &str) -> Result<()> {
     }
 
     println!(
-        "Job:    {}",
+        "Job:       {}",
         body.get("job_id").and_then(|v| v.as_str()).unwrap_or("-")
     );
     println!(
-        "Task:   {}",
+        "Workspace: {}",
+        body.get("workspace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-")
+    );
+    println!(
+        "Task:      {}",
         body.get("task_name")
             .and_then(|v| v.as_str())
             .unwrap_or("-")
     );
     println!(
-        "Status: {}",
+        "Status:    {}",
         body.get("status").and_then(|v| v.as_str()).unwrap_or("-")
     );
     println!(
-        "Mode:   {}",
+        "Mode:      {}",
         body.get("mode").and_then(|v| v.as_str()).unwrap_or("-")
     );
     println!(
-        "Created: {}",
+        "Created:   {}",
         body.get("created_at")
             .and_then(|v| v.as_str())
             .unwrap_or("-")
     );
 
     if let Some(started) = body.get("started_at").and_then(|v| v.as_str()) {
-        println!("Started: {}", started);
+        println!("Started:   {}", started);
     }
     if let Some(completed) = body.get("completed_at").and_then(|v| v.as_str()) {
-        println!("Done:    {}", completed);
+        println!("Done:      {}", completed);
     }
 
     // Print steps
@@ -218,37 +249,93 @@ async fn cmd_logs(client: &Client, server: &str, job_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_tasks(client: &Client, server: &str) -> Result<()> {
-    let resp = client
-        .get(format!("{}/api/tasks", server))
-        .send()
-        .await
-        .context("Failed to connect to server")?;
+async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Result<()> {
+    match workspace {
+        Some(ws) => {
+            // List tasks for a specific workspace
+            let resp = client
+                .get(format!("{}/api/workspaces/{}/tasks", server, ws))
+                .send()
+                .await
+                .context("Failed to connect to server")?;
 
-    let status = resp.status();
-    let body: Value = resp.json().await.context("Failed to parse response")?;
+            let status = resp.status();
+            let body: Value = resp.json().await.context("Failed to parse response")?;
 
-    if !status.is_success() {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Server returned {}: {}", status, err);
-    }
+            if !status.is_success() {
+                let err = body
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("Server returned {}: {}", status, err);
+            }
 
-    let tasks = body.as_array().context("Expected array response")?;
+            let tasks = body.as_array().context("Expected array response")?;
 
-    if tasks.is_empty() {
-        println!("No tasks found.");
-        return Ok(());
-    }
+            if tasks.is_empty() {
+                println!("No tasks found in workspace '{}'.", ws);
+                return Ok(());
+            }
 
-    println!("{:30} MODE", "NAME");
-    println!("{}", "-".repeat(45));
-    for task in tasks {
-        let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
-        let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
-        println!("{:30} {}", name, mode);
+            println!("{:30} {:15} MODE", "NAME", "WORKSPACE");
+            println!("{}", "-".repeat(55));
+            for task in tasks {
+                let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
+                println!("{:30} {:15} {}", name, ws, mode);
+            }
+        }
+        None => {
+            // List all workspaces and their tasks
+            let ws_resp = client
+                .get(format!("{}/api/workspaces", server))
+                .send()
+                .await
+                .context("Failed to connect to server")?;
+
+            let ws_status = ws_resp.status();
+            let ws_body: Value = ws_resp.json().await.context("Failed to parse response")?;
+
+            if !ws_status.is_success() {
+                let err = ws_body
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown error");
+                anyhow::bail!("Server returned {}: {}", ws_status, err);
+            }
+
+            let workspaces = ws_body.as_array().context("Expected array response")?;
+
+            println!("{:30} {:15} MODE", "NAME", "WORKSPACE");
+            println!("{}", "-".repeat(55));
+
+            let mut total = 0;
+            for ws in workspaces {
+                let ws_name = ws.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+
+                let resp = client
+                    .get(format!("{}/api/workspaces/{}/tasks", server, ws_name))
+                    .send()
+                    .await
+                    .context("Failed to connect to server")?;
+
+                if resp.status().is_success() {
+                    let body: Value = resp.json().await.context("Failed to parse response")?;
+                    if let Some(tasks) = body.as_array() {
+                        for task in tasks {
+                            let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                            let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
+                            println!("{:30} {:15} {}", name, ws_name, mode);
+                            total += 1;
+                        }
+                    }
+                }
+            }
+
+            if total == 0 {
+                println!("No tasks found.");
+            }
+        }
     }
 
     Ok(())
@@ -279,17 +366,61 @@ async fn cmd_jobs(client: &Client, server: &str, limit: i64) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:36} {:20} {:12} CREATED", "JOB ID", "TASK", "STATUS");
-    println!("{}", "-".repeat(85));
+    println!(
+        "{:36} {:20} {:15} {:12} CREATED",
+        "JOB ID", "TASK", "WORKSPACE", "STATUS"
+    );
+    println!("{}", "-".repeat(100));
     for job in jobs {
         let id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("-");
         let task = job.get("task_name").and_then(|v| v.as_str()).unwrap_or("-");
+        let ws = job.get("workspace").and_then(|v| v.as_str()).unwrap_or("-");
         let st = job.get("status").and_then(|v| v.as_str()).unwrap_or("-");
         let created = job
             .get("created_at")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
-        println!("{:36} {:20} {:12} {}", id, task, st, created);
+        println!("{:36} {:20} {:15} {:12} {}", id, task, ws, st, created);
+    }
+
+    Ok(())
+}
+
+async fn cmd_workspaces(client: &Client, server: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{}/api/workspaces", server))
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+
+    let workspaces = body.as_array().context("Expected array response")?;
+
+    if workspaces.is_empty() {
+        println!("No workspaces found.");
+        return Ok(());
+    }
+
+    println!("{:20} {:10} ACTIONS", "NAME", "TASKS");
+    println!("{}", "-".repeat(40));
+    for ws in workspaces {
+        let name = ws.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+        let tasks = ws.get("tasks_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let actions = ws
+            .get("actions_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("{:20} {:10} {}", name, tasks, actions);
     }
 
     Ok(())

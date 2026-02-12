@@ -8,6 +8,7 @@ import { TasksPage } from "@/pages/tasks";
 import { TaskDetailPage } from "@/pages/task-detail";
 import { JobsPage } from "@/pages/jobs";
 import { JobDetailPage } from "@/pages/job-detail";
+import { WorkspacesPage } from "@/pages/workspaces";
 
 export default function App() {
   return (
@@ -17,8 +18,12 @@ export default function App() {
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route index element={<DashboardPage />} />
+            <Route path="workspaces" element={<WorkspacesPage />} />
             <Route path="tasks" element={<TasksPage />} />
-            <Route path="tasks/:name" element={<TaskDetailPage />} />
+            <Route
+              path="workspaces/:workspace/tasks/:name"
+              element={<TaskDetailPage />}
+            />
             <Route path="jobs" element={<JobsPage />} />
             <Route path="jobs/:id" element={<JobDetailPage />} />
           </Route>

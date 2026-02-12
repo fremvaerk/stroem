@@ -10,6 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { listJobs } from "@/lib/api";
@@ -107,6 +108,7 @@ export function JobsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Task</TableHead>
+                  <TableHead>Workspace</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>Created</TableHead>
@@ -123,6 +125,11 @@ export function JobsPage() {
                       >
                         {job.task_name}
                       </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary" className="font-mono text-xs">
+                        {job.workspace}
+                      </Badge>
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={job.status} />

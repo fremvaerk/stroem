@@ -10,19 +10,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { listAllTasks } from "@/lib/api";
-import type { TaskListItem } from "@/lib/types";
+import { listWorkspaces } from "@/lib/api";
+import type { WorkspaceInfo } from "@/lib/types";
 
-export function TasksPage() {
-  const [tasks, setTasks] = useState<TaskListItem[]>([]);
+export function WorkspacesPage() {
+  const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const data = await listAllTasks();
-        if (!cancelled) setTasks(data);
+        const data = await listWorkspaces();
+        if (!cancelled) setWorkspaces(data);
       } catch {
         // ignore
       } finally {
@@ -43,59 +43,63 @@ export function TasksPage() {
     );
   }
 
-  // Check if we have multiple workspaces
-  const workspaces = new Set(tasks.map((t) => t.workspace));
-  const showWorkspace = workspaces.size > 1;
-
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Tasks</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Workspaces</h1>
         <p className="text-sm text-muted-foreground">
-          Available workflow tasks
+          Configured workflow workspaces
         </p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">All Tasks</CardTitle>
+          <CardTitle className="text-base">All Workspaces</CardTitle>
         </CardHeader>
         <CardContent>
-          {tasks.length === 0 ? (
+          {workspaces.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No tasks found.
+              No workspaces found.
             </p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
-                  {showWorkspace && <TableHead>Workspace</TableHead>}
-                  <TableHead>Mode</TableHead>
+                  <TableHead>Tasks</TableHead>
+                  <TableHead>Actions</TableHead>
+                  <TableHead>Revision</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {tasks.map((task) => (
-                  <TableRow key={`${task.workspace}/${task.name}`}>
+                {workspaces.map((ws) => (
+                  <TableRow key={ws.name}>
                     <TableCell>
                       <Link
-                        to={`/workspaces/${encodeURIComponent(task.workspace)}/tasks/${encodeURIComponent(task.name)}`}
+                        to={`/tasks`}
                         className="font-medium hover:underline"
                       >
-                        {task.name}
+                        {ws.name}
                       </Link>
                     </TableCell>
-                    {showWorkspace && (
-                      <TableCell>
-                        <Badge variant="secondary" className="font-mono text-xs">
-                          {task.workspace}
-                        </Badge>
-                      </TableCell>
-                    )}
                     <TableCell>
-                      <Badge variant="outline" className="font-mono text-xs">
-                        {task.mode}
+                      <Badge variant="secondary" className="font-mono text-xs">
+                        {ws.tasks_count}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary" className="font-mono text-xs">
+                        {ws.actions_count}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {ws.revision ? (
+                        <code className="text-xs text-muted-foreground">
+                          {ws.revision.slice(0, 8)}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

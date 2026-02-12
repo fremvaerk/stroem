@@ -13,13 +13,16 @@ Prerequisites: Docker, curl, jq.
 docker compose up -d
 
 # Wait for server to be ready
-until curl -sf http://localhost:8080/api/tasks >/dev/null; do sleep 2; done
+until curl -sf http://localhost:8080/api/workspaces/default/tasks >/dev/null; do sleep 2; done
 
-# List available tasks
-curl -s http://localhost:8080/api/tasks | jq .
+# List workspaces
+curl -s http://localhost:8080/api/workspaces | jq .
+
+# List available tasks in the default workspace
+curl -s http://localhost:8080/api/workspaces/default/tasks | jq .
 
 # Run the hello-world task
-curl -s -X POST http://localhost:8080/api/tasks/hello-world/execute \
+curl -s -X POST http://localhost:8080/api/workspaces/default/tasks/hello-world/execute \
   -H "Content-Type: application/json" \
   -d '{"input": {"name": "World"}}' | jq .
 
@@ -84,9 +87,16 @@ db:
   url: "postgres://stroem:stroem@localhost:5432/stroem"
 log_storage:
   local_dir: /tmp/stroem/logs
-workspace:
-  source_type: folder
-  path: ./workspace
+workspaces:
+  default:
+    type: folder
+    path: ./workspace
+  # Add more workspaces:
+  # data-team:
+  #   type: git
+  #   url: https://github.com/org/data-workflows.git
+  #   ref: main
+  #   poll_interval_secs: 60
 worker_token: "dev-worker-token-change-in-production"
 # Optional: enable authentication
 # auth:
@@ -108,10 +118,12 @@ worker_token: "dev-worker-token-change-in-production"
 worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
-workspace_dir: "./workspace"
+workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
   - shell
 ```
+
+Workers download workspace files from the server as tarballs and cache them locally in `workspace_cache_dir`. This allows workers to run on different hosts than the server.
 
 ## CLI
 
@@ -124,11 +136,20 @@ cargo build -p stroem-cli
 # Set server URL (default: http://localhost:8080)
 export STROEM_URL=http://localhost:8080
 
-# List tasks
+# List workspaces
+stroem workspaces
+
+# List tasks (all workspaces)
 stroem tasks
+
+# List tasks in a specific workspace
+stroem tasks --workspace data-team
 
 # Trigger a task
 stroem trigger hello-world --input '{"name": "CLI"}'
+
+# Trigger a task in a specific workspace
+stroem trigger etl-pipeline --workspace data-team --input '{"date": "2025-01-01"}'
 
 # Check job status
 stroem status <job-id>
@@ -233,9 +254,10 @@ See [docs/api-reference.md](docs/api-reference.md) for the full API documentatio
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/tasks` | List all tasks |
-| `GET` | `/api/tasks/{name}` | Get task detail |
-| `POST` | `/api/tasks/{name}/execute` | Trigger task execution |
+| `GET` | `/api/workspaces` | List all workspaces |
+| `GET` | `/api/workspaces/{ws}/tasks` | List tasks in workspace |
+| `GET` | `/api/workspaces/{ws}/tasks/{name}` | Get task detail |
+| `POST` | `/api/workspaces/{ws}/tasks/{name}/execute` | Trigger task execution |
 | `GET` | `/api/jobs` | List jobs |
 | `GET` | `/api/jobs/{id}` | Get job detail with steps |
 | `GET` | `/api/jobs/{id}/logs` | Get job logs |
@@ -257,6 +279,7 @@ Authenticated via `Authorization: Bearer <worker_token>`.
 | `POST` | `/worker/jobs/{id}/steps/{step}/start` | Mark step running |
 | `POST` | `/worker/jobs/{id}/steps/{step}/complete` | Report step result |
 | `POST` | `/worker/jobs/{id}/logs` | Push log chunk |
+| `GET` | `/worker/workspace/{ws}.tar.gz` | Download workspace tarball |
 | `POST` | `/worker/jobs/{id}/complete` | Complete local-mode job |
 
 ## Testing
@@ -302,8 +325,15 @@ cargo fmt --check --all
 - UI embedded in server binary via rust-embed, served with SPA fallback
 - Playwright E2E browser tests
 
-Upcoming phases:
-- **Phase 3**: Multi-workspace, Docker/Kubernetes runners, Git workspace sources
+**Phase 3 (Multi-Workspace)** -- In progress.
+- Multiple named workspaces with folder and git sources
+- Workspace-scoped API routes (`/api/workspaces/{ws}/tasks/...`)
+- Tarball distribution to workers with ETag caching
+- Git workspace sources with SSH key and token auth
+- CLI `--workspace` flag and `workspaces` command
+
+Upcoming:
+- **Phase 3 (continued)**: Docker/Kubernetes runners
 - **Phase 4**: Local execution mode, full k8s pod specs, RBAC, secret resolution
 
 ## License

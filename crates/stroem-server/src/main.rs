@@ -3,7 +3,7 @@ use stroem_db::{create_pool, run_migrations, UserRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
 use stroem_server::state::AppState;
-use stroem_server::workspace::load_folder_workspace;
+use stroem_server::workspace::WorkspaceManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -74,21 +74,26 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Load workspace
-    tracing::info!("Loading workspace from: {}", config.workspace.path);
-    let workspace = load_folder_workspace(&config.workspace.path)
+    // Load workspaces
+    tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
+    let workspace_manager = WorkspaceManager::new(config.workspaces.clone())
         .await
-        .context("Failed to load workspace")?;
+        .context("Failed to load workspaces")?;
 
-    tracing::info!(
-        "Workspace loaded: {} actions, {} tasks, {} triggers",
-        workspace.actions.len(),
-        workspace.tasks.len(),
-        workspace.triggers.len()
-    );
+    for info in workspace_manager.list_workspace_info().await {
+        tracing::info!(
+            "Workspace '{}': {} actions, {} tasks",
+            info.name,
+            info.actions_count,
+            info.tasks_count
+        );
+    }
+
+    // Start background watchers for hot-reload
+    workspace_manager.start_watchers();
 
     // Build application state
-    let state = AppState::new(pool, workspace, config.clone());
+    let state = AppState::new(pool, workspace_manager, config.clone());
 
     // Build router
     let app = stroem_server::web::build_router(state);

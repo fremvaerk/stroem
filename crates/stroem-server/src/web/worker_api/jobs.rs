@@ -38,6 +38,7 @@ pub struct ClaimRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ClaimResponse {
+    pub workspace: Option<String>,
     pub job_id: Option<String>,
     pub step_name: Option<String>,
     pub action_name: Option<String>,
@@ -156,6 +157,7 @@ pub async fn claim_job(
         Ok(Some(step)) => step,
         Ok(None) => {
             return Json(ClaimResponse {
+                workspace: None,
                 job_id: None,
                 step_name: None,
                 action_name: None,
@@ -183,21 +185,38 @@ pub async fn claim_job(
         step.job_id
     );
 
+    // Get the job to access task_name, workspace, and job input
+    let job = match JobRepo::get(&state.pool, step.job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            tracing::error!("Job {} not found", step.job_id);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to get job: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get job: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
     // Render template input at claim time using completed step outputs
     let rendered_input = 'render: {
-        // Get the job to access task_name and job input
-        let job = match JobRepo::get(&state.pool, step.job_id).await {
-            Ok(Some(j)) => j,
-            Ok(None) | Err(_) => break 'render step.input.clone(),
-        };
-
         // Get flow step definition from workspace to find raw template input
-        let workspace = state.workspace.read().await;
+        let workspace = match state.get_workspace(&job.workspace).await {
+            Some(w) => w,
+            None => break 'render step.input.clone(),
+        };
         let task = match workspace.tasks.get(&job.task_name) {
             Some(t) => t.clone(),
             None => break 'render step.input.clone(),
         };
-        drop(workspace);
 
         let flow_step = match task.flow.get(&step.step_name) {
             Some(fs) => fs.clone(),
@@ -268,12 +287,12 @@ pub async fn claim_job(
         }
 
         // Add secrets from workspace
-        let workspace = state.workspace.read().await;
-        if !workspace.secrets.is_empty() {
-            let secrets_value = serde_json::to_value(&workspace.secrets).unwrap_or_default();
-            spec_context.insert("secret".to_string(), secrets_value);
+        if let Some(ws_config) = state.get_workspace(&job.workspace).await {
+            if !ws_config.secrets.is_empty() {
+                let secrets_value = serde_json::to_value(&ws_config.secrets).unwrap_or_default();
+                spec_context.insert("secret".to_string(), secrets_value);
+            }
         }
-        drop(workspace);
 
         let context_value = serde_json::Value::Object(spec_context);
 
@@ -347,6 +366,7 @@ pub async fn claim_job(
     };
 
     Json(ClaimResponse {
+        workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
         step_name: Some(step.step_name),
         action_name: Some(step.action_name),
@@ -472,7 +492,17 @@ pub async fn complete_step(
     };
 
     // Get task definition from workspace
-    let workspace = state.workspace.read().await;
+    let workspace = match state.get_workspace(&job.workspace).await {
+        Some(w) => w,
+        None => {
+            tracing::error!("Workspace '{}' not found", job.workspace);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Workspace not found"})),
+            )
+                .into_response();
+        }
+    };
     let task = match workspace.tasks.get(&job.task_name) {
         Some(t) => t.clone(),
         None => {
@@ -484,7 +514,6 @@ pub async fn complete_step(
                 .into_response();
         }
     };
-    drop(workspace); // Release read lock
 
     // Trigger orchestrator to handle completion
     if let Err(e) = orchestrator::on_step_completed(&state.pool, job_id, &step_name, &task).await {

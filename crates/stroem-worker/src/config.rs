@@ -8,7 +8,10 @@ pub struct WorkerConfig {
     pub worker_name: String,
     pub max_concurrent: usize,
     pub poll_interval_secs: u64,
-    pub workspace_dir: String,
+    /// Base directory for caching workspace tarballs.
+    /// Each workspace gets a subdirectory: `{workspace_cache_dir}/{workspace_name}/`
+    #[serde(alias = "workspace_dir")]
+    pub workspace_cache_dir: String,
     #[serde(default = "default_capabilities")]
     pub capabilities: Vec<String>,
 }
@@ -39,7 +42,7 @@ worker_token: "test-token"
 worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
-workspace_dir: "/tmp/stroem-workspace"
+workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
   - shell
 "#;
@@ -54,7 +57,7 @@ capabilities:
         assert_eq!(config.worker_name, "worker-1");
         assert_eq!(config.max_concurrent, 4);
         assert_eq!(config.poll_interval_secs, 2);
-        assert_eq!(config.workspace_dir, "/tmp/stroem-workspace");
+        assert_eq!(config.workspace_cache_dir, "/tmp/stroem-workspace");
         assert_eq!(config.capabilities, vec!["shell"]);
     }
 
@@ -66,7 +69,7 @@ worker_token: "test-token"
 worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
-workspace_dir: "/tmp/stroem-workspace"
+workspace_cache_dir: "/tmp/stroem-workspace"
 "#;
 
         let mut file = NamedTempFile::new().unwrap();

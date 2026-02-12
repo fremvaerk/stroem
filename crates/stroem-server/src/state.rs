@@ -1,27 +1,32 @@
 use crate::config::ServerConfig;
 use crate::log_broadcast::LogBroadcast;
+use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
-use tokio::sync::RwLock;
 
 /// Shared application state
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    pub workspace: Arc<RwLock<WorkspaceConfig>>,
+    pub workspaces: Arc<WorkspaceManager>,
     pub config: Arc<ServerConfig>,
     pub log_broadcast: Arc<LogBroadcast>,
 }
 
 impl AppState {
     /// Create a new app state
-    pub fn new(pool: PgPool, workspace: WorkspaceConfig, config: ServerConfig) -> Self {
+    pub fn new(pool: PgPool, workspaces: WorkspaceManager, config: ServerConfig) -> Self {
         Self {
             pool,
-            workspace: Arc::new(RwLock::new(workspace)),
+            workspaces: Arc::new(workspaces),
             config: Arc::new(config),
             log_broadcast: Arc::new(LogBroadcast::new()),
         }
+    }
+
+    /// Get the workspace config for a given workspace name
+    pub async fn get_workspace(&self, name: &str) -> Option<WorkspaceConfig> {
+        self.workspaces.get_config_async(name).await
     }
 }
