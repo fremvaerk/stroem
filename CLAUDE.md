@@ -6,15 +6,16 @@ Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in R
 Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
 Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
+Phase 3 (partial): Multi-workspace support with folder and git sources, tarball distribution to workers.
 
 ## Architecture
 
 - **stroem-common**: Shared types, models, DAG walker, Tera templating, validation
 - **stroem-db**: PostgreSQL layer via sqlx (runtime queries), migrations, repositories
 - **stroem-runner**: Execution backends (ShellRunner for MVP)
-- **stroem-server**: Axum API server, orchestrator, workspace loader, log storage, embedded UI via rust-embed
-- **stroem-worker**: Worker process: polls server, executes steps, streams logs
-- **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs)
+- **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed
+- **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs
+- **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs, workspaces)
 
 ## Conventions
 
@@ -102,6 +103,15 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `type: shell` (with image) -> DockerRunner/KubeRunner (Phase 3)
 - `type: docker` -> DockerRunner/KubeRunner (Phase 3)
 - `type: pod` -> KubeRunner only (Phase 4)
+
+### Multi-Workspace
+- Server config uses `workspaces:` map with named entries (folder or git source)
+- `WorkspaceSource` trait in `crates/stroem-server/src/workspace/mod.rs` with `FolderSource` and `GitSource` impls
+- `GitSource` tests use local bare repos (`file://` URL) via `git2` — see `create_bare_repo` / `add_commit` helpers. Tests require `#[tokio::test(flavor = "multi_thread")]` due to `block_in_place` in `load()`.
+- `WorkspaceManager` holds all workspace entries, provides `get_config(name)`, `get_path(name)`, `get_revision(name)`
+- API routes are workspace-scoped: `/api/workspaces/{ws}/tasks/{name}/execute`
+- Workers download workspace tarballs via `GET /worker/workspace/{ws}.tar.gz` with ETag caching
+- `WorkspaceCache` in worker manages per-workspace tarball extraction and revision tracking
 
 ### Database
 - Runtime sqlx queries, NOT compile-time checked
