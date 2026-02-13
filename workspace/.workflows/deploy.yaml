@@ -23,6 +23,7 @@ actions:
 tasks:
   deploy-pipeline:
     mode: distributed
+    folder: deploy/staging
     input:
       env:
         type: string

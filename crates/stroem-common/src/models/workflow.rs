@@ -84,6 +84,8 @@ pub struct FlowStep {
 pub struct TaskDef {
     #[serde(default = "default_mode")]
     pub mode: String, // "distributed" or "local"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     #[serde(default)]
     pub input: HashMap<String, InputFieldDef>,
     pub flow: HashMap<String, FlowStep>,
@@ -419,6 +421,35 @@ secrets:
             config.secrets.get("api_key").unwrap(),
             "ref+vault://secret/data/api#key"
         );
+    }
+
+    #[test]
+    fn test_parse_task_with_folder() {
+        let yaml = r#"
+tasks:
+  deploy-staging:
+    folder: deploy/staging
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let task = config.tasks.get("deploy-staging").unwrap();
+        assert_eq!(task.folder.as_deref(), Some("deploy/staging"));
+    }
+
+    #[test]
+    fn test_parse_task_without_folder() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: test
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let task = config.tasks.get("test").unwrap();
+        assert!(task.folder.is_none());
     }
 
     #[test]

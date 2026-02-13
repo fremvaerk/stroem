@@ -56,12 +56,15 @@ Returns all tasks from the specified workspace.
     "mode": "distributed"
   },
   {
-    "name": "deploy-pipeline",
+    "name": "deploy-staging",
     "workspace": "default",
-    "mode": "distributed"
+    "mode": "distributed",
+    "folder": "deploy/staging"
   }
 ]
 ```
+
+The `folder` field is omitted when not set on the task.
 
 ---
 
@@ -81,6 +84,7 @@ GET /api/workspaces/{ws}/tasks/{name}
 {
   "name": "hello-world",
   "mode": "distributed",
+  "folder": "deploy/staging",
   "input": {
     "name": { "type": "string", "default": "World" }
   },

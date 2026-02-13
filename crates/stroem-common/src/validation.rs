@@ -449,6 +449,7 @@ triggers:
             "test".to_string(),
             TaskDef {
                 mode: "distributed".to_string(),
+                folder: None,
                 input: HashMap::new(),
                 flow: HashMap::new(),
             },

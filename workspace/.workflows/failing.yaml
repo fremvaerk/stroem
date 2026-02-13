@@ -12,12 +12,14 @@ actions:
 tasks:
   always-failing:
     mode: distributed
+    folder: testing
     flow:
       doom:
         action: always-fail
 
   fail-in-chain:
     mode: distributed
+    folder: testing
     input:
       name: { type: string, default: "test" }
     flow:
@@ -31,6 +33,7 @@ tasks:
 
   fail-continue:
     mode: distributed
+    folder: testing
     input:
       name: { type: string, default: "test" }
     flow:

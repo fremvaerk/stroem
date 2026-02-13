@@ -121,6 +121,7 @@ fn test_workspace() -> WorkspaceConfig {
         "hello-world".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: task_input,
             flow: hello_flow,
         },
@@ -163,6 +164,7 @@ fn test_workspace() -> WorkspaceConfig {
         "greet-and-shout".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: gs_task_input,
             flow: gs_flow,
         },
@@ -201,6 +203,7 @@ fn test_workspace() -> WorkspaceConfig {
         "linear-3".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow: l3_flow,
         },
@@ -248,6 +251,7 @@ fn test_workspace() -> WorkspaceConfig {
         "diamond".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow: d_flow,
         },
@@ -268,6 +272,7 @@ fn test_workspace() -> WorkspaceConfig {
         "docker-build-task".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow: dbt_flow,
         },
@@ -312,6 +317,7 @@ fn test_workspace() -> WorkspaceConfig {
         "mixed-input".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: mi_task_input,
             flow: mi_flow,
         },
@@ -363,6 +369,7 @@ fn test_workspace() -> WorkspaceConfig {
         "wide-fan-in".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow: wfi_flow,
         },
@@ -432,6 +439,7 @@ fn test_workspace() -> WorkspaceConfig {
         "backup-task".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: bt_task_input,
             flow: bt_flow,
         },
@@ -544,8 +552,30 @@ fn test_workspace() -> WorkspaceConfig {
         "data-pipeline".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: dp_task_input,
             flow: dp_flow,
+        },
+    );
+
+    // Task: deploy-staging (single step with folder)
+    let mut ds_flow = HashMap::new();
+    ds_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy-staging".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: Some("deploy/staging".to_string()),
+            input: HashMap::new(),
+            flow: ds_flow,
         },
     );
 
@@ -1279,6 +1309,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
 
     let task = TaskDef {
         mode: "distributed".to_string(),
+        folder: None,
         input: HashMap::new(),
         flow,
     };
@@ -1352,6 +1383,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     let task = TaskDef {
         mode: "distributed".to_string(),
+        folder: None,
         input: HashMap::new(),
         flow,
     };
@@ -3167,6 +3199,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
 
     let task = TaskDef {
         mode: "distributed".to_string(),
+        folder: None,
         input: HashMap::new(),
         flow,
     };
@@ -3251,6 +3284,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
 
     let task = TaskDef {
         mode: "distributed".to_string(),
+        folder: None,
         input: HashMap::new(),
         flow,
     };
@@ -3345,6 +3379,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
 
     let task = TaskDef {
         mode: "distributed".to_string(),
+        folder: None,
         input: HashMap::new(),
         flow,
     };
@@ -3604,6 +3639,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
         );
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         }
@@ -3711,6 +3747,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
         );
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         }
@@ -3797,6 +3834,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
         );
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         }
@@ -3890,6 +3928,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
         );
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         }
@@ -3982,6 +4021,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
         );
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         }
@@ -4077,6 +4117,7 @@ async fn test_cascading_skip() -> Result<()> {
         );
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         }
@@ -4182,6 +4223,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
         "deploy-app".to_string(),
         TaskDef {
             mode: "distributed".to_string(),
+            folder: None,
             input: HashMap::new(),
             flow,
         },
@@ -5387,6 +5429,38 @@ async fn test_list_jobs_shows_workspace_field() -> Result<()> {
         // Verify workspace field is present and non-empty
         assert!(!workspace.is_empty(), "workspace field should not be empty");
     }
+
+    Ok(())
+}
+
+// ─── Task folder: List tasks includes folder field ─────────────────
+
+#[tokio::test]
+async fn test_list_tasks_includes_folder() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.oneshot(api_get("/api/workspaces/default/tasks")).await?;
+    assert_eq!(response.status(), 200);
+
+    let body = body_json(response).await;
+    let tasks = body.as_array().unwrap();
+
+    // Find task with folder
+    let deploy_staging = tasks
+        .iter()
+        .find(|t| t["name"].as_str().unwrap() == "deploy-staging")
+        .expect("deploy-staging task should exist");
+    assert_eq!(
+        deploy_staging["folder"].as_str().unwrap(),
+        "deploy/staging"
+    );
+
+    // Find task without folder — folder field should be absent (skip_serializing_if)
+    let hello_world = tasks
+        .iter()
+        .find(|t| t["name"].as_str().unwrap() == "hello-world")
+        .expect("hello-world task should exist");
+    assert!(hello_world.get("folder").is_none() || hello_world["folder"].is_null());
 
     Ok(())
 }

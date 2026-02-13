@@ -14,6 +14,7 @@ actions:
 tasks:
   data-pipeline:
     mode: distributed
+    folder: data
     input:
       data: { type: string, default: "test" }
     flow:

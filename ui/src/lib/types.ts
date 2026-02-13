@@ -9,6 +9,7 @@ export interface TaskListItem {
   name: string;
   mode: string;
   workspace: string;
+  folder?: string;
 }
 
 export interface InputField {
@@ -28,6 +29,7 @@ export interface FlowStep {
 export interface TaskDetail {
   name: string;
   mode: string;
+  folder?: string;
   input: Record<string, InputField>;
   flow: Record<string, FlowStep>;
 }

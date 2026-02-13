@@ -26,6 +26,7 @@ actions:
 tasks:
   <task-name>:
     mode: distributed
+    folder: <optional-folder-path>
     input:
       <param-name>: { type: string, default: "value" }
     flow:
@@ -257,6 +258,61 @@ cmd: "{% if enabled %}echo Active{% else %}echo Inactive{% endif %}"
 - Step names in YAML can use hyphens: `say-hello`
 - In template references, use underscores: `{{ say_hello.output.* }}`
 - This is because Tera treats `-` as the subtraction operator
+
+## Organizing Tasks with Folders
+
+Tasks can be organized into folders using the optional `folder` property. The UI displays tasks in a collapsible folder tree when folders are present.
+
+### Basic folder
+
+```yaml
+tasks:
+  deploy-staging:
+    folder: deploy
+    flow:
+      run:
+        action: deploy-app
+```
+
+### Nested folders
+
+Use `/` to create nested folder hierarchies:
+
+```yaml
+tasks:
+  deploy-staging:
+    folder: deploy/staging
+    flow:
+      run:
+        action: deploy-app
+
+  deploy-production:
+    folder: deploy/production
+    flow:
+      run:
+        action: deploy-app
+
+  run-etl:
+    folder: data/pipelines
+    flow:
+      extract:
+        action: extract-data
+```
+
+This creates a tree structure in the UI:
+
+```
+deploy/
+  staging/
+    deploy-staging
+  production/
+    deploy-production
+data/
+  pipelines/
+    run-etl
+```
+
+Tasks without a `folder` property appear at the root level. When no tasks have folders, the UI shows a flat table as before.
 
 ## Input Parameters
 

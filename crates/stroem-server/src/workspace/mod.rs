@@ -397,6 +397,7 @@ tasks:
             "test-task".to_string(),
             TaskDef {
                 mode: "distributed".to_string(),
+                folder: None,
                 input: HashMap::new(),
                 flow,
             },
@@ -448,6 +449,7 @@ tasks:
             "task1".to_string(),
             TaskDef {
                 mode: "distributed".to_string(),
+                folder: None,
                 input: HashMap::new(),
                 flow: flow1,
             },
@@ -484,6 +486,7 @@ tasks:
             "task2".to_string(),
             TaskDef {
                 mode: "distributed".to_string(),
+                folder: None,
                 input: HashMap::new(),
                 flow: flow2,
             },

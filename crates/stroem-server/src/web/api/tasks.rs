@@ -17,12 +17,16 @@ pub struct TaskListItem {
     pub name: String,
     pub mode: String,
     pub workspace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TaskDetail {
     pub name: String,
     pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     pub input: HashMap<String, serde_json::Value>,
     pub flow: HashMap<String, serde_json::Value>,
 }
@@ -62,6 +66,7 @@ pub async fn list_tasks(
             name: name.clone(),
             mode: task.mode.clone(),
             workspace: ws.clone(),
+            folder: task.folder.clone(),
         })
         .collect();
 
@@ -99,6 +104,7 @@ pub async fn get_task(
     let detail = TaskDetail {
         name: name.clone(),
         mode: task.mode.clone(),
+        folder: task.folder.clone(),
         input: task
             .input
             .iter()

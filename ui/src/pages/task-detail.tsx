@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft, Play } from "lucide-react";
+import { ArrowLeft, Folder, Play } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -73,6 +73,12 @@ export function TaskDetailPage() {
             <Badge variant="outline" className="font-mono text-xs">
               {task.mode}
             </Badge>
+            {task.folder && (
+              <Badge variant="secondary" className="font-mono text-xs">
+                <Folder className="mr-1 h-3 w-3" />
+                {task.folder}
+              </Badge>
+            )}
             {workspace && (
               <Badge variant="secondary" className="font-mono text-xs">
                 {workspace}
