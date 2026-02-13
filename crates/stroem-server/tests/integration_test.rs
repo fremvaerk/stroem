@@ -10,12 +10,14 @@ use stroem_common::models::workflow::{
     ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
 use stroem_db::{
-    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserRepo, WorkerRepo,
+    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
+    WorkerRepo,
 };
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, ServerConfig, WorkspaceSourceDef,
 };
+use stroem_server::job_creator::create_job_for_task;
 use stroem_server::orchestrator;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
@@ -616,7 +618,7 @@ async fn setup() -> Result<(
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
-    let state = AppState::new(pool.clone(), mgr, config);
+    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -2700,6 +2702,7 @@ async fn setup_with_auth() -> Result<(
         auth: Some(AuthConfig {
             jwt_secret: AUTH_JWT_SECRET.to_string(),
             refresh_secret: AUTH_REFRESH_SECRET.to_string(),
+            base_url: None,
             providers: HashMap::new(),
             initial_user: Some(InitialUserConfig {
                 email: AUTH_USER_EMAIL.to_string(),
@@ -2721,7 +2724,7 @@ async fn setup_with_auth() -> Result<(
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
-    let state = AppState::new(pool.clone(), mgr, config);
+    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -4323,7 +4326,7 @@ async fn setup_multi_workspace() -> Result<(
     );
 
     let mgr = WorkspaceManager::from_entries(entries);
-    let state = AppState::new(pool.clone(), mgr, config);
+    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -4650,7 +4653,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config);
+    let state = AppState::new(pool, mgr, config, HashMap::new());
     let router = build_router(state);
 
     // Download tarball
@@ -4804,7 +4807,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config);
+    let state = AppState::new(pool, mgr, config, HashMap::new());
     let router = build_router(state);
 
     // Send a wrong ETag — should get 200 with full tarball, not 304
@@ -4876,7 +4879,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config);
+    let state = AppState::new(pool, mgr, config, HashMap::new());
     let router = build_router(state);
 
     // First request — get the revision
@@ -4965,7 +4968,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
     .await?;
 
     // AppState is Clone and shares Arc<WorkspaceManager> across clones
-    let state = AppState::new(pool, mgr, config);
+    let state = AppState::new(pool, mgr, config, HashMap::new());
     let router = build_router(state.clone());
 
     // First request — get original revision
@@ -5087,7 +5090,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config);
+    let state = AppState::new(pool, mgr, config, HashMap::new());
     let router = build_router(state);
 
     let req = Request::builder()
@@ -5439,7 +5442,9 @@ async fn test_list_jobs_shows_workspace_field() -> Result<()> {
 async fn test_list_tasks_includes_folder() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup().await?;
 
-    let response = router.oneshot(api_get("/api/workspaces/default/tasks")).await?;
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks"))
+        .await?;
     assert_eq!(response.status(), 200);
 
     let body = body_json(response).await;
@@ -5450,10 +5455,7 @@ async fn test_list_tasks_includes_folder() -> Result<()> {
         .iter()
         .find(|t| t["name"].as_str().unwrap() == "deploy-staging")
         .expect("deploy-staging task should exist");
-    assert_eq!(
-        deploy_staging["folder"].as_str().unwrap(),
-        "deploy/staging"
-    );
+    assert_eq!(deploy_staging["folder"].as_str().unwrap(), "deploy/staging");
 
     // Find task without folder — folder field should be absent (skip_serializing_if)
     let hello_world = tasks
@@ -5461,6 +5463,513 @@ async fn test_list_tasks_includes_folder() -> Result<()> {
         .find(|t| t["name"].as_str().unwrap() == "hello-world")
         .expect("hello-world task should exist");
     assert!(hello_world.get("folder").is_none() || hello_world["folder"].is_null());
+
+    Ok(())
+}
+
+// ─── Job creator: create_job_for_task with trigger source ──────────
+
+#[tokio::test]
+async fn test_create_job_for_task_trigger_source() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+    let input = json!({"name": "Scheduler"});
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        input.clone(),
+        "trigger",
+        Some("default/every-minute"),
+    )
+    .await?;
+
+    // Verify job
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.task_name, "hello-world");
+    assert_eq!(job.workspace, "default");
+    assert_eq!(job.source_type, "trigger");
+    assert_eq!(job.source_id.as_deref(), Some("default/every-minute"));
+    assert_eq!(job.input, Some(input));
+    assert_eq!(job.status, "pending");
+
+    // Verify steps
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].step_name, "greet");
+    assert_eq!(steps[0].action_name, "greet");
+    assert_eq!(steps[0].status, "ready");
+
+    Ok(())
+}
+
+// ─── Job creator: multi-step task creates correct step statuses ────
+
+#[tokio::test]
+async fn test_create_job_for_task_multi_step() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+    let input = json!({"name": "Test"});
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "greet-and-shout",
+        input,
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 2);
+
+    // Find steps by name
+    let greet_step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    let shout_step = steps.iter().find(|s| s.step_name == "shout").unwrap();
+
+    // greet has no dependencies → ready; shout depends on greet → pending
+    assert_eq!(greet_step.status, "ready");
+    assert_eq!(shout_step.status, "pending");
+
+    Ok(())
+}
+
+// ─── Job creator: task not found returns error ─────────────────────
+
+#[tokio::test]
+async fn test_create_job_for_task_missing_task() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+
+    let result = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "nonexistent-task",
+        json!({}),
+        "api",
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not found"),
+        "Error should mention 'not found': {}",
+        err
+    );
+
+    Ok(())
+}
+
+// ─── Job creator: missing action returns error ─────────────────────
+
+#[tokio::test]
+async fn test_create_job_for_task_missing_action() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    // Build a workspace with a task that references a non-existent action
+    let mut workspace = WorkspaceConfig::default();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "action-does-not-exist".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "broken-task".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+        },
+    );
+
+    let result = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "broken-task",
+        json!({}),
+        "api",
+        None,
+    )
+    .await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not found"),
+        "Error should mention action not found: {}",
+        err
+    );
+
+    Ok(())
+}
+
+// ─── OIDC integration tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_config_returns_oidc_providers_empty() -> Result<()> {
+    let (router, _pool, _temp, _container) = setup().await?;
+
+    let res = router.oneshot(api_get("/api/config")).await?;
+
+    assert_eq!(res.status(), 200);
+    let body = body_json(res).await;
+    assert_eq!(body["auth_required"], false);
+    assert_eq!(body["has_internal_auth"], false);
+    assert_eq!(body["oidc_providers"], json!([]));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_oidc_start_unknown_provider() -> Result<()> {
+    let (router, _pool, _temp, _container) = setup().await?;
+
+    let res = router
+        .oneshot(api_get("/api/auth/oidc/nonexistent"))
+        .await?;
+
+    assert_eq!(res.status(), 404);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_link_create_and_get() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "oidc@test.com", None, Some("OIDC User")).await?;
+
+    UserAuthLinkRepo::create(&pool, user_id, "google", "ext-123").await?;
+
+    let link = UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "google", "ext-123")
+        .await?
+        .expect("Link should exist");
+    assert_eq!(link.user_id, user_id);
+    assert_eq!(link.provider_id, "google");
+    assert_eq!(link.external_id, "ext-123");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_link_nonexistent() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    let link =
+        UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "google", "no-such-id").await?;
+    assert!(link.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_link_multiple_providers_same_user() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "multi@test.com", None, None).await?;
+
+    UserAuthLinkRepo::create(&pool, user_id, "google", "g-123").await?;
+    UserAuthLinkRepo::create(&pool, user_id, "github", "gh-456").await?;
+
+    let g = UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "google", "g-123")
+        .await?
+        .expect("Google link");
+    assert_eq!(g.user_id, user_id);
+
+    let gh = UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "github", "gh-456")
+        .await?
+        .expect("GitHub link");
+    assert_eq!(gh.user_id, user_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_provision_creates_new_user() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    let user = stroem_server::oidc::provision_user(
+        &pool,
+        "google",
+        "ext-new-user",
+        "new@oidc.com",
+        Some("New User"),
+    )
+    .await?;
+
+    assert_eq!(user.email, "new@oidc.com");
+    assert_eq!(user.name.as_deref(), Some("New User"));
+    assert!(user.password_hash.is_none());
+
+    // Verify auth link was created
+    let link = UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "google", "ext-new-user")
+        .await?
+        .expect("Auth link should exist");
+    assert_eq!(link.user_id, user.user_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_provision_links_existing_email_user() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    // Create existing user with password
+    let existing_id = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        existing_id,
+        "existing@test.com",
+        Some("$argon2id$hash"),
+        Some("Existing"),
+    )
+    .await?;
+
+    let user = stroem_server::oidc::provision_user(
+        &pool,
+        "google",
+        "ext-existing",
+        "existing@test.com",
+        None,
+    )
+    .await?;
+
+    // Should return the existing user
+    assert_eq!(user.user_id, existing_id);
+    assert_eq!(user.email, "existing@test.com");
+
+    // Auth link should be created
+    let link =
+        UserAuthLinkRepo::get_by_provider_and_external_id(&pool, "google", "ext-existing").await?;
+    assert!(link.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_provision_returns_linked_user() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    // Create user and link
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&pool, user_id, "linked@test.com", None, None).await?;
+    UserAuthLinkRepo::create(&pool, user_id, "google", "ext-linked").await?;
+
+    // Provision should find existing link
+    let user = stroem_server::oidc::provision_user(
+        &pool,
+        "google",
+        "ext-linked",
+        "linked@test.com",
+        Some("Different Name"),
+    )
+    .await?;
+
+    assert_eq!(user.user_id, user_id);
+    assert_eq!(user.email, "linked@test.com");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: Some(AuthConfig {
+            jwt_secret: "secret".to_string(),
+            refresh_secret: "refresh".to_string(),
+            base_url: None,
+            providers: HashMap::new(),
+            initial_user: None,
+        }),
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let router = build_router(state);
+
+    let res = router.oneshot(api_get("/api/config")).await?;
+    assert_eq!(res.status(), 200);
+    let body = body_json(res).await;
+    assert_eq!(body["auth_required"], true);
+    // No providers configured → internal auth defaults to true (backward compat)
+    assert_eq!(body["has_internal_auth"], true);
+    assert_eq!(body["oidc_providers"], json!([]));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_config_returns_has_internal_auth_default() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let res = router.oneshot(api_get("/api/config")).await?;
+    assert_eq!(res.status(), 200);
+    let body = body_json(res).await;
+    assert_eq!(body["auth_required"], true);
+    // setup_with_auth has no providers configured → defaults to internal auth
+    assert_eq!(body["has_internal_auth"], true);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_config_returns_has_internal_auth_true() -> Result<()> {
+    use stroem_server::config::ProviderConfig;
+
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: Some(AuthConfig {
+            jwt_secret: "secret".to_string(),
+            refresh_secret: "refresh".to_string(),
+            base_url: None,
+            providers: HashMap::from([(
+                "internal".to_string(),
+                ProviderConfig {
+                    provider_type: "internal".to_string(),
+                    display_name: None,
+                    issuer_url: None,
+                    client_id: None,
+                    client_secret: None,
+                },
+            )]),
+            initial_user: None,
+        }),
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let router = build_router(state);
+
+    let res = router.oneshot(api_get("/api/config")).await?;
+    assert_eq!(res.status(), 200);
+    let body = body_json(res).await;
+    assert_eq!(body["auth_required"], true);
+    assert_eq!(body["has_internal_auth"], true);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
+    use stroem_server::config::ProviderConfig;
+
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: Some(AuthConfig {
+            jwt_secret: "secret".to_string(),
+            refresh_secret: "refresh".to_string(),
+            base_url: Some("https://stroem.example.com".to_string()),
+            providers: HashMap::from([(
+                "google".to_string(),
+                ProviderConfig {
+                    provider_type: "oidc".to_string(),
+                    display_name: Some("Google".to_string()),
+                    issuer_url: Some("https://accounts.google.com".to_string()),
+                    client_id: Some("id".to_string()),
+                    client_secret: Some("secret".to_string()),
+                },
+            )]),
+            initial_user: None,
+        }),
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    // No actual OIDC providers initialized (would need real discovery)
+    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let router = build_router(state);
+
+    let res = router.oneshot(api_get("/api/config")).await?;
+    assert_eq!(res.status(), 200);
+    let body = body_json(res).await;
+    assert_eq!(body["auth_required"], true);
+    // Only OIDC provider configured, no internal → false
+    assert_eq!(body["has_internal_auth"], false);
 
     Ok(())
 }

@@ -8,10 +8,23 @@ RUN bun install --frozen-lockfile
 COPY ui/ ./
 RUN bun run build
 
-# Stage 2: Build Rust binary
-FROM rust:1-bookworm AS builder
-
+# Stage 2: Prepare dependency recipe (cargo-chef)
+FROM rust:1-bookworm AS chef
+RUN cargo install cargo-chef
 WORKDIR /app
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 3: Build dependencies (cached layer)
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# Build only dependencies - this layer is cached unless Cargo.toml/Cargo.lock change
+RUN cargo chef cook --release --recipe-path recipe.json -p stroem-server
+
+# Now copy actual source and build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 
@@ -20,7 +33,7 @@ COPY --from=frontend /app/crates/stroem-server/static/ crates/stroem-server/stat
 
 RUN cargo build --release -p stroem-server
 
-# Stage 3: Runtime
+# Stage 4: Runtime
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*

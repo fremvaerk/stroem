@@ -42,3 +42,12 @@ tasks:
         action: greet-with-warning
         input:
           name: "{{ input.name }}"
+
+triggers:
+  hello-every-10min:
+    type: scheduler
+    cron: "0 */10 * * * *"
+    task: hello-world
+    input:
+      name: "Scheduler"
+    enabled: true

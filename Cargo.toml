@@ -50,6 +50,14 @@ sha2 = "0.10"
 rust-embed = "8"
 mime_guess = "2"
 
+# Scheduler
+croner = "2"
+tokio-util = "0.7"
+
+# OIDC
+openidconnect = "4"
+url = "2"
+
 # Workspace sources
 async-trait = "0.1"
 git2 = "0.19"

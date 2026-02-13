@@ -1,4 +1,5 @@
 use crate::auth::validate_access_token;
+use crate::job_creator::create_job_for_task;
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
@@ -10,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 
 #[derive(Debug, Serialize)]
 pub struct TaskListItem {
@@ -139,17 +139,14 @@ pub async fn execute_task(
         }
     };
 
-    // 1. Look up task in workspace
-    let task = match workspace.tasks.get(&name) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Task not found"})),
-            )
-                .into_response()
-        }
-    };
+    // 1. Verify task exists in workspace
+    if !workspace.tasks.contains_key(&name) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Task not found"})),
+        )
+            .into_response();
+    }
 
     // 2. Determine source based on authentication
     let (source_type, source_id) = {
@@ -169,12 +166,16 @@ pub async fn execute_task(
             _ => ("api", None),
         }
     };
-    let job_id = match JobRepo::create(
+
+    let input_value = serde_json::to_value(&req.input).unwrap_or_default();
+
+    // 3. Create job + steps via shared function
+    let job_id = match create_job_for_task(
         &state.pool,
+        &workspace,
         &ws,
         &name,
-        &task.mode,
-        Some(serde_json::to_value(&req.input).unwrap_or_default()),
+        input_value,
         source_type,
         source_id.as_deref(),
     )
@@ -190,59 +191,6 @@ pub async fn execute_task(
                 .into_response();
         }
     };
-
-    // 3. Create job steps
-    let mut new_steps = Vec::new();
-
-    for (step_name, flow_step) in &task.flow {
-        // Resolve action
-        let action = match workspace.actions.get(&flow_step.action) {
-            Some(a) => a,
-            None => {
-                tracing::error!("Action '{}' not found", flow_step.action);
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("Action '{}' not found", flow_step.action)})),
-                )
-                    .into_response();
-            }
-        };
-
-        // Determine initial status: ready if no dependencies, pending otherwise
-        let status = if flow_step.depends_on.is_empty() {
-            "ready"
-        } else {
-            "pending"
-        };
-
-        // Create action_spec from action definition
-        let action_spec = serde_json::to_value(action).ok();
-
-        let new_step = NewJobStep {
-            job_id,
-            step_name: step_name.clone(),
-            action_name: flow_step.action.clone(),
-            action_type: action.action_type.clone(),
-            action_image: action.image.clone(),
-            action_spec,
-            input: Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
-            status: status.to_string(),
-        };
-
-        new_steps.push(new_step);
-    }
-
-    // Insert all steps
-    if let Err(e) = JobStepRepo::create_steps(&state.pool, &new_steps).await {
-        tracing::error!("Failed to create job steps: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to create job steps: {}", e)})),
-        )
-            .into_response();
-    }
-
-    tracing::info!("Created job {} with {} steps", job_id, new_steps.len());
 
     // 4. Return job_id
     Json(ExecuteTaskResponse {

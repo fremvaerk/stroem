@@ -113,6 +113,16 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Workers download workspace tarballs via `GET /worker/workspace/{ws}.tar.gz` with ETag caching
 - `WorkspaceCache` in worker manages per-workspace tarball extraction and revision tracking
 
+### Scheduler (Cron Triggers)
+- `crates/stroem-server/src/scheduler.rs` — background task that fires cron triggers
+- `crates/stroem-server/src/job_creator.rs` — shared job+step creation used by both API handler and scheduler
+- Uses `croner` crate for cron parsing (supports 5-field and 6-field with seconds via `with_seconds_optional()`)
+- Smart sleep: wakes only at next fire time, no fixed polling interval
+- Config hot-reload: picks up workspace changes on each cycle, preserves `last_run`/`next_run` for unchanged triggers
+- Clean shutdown via `tokio_util::sync::CancellationToken` (SIGINT/SIGTERM)
+- Jobs created by triggers have `source_type = "trigger"`, `source_id = "{workspace}/{trigger_name}"`
+- Cron validation at YAML parse time in `validation.rs` (CLI `validate` catches bad expressions)
+
 ### Database
 - Runtime sqlx queries, NOT compile-time checked
 - Migrations in `crates/stroem-db/migrations/`
@@ -124,6 +134,14 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Handlers use `AuthUser` extractor for protected endpoints; handlers without it remain open
 - Password hashing: argon2id via the `argon2` crate
 - **Worker auth**: Bearer token from config (`worker_token`)
+- **OIDC SSO**: Authorization Code with PKCE flow via `openidconnect` crate
+  - Config: add `provider_type: "oidc"` providers with `issuer_url`, `client_id`, `client_secret`, `display_name`
+  - Requires `base_url` in auth config for redirect URI construction
+  - OIDC discovery at startup (`CoreProviderMetadata::discover_async`)
+  - State stored in signed HttpOnly cookie (JWT with PKCE verifier, nonce, CSRF state)
+  - JIT user provisioning: find by auth_link → find by email → create new user (in `oidc::provision_user`)
+  - Routes: `GET /api/auth/oidc/{provider}` (start) and `GET /api/auth/oidc/{provider}/callback`
+  - After callback, issues internal JWT tokens and redirects to `/login/callback#access_token=...&refresh_token=...`
 
 ### WebSocket Log Streaming
 - `GET /api/jobs/{id}/logs/stream` -- WebSocket upgrade endpoint

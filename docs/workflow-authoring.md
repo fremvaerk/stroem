@@ -336,6 +336,59 @@ curl -X POST http://localhost:8080/api/workspaces/default/tasks/deploy-pipeline/
   -d '{"input": {"env": "production"}}'
 ```
 
+## Triggers
+
+Triggers define automated task execution. Currently supported: `scheduler` (cron-based).
+
+### Cron scheduler
+
+```yaml
+triggers:
+  nightly-backup:
+    type: scheduler
+    cron: "0 0 2 * * *"
+    task: backup-db
+    input:
+      retention_days: 30
+    enabled: true
+```
+
+The `cron` field supports both standard 5-field (minute granularity) and extended 6-field (second granularity) expressions:
+
+```
+# 5-field: minute hour day-of-month month day-of-week
+cron: "0 2 * * *"           # Every day at 2:00 AM
+
+# 6-field: second minute hour day-of-month month day-of-week
+cron: "0 0 2 * * *"         # Every day at 2:00:00 AM
+cron: "*/10 * * * * *"      # Every 10 seconds
+cron: "0 30 9 * * MON-FRI"  # Weekdays at 9:30 AM
+```
+
+Extended cron features (via the `croner` library):
+- `L` — last day of month (`L` in day-of-month) or last weekday occurrence (`5L` = last Friday)
+- `#` — nth weekday (`5#2` = second Friday of the month)
+- `W` — closest weekday to a day (`15W` = closest weekday to the 15th)
+- Text names — `MON`, `TUE`, `JAN`, `FEB`, etc.
+
+### Trigger fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | Trigger type: `scheduler` or `webhook` |
+| `cron` | For scheduler | Cron expression (5 or 6 fields) |
+| `task` | Yes | Name of the task to execute |
+| `input` | No | Input values passed to the task |
+| `enabled` | No | Whether the trigger is active (default: `true`) |
+
+### How the scheduler works
+
+- The scheduler runs inside the server process and wakes only when a trigger is due (no fixed polling interval).
+- When workspace configs are hot-reloaded (every 30 seconds), the scheduler picks up new/changed/removed triggers automatically.
+- If a trigger's cron expression changes, its next fire time is recalculated. If unchanged, the existing schedule is preserved.
+- Jobs created by triggers have `source_type: "trigger"` and `source_id: "{workspace}/{trigger_name}"` for audit trail.
+- If the server was down when a trigger was due, it fires on the next startup.
+
 ## Validation
 
 Use the CLI to validate workflow files before deploying:
@@ -354,6 +407,8 @@ The validator checks:
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow
 - No cycles in the dependency graph
+- Trigger cron expressions are valid (catches syntax errors before deployment)
+- Scheduler triggers have a `cron` field
 
 ## Multi-Workspace Setup
 

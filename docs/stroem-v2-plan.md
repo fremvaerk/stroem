@@ -796,18 +796,21 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 
 ### Phase 3 -- Multi-workspace, Runners & Production Readiness
 
-1. **Multi-workspace support**: Multiple workspace sources (folder + git), each namespaced. `GET /api/workspaces` endpoint. Workspace-scoped tarballs.
-2. **Git workspace source**: Clone, poll, sync on changes. Branch tracking with configurable poll interval.
+1. ~~**Multi-workspace support**~~: **DONE** -- Multiple workspace sources (folder + git), each namespaced. `GET /api/workspaces` endpoint. Workspace-scoped tarballs.
+2. ~~**Git workspace source**~~: **DONE** -- Clone, poll, sync on changes. Branch tracking with configurable poll interval.
 3. **Action libraries**: Clone library repos, cache by ref, parse action-only definitions, include in workspace tarballs under `_libraries/`.
-4. **DockerRunner** (via bollard) -- `docker run` for `type: docker` and `type: shell` + `image` actions. Mounts workspace for shell+image, runs container as-is for docker type.
-5. **KubeRunner** (via kube-rs) -- controller pattern: worker creates k8s Job/Pod per step, watches logs via k8s API, reports results. Handles shell+image (workspace mounted, `sh -c`), docker (image as-is), and ephemeral PVC management for shared workspace across step Pods.
-6. **OIDC auth provider**
-7. **S3 log upload** (on job completion) + fallback reads from S3
-8. **API keys**: Create, list, revoke, authenticate
-9. **Webhook triggers**: `POST /hooks/{name}` endpoint
-10. **Worker heartbeat + stale job recovery**
-11. **stroem-cli**: `validate`, `trigger`, `logs` commands
-12. **Helm chart** (including k8s worker deployment with RBAC for pod creation)
+4. **Schedule triggers**: Cron-based trigger evaluation loop on the server. Evaluates `TriggerDef` entries across all workspaces, creates jobs when cron expressions match. Tracks last fire time to prevent duplicates.
+5. **DockerRunner** (via bollard) -- `docker run` for `type: docker` and `type: shell` + `image` actions. Mounts workspace for shell+image, runs container as-is for docker type.
+6. **KubeRunner** (via kube-rs) -- controller pattern: worker creates k8s Job/Pod per step, watches logs via k8s API, reports results. Handles shell+image (workspace mounted, `sh -c`), docker (image as-is), and ephemeral PVC management for shared workspace across step Pods.
+7. **OIDC auth provider**
+8. **S3 log upload** (on job completion) + fallback reads from S3
+9. **API keys**: Create, list, revoke, authenticate
+10. **Webhook triggers**: `POST /hooks/{name}` endpoint
+11. **on_error / on_success hooks**: Optional callback sections on tasks and at the workflow level (workflow-level acts as default, task-level overrides). Each hook references an action + input, enabling notifications (e.g., Slack) or triggering follow-up workflows on job completion or failure. Context available: job_id, task_name, workspace, status, error_message, step_name (for on_error).
+12. **Sub-task execution (`type: task` action)**: A new action type that triggers another task as a child job, waits for completion, and exposes its output. Supports cross-workspace references. Requires cycle detection to prevent infinite recursion.
+13. **Worker heartbeat + stale job recovery**
+14. **stroem-cli**: `validate`, `trigger`, `logs` commands
+15. **Helm chart** (including k8s worker deployment with RBAC for pod creation)
 
 ### Phase 4 -- Advanced Features
 

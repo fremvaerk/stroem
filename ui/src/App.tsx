@@ -10,12 +10,14 @@ import { JobsPage } from "@/pages/jobs";
 import { JobDetailPage } from "@/pages/job-detail";
 import { TaskRunPage } from "@/pages/task-run";
 import { WorkspacesPage } from "@/pages/workspaces";
+import { LoginCallbackPage } from "@/pages/login-callback";
 
 export default function App() {
   return (
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/login/callback" element={<LoginCallbackPage />} />
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route index element={<DashboardPage />} />

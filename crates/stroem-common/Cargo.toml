@@ -12,5 +12,6 @@ serde_yml.workspace = true
 tera.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+croner.workspace = true
 
 [dev-dependencies]

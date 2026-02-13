@@ -8,7 +8,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export function LoginPage() {
-  const { authRequired, isAuthenticated, isLoading, login } = useAuth();
+  const {
+    authRequired,
+    isAuthenticated,
+    isLoading,
+    login,
+    hasInternalAuth,
+    oidcProviders,
+  } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -25,6 +32,8 @@ export function LoginPage() {
   if (!authRequired || isAuthenticated) {
     return <Navigate to="/" replace />;
   }
+
+  const hasOidc = oidcProviders.length > 0;
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -53,39 +62,72 @@ export function LoginPage() {
             </p>
           </div>
         </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {error && (
-              <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                {error}
+        <CardContent className="space-y-4">
+          {error && (
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
+          {hasInternalAuth && (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="email">Email</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="admin@stroem.local"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  autoFocus
+                />
               </div>
-            )}
-            <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="admin@stroem.local"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoFocus
-              />
+              <div className="space-y-2">
+                <Label htmlFor="password">Password</Label>
+                <Input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={submitting}>
+                {submitting ? "Signing in..." : "Sign in"}
+              </Button>
+            </form>
+          )}
+
+          {hasInternalAuth && hasOidc && (
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-card px-2 text-muted-foreground">
+                  Or continue with
+                </span>
+              </div>
             </div>
+          )}
+
+          {hasOidc && (
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
+              {oidcProviders.map((provider) => (
+                <Button
+                  key={provider.id}
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => {
+                    window.location.href = `/api/auth/oidc/${provider.id}`;
+                  }}
+                >
+                  {provider.display_name}
+                </Button>
+              ))}
             </div>
-            <Button type="submit" className="w-full" disabled={submitting}>
-              {submitting ? "Signing in..." : "Sign in"}
-            </Button>
-          </form>
+          )}
         </CardContent>
       </Card>
     </div>

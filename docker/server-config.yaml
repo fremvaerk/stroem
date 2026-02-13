@@ -19,6 +19,7 @@ worker_token: "dev-worker-token-change-in-production"
 auth:
   jwt_secret: "dev-jwt-secret-change-in-production"
   refresh_secret: "dev-refresh-secret-change-in-production"
+  base_url: "http://localhost:8080"
   initial_user:
     email: "admin@stroem.local"
     password: "admin"

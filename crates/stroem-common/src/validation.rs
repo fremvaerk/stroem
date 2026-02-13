@@ -72,6 +72,21 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                 trigger_name
             );
         }
+
+        // Validate cron expression syntax
+        if let Some(cron_expr) = &trigger.cron {
+            if croner::Cron::new(cron_expr)
+                .with_seconds_optional()
+                .parse()
+                .is_err()
+            {
+                bail!(
+                    "Trigger '{}' has invalid cron expression '{}'",
+                    trigger_name,
+                    cron_expr
+                );
+            }
+        }
     }
 
     // Validate secrets
@@ -440,6 +455,64 @@ triggers:
             .unwrap_err()
             .to_string()
             .contains("non-existent task"));
+    }
+
+    #[test]
+    fn test_validate_trigger_invalid_cron() {
+        let mut config = WorkflowConfig::default();
+        config.tasks.insert(
+            "test".to_string(),
+            TaskDef {
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+            },
+        );
+        config.triggers.insert(
+            "bad-cron".to_string(),
+            TriggerDef {
+                trigger_type: "scheduler".to_string(),
+                cron: Some("not a cron".to_string()),
+                task: "test".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+            },
+        );
+
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid cron expression"));
+    }
+
+    #[test]
+    fn test_validate_trigger_valid_cron_6field() {
+        let mut config = WorkflowConfig::default();
+        config.tasks.insert(
+            "test".to_string(),
+            TaskDef {
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+            },
+        );
+        config.triggers.insert(
+            "every-10s".to_string(),
+            TriggerDef {
+                trigger_type: "scheduler".to_string(),
+                cron: Some("*/10 * * * * *".to_string()),
+                task: "test".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+            },
+        );
+
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
     }
 
     #[test]

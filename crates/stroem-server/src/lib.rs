@@ -1,8 +1,11 @@
 pub mod auth;
 pub mod config;
+pub mod job_creator;
 pub mod log_broadcast;
 pub mod log_storage;
+pub mod oidc;
 pub mod orchestrator;
+pub mod scheduler;
 pub mod state;
 pub mod web;
 pub mod workspace;

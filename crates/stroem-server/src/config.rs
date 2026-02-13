@@ -52,6 +52,7 @@ pub enum WorkspaceSourceDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub provider_type: String, // "internal" or "oidc"
+    pub display_name: Option<String>,
     pub issuer_url: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -69,6 +70,7 @@ pub struct InitialUserConfig {
 pub struct AuthConfig {
     pub jwt_secret: String,
     pub refresh_secret: String,
+    pub base_url: Option<String>,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     pub initial_user: Option<InitialUserConfig>,
@@ -577,5 +579,86 @@ worker_token: "token"
             WorkspaceSourceDef::Folder { path } => assert_eq!(path, "/tmp/workflows"),
             _ => panic!("Expected folder"),
         }
+    }
+
+    #[test]
+    fn test_parse_config_with_oidc_provider() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+auth:
+  jwt_secret: "secret"
+  refresh_secret: "refresh"
+  base_url: "https://stroem.company.com"
+  providers:
+    internal:
+      provider_type: "internal"
+    google:
+      provider_type: "oidc"
+      display_name: "Google"
+      issuer_url: "https://accounts.google.com"
+      client_id: "123456.apps.googleusercontent.com"
+      client_secret: "GOCSPX-secret"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let auth = config.auth.unwrap();
+        assert_eq!(auth.base_url.as_deref(), Some("https://stroem.company.com"));
+        assert_eq!(auth.providers.len(), 2);
+
+        let internal = &auth.providers["internal"];
+        assert_eq!(internal.provider_type, "internal");
+
+        let google = &auth.providers["google"];
+        assert_eq!(google.provider_type, "oidc");
+        assert_eq!(google.display_name.as_deref(), Some("Google"));
+        assert_eq!(
+            google.issuer_url.as_deref(),
+            Some("https://accounts.google.com")
+        );
+        assert_eq!(
+            google.client_id.as_deref(),
+            Some("123456.apps.googleusercontent.com")
+        );
+        assert_eq!(google.client_secret.as_deref(), Some("GOCSPX-secret"));
+    }
+
+    #[test]
+    fn test_parse_config_oidc_display_name_defaults() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+auth:
+  jwt_secret: "secret"
+  refresh_secret: "refresh"
+  providers:
+    google:
+      provider_type: "oidc"
+      issuer_url: "https://accounts.google.com"
+      client_id: "id"
+      client_secret: "secret"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let auth = config.auth.unwrap();
+        let google = &auth.providers["google"];
+        // display_name is optional (defaults to None, handled at runtime)
+        assert!(google.display_name.is_none());
+        // base_url is optional
+        assert!(auth.base_url.is_none());
     }
 }

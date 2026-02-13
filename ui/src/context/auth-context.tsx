@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import type { AuthUser } from "@/lib/types";
+import type { OidcProvider } from "@/lib/api";
 import * as api from "@/lib/api";
 
 interface AuthContextValue {
@@ -14,6 +15,8 @@ interface AuthContextValue {
   isAuthenticated: boolean;
   isLoading: boolean;
   authRequired: boolean;
+  hasInternalAuth: boolean;
+  oidcProviders: OidcProvider[];
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -24,16 +27,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [authRequired, setAuthRequired] = useState(false);
+  const [hasInternalAuth, setHasInternalAuth] = useState(false);
+  const [oidcProviders, setOidcProviders] = useState<OidcProvider[]>([]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function init() {
-      const required = await api.checkAuthRequired();
+      const config = await api.getServerConfig();
       if (cancelled) return;
-      setAuthRequired(required);
+      setAuthRequired(config.authRequired);
+      setHasInternalAuth(config.hasInternalAuth);
+      setOidcProviders(config.oidcProviders);
 
-      if (required && api.hasRefreshToken()) {
+      if (config.authRequired && api.hasRefreshToken()) {
         try {
           const me = await api.getMe();
           if (!cancelled) setUser(me);
@@ -67,10 +74,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isAuthenticated: !!user,
       isLoading,
       authRequired,
+      hasInternalAuth,
+      oidcProviders,
       login,
       logout,
     }),
-    [user, isLoading, authRequired, login, logout],
+    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, login, logout],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;

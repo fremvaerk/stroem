@@ -4,6 +4,7 @@ use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
 use stroem_server::state::AppState;
 use stroem_server::workspace::WorkspaceManager;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -92,20 +93,73 @@ async fn main() -> Result<()> {
     // Start background watchers for hot-reload
     workspace_manager.start_watchers();
 
+    // Initialize OIDC providers
+    let oidc_providers = if let Some(auth) = &config.auth {
+        if auth.providers.values().any(|p| p.provider_type == "oidc") {
+            let base_url = auth
+                .base_url
+                .as_ref()
+                .context("base_url required when OIDC providers are configured")?;
+            stroem_server::oidc::init_providers(&auth.providers, base_url).await?
+        } else {
+            std::collections::HashMap::new()
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Build application state
-    let state = AppState::new(pool, workspace_manager, config.clone());
+    let state = AppState::new(pool, workspace_manager, config.clone(), oidc_providers);
+
+    // Start scheduler
+    let cancel_token = CancellationToken::new();
+    let _scheduler = stroem_server::scheduler::start(
+        state.pool.clone(),
+        state.workspaces.clone(),
+        cancel_token.clone(),
+    );
 
     // Build router
     let app = stroem_server::web::build_router(state);
 
-    // Start server
+    // Start server with graceful shutdown
     let listener = tokio::net::TcpListener::bind(&config.listen)
         .await
         .with_context(|| format!("Failed to bind to {}", config.listen))?;
 
     tracing::info!("Server listening on {}", config.listen);
 
-    axum::serve(listener, app).await.context("Server error")?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(cancel_token))
+        .await
+        .context("Server error")?;
 
     Ok(())
+}
+
+async fn shutdown_signal(cancel_token: CancellationToken) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Shutdown signal received, stopping...");
+    cancel_token.cancel();
 }

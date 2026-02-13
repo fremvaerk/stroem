@@ -102,9 +102,17 @@ worker_token: "dev-worker-token-change-in-production"
 # auth:
 #   jwt_secret: "your-jwt-secret"
 #   refresh_secret: "your-refresh-secret"
+#   base_url: "https://stroem.company.com"  # Required for OIDC
 #   providers:
 #     internal:
 #       provider_type: internal
+#     # OIDC SSO provider example:
+#     # google:
+#     #   provider_type: oidc
+#     #   display_name: "Google"
+#     #   issuer_url: "https://accounts.google.com"
+#     #   client_id: "your-client-id.apps.googleusercontent.com"
+#     #   client_secret: "your-client-secret"
 #   initial_user:
 #     email: admin@stroem.local
 #     password: admin

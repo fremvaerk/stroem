@@ -277,10 +277,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
                 return Ok(());
             }
 
-            println!(
-                "{:30} {:15} {:20} MODE",
-                "NAME", "WORKSPACE", "FOLDER"
-            );
+            println!("{:30} {:15} {:20} MODE", "NAME", "WORKSPACE", "FOLDER");
             println!("{}", "-".repeat(75));
             for task in tasks {
                 let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
@@ -310,10 +307,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
 
             let workspaces = ws_body.as_array().context("Expected array response")?;
 
-            println!(
-                "{:30} {:15} {:20} MODE",
-                "NAME", "WORKSPACE", "FOLDER"
-            );
+            println!("{:30} {:15} {:20} MODE", "NAME", "WORKSPACE", "FOLDER");
             println!("{}", "-".repeat(75));
 
             let mut total = 0;
@@ -332,8 +326,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
                         for task in tasks {
                             let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
                             let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
-                            let folder =
-                                task.get("folder").and_then(|v| v.as_str()).unwrap_or("-");
+                            let folder = task.get("folder").and_then(|v| v.as_str()).unwrap_or("-");
                             println!("{:30} {:15} {:20} {}", name, ws_name, folder, mode);
                             total += 1;
                         }

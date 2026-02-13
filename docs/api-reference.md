@@ -242,6 +242,11 @@ Returns job metadata and all steps with their statuses.
 }
 ```
 
+**Source types:**
+- `"api"` -- Job triggered via the REST API without authentication
+- `"user"` -- Job triggered by an authenticated user (source_id contains their email)
+- `"trigger"` -- Job created by the cron scheduler (source_id contains `"{workspace}/{trigger_name}"`, e.g. `"default/nightly-backup"`)
+
 **Job statuses:** `pending`, `running`, `completed`, `failed`, `cancelled`
 
 **Step statuses:** `pending`, `ready`, `running`, `completed`, `failed`, `skipped`
@@ -477,6 +482,66 @@ Authorization: Bearer <access_token>
 
 **Error responses:**
 - `401` -- Missing or invalid access token
+
+---
+
+### Server Config
+
+```
+GET /api/config
+```
+
+Returns server configuration for the UI. This is a public endpoint (no auth required).
+
+**Response:**
+
+```json
+{
+  "auth_required": true,
+  "has_internal_auth": true,
+  "oidc_providers": [
+    { "id": "google", "display_name": "Google" }
+  ]
+}
+```
+
+- `auth_required` -- Whether authentication is enabled on this server
+- `has_internal_auth` -- Whether internal (email/password) authentication is available
+- `oidc_providers` -- List of configured OIDC providers (empty if none configured)
+
+---
+
+### OIDC Login Start
+
+```
+GET /api/auth/oidc/{provider}
+```
+
+Initiates an OIDC Authorization Code + PKCE flow. Generates a PKCE challenge and CSRF state, stores them in a signed HttpOnly cookie, and redirects to the identity provider.
+
+**Response:** `302` redirect to the identity provider's authorization endpoint.
+
+**Error responses:**
+- `404` -- Unknown OIDC provider
+
+---
+
+### OIDC Callback
+
+```
+GET /api/auth/oidc/{provider}/callback?code=AUTH_CODE&state=CSRF_STATE
+```
+
+Handles the callback from the identity provider. Validates state, exchanges the authorization code for tokens, validates the ID token, provisions the user (JIT), and issues internal JWT tokens.
+
+On success: `302` redirect to `/login/callback#access_token=AT&refresh_token=RT`
+
+On error: `302` redirect to `/login/callback#error=URL_ENCODED_MSG`
+
+JIT user provisioning:
+1. If an auth_link for this provider+external_id exists → return that user
+2. If a user with the same email exists → create auth_link and return that user
+3. Otherwise → create a new user (no password) + auth_link
 
 ---
 

@@ -158,15 +158,36 @@ export async function getMe(): Promise<AuthUser> {
   return apiFetch<AuthUser>("/api/auth/me");
 }
 
-export async function checkAuthRequired(): Promise<boolean> {
+export interface OidcProvider {
+  id: string;
+  display_name: string;
+}
+
+export interface ServerConfig {
+  authRequired: boolean;
+  hasInternalAuth: boolean;
+  oidcProviders: OidcProvider[];
+}
+
+export async function getServerConfig(): Promise<ServerConfig> {
   try {
     const res = await fetch("/api/config");
-    if (!res.ok) return false;
+    if (!res.ok)
+      return { authRequired: false, hasInternalAuth: false, oidcProviders: [] };
     const data = await res.json();
-    return !!data.auth_required;
+    return {
+      authRequired: !!data.auth_required,
+      hasInternalAuth: !!data.has_internal_auth,
+      oidcProviders: data.oidc_providers || [],
+    };
   } catch {
-    return false;
+    return { authRequired: false, hasInternalAuth: false, oidcProviders: [] };
   }
+}
+
+export function setTokensFromOidc(accessToken: string, refreshToken: string) {
+  setAccessToken(accessToken);
+  setRefreshToken(refreshToken);
 }
 
 // Workspaces
