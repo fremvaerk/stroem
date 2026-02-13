@@ -1,5 +1,6 @@
 use anyhow::Result;
 use stroem_worker::config::load_config;
+use stroem_worker::executor::StepExecutor;
 use stroem_worker::poller::run_worker;
 
 #[tokio::main]
@@ -19,6 +20,38 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting worker '{}'", config.worker_name);
 
+    // Build executor with optional runners
+    #[allow(unused_mut)]
+    let mut executor = StepExecutor::new();
+
+    #[cfg(feature = "docker")]
+    if let Some(ref docker_config) = config.docker {
+        tracing::info!("Docker runner enabled");
+        let docker_runner = if let Some(ref _host) = docker_config.host {
+            stroem_runner::DockerRunner::new()?
+        } else {
+            stroem_runner::DockerRunner::new()?
+        };
+        executor = executor.with_docker_runner(docker_runner);
+    }
+
+    #[cfg(feature = "kubernetes")]
+    if let Some(ref kube_config) = config.kubernetes {
+        tracing::info!(
+            "Kubernetes runner enabled (namespace: {})",
+            kube_config.namespace
+        );
+        let mut kube_runner = stroem_runner::KubeRunner::new(
+            kube_config.namespace.clone(),
+            config.server_url.clone(),
+            config.worker_token.clone(),
+        );
+        if let Some(ref init_image) = kube_config.init_image {
+            kube_runner = kube_runner.with_init_image(init_image.clone());
+        }
+        executor = executor.with_kube_runner(kube_runner);
+    }
+
     // Run the worker
-    run_worker(config).await
+    run_worker(config, executor).await
 }

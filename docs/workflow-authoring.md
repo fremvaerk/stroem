@@ -41,7 +41,16 @@ tasks:
 
 Actions are the smallest execution unit. Each action defines a command or script that runs on a worker.
 
-### Inline command
+### Action Types
+
+| Type | Image | Runner | Description |
+|------|-------|--------|-------------|
+| `shell` | none | ShellRunner | Runs directly on the worker host |
+| `shell` | set | DockerRunner | Runs in a Docker container on the worker |
+| `docker` | set | DockerRunner | Runs in a Docker container on the worker |
+| `pod` | set | KubeRunner | Runs as a Kubernetes pod |
+
+### Inline command (shell)
 
 ```yaml
 actions:
@@ -52,7 +61,7 @@ actions:
       name: { type: string, required: true }
 ```
 
-### Script file
+### Script file (shell)
 
 Scripts are relative to the workspace root.
 
@@ -63,6 +72,86 @@ actions:
     script: actions/deploy.sh
     input:
       env: { type: string, default: "staging" }
+```
+
+### Docker action
+
+Runs the command inside a Docker container. The workspace is bind-mounted at `/workspace` (read-only). Requires the worker to have Docker access (DinD sidecar in Kubernetes, or a local Docker socket).
+
+```yaml
+actions:
+  lint-python:
+    type: shell
+    image: python:3.12-slim
+    cmd: "pip install ruff && ruff check /workspace"
+
+  run-tests:
+    type: docker
+    image: node:20-alpine
+    cmd: "cd /workspace && npm ci && npm test"
+    input:
+      test_suite: { type: string, default: "unit" }
+```
+
+When `type: shell` is used with an `image` field, it behaves identically to `type: docker`.
+
+### Kubernetes pod action
+
+Runs the command as a Kubernetes pod. An init container downloads the workspace tarball from the server and extracts it to `/workspace`. Requires the worker to have KubeRunner configured.
+
+```yaml
+actions:
+  train-model:
+    type: pod
+    image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+    cmd: "python /workspace/train.py --epochs 10"
+    input:
+      epochs: { type: string, default: "10" }
+```
+
+### Configuring Container Runners
+
+Container runners (Docker and Kubernetes) are optional features that must be enabled at build time and configured in the worker config.
+
+**Docker runner prerequisites:**
+1. Build the worker with the `docker` feature: `cargo build -p stroem-worker --features docker`
+2. Add `docker: {}` to the worker config
+3. The worker needs Docker daemon access (local socket, or DinD sidecar in K8s via `worker.dind.enabled=true` in Helm)
+
+**Kubernetes runner prerequisites:**
+1. Build the worker with the `kubernetes` feature: `cargo build -p stroem-worker --features kubernetes`
+2. Add a `kubernetes:` section to the worker config:
+   ```yaml
+   kubernetes:
+     namespace: stroem-jobs
+     init_image: curlimages/curl:latest  # optional, default
+   ```
+3. The worker needs in-cluster credentials or a kubeconfig with permissions to create/get/delete pods in the target namespace
+4. The server must be reachable from inside the pod (the init container downloads workspace tarballs from the server)
+
+**Worker config example with both runners:**
+
+```yaml
+server_url: "http://stroem-server:8080"
+worker_token: "your-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: /var/stroem/workspace-cache
+capabilities:
+  - shell
+
+docker: {}
+
+kubernetes:
+  namespace: stroem-jobs
+```
+
+**Helm chart:** When deploying via Helm, set `worker.kubernetes.enabled=true` and/or `worker.dind.enabled=true` to automatically configure the worker. The worker Docker image must be built with the corresponding features:
+
+```bash
+# Build worker with both container runners
+docker build -f Dockerfile.worker --build-arg FEATURES="docker,kubernetes" .
 ```
 
 ### Environment variables

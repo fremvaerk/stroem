@@ -129,9 +129,41 @@ poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
   - shell
+
+# Optional: enable Docker runner (requires Docker daemon access)
+# docker: {}
+
+# Optional: enable Kubernetes runner (requires in-cluster or kubeconfig access)
+# kubernetes:
+#   namespace: stroem-jobs
+#   init_image: curlimages/curl:latest  # downloads workspace tarball
 ```
 
 Workers download workspace files from the server as tarballs and cache them locally in `workspace_cache_dir`. This allows workers to run on different hosts than the server.
+
+#### Container Runners
+
+By default, the worker only supports `type: shell` actions (runs directly on the host). To run actions inside **Docker containers** or **Kubernetes pods**, enable the respective runners:
+
+**Docker runner** — Build the worker with the `docker` feature and add `docker: {}` to the worker config. The worker needs access to a Docker daemon (local socket or DinD sidecar in K8s).
+
+```bash
+cargo build -p stroem-worker --features docker
+```
+
+**Kubernetes runner** — Build the worker with the `kubernetes` feature and add a `kubernetes:` section to the worker config. The worker creates pods in the configured namespace. An init container downloads the workspace tarball from the server before the step runs.
+
+```bash
+cargo build -p stroem-worker --features kubernetes
+```
+
+Both features can be enabled simultaneously:
+
+```bash
+cargo build -p stroem-worker --features docker,kubernetes
+```
+
+See [docs/workflow-authoring.md](docs/workflow-authoring.md) for how to write workflows using `type: docker` and `type: pod` actions.
 
 ## CLI
 
@@ -171,6 +203,52 @@ stroem jobs --limit 10
 # Validate workflow YAML files
 stroem validate workspace/.workflows/
 ```
+
+## Kubernetes Deployment (Helm)
+
+A Helm chart is provided at `helm/stroem/`. It deploys the server and worker(s) with proper secret management.
+
+```bash
+# Basic install
+helm install stroem ./helm/stroem \
+  --set database.url="postgres://stroem:pw@postgres:5432/stroem" \
+  --set workerToken="my-secure-token"
+
+# With auth enabled
+helm install stroem ./helm/stroem \
+  --set database.url="postgres://stroem:pw@postgres:5432/stroem" \
+  --set workerToken="my-secure-token" \
+  --set auth.enabled=true \
+  --set auth.jwtSecret="jwt-secret-here" \
+  --set auth.refreshSecret="refresh-secret-here"
+
+# With Kubernetes runner (steps run as K8s pods)
+helm install stroem ./helm/stroem \
+  --set database.url="postgres://stroem:pw@postgres:5432/stroem" \
+  --set workerToken="my-secure-token" \
+  --set worker.kubernetes.enabled=true \
+  --set worker.kubernetes.namespace=stroem-jobs
+
+# With Docker runner (steps run in Docker containers via DinD sidecar)
+helm install stroem ./helm/stroem \
+  --set database.url="postgres://stroem:pw@postgres:5432/stroem" \
+  --set workerToken="my-secure-token" \
+  --set worker.dind.enabled=true
+```
+
+Key Helm values:
+
+| Value | Description | Default |
+|-------|-------------|---------|
+| `server.config.workspaces` | Workspace map (folder/git sources) | `default: { type: folder, path: /workspace }` |
+| `worker.replicas` | Number of worker pods | `2` |
+| `worker.kubernetes.enabled` | Enable KubeRunner | `false` |
+| `worker.kubernetes.namespace` | Namespace for step pods | `stroem-jobs` |
+| `worker.dind.enabled` | Enable DinD sidecar for DockerRunner | `false` |
+| `auth.enabled` | Enable JWT authentication | `false` |
+| `auth.providers` | OIDC provider list | `[]` |
+
+Secrets (database URL, worker token, JWT secrets) are stored in a Kubernetes Secret and injected into config files at startup via an init container.
 
 ## Writing Workflows
 
@@ -230,17 +308,13 @@ Key concepts:
          └────┬────┘   └────┬────┘   └─────────┘
               │              │
      ┌────────┼────────┐     │
-     │ Public │ Worker │     │
-     │  API   │  API   │     │
-     └────────┴────────┘     │
-                             │
-                      ┌──────┴──────┐
-                      │ ShellRunner │
-                      └─────────────┘
+     │ Public │ Worker │     ├──── ShellRunner (host)
+     │  API   │  API   │     ├──── DockerRunner (bollard)
+     └────────┴────────┘     └──── KubeRunner (kube)
 ```
 
 - **Server**: Axum HTTP server. Loads workflows from workspace, manages jobs and steps in PostgreSQL, orchestrates DAG execution, stores logs.
-- **Worker**: Polls server for ready steps, executes them via ShellRunner, streams logs back.
+- **Worker**: Polls server for ready steps, dispatches to the appropriate runner based on `type`/`image`, streams logs back.
 - **CLI**: HTTP client for triggering tasks, checking status, and viewing logs.
 
 ### Crates
@@ -249,7 +323,7 @@ Key concepts:
 |-------|-------------|
 | `stroem-common` | Shared types, YAML models, DAG walker, Tera templating, validation |
 | `stroem-db` | PostgreSQL layer (sqlx), migrations, repositories |
-| `stroem-runner` | Execution backends (ShellRunner for MVP) |
+| `stroem-runner` | Execution backends: ShellRunner, DockerRunner (optional), KubeRunner (optional) |
 | `stroem-server` | Axum API server, orchestrator, workspace loader, log storage, embedded UI |
 | `stroem-worker` | Worker process: polls, executes, streams logs |
 | `stroem-cli` | CLI tool: validate, trigger, status, logs, tasks, jobs |
@@ -333,15 +407,17 @@ cargo fmt --check --all
 - UI embedded in server binary via rust-embed, served with SPA fallback
 - Playwright E2E browser tests
 
-**Phase 3 (Multi-Workspace)** -- In progress.
+**Phase 3 (Multi-Workspace + Container Runners)** -- Complete.
 - Multiple named workspaces with folder and git sources
 - Workspace-scoped API routes (`/api/workspaces/{ws}/tasks/...`)
 - Tarball distribution to workers with ETag caching
 - Git workspace sources with SSH key and token auth
 - CLI `--workspace` flag and `workspaces` command
+- DockerRunner: run steps in Docker containers (via bollard, optional feature)
+- KubeRunner: run steps as Kubernetes pods with workspace init container (via kube, optional feature)
+- Production Helm chart with init-container secret injection, DinD sidecar, RBAC
 
 Upcoming:
-- **Phase 3 (continued)**: Docker/Kubernetes runners
 - **Phase 4**: Local execution mode, full k8s pod specs, RBAC, secret resolution
 
 ## License

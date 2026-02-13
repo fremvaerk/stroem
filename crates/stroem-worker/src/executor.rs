@@ -7,13 +7,21 @@ use crate::client::ClaimedStep;
 
 /// Executes workflow steps using the appropriate runner
 pub struct StepExecutor {
-    runner: ShellRunner,
+    shell_runner: ShellRunner,
+    #[cfg(feature = "docker")]
+    docker_runner: Option<stroem_runner::DockerRunner>,
+    #[cfg(feature = "kubernetes")]
+    kube_runner: Option<stroem_runner::KubeRunner>,
 }
 
 impl Default for StepExecutor {
     fn default() -> Self {
         Self {
-            runner: ShellRunner::new(),
+            shell_runner: ShellRunner::new(),
+            #[cfg(feature = "docker")]
+            docker_runner: None,
+            #[cfg(feature = "kubernetes")]
+            kube_runner: None,
         }
     }
 }
@@ -21,6 +29,54 @@ impl Default for StepExecutor {
 impl StepExecutor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the Docker runner (requires `docker` feature)
+    #[cfg(feature = "docker")]
+    pub fn with_docker_runner(mut self, runner: stroem_runner::DockerRunner) -> Self {
+        self.docker_runner = Some(runner);
+        self
+    }
+
+    /// Set the Kubernetes runner (requires `kubernetes` feature)
+    #[cfg(feature = "kubernetes")]
+    pub fn with_kube_runner(mut self, runner: stroem_runner::KubeRunner) -> Self {
+        self.kube_runner = Some(runner);
+        self
+    }
+
+    /// Select the appropriate runner for a step based on action_type and image
+    fn select_runner(&self, step: &ClaimedStep) -> Result<&dyn Runner> {
+        match (step.action_type.as_str(), step.action_image.as_ref()) {
+            ("shell", None) => Ok(&self.shell_runner),
+            ("shell", Some(_)) | ("docker", _) => {
+                #[cfg(feature = "docker")]
+                {
+                    self.docker_runner
+                        .as_ref()
+                        .map(|r| r as &dyn Runner)
+                        .context("Docker runner not configured. Enable the 'docker' feature and configure docker settings in worker config.")
+                }
+                #[cfg(not(feature = "docker"))]
+                {
+                    anyhow::bail!("Docker runner not available. Build the worker with the 'docker' feature enabled.")
+                }
+            }
+            ("pod", _) => {
+                #[cfg(feature = "kubernetes")]
+                {
+                    self.kube_runner
+                        .as_ref()
+                        .map(|r| r as &dyn Runner)
+                        .context("Kubernetes runner not configured. Enable the 'kubernetes' feature and configure kubernetes settings in worker config.")
+                }
+                #[cfg(not(feature = "kubernetes"))]
+                {
+                    anyhow::bail!("Kubernetes runner not available. Build the worker with the 'kubernetes' feature enabled.")
+                }
+            }
+            (t, _) => anyhow::bail!("Unknown action type: {t}"),
+        }
     }
 
     /// Execute a claimed step and return the result.
@@ -59,9 +115,11 @@ impl StepExecutor {
             }
         });
 
-        // Execute via runner
-        let result = self
-            .runner
+        // Select and execute via appropriate runner
+        let runner = self
+            .select_runner(step)
+            .context("Failed to select runner")?;
+        let result = runner
             .execute(config, Some(log_callback))
             .await
             .context("Failed to execute step")?;
@@ -116,11 +174,18 @@ impl StepExecutor {
             }
         }
 
+        // Inject Strøm metadata env vars (used by KubeRunner for pod naming/workspace)
+        env.insert("STROEM_JOB_ID".to_string(), step.job_id.to_string());
+        env.insert("STROEM_STEP_NAME".to_string(), step.step_name.clone());
+        env.insert("STROEM_WORKSPACE".to_string(), step.workspace.clone());
+
         Ok(RunConfig {
             cmd,
             script,
             env,
             workdir: workspace_dir.to_string(),
+            action_type: step.action_type.clone(),
+            image: step.action_image.clone(),
         })
     }
 }
@@ -251,7 +316,11 @@ mod tests {
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
-        assert!(config.env.is_empty());
+        // Only the 3 STROEM_* metadata env vars should be present
+        assert_eq!(config.env.len(), 3);
+        assert!(config.env.contains_key("STROEM_JOB_ID"));
+        assert!(config.env.contains_key("STROEM_STEP_NAME"));
+        assert!(config.env.contains_key("STROEM_WORKSPACE"));
     }
 
     #[test]
@@ -264,7 +333,8 @@ mod tests {
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
-        assert!(config.env.is_empty());
+        // Only the 3 STROEM_* metadata env vars
+        assert_eq!(config.env.len(), 3);
     }
 
     #[test]
@@ -283,8 +353,8 @@ mod tests {
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
-        // Only string values should be included
-        assert_eq!(config.env.len(), 2);
+        // 2 string values + 3 STROEM_* metadata env vars
+        assert_eq!(config.env.len(), 5);
         assert_eq!(config.env.get("STR_VAL"), Some(&"hello".to_string()));
         assert_eq!(config.env.get("ANOTHER_STR"), Some(&"world".to_string()));
     }
@@ -437,5 +507,70 @@ mod tests {
             has_stderr,
             "Should capture stderr output with correct stream tag"
         );
+    }
+
+    #[test]
+    fn test_dispatch_shell_no_image() {
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        // Shell without image should resolve to shell runner
+        let runner = executor.select_runner(&step);
+        assert!(runner.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_shell_with_image() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.action_image = Some("python:3.12".to_string());
+        // Without docker feature/config, should fail gracefully
+        let runner = executor.select_runner(&step);
+        assert!(runner.is_err());
+    }
+
+    #[test]
+    fn test_dispatch_docker_type() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.action_type = "docker".to_string();
+        step.action_image = Some("alpine:latest".to_string());
+        let runner = executor.select_runner(&step);
+        assert!(runner.is_err());
+    }
+
+    #[test]
+    fn test_dispatch_pod_type() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.action_type = "pod".to_string();
+        step.action_image = Some("alpine:latest".to_string());
+        let runner = executor.select_runner(&step);
+        assert!(runner.is_err());
+    }
+
+    #[test]
+    fn test_dispatch_unknown_type() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.action_type = "unknown".to_string();
+        match executor.select_runner(&step) {
+            Err(e) => assert!(
+                e.to_string().contains("Unknown action type"),
+                "Expected 'Unknown action type' error, got: {e}"
+            ),
+            Ok(_) => panic!("Expected error for unknown action type"),
+        }
+    }
+
+    #[test]
+    fn test_build_run_config_populates_action_type_and_image() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.action_type = "docker".to_string();
+        step.action_image = Some("python:3.12".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.action_type, "docker");
+        assert_eq!(config.image, Some("python:3.12".to_string()));
     }
 }

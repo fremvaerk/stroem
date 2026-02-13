@@ -14,6 +14,26 @@ pub struct WorkerConfig {
     pub workspace_cache_dir: String,
     #[serde(default = "default_capabilities")]
     pub capabilities: Vec<String>,
+    /// Docker runner configuration (requires `docker` feature)
+    pub docker: Option<DockerRunnerConfig>,
+    /// Kubernetes runner configuration (requires `kubernetes` feature)
+    pub kubernetes: Option<KubeRunnerConfig>,
+}
+
+/// Configuration for the Docker runner
+#[derive(Debug, Clone, Deserialize)]
+pub struct DockerRunnerConfig {
+    /// Docker host URL (e.g. "tcp://localhost:2376"). If not set, uses default socket.
+    pub host: Option<String>,
+}
+
+/// Configuration for the Kubernetes runner
+#[derive(Debug, Clone, Deserialize)]
+pub struct KubeRunnerConfig {
+    /// Namespace to create pods in
+    pub namespace: String,
+    /// Custom init container image (default: curlimages/curl:latest)
+    pub init_image: Option<String>,
 }
 
 fn default_capabilities() -> Vec<String> {
@@ -78,5 +98,71 @@ workspace_cache_dir: "/tmp/stroem-workspace"
 
         let config = load_config(file.path().to_str().unwrap()).unwrap();
         assert_eq!(config.capabilities, vec!["shell"]);
+    }
+
+    #[test]
+    fn test_config_with_docker() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+docker:
+  host: "tcp://localhost:2376"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+        let docker = config.docker.unwrap();
+        assert_eq!(docker.host, Some("tcp://localhost:2376".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_kubernetes() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+kubernetes:
+  namespace: "stroem-jobs"
+  init_image: "curlimages/curl:8.5.0"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+        let kube = config.kubernetes.unwrap();
+        assert_eq!(kube.namespace, "stroem-jobs");
+        assert_eq!(kube.init_image, Some("curlimages/curl:8.5.0".to_string()));
+    }
+
+    #[test]
+    fn test_config_no_runners() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+        assert!(config.docker.is_none());
+        assert!(config.kubernetes.is_none());
     }
 }

@@ -13,5 +13,18 @@ stroem-common.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }
 tracing.workspace = true
 
+# Docker runner (optional)
+bollard = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+# Kubernetes runner (optional)
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+
+[features]
+default = []
+docker = ["bollard", "futures-util"]
+kubernetes = ["kube", "k8s-openapi", "futures-util"]
+
 [dev-dependencies]
 tokio.workspace = true

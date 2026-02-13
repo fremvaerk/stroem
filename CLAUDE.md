@@ -6,13 +6,13 @@ Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in R
 Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
 Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
-Phase 3 (partial): Multi-workspace support with folder and git sources, tarball distribution to workers.
+Phase 3: Multi-workspace support, tarball distribution, Docker and Kubernetes runners.
 
 ## Architecture
 
 - **stroem-common**: Shared types, models, DAG walker, Tera templating, validation
 - **stroem-db**: PostgreSQL layer via sqlx (runtime queries), migrations, repositories
-- **stroem-runner**: Execution backends (ShellRunner for MVP)
+- **stroem-runner**: Execution backends (ShellRunner, DockerRunner via bollard, KubeRunner via kube). Docker and Kubernetes runners are behind optional cargo features.
 - **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed
 - **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs
 - **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs, workspaces)
@@ -52,11 +52,18 @@ Every new feature or significant change **must** include documentation updates:
 ## Build & Test
 
 ```bash
-# Build everything
+# Build everything (shell runner only)
 cargo build --workspace
+
+# Build with container runners
+cargo build --workspace --features stroem-worker/docker,stroem-worker/kubernetes
 
 # Run all tests (needs Docker for integration tests)
 cargo test --workspace
+
+# Run runner tests with features
+cargo test -p stroem-runner --features docker
+cargo test -p stroem-runner --features kubernetes
 
 # Run specific crate tests
 cargo test -p stroem-common
@@ -98,11 +105,20 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml \
 ### Workflow YAML structure
 See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 
-### Action types
-- `type: shell` (no image) -> ShellRunner in-worker
-- `type: shell` (with image) -> DockerRunner/KubeRunner (Phase 3)
-- `type: docker` -> DockerRunner/KubeRunner (Phase 3)
-- `type: pod` -> KubeRunner only (Phase 4)
+### Action types and Runners
+- `type: shell` (no image) → ShellRunner — runs directly on the worker host
+- `type: shell` (with `image`) → DockerRunner — runs in a Docker container
+- `type: docker` (with `image`) → DockerRunner — runs in a Docker container
+- `type: pod` (with `image`) → KubeRunner — runs as a Kubernetes pod
+
+### Runner Architecture
+- `RunConfig` carries `action_type` and `image` fields populated from `ClaimedStep`
+- `StepExecutor::select_runner()` dispatches based on `(action_type, image)` to the appropriate `Runner` impl
+- **DockerRunner** (`crates/stroem-runner/src/docker.rs`): Uses `bollard` crate. Pulls image, creates container with workspace bind-mounted at `/workspace:ro`, streams logs, parses `OUTPUT:` lines.
+- **KubeRunner** (`crates/stroem-runner/src/kubernetes.rs`): Uses `kube` + `k8s-openapi`. Creates pod with init container that downloads workspace tarball from server, main container runs user command. Pod naming: `stroem-{job_id_short}-{step_name}`.
+- Feature-gated: `stroem-runner/docker` and `stroem-runner/kubernetes` cargo features, forwarded through `stroem-worker/docker` and `stroem-worker/kubernetes`
+- Worker config: optional `docker` and `kubernetes` sections in `worker-config.yaml`
+- Build: `cargo build --workspace` (shell only), `cargo build --features stroem-worker/docker,stroem-worker/kubernetes` (all runners)
 
 ### Multi-Workspace
 - Server config uses `workspaces:` map with named entries (folder or git source)

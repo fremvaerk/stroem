@@ -20,6 +20,48 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/server-configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
     spec:
+      initContainers:
+        - name: config-renderer
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              cp /etc/stroem-template/server-config.yaml /etc/stroem/server-config.yaml
+              sed -i "s|PLACEHOLDER_DATABASE_URL|$DATABASE_URL|g" /etc/stroem/server-config.yaml
+              sed -i "s|PLACEHOLDER_WORKER_TOKEN|$WORKER_TOKEN|g" /etc/stroem/server-config.yaml
+              {{- if .Values.auth.enabled }}
+              sed -i "s|PLACEHOLDER_JWT_SECRET|$JWT_SECRET|g" /etc/stroem/server-config.yaml
+              sed -i "s|PLACEHOLDER_REFRESH_SECRET|$REFRESH_SECRET|g" /etc/stroem/server-config.yaml
+              {{- end }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: database-url
+            - name: WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: worker-token
+            {{- if .Values.auth.enabled }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: jwt-secret
+            - name: REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: refresh-secret
+            {{- end }}
+          volumeMounts:
+            - name: config-template
+              mountPath: /etc/stroem-template
+              readOnly: true
+            - name: config
+              mountPath: /etc/stroem
       containers:
         - name: stroem-server
           image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag }}"
@@ -32,16 +74,6 @@ spec:
               value: /etc/stroem/server-config.yaml
             - name: RUST_LOG
               value: info
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "stroem.fullname" . }}
-                  key: database-url
-            - name: WORKER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "stroem.fullname" . }}
-                  key: worker-token
           livenessProbe:
             tcpSocket:
               port: http
@@ -56,9 +88,6 @@ spec:
             - name: config
               mountPath: /etc/stroem
               readOnly: true
-            - name: workspace
-              mountPath: /workspace
-              readOnly: true
             - name: logs
               mountPath: {{ .Values.server.config.logStorageDir }}
           {{- with .Values.server.resources }}
@@ -66,19 +95,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
-        - name: config
+        - name: config-template
           configMap:
             name: {{ include "stroem.fullname" . }}-server
+        - name: config
+          emptyDir: {}
         - name: logs
           emptyDir: {}
-        - name: workspace
-          {{- if eq .Values.workspace.type "pvc" }}
-          persistentVolumeClaim:
-            {{- if .Values.workspace.pvc.existingClaim }}
-            claimName: {{ .Values.workspace.pvc.existingClaim }}
-            {{- else }}
-            claimName: {{ include "stroem.fullname" . }}-workspace
-            {{- end }}
-          {{- else }}
-          emptyDir: {}
-          {{- end }}

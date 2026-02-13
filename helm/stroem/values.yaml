@@ -8,6 +8,11 @@ server:
     port: 8080
   config:
     logStorageDir: /var/stroem/logs
+    # Workspaces map matching server-config.yaml format
+    workspaces:
+      default:
+        type: folder
+        path: /workspace
   resources: {}
 
 worker:
@@ -18,30 +23,48 @@ worker:
   config:
     maxConcurrent: 4
     pollIntervalSecs: 2
+    workspaceCacheDir: /var/stroem/workspace-cache
     capabilities: ["shell"]
-  resources: {}
+  # Docker-in-Docker sidecar for DockerRunner
   dind:
-    enabled: true
+    enabled: false
     image: docker:27-dind
     resources: {}
+  # KubeRunner configuration
+  kubernetes:
+    enabled: false
+    namespace: stroem-jobs
+    initImage: curlimages/curl:latest
+  resources: {}
 
 # Shared auth token between server and workers
 workerToken: "change-me-in-production"
 
-# Workspace volume (workflows YAML + scripts)
-workspace:
-  # "emptyDir" for dev, "pvc" for production
-  type: emptyDir
-  pvc:
-    existingClaim: ""
-    storageClass: ""
-    size: 1Gi
+# Authentication (optional)
+auth:
+  enabled: false
+  jwtSecret: ""
+  refreshSecret: ""
+  # Base URL for OIDC redirect URIs (e.g. https://stroem.example.com)
+  baseUrl: ""
+  # Initial admin user (created on first deploy)
+  initialUser:
+    username: admin
+    password: ""
+  # OIDC providers
+  providers: []
+  #  - name: google
+  #    displayName: Google
+  #    providerType: oidc
+  #    issuerUrl: https://accounts.google.com
+  #    clientId: ""
+  #    clientSecret: ""
 
 # External PostgreSQL (required)
 database:
   url: "postgres://stroem:stroem@postgres:5432/stroem"
 
-# RBAC for pod creation
+# RBAC for pod creation (needed for KubeRunner)
 rbac:
   create: true
 

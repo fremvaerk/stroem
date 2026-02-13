@@ -9,13 +9,13 @@ use crate::executor::StepExecutor;
 use crate::workspace_cache::WorkspaceCache;
 
 /// Main worker loop: register, heartbeat, and poll for jobs
-#[tracing::instrument(skip(config))]
-pub async fn run_worker(config: WorkerConfig) -> Result<()> {
+#[tracing::instrument(skip(config, executor))]
+pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<()> {
     tracing::info!("Starting worker '{}'", config.worker_name);
 
     // Create shared clients, executor, and workspace cache
     let client = ServerClient::new(&config.server_url, &config.worker_token);
-    let executor = Arc::new(StepExecutor::new());
+    let executor = Arc::new(executor);
     let workspace_cache = Arc::new(WorkspaceCache::new(&config.workspace_cache_dir));
 
     // Ensure workspace cache base directory exists

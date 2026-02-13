@@ -39,8 +39,8 @@ axum-extra = { version = "0.10", features = ["cookie"] }
 
 [dev-dependencies]
 tempfile = "3"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = "0.26"
+testcontainers-modules = { version = "0.14", features = ["postgres"] }
 http = "1"
 http-body-util = "0.1"
 tokio-tungstenite = "0.26"

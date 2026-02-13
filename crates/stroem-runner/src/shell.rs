@@ -148,15 +148,25 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn shell_config(
+        cmd: Option<&str>,
+        script: Option<&str>,
+        env: HashMap<String, String>,
+    ) -> RunConfig {
+        RunConfig {
+            cmd: cmd.map(|s| s.to_string()),
+            script: script.map(|s| s.to_string()),
+            env,
+            workdir: "/tmp".to_string(),
+            action_type: "shell".to_string(),
+            image: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_simple_echo() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: Some("echo hello world".to_string()),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(Some("echo hello world"), None, HashMap::new());
         let result = runner.execute(config, None).await.unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello world"));
@@ -166,12 +176,7 @@ mod tests {
     #[tokio::test]
     async fn test_exit_code() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: Some("exit 42".to_string()),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(Some("exit 42"), None, HashMap::new());
         let result = runner.execute(config, None).await.unwrap();
         assert_eq!(result.exit_code, 42);
     }
@@ -181,12 +186,7 @@ mod tests {
         let runner = ShellRunner::new();
         let mut env = HashMap::new();
         env.insert("MY_VAR".to_string(), "my_value".to_string());
-        let config = RunConfig {
-            cmd: Some("echo $MY_VAR".to_string()),
-            script: None,
-            env,
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(Some("echo $MY_VAR"), None, env);
         let result = runner.execute(config, None).await.unwrap();
         assert!(result.stdout.contains("my_value"));
     }
@@ -194,14 +194,11 @@ mod tests {
     #[tokio::test]
     async fn test_output_parsing() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: Some(
-                r#"echo "some log line" && echo 'OUTPUT: {"greeting": "hello"}'"#.to_string(),
-            ),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(
+            Some(r#"echo "some log line" && echo 'OUTPUT: {"greeting": "hello"}'"#),
+            None,
+            HashMap::new(),
+        );
         let result = runner.execute(config, None).await.unwrap();
         assert_eq!(result.exit_code, 0);
         let output = result.output.unwrap();
@@ -211,12 +208,7 @@ mod tests {
     #[tokio::test]
     async fn test_stderr_capture() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: Some("echo error >&2".to_string()),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(Some("echo error >&2"), None, HashMap::new());
         let result = runner.execute(config, None).await.unwrap();
         assert!(result.stderr.contains("error"));
     }
@@ -229,12 +221,11 @@ mod tests {
         let callback: LogCallback = Box::new(move |line| {
             lines_clone.lock().unwrap().push(line);
         });
-        let config = RunConfig {
-            cmd: Some("echo line1 && echo line2 && echo error >&2".to_string()),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(
+            Some("echo line1 && echo line2 && echo error >&2"),
+            None,
+            HashMap::new(),
+        );
         let result = runner.execute(config, Some(callback)).await.unwrap();
         assert_eq!(result.exit_code, 0);
         let captured = lines.lock().unwrap();
@@ -244,12 +235,7 @@ mod tests {
     #[tokio::test]
     async fn test_working_directory() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: Some("pwd".to_string()),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(Some("pwd"), None, HashMap::new());
         let result = runner.execute(config, None).await.unwrap();
         assert!(result.stdout.trim().contains("tmp"));
     }
@@ -257,12 +243,11 @@ mod tests {
     #[tokio::test]
     async fn test_multiline_output() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: Some("echo line1 && echo line2 && echo line3".to_string()),
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(
+            Some("echo line1 && echo line2 && echo line3"),
+            None,
+            HashMap::new(),
+        );
         let result = runner.execute(config, None).await.unwrap();
         assert!(result.stdout.contains("line1"));
         assert!(result.stdout.contains("line2"));
@@ -272,12 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_cmd_or_script_errors() {
         let runner = ShellRunner::new();
-        let config = RunConfig {
-            cmd: None,
-            script: None,
-            env: HashMap::new(),
-            workdir: "/tmp".to_string(),
-        };
+        let config = shell_config(None, None, HashMap::new());
         let result = runner.execute(config, None).await;
         assert!(result.is_err());
     }

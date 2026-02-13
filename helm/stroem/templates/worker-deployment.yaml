@@ -21,6 +21,26 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "stroem.serviceAccountName" . }}
+      initContainers:
+        - name: config-renderer
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              cp /etc/stroem-template/worker-config.yaml /etc/stroem/worker-config.yaml
+              sed -i "s|PLACEHOLDER_WORKER_TOKEN|$WORKER_TOKEN|g" /etc/stroem/worker-config.yaml
+          env:
+            - name: WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "stroem.fullname" . }}
+                  key: worker-token
+          volumeMounts:
+            - name: config-template
+              mountPath: /etc/stroem-template
+              readOnly: true
+            - name: config
+              mountPath: /etc/stroem
       containers:
         - name: stroem-worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
@@ -29,11 +49,6 @@ spec:
               value: /etc/stroem/worker-config.yaml
             - name: RUST_LOG
               value: info
-            - name: WORKER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "stroem.fullname" . }}
-                  key: worker-token
             {{- if .Values.worker.dind.enabled }}
             - name: DOCKER_HOST
               value: tcp://localhost:2376
@@ -48,9 +63,8 @@ spec:
             - name: config
               mountPath: /etc/stroem
               readOnly: true
-            - name: workspace
-              mountPath: /workspace
-              readOnly: true
+            - name: workspace-cache
+              mountPath: {{ .Values.worker.config.workspaceCacheDir }}
             {{- if .Values.worker.dind.enabled }}
             - name: dind-certs
               mountPath: /certs/client
@@ -79,20 +93,13 @@ spec:
           {{- end }}
         {{- end }}
       volumes:
-        - name: config
+        - name: config-template
           configMap:
             name: {{ include "stroem.fullname" . }}-worker
-        - name: workspace
-          {{- if eq .Values.workspace.type "pvc" }}
-          persistentVolumeClaim:
-            {{- if .Values.workspace.pvc.existingClaim }}
-            claimName: {{ .Values.workspace.pvc.existingClaim }}
-            {{- else }}
-            claimName: {{ include "stroem.fullname" . }}-workspace
-            {{- end }}
-          {{- else }}
+        - name: config
           emptyDir: {}
-          {{- end }}
+        - name: workspace-cache
+          emptyDir: {}
         {{- if .Values.worker.dind.enabled }}
         - name: dind-storage
           emptyDir: {}

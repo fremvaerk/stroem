@@ -30,6 +30,10 @@ pub struct RunConfig {
     pub env: HashMap<String, String>,
     /// Working directory
     pub workdir: String,
+    /// Action type: "shell", "docker", or "pod"
+    pub action_type: String,
+    /// Container image (e.g. "python:3.12") — used by docker and pod runners
+    pub image: Option<String>,
 }
 
 /// A callback for receiving log lines as they're produced

@@ -39,8 +39,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .auth
         .as_ref()
         .map(|a| {
-            a.providers.is_empty()
-                || a.providers.values().any(|p| p.provider_type == "internal")
+            a.providers.is_empty() || a.providers.values().any(|p| p.provider_type == "internal")
         })
         .unwrap_or(false);
 

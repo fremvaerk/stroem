@@ -11,8 +11,20 @@ data:
     worker_name: "k8s-worker"
     max_concurrent: {{ .Values.worker.config.maxConcurrent }}
     poll_interval_secs: {{ .Values.worker.config.pollIntervalSecs }}
-    workspace_dir: /workspace
+    workspace_cache_dir: {{ .Values.worker.config.workspaceCacheDir | quote }}
     capabilities:
     {{- range .Values.worker.config.capabilities }}
       - {{ . | quote }}
+    {{- end }}
+
+    {{- if .Values.worker.kubernetes.enabled }}
+    kubernetes:
+      namespace: {{ .Values.worker.kubernetes.namespace | quote }}
+      {{- if .Values.worker.kubernetes.initImage }}
+      init_image: {{ .Values.worker.kubernetes.initImage | quote }}
+      {{- end }}
+    {{- end }}
+
+    {{- if .Values.worker.dind.enabled }}
+    docker: {}
     {{- end }}
