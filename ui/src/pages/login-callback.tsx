@@ -1,34 +1,31 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo } from "react";
 import { Link } from "react-router";
 import { Zap } from "lucide-react";
 import { setTokensFromOidc } from "@/lib/api";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
+function parseCallbackHash() {
+  const hash = window.location.hash.substring(1);
+  const params = new URLSearchParams(hash);
+  return {
+    error: params.get("error"),
+    accessToken: params.get("access_token"),
+    refreshToken: params.get("refresh_token"),
+  };
+}
+
 export function LoginCallbackPage() {
-  const [error, setError] = useState<string | null>(null);
+  const { error: urlError, accessToken, refreshToken } = useMemo(() => parseCallbackHash(), []);
+
+  const error = urlError ?? (!accessToken || !refreshToken ? "Missing tokens in callback" : null);
 
   useEffect(() => {
-    const hash = window.location.hash.substring(1);
-    const params = new URLSearchParams(hash);
-
-    const errorMsg = params.get("error");
-    if (errorMsg) {
-      setError(errorMsg);
-      return;
-    }
-
-    const accessToken = params.get("access_token");
-    const refreshToken = params.get("refresh_token");
-
     if (accessToken && refreshToken) {
       setTokensFromOidc(accessToken, refreshToken);
-      // Full reload to re-mount AuthProvider with new tokens
       window.location.href = "/";
-    } else {
-      setError("Missing tokens in callback");
     }
-  }, []);
+  }, [accessToken, refreshToken]);
 
   if (!error) {
     return (

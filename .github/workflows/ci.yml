@@ -26,6 +26,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Ensure static dir exists (rust-embed)
+        run: mkdir -p crates/stroem-server/static
+
       - name: Check formatting
         run: cargo fmt --check --all
 
@@ -60,6 +63,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Ensure static dir exists (rust-embed)
+        run: mkdir -p crates/stroem-server/static
 
       - name: Run tests
         run: cargo test --workspace
