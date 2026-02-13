@@ -9,7 +9,7 @@ pub mod docker;
 pub mod kubernetes;
 
 pub use shell::ShellRunner;
-pub use traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner};
+pub use traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode};
 
 #[cfg(feature = "docker")]
 pub use docker::DockerRunner;

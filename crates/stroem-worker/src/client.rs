@@ -21,6 +21,7 @@ pub struct ClaimedStep {
     pub action_image: Option<String>,
     pub action_spec: Option<serde_json::Value>,
     pub input: Option<serde_json::Value>,
+    pub runner: Option<String>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -34,12 +35,14 @@ struct ClaimResponse {
     pub action_image: Option<String>,
     pub action_spec: Option<serde_json::Value>,
     pub input: Option<serde_json::Value>,
+    pub runner: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct RegisterRequest {
     name: String,
     capabilities: Vec<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +59,7 @@ struct HeartbeatRequest {
 struct ClaimRequest {
     worker_id: Uuid,
     capabilities: Vec<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,11 +80,17 @@ impl ServerClient {
 
     /// Register this worker with the server
     #[tracing::instrument(skip(self))]
-    pub async fn register(&self, name: &str, capabilities: &[String]) -> Result<Uuid> {
+    pub async fn register(
+        &self,
+        name: &str,
+        capabilities: &[String],
+        tags: Option<&[String]>,
+    ) -> Result<Uuid> {
         let url = format!("{}/worker/register", self.base_url);
         let req = RegisterRequest {
             name: name.to_string(),
             capabilities: capabilities.to_vec(),
+            tags: tags.map(|t| t.to_vec()),
         };
 
         let response = self
@@ -141,11 +151,13 @@ impl ServerClient {
         &self,
         worker_id: Uuid,
         capabilities: &[String],
+        tags: Option<&[String]>,
     ) -> Result<Option<ClaimedStep>> {
         let url = format!("{}/worker/jobs/claim", self.base_url);
         let req = ClaimRequest {
             worker_id,
             capabilities: capabilities.to_vec(),
+            tags: tags.map(|t| t.to_vec()),
         };
 
         let response = self
@@ -194,6 +206,7 @@ impl ServerClient {
             action_image: resp.action_image,
             action_spec: resp.action_spec,
             input: resp.input,
+            runner: resp.runner,
         };
 
         Ok(Some(step))

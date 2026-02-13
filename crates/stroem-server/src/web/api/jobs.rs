@@ -147,6 +147,7 @@ pub async fn get_job(
                 "action_name": step.action_name,
                 "action_type": step.action_type,
                 "action_image": step.action_image,
+                "runner": step.runner,
                 "input": step.input,
                 "output": step.output,
                 "status": step.status,

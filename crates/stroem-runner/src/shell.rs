@@ -160,6 +160,10 @@ mod tests {
             workdir: "/tmp".to_string(),
             action_type: "shell".to_string(),
             image: None,
+            runner_mode: crate::RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         }
     }
 

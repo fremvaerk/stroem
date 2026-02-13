@@ -14,10 +14,21 @@ pub struct WorkerConfig {
     pub workspace_cache_dir: String,
     #[serde(default = "default_capabilities")]
     pub capabilities: Vec<String>,
+    /// Worker tags for step routing (replaces capabilities). If not set, falls back to capabilities.
+    pub tags: Option<Vec<String>>,
+    /// Default runner image for Type 2 (shell-in-container) execution
+    pub runner_image: Option<String>,
     /// Docker runner configuration (requires `docker` feature)
     pub docker: Option<DockerRunnerConfig>,
     /// Kubernetes runner configuration (requires `kubernetes` feature)
     pub kubernetes: Option<KubeRunnerConfig>,
+}
+
+impl WorkerConfig {
+    /// Returns tags if set, otherwise falls back to capabilities
+    pub fn effective_tags(&self) -> &[String] {
+        self.tags.as_deref().unwrap_or(&self.capabilities)
+    }
 }
 
 /// Configuration for the Docker runner
@@ -144,6 +155,92 @@ kubernetes:
         let kube = config.kubernetes.unwrap();
         assert_eq!(kube.namespace, "stroem-jobs");
         assert_eq!(kube.init_image, Some("curlimages/curl:8.5.0".to_string()));
+    }
+
+    #[test]
+    fn test_effective_tags_with_tags_set() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - shell
+tags:
+  - shell
+  - docker
+  - node-20
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+        // When tags is set, effective_tags() returns tags (not capabilities)
+        assert_eq!(config.effective_tags(), &["shell", "docker", "node-20"]);
+    }
+
+    #[test]
+    fn test_effective_tags_without_tags() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - shell
+  - docker
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+        // When tags is not set, effective_tags() falls back to capabilities
+        assert!(config.tags.is_none());
+        assert_eq!(config.effective_tags(), &["shell", "docker"]);
+    }
+
+    #[test]
+    fn test_config_with_tags_and_runner_image() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+tags:
+  - shell
+  - docker
+  - gpu
+runner_image: "ghcr.io/myorg/stroem-runner:latest"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.tags,
+            Some(vec![
+                "shell".to_string(),
+                "docker".to_string(),
+                "gpu".to_string()
+            ])
+        );
+        assert_eq!(
+            config.runner_image,
+            Some("ghcr.io/myorg/stroem-runner:latest".to_string())
+        );
+        assert_eq!(config.effective_tags(), &["shell", "docker", "gpu"]);
     }
 
     #[test]

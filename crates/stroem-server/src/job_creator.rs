@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use stroem_common::models::workflow::WorkspaceConfig;
+use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
@@ -60,6 +61,8 @@ pub async fn create_job_for_task(
         };
 
         let action_spec = serde_json::to_value(action).ok();
+        let required_tags = compute_required_tags(action);
+        let runner = derive_runner(action);
 
         new_steps.push(NewJobStep {
             job_id,
@@ -70,6 +73,8 @@ pub async fn create_job_for_task(
             action_spec,
             input: Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
             status: status.to_string(),
+            required_tags,
+            runner,
         });
     }
 

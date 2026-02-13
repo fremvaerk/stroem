@@ -105,20 +105,30 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml \
 ### Workflow YAML structure
 See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 
-### Action types and Runners
-- `type: shell` (no image) → ShellRunner — runs directly on the worker host
-- `type: shell` (with `image`) → DockerRunner — runs in a Docker container
-- `type: docker` (with `image`) → DockerRunner — runs in a Docker container
-- `type: pod` (with `image`) → KubeRunner — runs as a Kubernetes pod
+### Action Types and Runners (Type 1 / Type 2 Split)
+- **Type 1 (Container)**: `type: docker` or `type: pod` — runs user's prepared image as-is, no workspace mounting
+- **Type 2 (Shell)**: `type: shell` + `runner: local|docker|pod` — shell commands in a runner environment with workspace files
+- `type: shell` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: shell` + `runner: docker` (Type 2) instead.
 
 ### Runner Architecture
-- `RunConfig` carries `action_type` and `image` fields populated from `ClaimedStep`
-- `StepExecutor::select_runner()` dispatches based on `(action_type, image)` to the appropriate `Runner` impl
-- **DockerRunner** (`crates/stroem-runner/src/docker.rs`): Uses `bollard` crate. Pulls image, creates container with workspace bind-mounted at `/workspace:ro`, streams logs, parses `OUTPUT:` lines.
-- **KubeRunner** (`crates/stroem-runner/src/kubernetes.rs`): Uses `kube` + `k8s-openapi`. Creates pod with init container that downloads workspace tarball from server, main container runs user command. Pod naming: `stroem-{job_id_short}-{step_name}`.
+- `RunConfig` carries `action_type`, `image`, `runner_mode`, `runner_image`, `entrypoint`, `command`
+- `RunnerMode` enum: `WithWorkspace` (Type 2) or `NoWorkspace` (Type 1)
+- `StepExecutor::select_runner()` dispatches on `(action_type, runner_field)`:
+  - `("shell", "local")` → ShellRunner
+  - `("shell", "docker")` or `("docker", _)` → DockerRunner
+  - `("shell", "pod")` or `("pod", _)` → KubeRunner
+- **DockerRunner** (`crates/stroem-runner/src/docker.rs`): Uses `bollard` crate. Dual mode: `WithWorkspace` bind-mounts workspace at `/workspace:ro`; `NoWorkspace` runs image standalone with optional entrypoint/command.
+- **KubeRunner** (`crates/stroem-runner/src/kubernetes.rs`): Uses `kube` + `k8s-openapi`. Dual mode: `WithWorkspace` has init container + workspace volume; `NoWorkspace` runs image directly.
 - Feature-gated: `stroem-runner/docker` and `stroem-runner/kubernetes` cargo features, forwarded through `stroem-worker/docker` and `stroem-worker/kubernetes`
-- Worker config: optional `docker` and `kubernetes` sections in `worker-config.yaml`
+- Worker config: optional `docker` and `kubernetes` sections, plus `tags` and `runner_image` in `worker-config.yaml`
 - Build: `cargo build --workspace` (shell only), `cargo build --features stroem-worker/docker,stroem-worker/kubernetes` (all runners)
+
+### Tags and Step Claiming
+- Workers declare `tags` (replaces `capabilities`) — e.g. `["shell", "docker", "gpu"]`
+- Steps compute `required_tags` from action type/runner + explicit tags
+- Claim SQL: `required_tags <@ worker_tags::jsonb` (all required tags must be in worker's tag set)
+- GIN index on `job_step.required_tags` for efficient containment queries
+- Backward compatible: `capabilities` still works if `tags` not set
 
 ### Multi-Workspace
 - Server config uses `workspaces:` map with named entries (folder or git source)

@@ -91,7 +91,14 @@ async fn test_create_steps_and_claim() -> Result<()> {
 
     // Register a worker
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     // Create a job
     let job_id = JobRepo::create(
@@ -116,6 +123,8 @@ async fn test_create_steps_and_claim() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo hello"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -126,6 +135,8 @@ async fn test_create_steps_and_claim() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo world"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
 
@@ -175,6 +186,8 @@ async fn test_claim_concurrency() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo test"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         });
     }
 
@@ -191,6 +204,7 @@ async fn test_claim_concurrency() -> Result<()> {
                 &pool_clone,
                 worker_id,
                 &format!("worker-{}", i),
+                &["shell".to_string()],
                 &["shell".to_string()],
             )
             .await
@@ -239,7 +253,14 @@ async fn test_step_lifecycle() -> Result<()> {
     .await?;
 
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     // Create a ready step
     let steps = vec![NewJobStep {
@@ -251,6 +272,8 @@ async fn test_step_lifecycle() -> Result<()> {
         action_spec: Some(serde_json::json!({"cmd": "echo test"})),
         input: None,
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
 
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -311,6 +334,8 @@ async fn test_update_input() -> Result<()> {
         action_spec: None,
         input: None,
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -356,6 +381,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -366,6 +393,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -376,6 +405,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo 3"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -386,6 +417,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"cmd": "echo 4"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
 
@@ -463,7 +496,14 @@ async fn test_worker_register_and_heartbeat() -> Result<()> {
     let capabilities = vec!["shell".to_string(), "docker".to_string()];
 
     // Register
-    WorkerRepo::register(&pool, worker_id, "test-worker", &capabilities).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &capabilities,
+        &capabilities,
+    )
+    .await?;
 
     // Get
     let worker = WorkerRepo::get(&pool, worker_id)
@@ -514,6 +554,8 @@ async fn test_all_steps_terminal() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -524,6 +566,8 @@ async fn test_all_steps_terminal() -> Result<()> {
             action_spec: None,
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
 
@@ -569,6 +613,8 @@ async fn test_any_step_failed() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -579,6 +625,8 @@ async fn test_any_step_failed() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
 
@@ -622,6 +670,8 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         action_spec: None,
         input: None,
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -664,7 +714,14 @@ async fn test_job_status_transitions() -> Result<()> {
 
     // Mark running
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
     JobRepo::mark_running(&pool, job_id, worker_id).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -727,6 +784,8 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -737,13 +796,22 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["docker".to_string()],
+            runner: "none".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Worker with only "shell" capability
     let shell_worker = Uuid::new_v4();
-    WorkerRepo::register(&pool, shell_worker, "shell-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        shell_worker,
+        "shell-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let claimed =
         JobStepRepo::claim_ready_step(&pool, &["shell".to_string()], shell_worker).await?;
@@ -757,6 +825,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         &pool,
         docker_worker,
         "docker-worker",
+        &["docker".to_string()],
         &["docker".to_string()],
     )
     .await?;

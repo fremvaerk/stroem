@@ -24,6 +24,11 @@ async fn main() -> Result<()> {
     #[allow(unused_mut)]
     let mut executor = StepExecutor::new();
 
+    if let Some(ref runner_image) = config.runner_image {
+        tracing::info!("Default runner image: {}", runner_image);
+        executor = executor.with_runner_image(runner_image.clone());
+    }
+
     #[cfg(feature = "docker")]
     if let Some(ref docker_config) = config.docker {
         tracing::info!("Docker runner enabled");

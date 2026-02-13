@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use stroem_runner::{LogCallback, LogLine, RunConfig, RunResult, Runner, ShellRunner};
+use stroem_runner::{LogCallback, LogLine, RunConfig, RunResult, Runner, RunnerMode, ShellRunner};
 
 use crate::client::ClaimedStep;
 
@@ -12,6 +12,8 @@ pub struct StepExecutor {
     docker_runner: Option<stroem_runner::DockerRunner>,
     #[cfg(feature = "kubernetes")]
     kube_runner: Option<stroem_runner::KubeRunner>,
+    /// Default runner image for Type 2 (shell-in-container) execution
+    runner_image: Option<String>,
 }
 
 impl Default for StepExecutor {
@@ -22,6 +24,7 @@ impl Default for StepExecutor {
             docker_runner: None,
             #[cfg(feature = "kubernetes")]
             kube_runner: None,
+            runner_image: None,
         }
     }
 }
@@ -29,6 +32,12 @@ impl Default for StepExecutor {
 impl StepExecutor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the default runner image for Type 2 execution
+    pub fn with_runner_image(mut self, image: String) -> Self {
+        self.runner_image = Some(image);
+        self
     }
 
     /// Set the Docker runner (requires `docker` feature)
@@ -45,11 +54,12 @@ impl StepExecutor {
         self
     }
 
-    /// Select the appropriate runner for a step based on action_type and image
+    /// Select the appropriate runner for a step based on (action_type, runner) dispatch
     fn select_runner(&self, step: &ClaimedStep) -> Result<&dyn Runner> {
-        match (step.action_type.as_str(), step.action_image.as_ref()) {
-            ("shell", None) => Ok(&self.shell_runner),
-            ("shell", Some(_)) | ("docker", _) => {
+        let runner_field = step.runner.as_deref().unwrap_or("local");
+        match (step.action_type.as_str(), runner_field) {
+            ("shell", "local") => Ok(&self.shell_runner),
+            ("shell", "docker") | ("docker", _) => {
                 #[cfg(feature = "docker")]
                 {
                     self.docker_runner
@@ -62,7 +72,7 @@ impl StepExecutor {
                     anyhow::bail!("Docker runner not available. Build the worker with the 'docker' feature enabled.")
                 }
             }
-            ("pod", _) => {
+            ("shell", "pod") | ("pod", _) => {
                 #[cfg(feature = "kubernetes")]
                 {
                     self.kube_runner
@@ -75,7 +85,7 @@ impl StepExecutor {
                     anyhow::bail!("Kubernetes runner not available. Build the worker with the 'kubernetes' feature enabled.")
                 }
             }
-            (t, _) => anyhow::bail!("Unknown action type: {t}"),
+            (t, r) => anyhow::bail!("Unknown action type / runner combination: {t}/{r}"),
         }
     }
 
@@ -140,6 +150,14 @@ impl StepExecutor {
             .as_ref()
             .context("Missing action_spec in claimed step")?;
 
+        let runner_field = step.runner.as_deref().unwrap_or("local");
+        let is_type2 = step.action_type == "shell"; // Type 2: shell with workspace
+        let runner_mode = if is_type2 {
+            RunnerMode::WithWorkspace
+        } else {
+            RunnerMode::NoWorkspace
+        };
+
         // Extract cmd or script from action_spec
         let cmd = action_spec
             .get("cmd")
@@ -158,9 +176,36 @@ impl StepExecutor {
             }
         });
 
-        if cmd.is_none() && script.is_none() {
+        // Extract entrypoint and command from action_spec
+        let entrypoint = action_spec.get("entrypoint").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        });
+
+        let command = action_spec.get("command").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+        });
+
+        // Type 2 (shell) requires cmd or script; Type 1 (docker/pod) allows empty (image defaults)
+        if is_type2 && cmd.is_none() && script.is_none() {
             anyhow::bail!("Action spec must contain either 'cmd' or 'script'");
         }
+
+        // Determine image: Type 2 uses runner_image, Type 1 uses action image
+        let image = if is_type2 && runner_field != "local" {
+            self.runner_image
+                .clone()
+                .or_else(|| step.action_image.clone())
+        } else {
+            step.action_image.clone()
+        };
 
         // Extract env from action_spec
         let mut env = HashMap::new();
@@ -185,7 +230,11 @@ impl StepExecutor {
             env,
             workdir: workspace_dir.to_string(),
             action_type: step.action_type.clone(),
-            image: step.action_image.clone(),
+            image,
+            runner_mode,
+            runner_image: self.runner_image.clone(),
+            entrypoint,
+            command,
         })
     }
 }
@@ -205,6 +254,7 @@ mod tests {
             action_image: None,
             action_spec,
             input: None,
+            runner: None,
         }
     }
 
@@ -519,10 +569,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_shell_with_image() {
+    fn test_dispatch_shell_with_docker_runner() {
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
-        step.action_image = Some("python:3.12".to_string());
+        step.runner = Some("docker".to_string());
         // Without docker feature/config, should fail gracefully
         let runner = executor.select_runner(&step);
         assert!(runner.is_err());
@@ -572,5 +622,146 @@ mod tests {
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.action_type, "docker");
         assert_eq!(config.image, Some("python:3.12".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_type1_no_cmd_allowed() {
+        // Type 1 (docker/pod) doesn't require cmd/script — image defaults run
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({})));
+        step.action_type = "docker".to_string();
+        step.action_image = Some("company/migrations:v3".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.runner_mode, RunnerMode::NoWorkspace);
+        assert!(config.cmd.is_none());
+        assert!(config.script.is_none());
+        assert_eq!(config.image, Some("company/migrations:v3".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_type2_with_runner_image() {
+        let executor =
+            StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
+
+        let mut step = test_step(Some(serde_json::json!({"cmd": "npm test"})));
+        step.runner = Some("docker".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
+        // Type 2 uses runner_image, not action_image
+        assert_eq!(config.image, Some("ghcr.io/org/runner:latest".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_type1_entrypoint() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({
+            "entrypoint": ["/app/run"],
+            "command": ["--env", "prod"]
+        })));
+        step.action_type = "docker".to_string();
+        step.action_image = Some("company/deploy:v3".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.entrypoint, Some(vec!["/app/run".to_string()]));
+        assert_eq!(
+            config.command,
+            Some(vec!["--env".to_string(), "prod".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_type2_fallback_to_action_image() {
+        // When runner_image is not set, Type 2 should fall back to action_image
+        let executor = StepExecutor::new(); // no runner_image
+        let mut step = test_step(Some(serde_json::json!({"cmd": "npm test"})));
+        step.runner = Some("docker".to_string());
+        step.action_image = Some("node:20-alpine".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
+        // Falls back to action_image when runner_image is not configured
+        assert_eq!(config.image, Some("node:20-alpine".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_type2_runner_image_overrides_action_image() {
+        // When runner_image IS set, it takes precedence over action_image for Type 2
+        let executor =
+            StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
+        let mut step = test_step(Some(serde_json::json!({"cmd": "npm test"})));
+        step.runner = Some("docker".to_string());
+        step.action_image = Some("node:20-alpine".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.image, Some("ghcr.io/org/runner:latest".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_type1_ignores_runner_image() {
+        // Type 1 (docker) should use action_image, not runner_image
+        let executor =
+            StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
+        let mut step = test_step(Some(serde_json::json!({})));
+        step.action_type = "docker".to_string();
+        step.action_image = Some("company/app:v3".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.runner_mode, RunnerMode::NoWorkspace);
+        assert_eq!(config.image, Some("company/app:v3".to_string()));
+    }
+
+    #[test]
+    fn test_dispatch_shell_pod_runner() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.runner = Some("pod".to_string());
+        // Without kubernetes feature/config, should fail gracefully
+        let runner = executor.select_runner(&step);
+        assert!(runner.is_err());
+    }
+
+    #[test]
+    fn test_build_run_config_type2_local_no_image() {
+        // Type 2 shell+local should not set image even if action_image is present
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.runner = None; // defaults to "local"
+        step.action_image = Some("node:20".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
+        // For shell+local, image comes from action_image directly (not runner_image logic)
+        assert_eq!(config.image, Some("node:20".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_stroem_env_vars() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.workspace = "my-workspace".to_string();
+        step.step_name = "deploy-step".to_string();
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(
+            config.env.get("STROEM_STEP_NAME"),
+            Some(&"deploy-step".to_string())
+        );
+        assert_eq!(
+            config.env.get("STROEM_WORKSPACE"),
+            Some(&"my-workspace".to_string())
+        );
+        assert!(config.env.contains_key("STROEM_JOB_ID"));
+    }
+
+    #[test]
+    fn test_build_run_config_shell_local_mode() {
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
+        assert_eq!(config.action_type, "shell");
     }
 }

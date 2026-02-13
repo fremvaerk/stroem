@@ -22,6 +22,8 @@ pub struct JobStepRow {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
+    pub required_tags: JsonValue,
+    pub runner: String,
 }
 
 /// New job step for creation
@@ -35,6 +37,8 @@ pub struct NewJobStep {
     pub action_spec: Option<JsonValue>,
     pub input: Option<JsonValue>,
     pub status: String, // 'pending' or 'ready'
+    pub required_tags: Vec<String>,
+    pub runner: String,
 }
 
 /// Repository for job step operations
@@ -50,19 +54,31 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner)
             VALUES
             "#,
         );
 
-        let mut bindings = Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut bindings: Vec<(
+            Uuid,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<JsonValue>,
+            Option<JsonValue>,
+            String,
+            JsonValue,
+            String,
+        )> = Vec::new();
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 8;
+            let base = i * 10;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -70,8 +86,11 @@ impl JobStepRepo {
                 base + 5,
                 base + 6,
                 base + 7,
-                base + 8
+                base + 8,
+                base + 9,
+                base + 10
             ));
+            let required_tags_json = serde_json::to_value(&step.required_tags).unwrap_or_default();
             bindings.push((
                 step.job_id,
                 step.step_name.clone(),
@@ -81,6 +100,8 @@ impl JobStepRepo {
                 step.action_spec.clone(),
                 step.input.clone(),
                 step.status.clone(),
+                required_tags_json,
+                step.runner.clone(),
             ));
         }
 
@@ -94,7 +115,9 @@ impl JobStepRepo {
                 .bind(binding.4)
                 .bind(binding.5)
                 .bind(binding.6)
-                .bind(binding.7);
+                .bind(binding.7)
+                .bind(binding.8)
+                .bind(binding.9);
         }
 
         q.execute(pool).await?;
@@ -103,27 +126,29 @@ impl JobStepRepo {
 
     /// Claim a ready step for a worker (SELECT FOR UPDATE SKIP LOCKED)
     /// This is the key concurrency-safe operation.
-    /// capabilities: worker's capabilities array (e.g. ["shell", "docker"])
+    /// worker_tags: worker's tags as JSONB array — step's required_tags must be a subset
     pub async fn claim_ready_step(
         pool: &PgPool,
-        capabilities: &[String],
+        worker_tags: &[String],
         worker_id: Uuid,
     ) -> Result<Option<JobStepRow>> {
+        let worker_tags_json = serde_json::to_value(worker_tags)?;
         let step = sqlx::query_as::<_, JobStepRow>(
             r#"
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND action_type = ANY($1)
+                WHERE status = 'ready' AND required_tags <@ $1::jsonb
                 ORDER BY job_id, step_name
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
             RETURNING job_id, step_name, action_name, action_type, action_image, action_spec,
-                      input, output, status, worker_id, started_at, completed_at, error_message
+                      input, output, status, worker_id, started_at, completed_at, error_message,
+                      required_tags, runner
             "#,
         )
-        .bind(capabilities)
+        .bind(worker_tags_json)
         .bind(worker_id)
         .fetch_optional(pool)
         .await?;
@@ -136,7 +161,8 @@ impl JobStepRepo {
         let steps = sqlx::query_as::<_, JobStepRow>(
             r#"
             SELECT job_id, step_name, action_name, action_type, action_image, action_spec,
-                   input, output, status, worker_id, started_at, completed_at, error_message
+                   input, output, status, worker_id, started_at, completed_at, error_message,
+                   required_tags, runner
             FROM job_step
             WHERE job_id = $1
             ORDER BY step_name
@@ -223,7 +249,8 @@ impl JobStepRepo {
         let steps = sqlx::query_as::<_, JobStepRow>(
             r#"
             SELECT job_id, step_name, action_name, action_type, action_image, action_spec,
-                   input, output, status, worker_id, started_at, completed_at, error_message
+                   input, output, status, worker_id, started_at, completed_at, error_message,
+                   required_tags, runner
             FROM job_step
             WHERE job_id = $1 AND status = 'ready'
             ORDER BY step_name

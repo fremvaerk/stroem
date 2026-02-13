@@ -46,11 +46,21 @@ pub struct ActionDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>, // for shell (alternative to cmd)
 
+    // Runner field (for shell actions: "local", "docker", "pod")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+
+    // Tags for worker routing
+    #[serde(default)]
+    pub tags: Vec<String>,
+
     // Container fields
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>, // for shell+image, docker, pod
+    pub image: Option<String>, // for docker, pod
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>, // for docker
+    pub command: Option<Vec<String>>, // for docker/pod
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<Vec<String>>, // for docker/pod Type 1
 
     // Common fields
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -421,6 +431,72 @@ secrets:
             config.secrets.get("api_key").unwrap(),
             "ref+vault://secret/data/api#key"
         );
+    }
+
+    #[test]
+    fn test_parse_action_with_runner() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: docker
+    cmd: "npm test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let action = config.actions.get("test").unwrap();
+        assert_eq!(action.runner.as_deref(), Some("docker"));
+    }
+
+    #[test]
+    fn test_parse_action_with_tags() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: docker
+    tags: ["node-20", "gpu"]
+    cmd: "npm test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let action = config.actions.get("test").unwrap();
+        assert_eq!(action.tags, vec!["node-20", "gpu"]);
+    }
+
+    #[test]
+    fn test_parse_action_with_entrypoint() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: docker
+    image: company/deploy:v3
+    entrypoint: ["/app/run"]
+    command: ["--env", "prod"]
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let action = config.actions.get("deploy").unwrap();
+        assert_eq!(
+            action.entrypoint.as_ref().unwrap(),
+            &vec!["/app/run".to_string()]
+        );
+        assert_eq!(
+            action.command.as_ref().unwrap(),
+            &vec!["--env".to_string(), "prod".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_action_defaults_for_new_fields() {
+        let yaml = r#"
+actions:
+  simple:
+    type: shell
+    cmd: "echo test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let action = config.actions.get("simple").unwrap();
+        assert!(action.runner.is_none());
+        assert!(action.tags.is_empty());
+        assert!(action.entrypoint.is_none());
     }
 
     #[test]

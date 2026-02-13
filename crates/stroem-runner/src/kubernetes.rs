@@ -1,4 +1,4 @@
-use crate::traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner};
+use crate::traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::io::AsyncBufReadExt;
@@ -50,14 +50,6 @@ impl KubeRunner {
             .unwrap_or("alpine:latest")
             .to_string();
 
-        let cmd = if let Some(ref command) = config.cmd {
-            vec!["sh".to_string(), "-c".to_string(), command.clone()]
-        } else if let Some(ref script) = config.script {
-            vec!["sh".to_string(), "-c".to_string(), script.clone()]
-        } else {
-            vec!["echo".to_string(), "No command specified".to_string()]
-        };
-
         let env: Vec<serde_json::Value> = config
             .env
             .iter()
@@ -69,53 +61,105 @@ impl KubeRunner {
             })
             .collect();
 
-        // Init container: download and extract workspace tarball
-        let tarball_url = format!(
-            "{}/worker/workspace/{}.tar.gz",
-            self.server_url, workspace_name
-        );
+        match config.runner_mode {
+            RunnerMode::WithWorkspace => {
+                // Type 2: Shell in container with workspace via init container
+                let cmd = if let Some(ref command) = config.cmd {
+                    vec!["sh".to_string(), "-c".to_string(), command.clone()]
+                } else if let Some(ref script) = config.script {
+                    vec!["sh".to_string(), "-c".to_string(), script.clone()]
+                } else {
+                    vec!["echo".to_string(), "No command specified".to_string()]
+                };
 
-        let pod: Pod = serde_json::from_value(serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {
-                "name": pod_name,
-                "labels": labels,
-            },
-            "spec": {
-                "restartPolicy": "Never",
-                "initContainers": [{
-                    "name": "workspace-init",
-                    "image": self.init_image,
-                    "command": ["sh", "-c", format!(
-                        "curl -sSf -H 'Authorization: Bearer {}' '{}' | tar xz -C /workspace",
-                        self.worker_token, tarball_url
-                    )],
-                    "volumeMounts": [{
-                        "name": "workspace",
-                        "mountPath": "/workspace",
-                    }],
-                }],
-                "containers": [{
+                let tarball_url = format!(
+                    "{}/worker/workspace/{}.tar.gz",
+                    self.server_url, workspace_name
+                );
+
+                let pod: Pod = serde_json::from_value(serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": pod_name,
+                        "labels": labels,
+                    },
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "initContainers": [{
+                            "name": "workspace-init",
+                            "image": self.init_image,
+                            "command": ["sh", "-c", format!(
+                                "curl -sSf -H 'Authorization: Bearer {}' '{}' | tar xz -C /workspace",
+                                self.worker_token, tarball_url
+                            )],
+                            "volumeMounts": [{
+                                "name": "workspace",
+                                "mountPath": "/workspace",
+                            }],
+                        }],
+                        "containers": [{
+                            "name": "step",
+                            "image": image,
+                            "command": cmd,
+                            "env": env,
+                            "workingDir": "/workspace",
+                            "volumeMounts": [{
+                                "name": "workspace",
+                                "mountPath": "/workspace",
+                            }],
+                        }],
+                        "volumes": [{
+                            "name": "workspace",
+                            "emptyDir": {},
+                        }],
+                    },
+                }))
+                .expect("Pod spec should be valid JSON");
+                pod
+            }
+            RunnerMode::NoWorkspace => {
+                // Type 1: Run user's prepared image, no init container, no workspace volume
+                let mut container = serde_json::json!({
                     "name": "step",
                     "image": image,
-                    "command": cmd,
                     "env": env,
-                    "workingDir": "/workspace",
-                    "volumeMounts": [{
-                        "name": "workspace",
-                        "mountPath": "/workspace",
-                    }],
-                }],
-                "volumes": [{
-                    "name": "workspace",
-                    "emptyDir": {},
-                }],
-            },
-        }))
-        .expect("Pod spec should be valid JSON");
+                });
 
-        pod
+                // Set entrypoint if provided
+                if let Some(ref ep) = config.entrypoint {
+                    container["command"] = serde_json::json!(ep);
+                }
+
+                // Set cmd/command args
+                if let Some(ref command) = config.command {
+                    container["args"] = serde_json::json!(command);
+                } else if let Some(ref cmd) = config.cmd {
+                    // If entrypoint is set, pass cmd as args
+                    if config.entrypoint.is_some() {
+                        container["args"] = serde_json::json!([cmd]);
+                    } else {
+                        container["command"] = serde_json::json!(["sh", "-c", cmd]);
+                    }
+                }
+                // If nothing is set, image default entrypoint/cmd runs
+
+                let pod: Pod = serde_json::from_value(serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": pod_name,
+                        "labels": labels,
+                    },
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [container],
+                    },
+                }))
+                .expect("Pod spec should be valid JSON");
+                pod
+            }
+        }
     }
 
     /// Generate a pod name from job_id and step_name
@@ -332,6 +376,10 @@ mod tests {
             workdir: "/tmp".to_string(),
             action_type: "pod".to_string(),
             image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         };
 
         let mut labels = HashMap::new();
@@ -377,6 +425,87 @@ mod tests {
         assert_eq!(volumes[0].name, "workspace");
     }
 
+    #[test]
+    fn test_build_pod_spec_no_workspace() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: Some("deploy --env production".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("company/deploy:v3".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+        };
+
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "stroem-step".to_string());
+
+        let pod = runner.build_pod_spec("test-pod-nows", &config, "default", labels);
+
+        let spec = pod.spec.unwrap();
+
+        // No init containers in NoWorkspace mode
+        assert!(
+            spec.init_containers.is_none() || spec.init_containers.as_ref().unwrap().is_empty()
+        );
+
+        // No volumes
+        assert!(spec.volumes.is_none() || spec.volumes.as_ref().unwrap().is_empty());
+
+        // Main container uses the action image
+        assert_eq!(containers_image(&spec.containers), "company/deploy:v3");
+
+        // No workspace workdir
+        assert!(spec.containers[0].working_dir.is_none());
+    }
+
+    #[test]
+    fn test_build_pod_spec_no_workspace_with_entrypoint() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: None,
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("company/tool:latest".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: Some(vec!["/app/run".to_string()]),
+            command: Some(vec!["--verbose".to_string()]),
+        };
+
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "stroem-step".to_string());
+
+        let pod = runner.build_pod_spec("test-pod-ep", &config, "default", labels);
+
+        let spec = pod.spec.unwrap();
+        let container = &spec.containers[0];
+
+        // Entrypoint maps to command, command maps to args
+        assert_eq!(container.command, Some(vec!["/app/run".to_string()]));
+        assert_eq!(container.args, Some(vec!["--verbose".to_string()]));
+    }
+
+    fn containers_image(containers: &[k8s_openapi::api::core::v1::Container]) -> &str {
+        containers[0].image.as_deref().unwrap_or("")
+    }
+
     /// Integration test: requires a Kubernetes cluster.
     /// Run with: cargo test -p stroem-runner --features kubernetes -- --ignored test_kube_echo
     #[tokio::test]
@@ -400,6 +529,10 @@ mod tests {
             workdir: "/tmp".to_string(),
             action_type: "pod".to_string(),
             image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         };
 
         let result = runner.execute(config, None).await.unwrap();

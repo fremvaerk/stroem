@@ -226,6 +226,34 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
                     action_name
                 );
             }
+
+            // Shell actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
+            if action.image.is_some() {
+                bail!(
+                    "Action '{}' is type 'shell' but has 'image' field. Use type: docker for container images, or runner: docker for shell-in-container",
+                    action_name
+                );
+            }
+
+            // Validate runner if present
+            if let Some(ref runner) = action.runner {
+                match runner.as_str() {
+                    "local" | "docker" | "pod" => {}
+                    other => bail!(
+                        "Action '{}' has invalid runner '{}' (expected: local, docker, pod)",
+                        action_name,
+                        other
+                    ),
+                }
+            }
+
+            // Shell actions must not have entrypoint
+            if action.entrypoint.is_some() {
+                bail!(
+                    "Action '{}' is type 'shell' but has 'entrypoint' field (only valid for docker/pod)",
+                    action_name
+                );
+            }
         }
         "docker" => {
             // Docker actions must have image
@@ -235,12 +263,44 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
                     action_name
                 );
             }
+
+            // Docker actions must not have runner
+            if action.runner.is_some() {
+                bail!(
+                    "Action '{}' is type 'docker' but has 'runner' field (runner is only for shell actions)",
+                    action_name
+                );
+            }
+
+            // Docker actions must not have script
+            if action.script.is_some() {
+                bail!(
+                    "Action '{}' is type 'docker' but has 'script' field (use cmd or entrypoint instead)",
+                    action_name
+                );
+            }
         }
         "pod" => {
             // Pod actions must have image
             if action.image.is_none() {
                 bail!(
                     "Action '{}' is type 'pod' but missing 'image' field",
+                    action_name
+                );
+            }
+
+            // Pod actions must not have runner
+            if action.runner.is_some() {
+                bail!(
+                    "Action '{}' is type 'pod' but has 'runner' field (runner is only for shell actions)",
+                    action_name
+                );
+            }
+
+            // Pod actions must not have script
+            if action.script.is_some() {
+                bail!(
+                    "Action '{}' is type 'pod' but has 'script' field (use cmd or entrypoint instead)",
                     action_name
                 );
             }
@@ -255,6 +315,39 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Compute the required worker tags for an action.
+/// These tags must all be present on a worker for it to claim a step using this action.
+pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
+    let base_tag = match action.action_type.as_str() {
+        "shell" => match action.runner.as_deref() {
+            Some("docker") => "docker",
+            Some("pod") => "kubernetes",
+            _ => "shell",
+        },
+        "docker" => "docker",
+        "pod" => "kubernetes",
+        _ => "shell",
+    };
+
+    let mut tags = vec![base_tag.to_string()];
+    for tag in &action.tags {
+        if !tags.contains(tag) {
+            tags.push(tag.clone());
+        }
+    }
+    tags
+}
+
+/// Derive the runner mode string for an action.
+/// Returns "local", "docker", "pod", or "none".
+pub fn derive_runner(action: &ActionDef) -> String {
+    match action.action_type.as_str() {
+        "shell" => action.runner.as_deref().unwrap_or("local").to_string(),
+        "docker" | "pod" => "none".to_string(),
+        _ => "local".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -575,7 +668,7 @@ actions:
     }
 
     #[test]
-    fn test_validate_shell_with_image() {
+    fn test_validate_shell_with_image_rejected() {
         let yaml = r#"
 actions:
   build:
@@ -585,7 +678,11 @@ actions:
 "#;
         let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has 'image' field"));
     }
 
     #[test]
@@ -597,7 +694,7 @@ actions:
     cmd: "git clone repo"
   build:
     type: shell
-    image: node:20
+    runner: docker
     cmd: "npm run build"
   deploy:
     type: docker
@@ -754,5 +851,362 @@ actions:
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("db.host"));
         assert!(warnings[0].contains("not defined in secrets"));
+    }
+
+    #[test]
+    fn test_validate_shell_with_runner() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: docker
+    cmd: "npm test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_with_invalid_runner() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: invalid
+    cmd: "npm test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid runner"));
+    }
+
+    #[test]
+    fn test_validate_shell_with_entrypoint_rejected() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    cmd: "echo hi"
+    entrypoint: ["/bin/sh"]
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("entrypoint"));
+    }
+
+    #[test]
+    fn test_validate_docker_with_runner_rejected() {
+        let yaml = r#"
+actions:
+  test:
+    type: docker
+    image: alpine:latest
+    runner: local
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("runner"));
+    }
+
+    #[test]
+    fn test_validate_docker_with_script_rejected() {
+        let yaml = r#"
+actions:
+  test:
+    type: docker
+    image: alpine:latest
+    script: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("script"));
+    }
+
+    #[test]
+    fn test_validate_docker_no_cmd_ok() {
+        // Type 1: docker with image only (uses image default entrypoint)
+        let yaml = r#"
+actions:
+  migrate:
+    type: docker
+    image: company/db-migrations:v3
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_docker_with_entrypoint() {
+        let yaml = r#"
+actions:
+  test:
+    type: docker
+    image: alpine:latest
+    entrypoint: ["/bin/sh", "-c"]
+    cmd: "echo hello"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_with_tags() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: docker
+    tags: ["node-20"]
+    cmd: "npm test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compute_required_tags_shell_local() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+cmd: "echo test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["shell"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_shell_docker() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+runner: docker
+cmd: "npm test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["docker"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_shell_docker_with_tags() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+runner: docker
+tags: ["node-20"]
+cmd: "npm test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["docker", "node-20"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_docker() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: docker
+image: alpine:latest
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["docker"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_pod() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: pod
+image: alpine:latest
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["kubernetes"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_pod_with_tags() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: pod
+image: alpine:latest
+tags: ["gpu"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["kubernetes", "gpu"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_shell_pod() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+runner: pod
+cmd: "npm test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), vec!["kubernetes"]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_dedup_base_tag() {
+        use crate::models::workflow::ActionDef;
+        // If tags already include the base tag, it should not be duplicated
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: docker
+image: alpine:latest
+tags: ["docker", "gpu"]
+"#,
+        )
+        .unwrap();
+        let tags = compute_required_tags(&action);
+        assert_eq!(tags, vec!["docker", "gpu"]);
+        // Ensure "docker" appears only once
+        assert_eq!(tags.iter().filter(|t| *t == "docker").count(), 1);
+    }
+
+    #[test]
+    fn test_validate_pod_with_runner_rejected() {
+        let yaml = r#"
+actions:
+  test:
+    type: pod
+    image: alpine:latest
+    runner: local
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("runner"));
+    }
+
+    #[test]
+    fn test_validate_pod_with_script_rejected() {
+        let yaml = r#"
+actions:
+  test:
+    type: pod
+    image: alpine:latest
+    script: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("script"));
+    }
+
+    #[test]
+    fn test_validate_shell_runner_pod() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: pod
+    cmd: "npm test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_shell_runner_local() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: local
+    cmd: "echo test"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_derive_runner_shell_default() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+cmd: "echo test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "local");
+    }
+
+    #[test]
+    fn test_derive_runner_shell_docker() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+runner: docker
+cmd: "npm test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "docker");
+    }
+
+    #[test]
+    fn test_derive_runner_shell_pod() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: shell
+runner: pod
+cmd: "npm test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "pod");
+    }
+
+    #[test]
+    fn test_derive_runner_docker() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: docker
+image: alpine:latest
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "none");
+    }
+
+    #[test]
+    fn test_derive_runner_pod() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: pod
+image: alpine:latest
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "none");
     }
 }

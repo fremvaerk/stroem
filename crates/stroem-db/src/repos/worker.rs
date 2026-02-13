@@ -25,18 +25,21 @@ impl WorkerRepo {
         worker_id: Uuid,
         name: &str,
         capabilities: &[String],
+        tags: &[String],
     ) -> Result<()> {
         let capabilities_json = serde_json::to_value(capabilities)?;
+        let tags_json = serde_json::to_value(tags)?;
 
         sqlx::query(
             r#"
-            INSERT INTO worker (worker_id, name, capabilities, last_heartbeat)
-            VALUES ($1, $2, $3, NOW())
+            INSERT INTO worker (worker_id, name, capabilities, tags, last_heartbeat)
+            VALUES ($1, $2, $3, $4, NOW())
             "#,
         )
         .bind(worker_id)
         .bind(name)
         .bind(capabilities_json)
+        .bind(tags_json)
         .execute(pool)
         .await?;
 

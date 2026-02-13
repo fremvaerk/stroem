@@ -217,6 +217,7 @@ Returns job metadata and all steps with their statuses.
       "action_name": "greet",
       "action_type": "shell",
       "action_image": null,
+      "runner": "local",
       "input": { "name": "World" },
       "output": { "greeting": "Hello World" },
       "status": "completed",
@@ -230,6 +231,7 @@ Returns job metadata and all steps with their statuses.
       "action_name": "shout",
       "action_type": "shell",
       "action_image": null,
+      "runner": "local",
       "input": { "message": "Hello World" },
       "output": null,
       "status": "completed",
@@ -570,9 +572,16 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 ```json
 {
   "name": "worker-1",
-  "capabilities": ["shell"]
+  "capabilities": ["shell"],
+  "tags": ["shell", "docker"]
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Worker display name |
+| `capabilities` | string[] | Legacy capability list (used if `tags` not set) |
+| `tags` | string[] (optional) | Worker tags for step routing. Overrides `capabilities` when set. |
 
 **Response:**
 
@@ -623,9 +632,18 @@ Claims the next ready step that matches the worker's capabilities. Uses `SELECT 
 ```json
 {
   "worker_id": "w1w2w3w4-w5w6-7890-abcd-ef1234567890",
-  "capabilities": ["shell"]
+  "capabilities": ["shell"],
+  "tags": ["shell", "docker"]
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `worker_id` | string | Worker ID from registration |
+| `capabilities` | string[] | Legacy capability list (used if `tags` not set) |
+| `tags` | string[] (optional) | Worker tags for step matching. Overrides `capabilities` when set. |
+
+A step is only claimed if all of its `required_tags` are present in the worker's effective tag set.
 
 **Response (step available):**
 
@@ -637,6 +655,7 @@ Claims the next ready step that matches the worker's capabilities. Uses `SELECT 
   "action_name": "greet",
   "action_type": "shell",
   "action_image": null,
+  "runner": "local",
   "action_spec": {
     "cmd": "echo Hello World && echo 'OUTPUT: {\"greeting\": \"Hello World\"}'",
     "env": {}
@@ -647,7 +666,7 @@ Claims the next ready step that matches the worker's capabilities. Uses `SELECT 
 }
 ```
 
-The `action_spec` contains the fully resolved action definition with templates already rendered against the job context. The `workspace` field tells the worker which workspace tarball to download.
+The `action_spec` contains the fully resolved action definition with templates already rendered against the job context. The `workspace` field tells the worker which workspace tarball to download. The `runner` field indicates how to execute the step: `local` (ShellRunner), `docker`/`pod` (container runner with workspace), or `none` (Type 1 container, image runs standalone).
 
 **Response (no work available):**
 
@@ -659,6 +678,7 @@ The `action_spec` contains the fully resolved action definition with templates a
   "action_name": null,
   "action_type": null,
   "action_image": null,
+  "runner": null,
   "action_spec": null,
   "input": null
 }

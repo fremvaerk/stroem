@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub struct RegisterRequest {
     pub name: String,
     pub capabilities: Vec<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,6 +35,7 @@ pub struct HeartbeatRequest {
 pub struct ClaimRequest {
     pub worker_id: String,
     pub capabilities: Vec<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +48,7 @@ pub struct ClaimResponse {
     pub action_image: Option<String>,
     pub action_spec: Option<serde_json::Value>,
     pub input: Option<serde_json::Value>,
+    pub runner: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,7 +89,16 @@ pub async fn register_worker(
 ) -> impl IntoResponse {
     let worker_id = Uuid::new_v4();
 
-    match WorkerRepo::register(&state.pool, worker_id, &req.name, &req.capabilities).await {
+    let effective_tags = req.tags.as_deref().unwrap_or(&req.capabilities);
+    match WorkerRepo::register(
+        &state.pool,
+        worker_id,
+        &req.name,
+        &req.capabilities,
+        effective_tags,
+    )
+    .await
+    {
         Ok(_) => {
             tracing::info!("Registered worker: {} ({})", req.name, worker_id);
             Json(RegisterResponse {
@@ -152,8 +164,8 @@ pub async fn claim_job(
         }
     };
 
-    let step = match JobStepRepo::claim_ready_step(&state.pool, &req.capabilities, worker_id).await
-    {
+    let effective_tags = req.tags.as_deref().unwrap_or(&req.capabilities);
+    let step = match JobStepRepo::claim_ready_step(&state.pool, effective_tags, worker_id).await {
         Ok(Some(step)) => step,
         Ok(None) => {
             return Json(ClaimResponse {
@@ -165,6 +177,7 @@ pub async fn claim_job(
                 action_image: None,
                 action_spec: None,
                 input: None,
+                runner: None,
             })
             .into_response();
         }
@@ -374,6 +387,7 @@ pub async fn claim_job(
         action_image: step.action_image,
         action_spec: rendered_action_spec,
         input: rendered_input,
+        runner: Some(step.runner),
     })
     .into_response()
 }

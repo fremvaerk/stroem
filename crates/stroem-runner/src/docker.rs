@@ -1,4 +1,4 @@
-use crate::traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner};
+use crate::traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bollard::container::{
@@ -31,39 +31,76 @@ impl DockerRunner {
 
     /// Build container config from RunConfig
     fn build_container_config(config: &RunConfig) -> Config<String> {
-        let image = config
-            .image
-            .as_deref()
-            .unwrap_or("alpine:latest")
-            .to_string();
-
-        let cmd = if let Some(ref command) = config.cmd {
-            vec!["sh".to_string(), "-c".to_string(), command.clone()]
-        } else if let Some(ref script) = config.script {
-            vec!["sh".to_string(), "-c".to_string(), script.clone()]
-        } else {
-            vec!["echo".to_string(), "No command specified".to_string()]
-        };
-
         let env: Vec<String> = config.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
-        let mut binds = Vec::new();
-        if !config.workdir.is_empty() {
-            binds.push(format!("{}:/workspace:ro", config.workdir));
-        }
+        match config.runner_mode {
+            RunnerMode::WithWorkspace => {
+                // Type 2: Shell in container with workspace bind-mount
+                let image = config
+                    .image
+                    .as_deref()
+                    .unwrap_or("alpine:latest")
+                    .to_string();
 
-        Config {
-            image: Some(image),
-            cmd: Some(cmd),
-            env: Some(env),
-            working_dir: Some("/workspace".to_string()),
-            host_config: Some(bollard::models::HostConfig {
-                binds: Some(binds),
-                ..Default::default()
-            }),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
+                let cmd = if let Some(ref command) = config.cmd {
+                    vec!["sh".to_string(), "-c".to_string(), command.clone()]
+                } else if let Some(ref script) = config.script {
+                    vec!["sh".to_string(), "-c".to_string(), script.clone()]
+                } else {
+                    vec!["echo".to_string(), "No command specified".to_string()]
+                };
+
+                let mut binds = Vec::new();
+                if !config.workdir.is_empty() {
+                    binds.push(format!("{}:/workspace:ro", config.workdir));
+                }
+
+                Config {
+                    image: Some(image),
+                    cmd: Some(cmd),
+                    env: Some(env),
+                    working_dir: Some("/workspace".to_string()),
+                    host_config: Some(bollard::models::HostConfig {
+                        binds: Some(binds),
+                        ..Default::default()
+                    }),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                }
+            }
+            RunnerMode::NoWorkspace => {
+                // Type 1: Run user's prepared image as-is
+                let image = config
+                    .image
+                    .as_deref()
+                    .unwrap_or("alpine:latest")
+                    .to_string();
+
+                // Use entrypoint if set, otherwise let Docker image defaults apply
+                let entrypoint = config.entrypoint.clone();
+
+                // Determine cmd: explicit command > cmd > image defaults (None)
+                let cmd = if let Some(ref command) = config.command {
+                    Some(command.clone())
+                } else {
+                    config
+                        .cmd
+                        .as_ref()
+                        .map(|c| vec!["sh".to_string(), "-c".to_string(), c.clone()])
+                };
+
+                Config {
+                    image: Some(image),
+                    entrypoint,
+                    cmd,
+                    env: Some(env),
+                    // No workspace bind mount, no workdir override
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                }
+            }
         }
     }
 }
@@ -243,6 +280,10 @@ mod tests {
             workdir: "/tmp/workspace".to_string(),
             action_type: "docker".to_string(),
             image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -276,6 +317,10 @@ mod tests {
             workdir: "/tmp".to_string(),
             action_type: "docker".to_string(),
             image: None,
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -291,6 +336,10 @@ mod tests {
             workdir: "/tmp".to_string(),
             action_type: "docker".to_string(),
             image: Some("ubuntu:22.04".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -302,6 +351,98 @@ mod tests {
                 "/workspace/deploy.sh".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn test_build_container_config_no_workspace() {
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: {
+                let mut env = HashMap::new();
+                env.insert("FOO".to_string(), "bar".to_string());
+                env
+            },
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+
+        assert_eq!(container_config.image, Some("python:3.12".to_string()));
+        // Without entrypoint, cmd gets wrapped in sh -c
+        assert_eq!(
+            container_config.cmd,
+            Some(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo hello".to_string()
+            ])
+        );
+
+        // No workspace bind mount in NoWorkspace mode
+        assert!(container_config.host_config.is_none());
+        // No workdir override
+        assert!(container_config.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_build_container_config_no_workspace_with_entrypoint() {
+        let config = RunConfig {
+            cmd: None,
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("company/deploy:v3".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: Some(vec!["/app/run".to_string()]),
+            command: Some(vec!["--env".to_string(), "prod".to_string()]),
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+
+        assert_eq!(
+            container_config.entrypoint,
+            Some(vec!["/app/run".to_string()])
+        );
+        assert_eq!(
+            container_config.cmd,
+            Some(vec!["--env".to_string(), "prod".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_no_workspace_image_defaults() {
+        // Type 1 with no cmd, no entrypoint — image defaults should apply
+        let config = RunConfig {
+            cmd: None,
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("company/migrations:v3".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+
+        assert_eq!(
+            container_config.image,
+            Some("company/migrations:v3".to_string())
+        );
+        // No entrypoint or cmd overrides — image defaults apply
+        assert!(container_config.entrypoint.is_none());
+        assert!(container_config.cmd.is_none());
     }
 
     /// Integration test: requires Docker daemon running.
@@ -317,6 +458,10 @@ mod tests {
             workdir: "/tmp".to_string(),
             action_type: "docker".to_string(),
             image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
         };
 
         let result = runner.execute(config, None).await.unwrap();

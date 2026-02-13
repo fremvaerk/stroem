@@ -1,0 +1,21 @@
+# Strøm runner base image for Type 2 (shell-in-container) execution.
+# Provides a minimal environment with common tools for running shell commands
+# and scripts inside Docker or Kubernetes pods with workspace access.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    gzip \
+    jq \
+    tar \
+  && rm -rf /var/lib/apt/lists/*
+
+# Default workspace mount point
+WORKDIR /workspace
+
+# Default entrypoint — shell commands are passed via cmd
+ENTRYPOINT ["bash", "-c"]
+CMD ["echo 'Strøm runner ready'"]

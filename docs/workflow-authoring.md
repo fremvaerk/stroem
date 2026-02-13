@@ -43,12 +43,26 @@ Actions are the smallest execution unit. Each action defines a command or script
 
 ### Action Types
 
-| Type | Image | Runner | Description |
-|------|-------|--------|-------------|
-| `shell` | none | ShellRunner | Runs directly on the worker host |
-| `shell` | set | DockerRunner | Runs in a Docker container on the worker |
-| `docker` | set | DockerRunner | Runs in a Docker container on the worker |
-| `pod` | set | KubeRunner | Runs as a Kubernetes pod |
+Actions are split into two execution modes:
+
+**Type 1 — Container (run a prepared image):**
+
+| Type | Description |
+|------|-------------|
+| `docker` | Runs user's prepared Docker image as-is (no workspace mount) |
+| `pod` | Runs user's prepared image as a Kubernetes pod (no workspace mount) |
+
+Type 1 actions require `image`. The image's default entrypoint/cmd runs unless overridden with `entrypoint` and/or `cmd`. Use this when you have a self-contained image (e.g. DB migrations, deploy tools).
+
+**Type 2 — Shell (commands in a runner environment):**
+
+| Type | Runner | Description |
+|------|--------|-------------|
+| `shell` | `local` (default) | Runs directly on the worker host |
+| `shell` + `runner: docker` | Runs in a Docker container with workspace mounted at `/workspace` |
+| `shell` + `runner: pod` | Runs as a Kubernetes pod with workspace downloaded via init container |
+
+Type 2 actions require `cmd` or `script`. The workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code.
 
 ### Inline command (shell)
 
@@ -74,39 +88,74 @@ actions:
       env: { type: string, default: "staging" }
 ```
 
-### Docker action
+### Type 1: Docker container action
 
-Runs the command inside a Docker container. The workspace is bind-mounted at `/workspace` (read-only). Requires the worker to have Docker access (DinD sidecar in Kubernetes, or a local Docker socket).
+Runs a prepared Docker image as-is. No workspace files are mounted. Use this for self-contained images like DB migrations, deploy tools, or pre-built applications.
 
 ```yaml
 actions:
-  lint-python:
-    type: shell
-    image: python:3.12-slim
-    cmd: "pip install ruff && ruff check /workspace"
-
-  run-tests:
+  migrate-db:
     type: docker
-    image: node:20-alpine
-    cmd: "cd /workspace && npm ci && npm test"
-    input:
-      test_suite: { type: string, default: "unit" }
+    image: company/db-migrations:v3
+    env:
+      DB_URL: "{{ secret.db_url }}"
+    # No cmd — image's default entrypoint runs
+
+  deploy:
+    type: docker
+    image: company/deploy-tool:latest
+    cmd: "deploy --env production"
+
+  custom-entrypoint:
+    type: docker
+    image: company/tool:v2
+    entrypoint: ["/app/run"]
+    cmd: "--verbose --env staging"
 ```
 
-When `type: shell` is used with an `image` field, it behaves identically to `type: docker`.
+### Type 1: Kubernetes pod action
 
-### Kubernetes pod action
-
-Runs the command as a Kubernetes pod. An init container downloads the workspace tarball from the server and extracts it to `/workspace`. Requires the worker to have KubeRunner configured.
+Runs a prepared image as a Kubernetes pod. No workspace files are downloaded.
 
 ```yaml
 actions:
   train-model:
     type: pod
     image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
-    cmd: "python /workspace/train.py --epochs 10"
+    cmd: "python /app/train.py --epochs 10"
+    tags: ["gpu"]
+```
+
+### Type 2: Shell in Docker
+
+Runs shell commands in a Docker container with the workspace mounted at `/workspace` (read-only). Requires `runner: docker` on the action.
+
+```yaml
+actions:
+  lint-python:
+    type: shell
+    runner: docker
+    cmd: "pip install ruff && ruff check /workspace"
+
+  run-tests:
+    type: shell
+    runner: docker
+    cmd: "cd /workspace && npm ci && npm test"
     input:
-      epochs: { type: string, default: "10" }
+      test_suite: { type: string, default: "unit" }
+```
+
+### Type 2: Shell in Kubernetes pod
+
+Runs shell commands as a Kubernetes pod with the workspace downloaded via an init container.
+
+```yaml
+actions:
+  gpu-test:
+    type: shell
+    runner: pod
+    tags: ["gpu"]
+    cmd: "python /workspace/test_gpu.py"
 ```
 
 ### Configuring Container Runners
@@ -138,14 +187,37 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: /var/stroem/workspace-cache
-capabilities:
+
+# Tags declare what this worker can run (replaces capabilities)
+tags:
   - shell
+  - docker
+  - kubernetes
+
+# Default image for Type 2 shell-in-container execution
+runner_image: "ghcr.io/myorg/stroem-runner:latest"
 
 docker: {}
 
 kubernetes:
   namespace: stroem-jobs
 ```
+
+### Worker tags
+
+Tags control which steps a worker can claim. Each step computes `required_tags` based on its action type and runner:
+
+| Action | Runner | Required tags |
+|--------|--------|--------------|
+| `shell` | `local` (default) | `["shell"]` |
+| `shell` | `docker` | `["docker"]` |
+| `shell` | `pod` | `["kubernetes"]` |
+| `docker` | — | `["docker"]` |
+| `pod` | — | `["kubernetes"]` |
+
+Actions can add extra tags via the `tags` field (e.g., `tags: ["gpu"]`). A worker claims a step only when all required tags are present in the worker's tag set.
+
+For backward compatibility, `capabilities` still works — if `tags` is not set, `capabilities` is used as the tag set.
 
 **Helm chart:** When deploying via Helm, set `worker.kubernetes.enabled=true` and/or `worker.dind.enabled=true` to automatically configure the worker. The worker Docker image must be built with the corresponding features:
 
@@ -492,7 +564,10 @@ stroem validate workspace/.workflows/
 
 The validator checks:
 - YAML syntax and structure
-- Action type validity (shell actions need `cmd` or `script`)
+- Action type validity (`shell` needs `cmd` or `script`; `docker`/`pod` need `image`)
+- `shell` actions cannot have `image` (use `runner: docker` instead)
+- `docker`/`pod` actions cannot have `runner` or `script`
+- `runner` values are valid (`local`, `docker`, `pod`)
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow
 - No cycles in the dependency graph

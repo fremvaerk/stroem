@@ -17,19 +17,13 @@ actions:
 
   install:
     type: shell
-    image: node:20-alpine
+    runner: docker
     cmd: "cd /workspace/src && npm ci"
-    resources:
-      cpu: "1"
-      memory: "2Gi"
 
   test:
     type: shell
-    image: node:20-alpine
+    runner: docker
     cmd: "cd /workspace/src && npm test"
-    resources:
-      cpu: "2"
-      memory: "4Gi"
 
   build-image:
     type: docker
@@ -37,7 +31,7 @@ actions:
     command: ["--context=/workspace/src", "--destination=company/app:{{ input.tag }}"]
 
   deploy:
-    type: shell
+    type: docker
     image: bitnami/kubectl:1.30
     cmd: "kubectl set image deployment/app app=company/app:{{ input.tag }}"
     input:

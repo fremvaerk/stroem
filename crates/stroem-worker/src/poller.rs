@@ -23,8 +23,9 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
         .context("Failed to create workspace cache directory")?;
 
     // Register with server
+    let tags = config.tags.as_deref();
     let worker_id = client
-        .register(&config.worker_name, &config.capabilities)
+        .register(&config.worker_name, &config.capabilities, tags)
         .await
         .context("Failed to register worker")?;
     tracing::info!("Registered as worker {}", worker_id);
@@ -63,7 +64,10 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
             .context("Failed to acquire semaphore permit")?;
 
         // Try to claim a step
-        match client.claim_step(worker_id, &config.capabilities).await {
+        match client
+            .claim_step(worker_id, &config.capabilities, tags)
+            .await
+        {
             Ok(Some(step)) => {
                 tracing::info!(
                     "Claimed step '{}' for job {} (workspace: {}, action: {})",

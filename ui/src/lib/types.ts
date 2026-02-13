@@ -52,6 +52,7 @@ export interface JobStep {
   action_name: string;
   action_type: string;
   action_image: string | null;
+  runner: string;
   input: Record<string, unknown> | null;
   output: Record<string, unknown> | null;
   status: string;

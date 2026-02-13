@@ -49,8 +49,11 @@ fn test_workspace() -> WorkspaceConfig {
             action_type: "shell".to_string(),
             cmd: Some("echo Hello $NAME".to_string()),
             script: None,
+            runner: None,
+            tags: vec![],
             image: None,
             command: None,
+            entrypoint: None,
             env: None,
             workdir: None,
             resources: None,
@@ -66,8 +69,11 @@ fn test_workspace() -> WorkspaceConfig {
             action_type: "shell".to_string(),
             cmd: Some("echo $MSG | tr a-z A-Z".to_string()),
             script: None,
+            runner: None,
+            tags: vec![],
             image: None,
             command: None,
+            entrypoint: None,
             env: None,
             workdir: None,
             resources: None,
@@ -83,12 +89,15 @@ fn test_workspace() -> WorkspaceConfig {
             action_type: "docker".to_string(),
             cmd: None,
             script: None,
+            runner: None,
+            tags: vec![],
             image: Some("docker:latest".to_string()),
             command: Some(vec![
                 "docker".to_string(),
                 "build".to_string(),
                 ".".to_string(),
             ]),
+            entrypoint: None,
             env: None,
             workdir: None,
             resources: None,
@@ -405,8 +414,11 @@ fn test_workspace() -> WorkspaceConfig {
             action_type: "shell".to_string(),
             cmd: Some("pg_dump -h {{ input.host }}".to_string()),
             script: None,
+            runner: None,
+            tags: vec![],
             image: None,
             command: None,
+            entrypoint: None,
             env: Some(db_env),
             workdir: None,
             resources: None,
@@ -478,8 +490,11 @@ fn test_workspace() -> WorkspaceConfig {
                     .to_string(),
             ),
             script: None,
+            runner: None,
+            tags: vec![],
             image: None,
             command: None,
+            entrypoint: None,
             env: None,
             workdir: None,
             resources: None,
@@ -507,8 +522,11 @@ fn test_workspace() -> WorkspaceConfig {
                     .to_string(),
             ),
             script: None,
+            runner: None,
+            tags: vec![],
             image: None,
             command: None,
+            entrypoint: None,
             env: None,
             workdir: None,
             resources: None,
@@ -628,9 +646,15 @@ async fn setup() -> Result<(
 /// Use this to satisfy foreign key constraints when calling `mark_running`.
 async fn register_test_worker(pool: &PgPool) -> Uuid {
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(pool, worker_id, "test-worker", &["shell".to_string()])
-        .await
-        .expect("Failed to register test worker");
+    WorkerRepo::register(
+        pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await
+    .expect("Failed to register test worker");
     worker_id
 }
 
@@ -742,6 +766,8 @@ async fn test_worker_register_and_claim() -> Result<()> {
         action_spec: Some(json!({"cmd": "echo Hello"})),
         input: Some(json!({"name": "{{ input.name }}"})),
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -796,7 +822,14 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
 
     // Register worker
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     // Claim the first step (greet)
     let response = router
@@ -926,7 +959,14 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
 
     // Verify no steps are claimable
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
     let response = router
         .oneshot(worker_request(
             "POST",
@@ -1336,6 +1376,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         action_spec: Some(json!({"cmd": "exit 1"})),
         input: None,
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1411,6 +1453,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -1421,6 +1465,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -1431,6 +1477,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 3"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2086,7 +2134,14 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
 
     // Register worker
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     // Claim greet step
     let response = router
@@ -2149,7 +2204,14 @@ async fn test_first_step_template_rendering() -> Result<()> {
 
     // Register worker and claim
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let response = router
         .oneshot(worker_request(
@@ -2187,7 +2249,14 @@ async fn test_dependency_with_null_output() -> Result<()> {
     let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
 
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     // Claim greet step
     let _response = router
@@ -2435,7 +2504,14 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
 
     // Register worker and claim
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let response = router
         .oneshot(worker_request(
@@ -2475,7 +2551,14 @@ async fn test_secret_reference_in_env() -> Result<()> {
 
     // Register worker and claim
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let response = router
         .oneshot(worker_request(
@@ -2513,7 +2596,14 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
 
     // Register worker and claim
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let response = router
         .oneshot(worker_request(
@@ -2561,7 +2651,14 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
 
     // Register worker and claim
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let response = router
         .oneshot(worker_request(
@@ -2598,7 +2695,14 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
 
     // Register worker and claim
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "test-worker", &["shell".to_string()]).await?;
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
 
     let response = router
         .oneshot(worker_request(
@@ -3228,6 +3332,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3238,6 +3344,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3313,6 +3421,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3323,6 +3433,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3408,6 +3520,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3418,6 +3532,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3428,6 +3544,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo 3"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3555,6 +3673,8 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         action_spec: Some(json!({"cmd": "exit 1"})),
         input: None,
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -3669,6 +3789,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3679,6 +3801,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3777,6 +3901,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3787,6 +3913,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3864,6 +3992,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3874,6 +4004,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3958,6 +4090,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -3968,6 +4102,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -4051,6 +4187,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -4061,6 +4199,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -4147,6 +4287,8 @@ async fn test_cascading_skip() -> Result<()> {
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -4157,6 +4299,8 @@ async fn test_cascading_skip() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
         NewJobStep {
             job_id,
@@ -4167,6 +4311,8 @@ async fn test_cascading_skip() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -4202,8 +4348,11 @@ fn test_workspace_ops() -> WorkspaceConfig {
             action_type: "shell".to_string(),
             cmd: Some("echo deploying...".to_string()),
             script: None,
+            runner: None,
+            tags: vec![],
             image: None,
             command: None,
+            entrypoint: None,
             env: None,
             workdir: None,
             resources: None,
@@ -4523,6 +4672,8 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         action_spec: Some(json!({"cmd": "echo deploying..."})),
         input: None,
         status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -5272,6 +5423,8 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo Hello"})),
             input: Some(json!({"name": "Test"})),
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         }],
     )
     .await?;
@@ -5299,6 +5452,8 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             action_spec: Some(json!({"cmd": "echo deploying..."})),
             input: None,
             status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
         }],
     )
     .await?;
