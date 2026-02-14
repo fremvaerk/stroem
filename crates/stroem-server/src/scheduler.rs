@@ -291,6 +291,7 @@ mod tests {
             "greet".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                task: None,
                 cmd: Some("echo hello".to_string()),
                 script: None,
                 runner: None,

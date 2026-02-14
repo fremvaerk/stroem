@@ -38,7 +38,11 @@ pub struct ResourceDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDef {
     #[serde(rename = "type")]
-    pub action_type: String, // "shell", "docker", "pod"
+    pub action_type: String, // "shell", "docker", "pod", "task"
+
+    /// For type: task — the name of the task to execute as a sub-job
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 
     // Shell action fields
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -509,6 +513,39 @@ actions:
         assert!(action.runner.is_none());
         assert!(action.tags.is_empty());
         assert!(action.entrypoint.is_none());
+    }
+
+    #[test]
+    fn test_parse_task_action() {
+        let yaml = r#"
+actions:
+  run-cleanup:
+    type: task
+    task: cleanup-resources
+
+  greet:
+    type: shell
+    cmd: "echo hello"
+
+tasks:
+  cleanup-resources:
+    flow:
+      step1:
+        action: greet
+  deploy:
+    flow:
+      build:
+        action: greet
+      cleanup:
+        action: run-cleanup
+        depends_on: [build]
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let action = config.actions.get("run-cleanup").unwrap();
+        assert_eq!(action.action_type, "task");
+        assert_eq!(action.task.as_deref(), Some("cleanup-resources"));
+        assert!(action.cmd.is_none());
+        assert!(action.image.is_none());
     }
 
     #[test]

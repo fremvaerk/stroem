@@ -48,6 +48,7 @@ fn test_workspace() -> WorkspaceConfig {
         "greet".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("echo Hello $NAME".to_string()),
             script: None,
             runner: None,
@@ -68,6 +69,7 @@ fn test_workspace() -> WorkspaceConfig {
         "shout".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("echo $MSG | tr a-z A-Z".to_string()),
             script: None,
             runner: None,
@@ -88,6 +90,7 @@ fn test_workspace() -> WorkspaceConfig {
         "docker-build".to_string(),
         ActionDef {
             action_type: "docker".to_string(),
+            task: None,
             cmd: None,
             script: None,
             runner: None,
@@ -427,6 +430,7 @@ fn test_workspace() -> WorkspaceConfig {
         "db-backup".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("pg_dump -h {{ input.host }}".to_string()),
             script: None,
             runner: None,
@@ -502,6 +506,7 @@ fn test_workspace() -> WorkspaceConfig {
         "transform".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some(
                 "echo Processing $DATA && echo 'OUTPUT: {\"result\": \"processed-'$DATA'\"}'"
                     .to_string(),
@@ -534,6 +539,7 @@ fn test_workspace() -> WorkspaceConfig {
         "summarize".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some(
                 "echo Summarizing $VALUE && echo 'OUTPUT: {\"summary\": \"'$VALUE' done\"}'"
                     .to_string(),
@@ -4393,6 +4399,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
         "deploy".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("echo deploying...".to_string()),
             script: None,
             runner: None,
@@ -6209,6 +6216,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "deploy".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("echo deploying".to_string()),
             script: None,
             runner: None,
@@ -6229,6 +6237,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "crash".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("exit 1".to_string()),
             script: None,
             runner: None,
@@ -6258,6 +6267,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "notify".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            task: None,
             cmd: Some("echo {{ input.message }}".to_string()),
             script: None,
             runner: None,
@@ -7087,6 +7097,688 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         1,
         "Should be exactly 1 hook job (no recursion)"
     );
+
+    Ok(())
+}
+
+// ─── Task action (type: task) tests ────────────────────────────────────
+
+/// Build a workspace for task-action tests.
+fn task_action_test_workspace() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    // Action: greet (shell)
+    workspace.actions.insert(
+        "greet".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            task: None,
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    // Action: run-cleanup (type: task → cleanup)
+    workspace.actions.insert(
+        "run-cleanup".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("cleanup".to_string()),
+            cmd: None,
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    // Task: cleanup (single step)
+    let mut cleanup_flow = HashMap::new();
+    cleanup_flow.insert(
+        "clean".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "cleanup".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: cleanup_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    // Task: deploy (build → cleanup via task action)
+    let mut deploy_flow = HashMap::new();
+    deploy_flow.insert(
+        "build".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    deploy_flow.insert(
+        "cleanup".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec!["build".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: deploy_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    workspace
+}
+
+#[tokio::test]
+async fn test_task_action_creates_child_job() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let workspace = task_action_test_workspace();
+
+    // Create a job that has a task-action step as the only initially-ready step
+    // Use "cleanup" task name but insert a task with a single task-action step at root
+    let mut ws = workspace.clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    ws.tasks.insert(
+        "run-task-action".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &ws,
+        "default",
+        "run-task-action",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // The parent step "run" should be running (server-side dispatch)
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    assert_eq!(parent_steps.len(), 1);
+    assert_eq!(parent_steps[0].step_name, "run");
+    assert_eq!(parent_steps[0].action_type, "task");
+    assert_eq!(parent_steps[0].status, "running");
+
+    // A child job should have been created
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    assert_eq!(all_jobs.len(), 2);
+
+    let child_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "task")
+        .expect("Child job not found");
+    assert_eq!(child_job.task_name, "cleanup");
+    assert_eq!(child_job.parent_job_id, Some(parent_job_id));
+    assert_eq!(child_job.parent_step_name.as_deref(), Some("run"));
+
+    // Child job should have its own steps
+    let child_steps = JobStepRepo::get_steps_for_job(&pool, child_job.job_id).await?;
+    assert_eq!(child_steps.len(), 1);
+    assert_eq!(child_steps[0].step_name, "clean");
+    assert_eq!(child_steps[0].action_type, "shell");
+    assert_eq!(child_steps[0].status, "ready");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_action_child_completion_updates_parent() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let workspace = task_action_test_workspace();
+
+    // Use the deploy task: build → cleanup (task action)
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step "build" is ready, "cleanup" is pending (depends on build)
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let build_step = parent_steps
+        .iter()
+        .find(|s| s.step_name == "build")
+        .unwrap();
+    let cleanup_step = parent_steps
+        .iter()
+        .find(|s| s.step_name == "cleanup")
+        .unwrap();
+    assert_eq!(build_step.status, "ready");
+    assert_eq!(cleanup_step.status, "pending");
+
+    // Only 1 job so far (no child yet because cleanup is pending)
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    assert_eq!(all_jobs.len(), 1);
+
+    // Simulate worker completing the build step
+    let worker_id = register_test_worker(&pool).await;
+    JobStepRepo::mark_running(&pool, parent_job_id, "build", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, parent_job_id, worker_id).await?;
+    JobStepRepo::mark_completed(
+        &pool,
+        parent_job_id,
+        "build",
+        Some(json!({"artifact": "v1.0"})),
+    )
+    .await?;
+
+    // Run orchestrator to promote cleanup step
+    let task = workspace.tasks.get("deploy").unwrap();
+    orchestrator::on_step_completed(&pool, parent_job_id, "build", task).await?;
+
+    // Now handle_task_steps should dispatch the cleanup step
+    stroem_server::job_creator::handle_task_steps(&pool, &workspace, "default", parent_job_id)
+        .await?;
+
+    // Cleanup step should now be running
+    let steps_after = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let cleanup_after = steps_after
+        .iter()
+        .find(|s| s.step_name == "cleanup")
+        .unwrap();
+    assert_eq!(cleanup_after.status, "running");
+
+    // A child job should exist
+    let all_jobs_2 = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    assert_eq!(all_jobs_2.len(), 2);
+
+    let child_job = all_jobs_2
+        .iter()
+        .find(|j| j.source_type == "task")
+        .expect("Child job not found");
+
+    // Now simulate completing the child job's step
+    let child_steps = JobStepRepo::get_steps_for_job(&pool, child_job.job_id).await?;
+    assert_eq!(child_steps[0].status, "ready");
+
+    JobStepRepo::mark_running(&pool, child_job.job_id, "clean", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, child_job.job_id, worker_id).await?;
+    JobStepRepo::mark_completed(
+        &pool,
+        child_job.job_id,
+        "clean",
+        Some(json!({"cleaned": true})),
+    )
+    .await?;
+
+    // Run orchestrator for the child job
+    let child_task = workspace.tasks.get("cleanup").unwrap();
+    orchestrator::on_step_completed(&pool, child_job.job_id, "clean", child_task).await?;
+
+    // Child job should now be completed
+    let child_after = JobRepo::get(&pool, child_job.job_id).await?.unwrap();
+    assert_eq!(child_after.status, "completed");
+
+    // Simulate propagation: mark parent step completed with child's output
+    JobStepRepo::mark_completed(&pool, parent_job_id, "cleanup", child_after.output.clone())
+        .await?;
+
+    // Run orchestrator for the parent job
+    orchestrator::on_step_completed(&pool, parent_job_id, "cleanup", task).await?;
+
+    // Parent job should now be completed
+    let parent_after = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(parent_after.status, "completed");
+
+    // Parent job output should include the child job's output via the cleanup step
+    // Child job output is aggregated by orchestrator: { "clean": { "cleaned": true } }
+    // That becomes the cleanup step's output, and since cleanup is a terminal step
+    // in the parent, it appears in the parent's output
+    let parent_output = parent_after.output.unwrap();
+    assert!(
+        parent_output.get("cleanup").is_some(),
+        "Parent output should contain 'cleanup' key"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_action_not_claimed_by_worker() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let _workspace = task_action_test_workspace();
+
+    // Insert a step that is "ready" with action_type "task" directly
+    let job_id =
+        JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
+
+    let step = NewJobStep {
+        job_id,
+        step_name: "task-step".to_string(),
+        action_name: "run-cleanup".to_string(),
+        action_type: "task".to_string(),
+        action_image: None,
+        action_spec: Some(json!({"task": "cleanup"})),
+        input: None,
+        status: "ready".to_string(),
+        required_tags: vec![],
+        runner: "none".to_string(),
+    };
+    JobStepRepo::create_steps(&pool, &[step]).await?;
+
+    // Register a worker and try to claim
+    let worker_id = register_test_worker(&pool).await;
+    let claimed = JobStepRepo::claim_ready_step(&pool, &["shell".to_string()], worker_id).await?;
+
+    // Worker should NOT claim the task-type step
+    assert!(claimed.is_none(), "Worker should not claim task-type steps");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_action_input_rendered() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = task_action_test_workspace();
+
+    // Add input-aware task action
+    workspace.actions.insert(
+        "run-with-input".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("cleanup".to_string()),
+            cmd: None,
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    // Add a task with a task-action step that passes templated input
+    let mut flow = HashMap::new();
+    let mut step_input = HashMap::new();
+    step_input.insert("env".to_string(), json!("{{ input.environment }}"));
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "run-with-input".to_string(),
+            depends_on: vec![],
+            input: step_input,
+            continue_on_failure: false,
+        },
+    );
+    let mut task_input = HashMap::new();
+    task_input.insert(
+        "environment".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            required: true,
+            default: None,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy-with-input".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: task_input,
+            flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let _parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy-with-input",
+        json!({"environment": "production"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Child job should exist and its input should contain the rendered value
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    assert_eq!(all_jobs.len(), 2);
+
+    let child_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "task")
+        .expect("Child job not found");
+    let child_input = child_job.input.as_ref().unwrap();
+    assert_eq!(child_input["env"], "production");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_action_in_hook() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = task_action_test_workspace();
+
+    // Task with on_error hook that uses a task-type action
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy-with-hook".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![HookDef {
+                action: "run-cleanup".to_string(),
+                input: HashMap::new(),
+            }],
+        },
+    );
+
+    // Create and fail the original job
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy-with-hook",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("deploy-with-hook").unwrap();
+
+    // Simulate step failure
+    let worker_id = register_test_worker(&pool).await;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "something broke").await?;
+
+    // Orchestrate → job fails
+    orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    // Fire hooks
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    // A hook job should have been created with task_name = "cleanup" (not "_hook:run-cleanup")
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_jobs: Vec<_> = all_jobs
+        .iter()
+        .filter(|j| j.source_type == "hook")
+        .collect();
+    assert_eq!(hook_jobs.len(), 1);
+
+    // When hook action is type: task, it creates a real task job
+    let hook_job = hook_jobs[0];
+    assert_eq!(hook_job.task_name, "cleanup");
+
+    // And the hook job should have the cleanup task's steps
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    assert_eq!(hook_steps.len(), 1);
+    assert_eq!(hook_steps[0].step_name, "clean");
+    assert_eq!(hook_steps[0].action_type, "shell");
+    assert_eq!(hook_steps[0].status, "ready");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_action_self_reference_rejected() -> Result<()> {
+    use stroem_common::validation::validate_workflow_config;
+
+    let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+  run-self:
+    type: task
+    task: loopy
+tasks:
+  loopy:
+    flow:
+      step1:
+        action: greet
+      step2:
+        action: run-self
+        depends_on: [step1]
+"#;
+    let config: stroem_common::models::workflow::WorkflowConfig =
+        serde_yml::from_str(yaml).unwrap();
+    let result = validate_workflow_config(&config);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("self-reference"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = task_action_test_workspace();
+
+    // Add a failing task
+    let mut fail_flow = HashMap::new();
+    fail_flow.insert(
+        "crash".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "failing-task".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: fail_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    // Action for failing task
+    workspace.actions.insert(
+        "run-failing".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("failing-task".to_string()),
+            cmd: None,
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    // Task that runs the failing task action
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "run-failing".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "parent-of-fail".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: parent_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "parent-of-fail",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Child job should exist
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let child_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "task")
+        .expect("Child job not found");
+    assert_eq!(child_job.parent_job_id, Some(parent_job_id));
+    assert_eq!(child_job.parent_step_name.as_deref(), Some("run"));
+
+    // Simulate worker failing the child's step
+    let worker_id = register_test_worker(&pool).await;
+    JobStepRepo::mark_running(&pool, child_job.job_id, "crash", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, child_job.job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, child_job.job_id, "crash", "child crashed").await?;
+
+    // Run orchestrator for child → child job fails
+    let child_task = workspace.tasks.get("failing-task").unwrap();
+    orchestrator::on_step_completed(&pool, child_job.job_id, "crash", child_task).await?;
+
+    let child_after = JobRepo::get(&pool, child_job.job_id).await?.unwrap();
+    assert_eq!(child_after.status, "failed");
+
+    // Simulate propagation: mark parent step failed
+    let err_msg = format!("Child job {} failed", child_job.job_id);
+    JobStepRepo::mark_failed(&pool, parent_job_id, "run", &err_msg).await?;
+
+    // Run orchestrator for parent → parent job fails
+    let parent_task = workspace.tasks.get("parent-of-fail").unwrap();
+    orchestrator::on_step_completed(&pool, parent_job_id, "run", parent_task).await?;
+
+    let parent_after = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(parent_after.status, "failed");
+
+    // Parent step should have error message about child failure
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let parent_step = parent_steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(parent_step.status, "failed");
+    assert!(parent_step
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("failed"));
 
     Ok(())
 }

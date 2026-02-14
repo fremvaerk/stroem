@@ -214,6 +214,7 @@ Tags control which steps a worker can claim. Each step computes `required_tags` 
 | `shell` | `pod` | `["kubernetes"]` |
 | `docker` | — | `["docker"]` |
 | `pod` | — | `["kubernetes"]` |
+| `task` | — | `[]` (server-dispatched) |
 
 Actions can add extra tags via the `tags` field (e.g., `tags: ["gpu"]`). A worker claims a step only when all required tags are present in the worker's tag set.
 
@@ -225,6 +226,77 @@ For backward compatibility, `capabilities` still works — if `tags` is not set,
 # Build worker with both container runners
 docker build -f Dockerfile.worker --build-arg FEATURES="docker,kubernetes" .
 ```
+
+### Action Type: task (Sub-Job Execution)
+
+Actions of `type: task` reference another task by name. When a step using a task action becomes ready, the server creates a child job that runs the referenced task's full flow. Workers never see task steps — they are dispatched entirely server-side.
+
+```yaml
+actions:
+  run-cleanup:
+    type: task
+    task: cleanup-resources
+
+  cleanup-resources-action:
+    type: shell
+    cmd: "echo 'Cleaning up...'"
+
+tasks:
+  cleanup-resources:
+    mode: distributed
+    input:
+      env: { type: string }
+    flow:
+      cleanup:
+        action: cleanup-resources-action
+        input:
+          env: "{{ input.env }}"
+
+  deploy:
+    mode: distributed
+    input:
+      env: { type: string, default: "staging" }
+    flow:
+      build:
+        action: build-app
+      cleanup:
+        action: run-cleanup
+        depends_on: [build]
+        input:
+          env: "{{ input.env }}"
+```
+
+In this example, when the `deploy` task's `cleanup` step becomes ready (after `build` completes), the server creates a child job running the `cleanup-resources` task. The child job executes its own flow steps, and when complete, the parent's `cleanup` step is marked as completed.
+
+**Rules for task actions:**
+- Must have `task` field referencing an existing task in the same workspace
+- Cannot have `cmd`, `script`, `image`, or `runner` fields
+- No worker tags required — task steps are server-dispatched
+- Self-referencing tasks (direct or via hooks) are rejected at validation time
+- Maximum nesting depth of 10 levels prevents infinite recursion
+- Step input templates are rendered server-side before creating the child job
+
+**Task actions in hooks:**
+
+Task actions also work in `on_success` and `on_error` hooks, creating a full child job for the referenced task instead of a single-step hook job:
+
+```yaml
+tasks:
+  deploy:
+    flow:
+      deploy:
+        action: deploy-app
+    on_error:
+      - action: run-cleanup
+        input:
+          env: "{{ hook.workspace }}"
+```
+
+**Parent-child relationship:**
+- Child jobs track their parent via `parent_job_id` and `parent_step_name`
+- When a child job completes, the parent step is marked as completed with the child's output
+- When a child job fails, the parent step is marked as failed
+- The parent's orchestrator runs after child completion, promoting any downstream steps
 
 ### Environment variables
 
@@ -564,9 +636,12 @@ stroem validate workspace/.workflows/
 
 The validator checks:
 - YAML syntax and structure
-- Action type validity (`shell` needs `cmd` or `script`; `docker`/`pod` need `image`)
+- Action type validity (`shell` needs `cmd` or `script`; `docker`/`pod` need `image`; `task` needs `task`)
 - `shell` actions cannot have `image` (use `runner: docker` instead)
 - `docker`/`pod` actions cannot have `runner` or `script`
+- `task` actions cannot have `cmd`, `script`, `image`, or `runner`
+- `task` actions must reference an existing task in the same workspace
+- Self-referencing task actions (task A → action → task A) are rejected
 - `runner` values are valid (`local`, `docker`, `pod`)
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow

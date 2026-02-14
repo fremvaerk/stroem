@@ -205,6 +205,36 @@ async fn fire_single_hook(
             .context("Failed to render hook input templates")?
     };
 
+    // If the action is type: task, create a full job for the referenced task
+    if action.action_type == "task" {
+        let task_ref = action
+            .task
+            .as_ref()
+            .context("type: task action missing task field")?;
+
+        let job_id = crate::job_creator::create_job_for_task(
+            pool,
+            workspace_config,
+            workspace,
+            task_ref,
+            rendered_input,
+            "hook",
+            Some(source_id),
+        )
+        .await
+        .context("Failed to create hook task job")?;
+
+        tracing::info!(
+            "Fired hook task job {} for action '{}' -> task '{}' (source: {})",
+            job_id,
+            hook.action,
+            task_ref,
+            source_id
+        );
+
+        return Ok(());
+    }
+
     // Create the hook job (single-step, always distributed)
     let task_name = format!("_hook:{}", hook.action);
     let job_id = JobRepo::create(

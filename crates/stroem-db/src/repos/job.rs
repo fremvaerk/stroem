@@ -22,6 +22,8 @@ pub struct JobRow {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub log_path: Option<String>,
+    pub parent_job_id: Option<Uuid>,
+    pub parent_step_name: Option<String>,
 }
 
 /// Repository for job operations
@@ -38,12 +40,39 @@ impl JobRepo {
         source_type: &str,
         source_id: Option<&str>,
     ) -> Result<Uuid> {
+        Self::create_with_parent(
+            pool,
+            workspace,
+            task_name,
+            mode,
+            input,
+            source_type,
+            source_id,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Create a new job with optional parent tracking (for type: task sub-jobs)
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_parent(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        mode: &str,
+        input: Option<JsonValue>,
+        source_type: &str,
+        source_id: Option<&str>,
+        parent_job_id: Option<Uuid>,
+        parent_step_name: Option<&str>,
+    ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
 
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(job_id)
@@ -53,6 +82,8 @@ impl JobRepo {
         .bind(input)
         .bind(source_type)
         .bind(source_id)
+        .bind(parent_job_id)
+        .bind(parent_step_name)
         .execute(pool)
         .await?;
 
@@ -64,7 +95,8 @@ impl JobRepo {
         let job = sqlx::query_as::<_, JobRow>(
             r#"
             SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                   source_id, worker_id, revision, created_at, started_at, completed_at, log_path
+                   source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
+                   parent_job_id, parent_step_name
             FROM job
             WHERE job_id = $1
             "#,
@@ -87,7 +119,8 @@ impl JobRepo {
             sqlx::query_as::<_, JobRow>(
                 r#"
                 SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                       source_id, worker_id, revision, created_at, started_at, completed_at, log_path
+                       source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
+                       parent_job_id, parent_step_name
                 FROM job
                 WHERE workspace = $1
                 ORDER BY created_at DESC
@@ -103,7 +136,8 @@ impl JobRepo {
             sqlx::query_as::<_, JobRow>(
                 r#"
                 SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                       source_id, worker_id, revision, created_at, started_at, completed_at, log_path
+                       source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
+                       parent_job_id, parent_step_name
                 FROM job
                 ORDER BY created_at DESC
                 LIMIT $1 OFFSET $2
@@ -166,6 +200,22 @@ impl JobRepo {
             "#,
         )
         .bind(worker_id)
+        .bind(job_id)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Transition job from pending to running without a worker (server-side dispatch for type: task)
+    pub async fn mark_running_if_pending_server(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job
+            SET status = 'running', started_at = NOW()
+            WHERE job_id = $1 AND status = 'pending'
+            "#,
+        )
         .bind(job_id)
         .execute(pool)
         .await?;

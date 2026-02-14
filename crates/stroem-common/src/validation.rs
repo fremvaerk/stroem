@@ -10,6 +10,69 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
     // Validate each action
     for (action_name, action) in &config.actions {
         validate_action(action_name, action)?;
+
+        // For type: task, verify the referenced task exists
+        if action.action_type == "task" {
+            let task_ref = action.task.as_ref().unwrap(); // validated above
+            if !config.tasks.contains_key(task_ref) {
+                bail!(
+                    "Action '{}' references non-existent task '{}'",
+                    action_name,
+                    task_ref
+                );
+            }
+        }
+    }
+
+    // Check for direct self-references: task T uses action A where A is type:task
+    // pointing back to T
+    for (task_name, task) in &config.tasks {
+        for (step_name, step) in &task.flow {
+            if let Some(action) = config.actions.get(&step.action) {
+                if action.action_type == "task" {
+                    if let Some(ref task_ref) = action.task {
+                        if task_ref == task_name {
+                            bail!(
+                                "Task '{}' step '{}' uses action '{}' which references back to the same task (self-reference)",
+                                task_name,
+                                step_name,
+                                step.action
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check hooks for self-references too
+        for (i, hook) in task.on_success.iter().enumerate() {
+            if let Some(action) = config.actions.get(&hook.action) {
+                if action.action_type == "task" {
+                    if let Some(ref task_ref) = action.task {
+                        if task_ref == task_name {
+                            bail!(
+                                "Task '{}' on_success[{}] uses action '{}' which references back to the same task (self-reference)",
+                                task_name, i, hook.action
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for (i, hook) in task.on_error.iter().enumerate() {
+            if let Some(action) = config.actions.get(&hook.action) {
+                if action.action_type == "task" {
+                    if let Some(ref task_ref) = action.task {
+                        if task_ref == task_name {
+                            bail!(
+                                "Task '{}' on_error[{}] uses action '{}' which references back to the same task (self-reference)",
+                                task_name, i, hook.action
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Validate each task
@@ -313,9 +376,44 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
                 );
             }
         }
+        "task" => {
+            // Task actions must have task field
+            if action.task.is_none() {
+                bail!(
+                    "Action '{}' is type 'task' but missing 'task' field",
+                    action_name
+                );
+            }
+
+            // Task actions must not have cmd, script, or image
+            if action.cmd.is_some() {
+                bail!(
+                    "Action '{}' is type 'task' but has 'cmd' field (task actions only reference another task)",
+                    action_name
+                );
+            }
+            if action.script.is_some() {
+                bail!(
+                    "Action '{}' is type 'task' but has 'script' field (task actions only reference another task)",
+                    action_name
+                );
+            }
+            if action.image.is_some() {
+                bail!(
+                    "Action '{}' is type 'task' but has 'image' field (task actions only reference another task)",
+                    action_name
+                );
+            }
+            if action.runner.is_some() {
+                bail!(
+                    "Action '{}' is type 'task' but has 'runner' field (task actions only reference another task)",
+                    action_name
+                );
+            }
+        }
         other => {
             bail!(
-                "Action '{}' has invalid type '{}' (expected: shell, docker, pod)",
+                "Action '{}' has invalid type '{}' (expected: shell, docker, pod, task)",
                 action_name,
                 other
             );
@@ -351,6 +449,11 @@ fn validate_hook_action(
 /// Compute the required worker tags for an action.
 /// These tags must all be present on a worker for it to claim a step using this action.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
+    // Task actions are handled server-side, not by workers
+    if action.action_type == "task" {
+        return vec![];
+    }
+
     let base_tag = match action.action_type.as_str() {
         "shell" => match action.runner.as_deref() {
             Some("docker") => "docker",
@@ -377,6 +480,7 @@ pub fn derive_runner(action: &ActionDef) -> String {
     match action.action_type.as_str() {
         "shell" => action.runner.as_deref().unwrap_or("local").to_string(),
         "docker" | "pod" => "none".to_string(),
+        "task" => "none".to_string(),
         _ => "local".to_string(),
     }
 }
@@ -1320,5 +1424,189 @@ tasks:
         let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_task_action_valid() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+  run-cleanup:
+    type: task
+    task: cleanup
+
+tasks:
+  cleanup:
+    flow:
+      step1:
+        action: greet
+  deploy:
+    flow:
+      build:
+        action: greet
+      cleanup:
+        action: run-cleanup
+        depends_on: [build]
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_task_action_missing_task_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: task
+tasks:
+  t:
+    flow:
+      s:
+        action: bad
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing 'task'"));
+    }
+
+    #[test]
+    fn test_validate_task_action_with_cmd_rejected() {
+        let yaml = r#"
+actions:
+  bad:
+    type: task
+    task: some-task
+    cmd: "echo nope"
+tasks:
+  some-task:
+    flow:
+      s:
+        action: bad
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'cmd'"));
+    }
+
+    #[test]
+    fn test_validate_task_action_with_image_rejected() {
+        let yaml = r#"
+actions:
+  bad:
+    type: task
+    task: some-task
+    image: alpine:latest
+tasks:
+  some-task:
+    flow:
+      s:
+        action: bad
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'image'"));
+    }
+
+    #[test]
+    fn test_validate_task_action_nonexistent_task() {
+        let yaml = r#"
+actions:
+  run-missing:
+    type: task
+    task: nonexistent
+tasks:
+  deploy:
+    flow:
+      s:
+        action: run-missing
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-existent task"));
+    }
+
+    #[test]
+    fn test_validate_task_action_self_reference() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+  run-self:
+    type: task
+    task: loopy
+tasks:
+  loopy:
+    flow:
+      step1:
+        action: greet
+      step2:
+        action: run-self
+        depends_on: [step1]
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("self-reference"));
+    }
+
+    #[test]
+    fn test_validate_task_action_self_reference_in_hook() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+  run-self:
+    type: task
+    task: loopy
+tasks:
+  loopy:
+    flow:
+      step1:
+        action: greet
+    on_error:
+      - action: run-self
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("self-reference"));
+    }
+
+    #[test]
+    fn test_compute_required_tags_task() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: task
+task: other-task
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_derive_runner_task() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yml::from_str(
+            r#"
+type: task
+task: other-task
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "none");
     }
 }

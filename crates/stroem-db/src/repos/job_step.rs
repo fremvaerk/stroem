@@ -138,7 +138,7 @@ impl JobStepRepo {
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND required_tags <@ $1::jsonb
+                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type != 'task'
                 ORDER BY job_id, step_name
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -190,6 +190,23 @@ impl JobStepRepo {
             "#,
         )
         .bind(worker_id)
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Mark step as running (server-side, no worker — used for type: task steps)
+    pub async fn mark_running_server(pool: &PgPool, job_id: Uuid, step_name: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'running', started_at = NOW()
+            WHERE job_id = $1 AND step_name = $2
+            "#,
+        )
         .bind(job_id)
         .bind(step_name)
         .execute(pool)

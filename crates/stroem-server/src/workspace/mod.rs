@@ -370,6 +370,7 @@ tasks:
             "test-action".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                task: None,
                 cmd: Some("echo test".to_string()),
                 script: None,
                 runner: None,
@@ -428,6 +429,7 @@ tasks:
             "action1".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                task: None,
                 cmd: Some("echo 1".to_string()),
                 script: None,
                 runner: None,
@@ -470,6 +472,7 @@ tasks:
             "action2".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                task: None,
                 cmd: Some("echo 2".to_string()),
                 script: None,
                 runner: None,

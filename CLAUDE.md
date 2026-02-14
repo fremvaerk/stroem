@@ -114,6 +114,7 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 ### Action Types and Runners (Type 1 / Type 2 Split)
 - **Type 1 (Container)**: `type: docker` or `type: pod` — runs user's prepared image as-is, no workspace mounting
 - **Type 2 (Shell)**: `type: shell` + `runner: local|docker|pod` — shell commands in a runner environment with workspace files
+- **Type 3 (Sub-job)**: `type: task` — references another task, server creates a child job (see Task Actions below)
 - `type: shell` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: shell` + `runner: docker` (Type 2) instead.
 
 ### Runner Architecture
@@ -163,6 +164,19 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Hook jobs: `task_name = "_hook:{action}"`, `source_type = "hook"`, `source_id = "{ws}/{task}/{job_id}/{hook_type}[idx]"`
 - Validation in `validation.rs` — hook action references must exist (or be library actions with `/`)
 - Migration `005_hooks.sql` adds `'hook'` to `source_type` CHECK constraint
+- Hook actions can be `type: task` — creates a full child job instead of a single-step hook job
+
+### Task Actions (type: task — Sub-Job Execution)
+- `ActionDef.task: Option<String>` — references another task by name
+- `type: task` actions cannot have `cmd`, `script`, `image`, or `runner`
+- Server-side dispatch: workers never claim task-type steps (filtered in claim SQL `action_type != 'task'`)
+- `job_creator.rs` — `handle_task_steps()` finds ready task steps, renders input, creates child jobs
+- `create_job_for_task_inner()` uses `Box::pin` for recursive async (task → child task → grandchild task)
+- `compute_depth()` walks parent chain — max 10 levels (`MAX_TASK_DEPTH`)
+- DB: `parent_job_id` + `parent_step_name` columns on `job` table (migration `006_task_actions.sql`)
+- `propagate_to_parent()` in `complete_step` handler: child completes → parent step updated → parent orchestrated → recurse up chain
+- Child jobs: `source_type = "task"`, `source_id = "{parent_job_id}/{step_name}"`
+- Validation: self-referencing task actions rejected (direct and via hooks)
 
 ### Database
 - Runtime sqlx queries, NOT compile-time checked

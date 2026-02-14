@@ -576,6 +576,13 @@ pub async fn complete_step(
             .into_response();
     }
 
+    // Handle any newly-promoted type: task steps in the current job
+    if let Err(e) =
+        crate::job_creator::handle_task_steps(&state.pool, &workspace, &job.workspace, job_id).await
+    {
+        tracing::error!("Failed to handle task steps for job {}: {}", job_id, e);
+    }
+
     // Spawn background S3 upload if the job reached a terminal state, and fire hooks
     if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
         if job_after.status == "completed" || job_after.status == "failed" {
@@ -586,12 +593,140 @@ pub async fn complete_step(
                 }
             });
 
+            // If this is a child job, propagate completion to the parent step
+            if let (Some(parent_job_id), Some(ref parent_step)) =
+                (job_after.parent_job_id, &job_after.parent_step_name)
+            {
+                if let Err(e) =
+                    propagate_to_parent(&state, &job_after, parent_job_id, parent_step).await
+                {
+                    tracing::error!(
+                        "Failed to propagate child job {} to parent {}: {}",
+                        job_after.job_id,
+                        parent_job_id,
+                        e
+                    );
+                }
+            }
+
             // Fire hooks (best-effort, inline since it only does DB writes)
             crate::hooks::fire_hooks(&state.pool, &workspace, &job_after, &task).await;
         }
     }
 
     Json(json!({"status": "ok"})).into_response()
+}
+
+/// Propagate a child job's terminal state to the parent step and orchestrate the parent.
+async fn propagate_to_parent(
+    state: &AppState,
+    child_job: &stroem_db::JobRow,
+    parent_job_id: Uuid,
+    parent_step: &str,
+) -> Result<(), anyhow::Error> {
+    if child_job.status == "completed" {
+        JobStepRepo::mark_completed(
+            &state.pool,
+            parent_job_id,
+            parent_step,
+            child_job.output.clone(),
+        )
+        .await?;
+    } else {
+        let err = format!("Child job {} failed", child_job.job_id);
+        JobStepRepo::mark_failed(&state.pool, parent_job_id, parent_step, &err).await?;
+    }
+
+    // Get parent job info to orchestrate
+    let parent_job = JobRepo::get(&state.pool, parent_job_id).await?;
+    if let Some(ref parent_job) = parent_job {
+        if let Some(parent_ws) = state.get_workspace(&parent_job.workspace).await {
+            // Build task def for parent — may be a real task or a hook
+            let parent_task = if let Some(t) = parent_ws.tasks.get(&parent_job.task_name) {
+                t.clone()
+            } else if parent_job.source_type == "hook" {
+                // Hook jobs use synthetic names; build minimal TaskDef
+                let steps = JobStepRepo::get_steps_for_job(&state.pool, parent_job_id).await?;
+                let mut flow = HashMap::new();
+                for step in &steps {
+                    flow.insert(
+                        step.step_name.clone(),
+                        FlowStep {
+                            action: step.action_name.clone(),
+                            depends_on: vec![],
+                            input: HashMap::new(),
+                            continue_on_failure: false,
+                        },
+                    );
+                }
+                TaskDef {
+                    mode: "distributed".to_string(),
+                    folder: None,
+                    input: HashMap::new(),
+                    flow,
+                    on_success: vec![],
+                    on_error: vec![],
+                }
+            } else {
+                tracing::warn!(
+                    "Parent task '{}' not found in workspace '{}'",
+                    parent_job.task_name,
+                    parent_job.workspace
+                );
+                return Ok(());
+            };
+
+            // Run orchestrator for parent job
+            orchestrator::on_step_completed(&state.pool, parent_job_id, parent_step, &parent_task)
+                .await?;
+
+            // Handle any newly-promoted task steps in the parent
+            crate::job_creator::handle_task_steps(
+                &state.pool,
+                &parent_ws,
+                &parent_job.workspace,
+                parent_job_id,
+            )
+            .await?;
+
+            // Check if parent job is now terminal — propagate recursively
+            if let Ok(Some(parent_after)) = JobRepo::get(&state.pool, parent_job_id).await {
+                if parent_after.status == "completed" || parent_after.status == "failed" {
+                    // S3 upload for parent
+                    let log_storage = state.log_storage.clone();
+                    let pjid = parent_job_id;
+                    tokio::spawn(async move {
+                        if let Err(e) = log_storage.upload_to_s3(pjid).await {
+                            tracing::warn!(
+                                "Failed to upload logs to S3 for parent job {}: {}",
+                                pjid,
+                                e
+                            );
+                        }
+                    });
+
+                    // Propagate up the chain if parent is also a child
+                    if let (Some(grandparent_id), Some(ref grandparent_step)) =
+                        (parent_after.parent_job_id, &parent_after.parent_step_name)
+                    {
+                        Box::pin(propagate_to_parent(
+                            state,
+                            &parent_after,
+                            grandparent_id,
+                            grandparent_step,
+                        ))
+                        .await?;
+                    }
+
+                    // Fire hooks for the parent
+                    crate::hooks::fire_hooks(&state.pool, &parent_ws, &parent_after, &parent_task)
+                        .await;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// POST /worker/jobs/:id/logs - Append log chunk
@@ -685,8 +820,24 @@ pub async fn complete_job(
                 }
             });
 
-            // Fire hooks for the completed job
+            // Fire hooks and propagate to parent for the completed job
             if let Ok(Some(job)) = JobRepo::get(&state.pool, job_id).await {
+                // If this is a child job, propagate completion to the parent step
+                if let (Some(parent_job_id), Some(ref parent_step)) =
+                    (job.parent_job_id, &job.parent_step_name)
+                {
+                    if let Err(e) =
+                        propagate_to_parent(&state, &job, parent_job_id, parent_step).await
+                    {
+                        tracing::error!(
+                            "Failed to propagate child job {} to parent {}: {}",
+                            job.job_id,
+                            parent_job_id,
+                            e
+                        );
+                    }
+                }
+
                 if let Some(ws_config) = state.get_workspace(&job.workspace).await {
                     if let Some(task) = ws_config.tasks.get(&job.task_name) {
                         crate::hooks::fire_hooks(&state.pool, &ws_config, &job, task).await;
