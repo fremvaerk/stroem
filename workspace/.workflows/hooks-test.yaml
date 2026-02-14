@@ -1,0 +1,47 @@
+actions:
+  python-crash:
+    type: shell
+    cmd: |
+      python3 -c "
+      import sys
+
+      def process_data(data):
+          return data['missing_key']
+
+      def main():
+          result = process_data({'name': 'test'})
+          print(result)
+
+      main()
+      "
+
+  log-hook-result:
+    type: shell
+    cmd: |
+      echo "HOOK_FIRED"
+      echo "workspace={{ input.workspace }}"
+      echo "task={{ input.task_name }}"
+      echo "status={{ input.status }}"
+      echo "is_success={{ input.is_success }}"
+      echo "error_message={{ input.error_message }}"
+    input:
+      workspace: { type: string }
+      task_name: { type: string }
+      status: { type: string }
+      is_success: { type: string }
+      error_message: { type: string }
+
+tasks:
+  python-crash-with-hook:
+    mode: distributed
+    flow:
+      crash:
+        action: python-crash
+    on_error:
+      - action: log-hook-result
+        input:
+          workspace: "{{ hook.workspace }}"
+          task_name: "{{ hook.task_name }}"
+          status: "{{ hook.status }}"
+          is_success: "{{ hook.is_success }}"
+          error_message: "{{ hook.error_message }}"

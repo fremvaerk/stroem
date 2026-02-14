@@ -1,4 +1,3 @@
-use crate::log_storage::LogStorage;
 use crate::orchestrator;
 use crate::state::AppState;
 use axum::{
@@ -9,7 +8,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
+use stroem_common::models::workflow::{FlowStep, TaskDef};
 use stroem_common::template::{render_env_map, render_input_map, render_string_opt};
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
@@ -519,6 +520,42 @@ pub async fn complete_step(
     };
     let task = match workspace.tasks.get(&job.task_name) {
         Some(t) => t.clone(),
+        None if job.source_type == "hook" => {
+            // Hook jobs use synthetic task names (e.g. "_hook:notify") that don't
+            // exist in the workspace. Build a minimal TaskDef so the orchestrator
+            // can still detect terminal state and mark the job completed/failed.
+            let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to get steps for hook job: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "Failed to get steps for hook job"})),
+                    )
+                        .into_response();
+                }
+            };
+            let mut flow = HashMap::new();
+            for step in &steps {
+                flow.insert(
+                    step.step_name.clone(),
+                    FlowStep {
+                        action: step.action_name.clone(),
+                        depends_on: vec![],
+                        input: HashMap::new(),
+                        continue_on_failure: false,
+                    },
+                );
+            }
+            TaskDef {
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow,
+                on_success: vec![],
+                on_error: vec![],
+            }
+        }
         None => {
             tracing::error!("Task '{}' not found in workspace", job.task_name);
             return (
@@ -537,6 +574,21 @@ pub async fn complete_step(
             Json(json!({"error": format!("Orchestrator error: {}", e)})),
         )
             .into_response();
+    }
+
+    // Spawn background S3 upload if the job reached a terminal state, and fire hooks
+    if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
+        if job_after.status == "completed" || job_after.status == "failed" {
+            let log_storage = state.log_storage.clone();
+            tokio::spawn(async move {
+                if let Err(e) = log_storage.upload_to_s3(job_id).await {
+                    tracing::warn!("Failed to upload logs to S3 for job {}: {}", job_id, e);
+                }
+            });
+
+            // Fire hooks (best-effort, inline since it only does DB writes)
+            crate::hooks::fire_hooks(&state.pool, &workspace, &job_after, &task).await;
+        }
     }
 
     Json(json!({"status": "ok"})).into_response()
@@ -560,8 +612,6 @@ pub async fn append_log(
         }
     };
 
-    let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
-
     // Convert structured log lines to JSONL with step field
     let step = req.step_name.as_deref().unwrap_or("");
     let jsonl_chunk: String = req
@@ -580,10 +630,10 @@ pub async fn append_log(
         .join("\n")
         + "\n";
 
-    match log_storage.append_log(job_id, &jsonl_chunk).await {
+    match state.log_storage.append_log(job_id, &jsonl_chunk).await {
         Ok(_) => {
             // Update log path in database (idempotent)
-            let log_path = log_storage.get_log_path(job_id);
+            let log_path = state.log_storage.get_log_path(job_id);
             if let Err(e) = JobRepo::set_log_path(&state.pool, job_id, &log_path).await {
                 tracing::warn!("Failed to update log path: {}", e);
             }
@@ -626,7 +676,26 @@ pub async fn complete_job(
     };
 
     match JobRepo::mark_completed(&state.pool, job_id, req.output).await {
-        Ok(_) => Json(json!({"status": "ok"})).into_response(),
+        Ok(_) => {
+            // Spawn background S3 upload for the completed job
+            let log_storage = state.log_storage.clone();
+            tokio::spawn(async move {
+                if let Err(e) = log_storage.upload_to_s3(job_id).await {
+                    tracing::warn!("Failed to upload logs to S3 for job {}: {}", job_id, e);
+                }
+            });
+
+            // Fire hooks for the completed job
+            if let Ok(Some(job)) = JobRepo::get(&state.pool, job_id).await {
+                if let Some(ws_config) = state.get_workspace(&job.workspace).await {
+                    if let Some(task) = ws_config.tasks.get(&job.task_name) {
+                        crate::hooks::fire_hooks(&state.pool, &ws_config, &job, task).await;
+                    }
+                }
+            }
+
+            Json(json!({"status": "ok"})).into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to mark job as completed: {}", e);
             (

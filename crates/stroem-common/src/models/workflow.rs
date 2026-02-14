@@ -77,6 +77,14 @@ pub struct ActionDef {
     pub output: Option<OutputDef>,
 }
 
+/// Hook definition — an action to run when a job completes or fails
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookDef {
+    pub action: String,
+    #[serde(default)]
+    pub input: HashMap<String, serde_json::Value>,
+}
+
 /// A single step in a task flow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowStep {
@@ -99,6 +107,10 @@ pub struct TaskDef {
     #[serde(default)]
     pub input: HashMap<String, InputFieldDef>,
     pub flow: HashMap<String, FlowStep>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_success: Vec<HookDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_error: Vec<HookDef>,
 }
 
 fn default_mode() -> String {
@@ -562,5 +574,67 @@ actions:
         assert!(workspace.secrets.contains_key("db_password"));
         assert!(workspace.secrets.contains_key("api_key"));
         assert_eq!(workspace.actions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_task_with_hooks() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "make deploy"
+  notify:
+    type: shell
+    cmd: "curl $WEBHOOK"
+    input:
+      message:
+        type: string
+
+tasks:
+  release:
+    flow:
+      step1:
+        action: deploy
+    on_success:
+      - action: notify
+        input:
+          message: "Deploy succeeded"
+      - action: notify
+        input:
+          message: "All good"
+    on_error:
+      - action: notify
+        input:
+          message: "Deploy FAILED"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let task = config.tasks.get("release").unwrap();
+        assert_eq!(task.on_success.len(), 2);
+        assert_eq!(task.on_error.len(), 1);
+        assert_eq!(task.on_success[0].action, "notify");
+        assert_eq!(
+            task.on_success[0].input.get("message").unwrap(),
+            "Deploy succeeded"
+        );
+        assert_eq!(task.on_error[0].action, "notify");
+        assert_eq!(
+            task.on_error[0].input.get("message").unwrap(),
+            "Deploy FAILED"
+        );
+    }
+
+    #[test]
+    fn test_parse_task_without_hooks() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: test
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let task = config.tasks.get("test").unwrap();
+        assert!(task.on_success.is_empty());
+        assert!(task.on_error.is_empty());
     }
 }

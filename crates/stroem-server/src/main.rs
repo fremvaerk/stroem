@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use stroem_db::{create_pool, run_migrations, UserRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
+use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::workspace::WorkspaceManager;
 use tokio_util::sync::CancellationToken;
@@ -108,8 +109,27 @@ async fn main() -> Result<()> {
         std::collections::HashMap::new()
     };
 
+    // Initialize log storage
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+
+    #[cfg(feature = "s3")]
+    let log_storage = if let Some(ref s3_config) = config.log_storage.s3 {
+        log_storage
+            .with_s3(s3_config)
+            .await
+            .context("Failed to initialize S3 log backend")?
+    } else {
+        log_storage
+    };
+
     // Build application state
-    let state = AppState::new(pool, workspace_manager, config.clone(), oidc_providers);
+    let state = AppState::new(
+        pool,
+        workspace_manager,
+        config.clone(),
+        log_storage,
+        oidc_providers,
+    );
 
     // Start scheduler
     let cancel_token = CancellationToken::new();

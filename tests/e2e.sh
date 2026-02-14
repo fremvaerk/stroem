@@ -262,6 +262,145 @@ else
     fail "Deploy logs missing notification with env input - input propagation broken"
 fi
 
+# --- 10. Test hooks with Python crash ---
+info "Triggering python-crash-with-hook task (expects failure + hook)..."
+EXEC_RESP3=$(curl -sf -X POST "$BASE_URL/api/workspaces/default/tasks/python-crash-with-hook/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+
+JOB_ID3=$(echo "$EXEC_RESP3" | jq -r '.job_id')
+if [ -z "$JOB_ID3" ] || [ "$JOB_ID3" = "null" ]; then
+    fail "No job_id returned for python-crash-with-hook: $EXEC_RESP3"
+fi
+pass "Python crash job created: $JOB_ID3"
+
+info "Waiting for python-crash job to fail..."
+POLLED=0
+JOB_STATUS3="pending"
+
+while [ "$JOB_STATUS3" != "completed" ] && [ "$JOB_STATUS3" != "failed" ]; do
+    sleep 2
+    POLLED=$((POLLED + 2))
+    if [ "$POLLED" -ge "$MAX_POLL" ]; then
+        JOB_DETAIL3=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID3")
+        echo "$JOB_DETAIL3" | jq .
+        fail "Python crash job did not reach terminal state within ${MAX_POLL}s (status: $JOB_STATUS3)"
+    fi
+
+    JOB_DETAIL3=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID3")
+    JOB_STATUS3=$(echo "$JOB_DETAIL3" | jq -r '.status')
+    printf "."
+done
+echo ""
+
+if [ "$JOB_STATUS3" != "failed" ]; then
+    echo "$JOB_DETAIL3" | jq .
+    fail "Expected python-crash job to fail, got status: $JOB_STATUS3"
+fi
+pass "Python crash job failed as expected (${POLLED}s)"
+
+# --- 11. Verify Python traceback in error message ---
+info "Checking crash step error message..."
+STEP_ERROR=$(echo "$JOB_DETAIL3" | jq -r '.steps[] | select(.step_name == "crash") | .error_message')
+
+if echo "$STEP_ERROR" | grep -q "KeyError"; then
+    pass "Error message contains Python KeyError exception"
+else
+    echo "Step error:"
+    echo "$STEP_ERROR"
+    fail "Error message missing Python KeyError exception"
+fi
+
+if echo "$STEP_ERROR" | grep -q "missing_key"; then
+    pass "Error message contains the missing key name"
+else
+    echo "Step error:"
+    echo "$STEP_ERROR"
+    fail "Error message missing the key name 'missing_key'"
+fi
+
+# --- 12. Verify Python traceback in logs ---
+info "Checking crash job logs for traceback..."
+LOGS_RESP3=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID3/logs")
+LOGS3=$(echo "$LOGS_RESP3" | jq -r '.logs')
+
+if echo "$LOGS3" | grep -q "Traceback"; then
+    pass "Logs contain Python Traceback header"
+else
+    echo "Logs:"
+    echo "$LOGS3"
+    info "Note: traceback may be in error_message only (stderr captured by worker)"
+fi
+
+# --- 13. Verify hook job was created and completed ---
+info "Waiting for hook job to appear and complete..."
+POLLED=0
+HOOK_FOUND=false
+
+while [ "$POLLED" -lt "$MAX_POLL" ]; do
+    sleep 2
+    POLLED=$((POLLED + 2))
+
+    ALL_JOBS=$(curl -sf "$BASE_URL/api/jobs?limit=50")
+    HOOK_JOB=$(echo "$ALL_JOBS" | jq -r '[.[] | select(.source_type == "hook")] | first')
+
+    if [ "$HOOK_JOB" != "null" ] && [ -n "$HOOK_JOB" ]; then
+        HOOK_JOB_ID=$(echo "$HOOK_JOB" | jq -r '.job_id')
+        HOOK_STATUS=$(echo "$HOOK_JOB" | jq -r '.status')
+
+        if [ "$HOOK_STATUS" = "completed" ] || [ "$HOOK_STATUS" = "failed" ]; then
+            HOOK_FOUND=true
+            break
+        fi
+    fi
+    printf "."
+done
+echo ""
+
+if [ "$HOOK_FOUND" != "true" ]; then
+    info "All jobs:"
+    curl -sf "$BASE_URL/api/jobs?limit=50" | jq .
+    fail "Hook job not found or did not reach terminal state within ${MAX_POLL}s"
+fi
+pass "Hook job $HOOK_JOB_ID reached status: $HOOK_STATUS"
+
+# Verify hook job has correct source_type and source_id
+HOOK_SOURCE_ID=$(echo "$HOOK_JOB" | jq -r '.source_id')
+if echo "$HOOK_SOURCE_ID" | grep -q "on_error"; then
+    pass "Hook job source_id contains 'on_error'"
+else
+    fail "Hook job source_id should contain 'on_error', got: $HOOK_SOURCE_ID"
+fi
+
+# --- 14. Verify hook job logs contain the error context ---
+info "Checking hook job logs for error context..."
+HOOK_LOGS_RESP=$(curl -sf "$BASE_URL/api/jobs/$HOOK_JOB_ID/logs")
+HOOK_LOGS=$(echo "$HOOK_LOGS_RESP" | jq -r '.logs')
+
+if echo "$HOOK_LOGS" | grep -q "HOOK_FIRED"; then
+    pass "Hook job logs contain HOOK_FIRED marker"
+else
+    echo "Hook logs:"
+    echo "$HOOK_LOGS"
+    fail "Hook job logs missing HOOK_FIRED marker"
+fi
+
+if echo "$HOOK_LOGS" | grep -q "status=failed"; then
+    pass "Hook job logs contain status=failed"
+else
+    echo "Hook logs:"
+    echo "$HOOK_LOGS"
+    fail "Hook job logs missing status=failed"
+fi
+
+if echo "$HOOK_LOGS" | grep -q "KeyError"; then
+    pass "Hook job error_message contains Python KeyError (full traceback passed to hook)"
+else
+    echo "Hook logs:"
+    echo "$HOOK_LOGS"
+    fail "Hook job error_message missing Python KeyError - traceback not propagated to hook"
+fi
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"

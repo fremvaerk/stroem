@@ -1,4 +1,3 @@
-use crate::log_storage::LogStorage;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -242,9 +241,7 @@ pub async fn get_step_logs(
         }
     };
 
-    let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
-
-    match log_storage.get_step_log(job_id, &step_name).await {
+    match state.log_storage.get_step_log(job_id, &step_name).await {
         Ok(logs) => Json(json!({"logs": logs})).into_response(),
         Err(e) => {
             tracing::error!("Failed to get step logs: {}", e);
@@ -274,11 +271,7 @@ pub async fn get_job_logs(
         }
     };
 
-    // Create log storage
-    let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
-
-    // Get logs
-    match log_storage.get_log(job_id).await {
+    match state.log_storage.get_log(job_id).await {
         Ok(logs) => Json(json!({"logs": logs})).into_response(),
         Err(e) => {
             tracing::error!("Failed to get logs: {}", e);

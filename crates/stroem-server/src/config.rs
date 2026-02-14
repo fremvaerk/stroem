@@ -7,10 +7,21 @@ pub struct DbConfig {
     pub url: String,
 }
 
+/// S3 configuration for log archival
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3Config {
+    pub bucket: String,
+    pub region: String,
+    #[serde(default)]
+    pub prefix: String,
+    pub endpoint: Option<String>,
+}
+
 /// Log storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogStorageConfig {
     pub local_dir: String,
+    pub s3: Option<S3Config>,
 }
 
 /// Git auth configuration for workspace sources
@@ -227,6 +238,76 @@ worker_token: "token"
             }
             _ => panic!("Expected git"),
         }
+    }
+
+    #[test]
+    fn test_parse_config_with_s3() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+  s3:
+    bucket: "my-stroem-logs"
+    region: "eu-west-1"
+    prefix: "logs/"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let s3 = config.log_storage.s3.unwrap();
+        assert_eq!(s3.bucket, "my-stroem-logs");
+        assert_eq!(s3.region, "eu-west-1");
+        assert_eq!(s3.prefix, "logs/");
+        assert!(s3.endpoint.is_none());
+    }
+
+    #[test]
+    fn test_parse_config_without_s3() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert!(config.log_storage.s3.is_none());
+    }
+
+    #[test]
+    fn test_parse_config_s3_with_endpoint() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+  s3:
+    bucket: "stroem-logs"
+    region: "us-east-1"
+    endpoint: "http://minio:9000"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let s3 = config.log_storage.s3.unwrap();
+        assert_eq!(s3.bucket, "stroem-logs");
+        assert_eq!(s3.region, "us-east-1");
+        assert_eq!(s3.prefix, ""); // default
+        assert_eq!(s3.endpoint.as_deref(), Some("http://minio:9000"));
     }
 
     #[test]

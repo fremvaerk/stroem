@@ -1,4 +1,3 @@
-use crate::log_storage::LogStorage;
 use crate::state::AppState;
 use axum::{
     extract::{ws::WebSocket, Path, State, WebSocketUpgrade},
@@ -33,8 +32,7 @@ pub async fn job_log_stream(
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid) {
     // 1. Send backfill (existing log content)
-    let log_storage = LogStorage::new(&state.config.log_storage.local_dir);
-    if let Ok(existing) = log_storage.get_log(job_id).await {
+    if let Ok(existing) = state.log_storage.get_log(job_id).await {
         if !existing.is_empty()
             && socket
                 .send(axum::extract::ws::Message::Text(existing.into()))

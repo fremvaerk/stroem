@@ -323,6 +323,8 @@ mod tests {
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                on_success: vec![],
+                on_error: vec![],
             },
         );
         config.triggers.insert(

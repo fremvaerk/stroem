@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod hooks;
 pub mod job_creator;
 pub mod log_broadcast;
 pub mod log_storage;

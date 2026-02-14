@@ -917,6 +917,35 @@ auth:
 
 Without the `auth` section, existing API routes continue to work without authentication and auth endpoints return `404`.
 
+### Log Storage
+
+Log storage controls where job logs are stored:
+
+```yaml
+log_storage:
+  local_dir: "/var/stroem/logs"
+  s3:                              # optional — omit to disable
+    bucket: "my-stroem-logs"
+    region: "eu-west-1"
+    prefix: "logs/"               # optional key prefix, default ""
+    endpoint: "http://minio:9000" # optional — for S3-compatible storage
+```
+
+- **local_dir**: Directory for local JSONL log files (always used for active jobs)
+- **s3** (optional): When configured, logs are uploaded to S3 when a job reaches a terminal state (completed/failed). Log read endpoints try local files first and fall back to S3 if the local file is missing.
+  - **bucket**: S3 bucket name
+  - **region**: AWS region
+  - **prefix**: Key prefix for S3 objects (e.g. `"logs/"` produces keys like `logs/{job_id}.jsonl`)
+  - **endpoint**: Custom endpoint URL for S3-compatible storage (MinIO, LocalStack, etc.)
+
+Credentials use the standard AWS credential chain (environment variables, IAM role, `~/.aws/credentials`).
+
+The S3 feature requires building with `--features s3`:
+
+```bash
+cargo build -p stroem-server --features s3
+```
+
 ### Workspaces
 
 Workspaces define where workflow files are loaded from. The `workspaces` map supports multiple named workspaces with different source types:

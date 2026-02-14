@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
+    ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef, WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -18,6 +18,7 @@ use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::job_creator::create_job_for_task;
+use stroem_server::log_storage::LogStorage;
 use stroem_server::orchestrator;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
@@ -135,6 +136,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: task_input,
             flow: hello_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -178,6 +181,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: gs_task_input,
             flow: gs_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -217,6 +222,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: l3_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -265,6 +272,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: d_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -286,6 +295,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: dbt_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -331,6 +342,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: mi_task_input,
             flow: mi_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -383,6 +396,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: wfi_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -456,6 +471,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: bt_task_input,
             flow: bt_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -575,6 +592,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: dp_task_input,
             flow: dp_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -596,6 +615,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: Some("deploy/staging".to_string()),
             input: HashMap::new(),
             flow: ds_flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -623,6 +644,7 @@ async fn setup() -> Result<(
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -636,7 +658,8 @@ async fn setup() -> Result<(
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
-    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -1354,6 +1377,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        on_success: vec![],
+        on_error: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -1430,6 +1455,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        on_success: vec![],
+        on_error: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -2795,6 +2822,7 @@ async fn setup_with_auth() -> Result<(
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -2828,7 +2856,8 @@ async fn setup_with_auth() -> Result<(
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
-    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -3309,6 +3338,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        on_success: vec![],
+        on_error: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -3398,6 +3429,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        on_success: vec![],
+        on_error: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -3497,6 +3530,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        on_success: vec![],
+        on_error: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -3765,6 +3800,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         }
     };
 
@@ -3877,6 +3914,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         }
     };
 
@@ -3968,6 +4007,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         }
     };
 
@@ -4066,6 +4107,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         }
     };
 
@@ -4163,6 +4206,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         }
     };
 
@@ -4263,6 +4308,8 @@ async fn test_cascading_skip() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         }
     };
 
@@ -4378,6 +4425,8 @@ fn test_workspace_ops() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -4406,6 +4455,7 @@ async fn setup_multi_workspace() -> Result<(
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([
             (
@@ -4475,7 +4525,8 @@ async fn setup_multi_workspace() -> Result<(
     );
 
     let mgr = WorkspaceManager::from_entries(entries);
-    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     Ok((router, pool, temp_dir, container))
@@ -4785,6 +4836,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -4804,7 +4856,8 @@ async fn test_workspace_tarball_download() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     // Download tarball
@@ -4939,6 +4992,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -4958,7 +5012,8 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     // Send a wrong ETag — should get 200 with full tarball, not 304
@@ -5011,6 +5066,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -5030,7 +5086,8 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     // First request — get the revision
@@ -5099,6 +5156,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -5119,7 +5177,8 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
     .await?;
 
     // AppState is Clone and shares Arc<WorkspaceManager> across clones
-    let state = AppState::new(pool, mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
     let router = build_router(state.clone());
 
     // First request — get original revision
@@ -5222,6 +5281,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -5241,7 +5301,8 @@ async fn test_tarball_etag_header_format() -> Result<()> {
     )]))
     .await?;
 
-    let state = AppState::new(pool, mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     let req = Request::builder()
@@ -5750,6 +5811,8 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            on_success: vec![],
+            on_error: vec![],
         },
     );
 
@@ -5962,6 +6025,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -5981,7 +6045,8 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
-    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     let res = router.oneshot(api_get("/api/config")).await?;
@@ -6028,6 +6093,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -6056,7 +6122,8 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
-    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     let res = router.oneshot(api_get("/api/config")).await?;
@@ -6087,6 +6154,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         db: DbConfig { url },
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -6116,7 +6184,8 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     // No actual OIDC providers initialized (would need real discovery)
-    let state = AppState::new(pool.clone(), mgr, config, HashMap::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
     let router = build_router(state);
 
     let res = router.oneshot(api_get("/api/config")).await?;
@@ -6125,6 +6194,899 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
     assert_eq!(body["auth_required"], true);
     // Only OIDC provider configured, no internal → false
     assert_eq!(body["has_internal_auth"], false);
+
+    Ok(())
+}
+
+// ─── Hook integration tests ──────────────────────────────────────────
+
+/// Helper: build a workspace with on_success/on_error hooks for testing.
+fn hook_test_workspace() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    // Action: deploy (shell)
+    workspace.actions.insert(
+        "deploy".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            cmd: Some("echo deploying".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    // Action: crash (shell, always fails)
+    workspace.actions.insert(
+        "crash".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            cmd: Some("exit 1".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+        },
+    );
+
+    // Action: notify (the hook action)
+    let mut notify_input = HashMap::new();
+    notify_input.insert(
+        "message".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            required: false,
+            default: None,
+        },
+    );
+    workspace.actions.insert(
+        "notify".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            cmd: Some("echo {{ input.message }}".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: notify_input,
+            output: None,
+        },
+    );
+
+    workspace
+}
+
+#[tokio::test]
+async fn test_hook_fires_on_job_success() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Task with on_success hook
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    let mut hook_input = HashMap::new();
+    hook_input.insert(
+        "message".to_string(),
+        json!("Success: {{ hook.task_name }}"),
+    );
+    workspace.tasks.insert(
+        "deploy-task".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+            on_error: vec![],
+        },
+    );
+
+    // Create job using job_creator
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy-task",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("deploy-task").unwrap();
+
+    // Register worker and simulate step completion
+    let worker_id = register_test_worker(&pool).await;
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].status, "ready");
+
+    // Mark step running, then completed
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"result": "ok"}))).await?;
+
+    // Run orchestrator to mark job as completed
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    // Verify job is completed
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+
+    // Fire hooks
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    // Verify hook job was created
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    assert_eq!(all_jobs.len(), 2); // original + hook
+
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job not found");
+    assert_eq!(hook_job.task_name, "_hook:notify");
+    assert!(hook_job.source_id.as_ref().unwrap().contains("on_success"));
+
+    // Verify hook step was created and is ready
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    assert_eq!(hook_steps.len(), 1);
+    assert_eq!(hook_steps[0].step_name, "hook");
+    assert_eq!(hook_steps[0].action_name, "notify");
+    assert_eq!(hook_steps[0].status, "ready");
+
+    // Verify rendered input contains the task name
+    let hook_input = hook_steps[0].input.as_ref().unwrap();
+    assert_eq!(hook_input["message"], "Success: deploy-task");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hook_fires_on_job_failure() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Task with on_error hook
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "crash".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    let mut hook_input = HashMap::new();
+    hook_input.insert(
+        "message".to_string(),
+        json!("Failed: {{ hook.error_message }}"),
+    );
+    workspace.tasks.insert(
+        "crash-task".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+        },
+    );
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "crash-task",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("crash-task").unwrap();
+
+    // Simulate step failure
+    let worker_id = register_test_worker(&pool).await;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "exit code 1").await?;
+
+    // Orchestrator marks job as failed
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    // Fire hooks
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    // Verify hook job was created
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job not found");
+    assert!(hook_job.source_id.as_ref().unwrap().contains("on_error"));
+
+    // Verify rendered input contains error message
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    let hook_input = hook_steps[0].input.as_ref().unwrap();
+    assert_eq!(hook_input["message"], "Failed: Step 'step1': exit code 1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hook_not_fired_for_hook_job() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Task with on_success hook (to verify recursion doesn't happen)
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy-task".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![HookDef {
+                action: "notify".to_string(),
+                input: HashMap::new(),
+            }],
+            on_error: vec![],
+        },
+    );
+
+    let task = workspace.tasks.get("deploy-task").unwrap();
+
+    // Create a hook job directly (simulating a hook that already fired)
+    let hook_job_id = JobRepo::create(
+        &pool,
+        "default",
+        "_hook:notify",
+        "distributed",
+        Some(json!({})),
+        "hook",
+        Some("default/deploy-task/abc/on_success[0]"),
+    )
+    .await?;
+
+    // Mark the hook job as completed
+    JobRepo::mark_completed(&pool, hook_job_id, None).await?;
+
+    let hook_job = JobRepo::get(&pool, hook_job_id).await?.unwrap();
+    assert_eq!(hook_job.source_type, "hook");
+
+    // Fire hooks — should be a no-op because source_type is "hook"
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &hook_job, task).await;
+
+    // Verify no additional hook jobs were created
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    assert_eq!(all_jobs.len(), 1); // Only the original hook job
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hook_input_contains_context() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    let mut hook_input = HashMap::new();
+    hook_input.insert("ws".to_string(), json!("{{ hook.workspace }}"));
+    hook_input.insert("task".to_string(), json!("{{ hook.task_name }}"));
+    hook_input.insert("st".to_string(), json!("{{ hook.status }}"));
+    hook_input.insert("src".to_string(), json!("{{ hook.source_type }}"));
+    workspace.tasks.insert(
+        "deploy-task".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+            on_error: vec![],
+        },
+    );
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy-task",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("deploy-task").unwrap();
+    let worker_id = register_test_worker(&pool).await;
+
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job not found");
+
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    let input = hook_steps[0].input.as_ref().unwrap();
+
+    assert_eq!(input["ws"], "default");
+    assert_eq!(input["task"], "deploy-task");
+    assert_eq!(input["st"], "completed");
+    assert_eq!(input["src"], "api");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_hook_error_message_all_failures() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Two independent steps, both fail. step2 has continue_on_failure=false
+    // which causes the job to be marked "failed". Both errors appear in hook context.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "crash".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: true,
+        },
+    );
+    flow.insert(
+        "step2".to_string(),
+        FlowStep {
+            action: "crash".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    let mut hook_input = HashMap::new();
+    hook_input.insert("err".to_string(), json!("{{ hook.error_message }}"));
+    workspace.tasks.insert(
+        "multi-fail".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+        },
+    );
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "multi-fail",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("multi-fail").unwrap();
+    let worker_id = register_test_worker(&pool).await;
+
+    // Both steps are independent and start as "ready". Fail both.
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "build error").await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    // Fail step2
+    JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step2", "test failure").await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task).await?;
+
+    // Job should be failed (step2.continue_on_failure=false)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    // Fire hooks
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job not found");
+
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    let input = hook_steps[0].input.as_ref().unwrap();
+
+    let err_msg = input["err"].as_str().unwrap();
+    // Both step errors should be present
+    assert!(
+        err_msg.contains("step1"),
+        "Missing step1 error: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("build error"),
+        "Missing build error: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("step2"),
+        "Missing step2 error: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("test failure"),
+        "Missing test failure: {}",
+        err_msg
+    );
+
+    Ok(())
+}
+
+/// on_success hook still receives error_message when all failures are tolerable
+#[tokio::test]
+async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Two steps, both with continue_on_failure=true. One fails → job "completed" → on_success fires.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "crash".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: true,
+        },
+    );
+    flow.insert(
+        "step2".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: true,
+        },
+    );
+
+    let mut hook_input = HashMap::new();
+    hook_input.insert("error".to_string(), json!("{{ hook.error_message }}"));
+    hook_input.insert("is_success".to_string(), json!("{{ hook.is_success }}"));
+    workspace.tasks.insert(
+        "tolerant".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+            on_error: vec![],
+        },
+    );
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "tolerant",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("tolerant").unwrap();
+    let worker_id = register_test_worker(&pool).await;
+
+    // step1 fails (but tolerable)
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", "deploy crashed").await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    // step2 succeeds
+    JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task).await?;
+
+    // Job should be "completed" (all failures tolerable)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+
+    // on_success fires
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("on_success hook job should be created");
+    assert!(hook_job.source_id.as_ref().unwrap().contains("on_success"));
+
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    let input = hook_steps[0].input.as_ref().unwrap();
+
+    // error_message should still contain the failed step info
+    let err_field = input["error"].as_str().unwrap();
+    assert!(
+        err_field.contains("step1"),
+        "on_success hook should still have failed step info: {}",
+        err_field
+    );
+    assert!(
+        err_field.contains("deploy crashed"),
+        "on_success hook should contain the error text: {}",
+        err_field
+    );
+
+    // is_success should be true
+    let is_success = input["is_success"].as_str().unwrap();
+    assert_eq!(is_success, "true");
+
+    Ok(())
+}
+
+/// Multiline error messages (e.g. Python tracebacks) are preserved in hook context
+#[tokio::test]
+async fn test_hook_multiline_error_message() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "crash".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+
+    let mut hook_input = HashMap::new();
+    hook_input.insert("err".to_string(), json!("{{ hook.error_message }}"));
+    workspace.tasks.insert(
+        "py-crash".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+        },
+    );
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "py-crash",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("py-crash").unwrap();
+    let worker_id = register_test_worker(&pool).await;
+
+    // Simulate a Python traceback as the error message
+    let python_traceback = "Traceback (most recent call last):\n  File \"deploy.py\", line 42, in main\n    result = connect(host)\n  File \"deploy.py\", line 18, in connect\n    raise ConnectionError(f\"Failed to connect to {host}\")\nConnectionError: Failed to connect to prod-db.internal";
+
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", python_traceback).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job not found");
+
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    let input = hook_steps[0].input.as_ref().unwrap();
+
+    let err_msg = input["err"].as_str().unwrap();
+
+    // Full traceback should be preserved, including newlines
+    assert!(
+        err_msg.contains("Traceback (most recent call last):"),
+        "Missing traceback header: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("ConnectionError: Failed to connect to prod-db.internal"),
+        "Missing final exception line: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("deploy.py\", line 42"),
+        "Missing stack frame: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains('\n'),
+        "Newlines should be preserved in error message",
+    );
+
+    Ok(())
+}
+
+/// Hook job completes successfully through orchestrator (tests the bug fix where
+/// hook jobs with synthetic task names like "_hook:notify" would fail in complete_step
+/// because the task didn't exist in the workspace).
+#[tokio::test]
+async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Create a task with on_error hook
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "crash".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+        },
+    );
+    let mut hook_input = HashMap::new();
+    hook_input.insert("message".to_string(), json!("{{ hook.error_message }}"));
+    workspace.tasks.insert(
+        "with-hook".to_string(),
+        TaskDef {
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+        },
+    );
+
+    // Create and fail the original job
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "with-hook",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let task = workspace.tasks.get("with-hook").unwrap();
+    let worker_id = register_test_worker(&pool).await;
+
+    // Worker-style error format with Python traceback
+    let python_error = "Exit code: 1\nStderr: Traceback (most recent call last):\n  File \"app.py\", line 10, in main\n    raise ValueError(\"bad input\")\nValueError: bad input";
+
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "step1", python_error).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    // Fire hooks → creates hook job
+    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job should be created");
+
+    // Verify hook job has synthetic task name
+    assert!(
+        hook_job.task_name.starts_with("_hook:"),
+        "Hook job task_name should be synthetic: {}",
+        hook_job.task_name
+    );
+
+    let hook_job_id = hook_job.job_id;
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job_id).await?;
+    assert_eq!(hook_steps.len(), 1);
+    assert_eq!(hook_steps[0].step_name, "hook");
+    assert_eq!(hook_steps[0].status, "ready");
+
+    // Verify hook step input contains the Python traceback
+    let hook_step_input = hook_steps[0].input.as_ref().unwrap();
+    let msg = hook_step_input["message"].as_str().unwrap();
+    assert!(
+        msg.contains("ValueError: bad input"),
+        "Hook input should contain the Python error: {}",
+        msg
+    );
+    assert!(
+        msg.contains("Traceback"),
+        "Hook input should contain traceback: {}",
+        msg
+    );
+
+    // Now simulate the hook job being executed by a worker:
+    // Worker claims it, runs it, reports success.
+    JobStepRepo::mark_running(&pool, hook_job_id, "hook", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, hook_job_id, worker_id).await?;
+    JobStepRepo::mark_completed(&pool, hook_job_id, "hook", None).await?;
+
+    // Build a synthetic TaskDef the same way complete_step does for hook jobs
+    let hook_steps_for_task = JobStepRepo::get_steps_for_job(&pool, hook_job_id).await?;
+    let mut hook_flow = HashMap::new();
+    for step in &hook_steps_for_task {
+        hook_flow.insert(
+            step.step_name.clone(),
+            FlowStep {
+                action: step.action_name.clone(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+    }
+    let hook_task_def = TaskDef {
+        mode: "distributed".to_string(),
+        folder: None,
+        input: HashMap::new(),
+        flow: hook_flow,
+        on_success: vec![],
+        on_error: vec![],
+    };
+
+    // Orchestrator should mark the hook job as completed
+    stroem_server::orchestrator::on_step_completed(&pool, hook_job_id, "hook", &hook_task_def)
+        .await?;
+
+    let hook_job_after = JobRepo::get(&pool, hook_job_id).await?.unwrap();
+    assert_eq!(
+        hook_job_after.status, "completed",
+        "Hook job should be marked completed by orchestrator"
+    );
+
+    // Verify no recursive hook job was created (recursion guard)
+    let all_jobs_after = JobRepo::list(&pool, Some("default"), 100, 0).await?;
+    let hook_jobs: Vec<_> = all_jobs_after
+        .iter()
+        .filter(|j| j.source_type == "hook")
+        .collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "Should be exactly 1 hook job (no recursion)"
+    );
 
     Ok(())
 }

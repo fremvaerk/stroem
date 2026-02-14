@@ -3,6 +3,10 @@ name = "stroem-server"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
@@ -36,13 +40,17 @@ tokio-util.workspace = true
 openidconnect.workspace = true
 url.workspace = true
 axum-extra = { version = "0.10", features = ["cookie"] }
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 testcontainers = "0.26"
-testcontainers-modules = { version = "0.14", features = ["postgres"] }
+testcontainers-modules = { version = "0.14", features = ["postgres", "minio"] }
 http = "1"
 http-body-util = "0.1"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 walkdir = "2"
+aws-sdk-s3 = "1"
+aws-config = "1"

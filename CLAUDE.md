@@ -58,8 +58,14 @@ cargo build --workspace
 # Build with container runners
 cargo build --workspace --features stroem-worker/docker,stroem-worker/kubernetes
 
+# Build with S3 log archival
+cargo build -p stroem-server --features s3
+
 # Run all tests (needs Docker for integration tests)
 cargo test --workspace
+
+# Run server tests with S3 (needs Docker for MinIO)
+cargo test -p stroem-server --features s3
 
 # Run runner tests with features
 cargo test -p stroem-runner --features docker
@@ -149,6 +155,15 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Jobs created by triggers have `source_type = "trigger"`, `source_id = "{workspace}/{trigger_name}"`
 - Cron validation at YAML parse time in `validation.rs` (CLI `validate` catches bad expressions)
 
+### Hooks (on_success / on_error)
+- `HookDef` struct in `crates/stroem-common/src/models/workflow.rs` — `action` + `input` map
+- `TaskDef` has `on_success: Vec<HookDef>` and `on_error: Vec<HookDef>` (default empty)
+- `crates/stroem-server/src/hooks.rs` — `fire_hooks()` builds `HookContext`, renders input through Tera, creates single-step hook jobs
+- Recursion guard: jobs with `source_type = "hook"` never trigger further hooks
+- Hook jobs: `task_name = "_hook:{action}"`, `source_type = "hook"`, `source_id = "{ws}/{task}/{job_id}/{hook_type}[idx]"`
+- Validation in `validation.rs` — hook action references must exist (or be library actions with `/`)
+- Migration `005_hooks.sql` adds `'hook'` to `source_type` CHECK constraint
+
 ### Database
 - Runtime sqlx queries, NOT compile-time checked
 - Migrations in `crates/stroem-db/migrations/`
@@ -168,6 +183,14 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
   - JIT user provisioning: find by auth_link → find by email → create new user (in `oidc::provision_user`)
   - Routes: `GET /api/auth/oidc/{provider}` (start) and `GET /api/auth/oidc/{provider}/callback`
   - After callback, issues internal JWT tokens and redirects to `/login/callback#access_token=...&refresh_token=...`
+
+### Log Storage
+- `LogStorage` in `AppState` — local JSONL files + optional S3 archival
+- Feature-gated: `s3` cargo feature on `stroem-server` enables `aws-sdk-s3` + `aws-config`
+- S3 upload spawned as background task when a job reaches terminal state (completed/failed)
+- Read fallback: local file → legacy .log → S3 (if configured)
+- Config: optional `s3` section in `log_storage` with `bucket`, `region`, `prefix`, `endpoint`
+- Credentials via standard AWS chain (env vars, IAM role, `~/.aws/credentials`)
 
 ### WebSocket Log Streaming
 - `GET /api/jobs/{id}/logs/stream` -- WebSocket upgrade endpoint

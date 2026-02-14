@@ -53,6 +53,14 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
         // Validate DAG (no cycles)
         dag::validate_dag(&task.flow)
             .map_err(|e| anyhow::anyhow!("Task '{}' has invalid DAG: {}", task_name, e))?;
+
+        // Validate hooks reference existing actions
+        for (i, hook) in task.on_success.iter().enumerate() {
+            validate_hook_action(task_name, "on_success", i, &hook.action, config)?;
+        }
+        for (i, hook) in task.on_error.iter().enumerate() {
+            validate_hook_action(task_name, "on_error", i, &hook.action, config)?;
+        }
     }
 
     // Validate triggers reference existing tasks
@@ -317,6 +325,29 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
     Ok(())
 }
 
+/// Validates that a hook references an existing action (or a library action).
+fn validate_hook_action(
+    task_name: &str,
+    hook_type: &str,
+    idx: usize,
+    action: &str,
+    config: &WorkflowConfig,
+) -> Result<()> {
+    if action.contains('/') {
+        return Ok(()); // library action — skip
+    }
+    if !config.actions.contains_key(action) {
+        bail!(
+            "Task '{}' {}[{}] references non-existent action '{}'",
+            task_name,
+            hook_type,
+            idx,
+            action
+        );
+    }
+    Ok(())
+}
+
 /// Compute the required worker tags for an action.
 /// These tags must all be present on a worker for it to claim a step using this action.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
@@ -560,6 +591,8 @@ triggers:
                 folder: None,
                 input: HashMap::new(),
                 flow: HashMap::new(),
+                on_success: vec![],
+                on_error: vec![],
             },
         );
         config.triggers.insert(
@@ -591,6 +624,8 @@ triggers:
                 folder: None,
                 input: HashMap::new(),
                 flow: HashMap::new(),
+                on_success: vec![],
+                on_error: vec![],
             },
         );
         config.triggers.insert(
@@ -618,6 +653,8 @@ triggers:
                 folder: None,
                 input: HashMap::new(),
                 flow: HashMap::new(),
+                on_success: vec![],
+                on_error: vec![],
             },
         );
         config.triggers.insert(
@@ -1208,5 +1245,80 @@ image: alpine:latest
         )
         .unwrap();
         assert_eq!(derive_runner(&action), "none");
+    }
+
+    #[test]
+    fn test_validate_hook_valid_action() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "make deploy"
+  notify:
+    type: shell
+    cmd: "curl $WEBHOOK"
+
+tasks:
+  release:
+    flow:
+      step1:
+        action: deploy
+    on_success:
+      - action: notify
+        input:
+          message: "Deploy succeeded"
+    on_error:
+      - action: notify
+        input:
+          message: "Deploy FAILED"
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_hook_missing_action() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "make deploy"
+
+tasks:
+  release:
+    flow:
+      step1:
+        action: deploy
+    on_success:
+      - action: nonexistent
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("on_success[0]"));
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_validate_hook_library_action() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "make deploy"
+
+tasks:
+  release:
+    flow:
+      step1:
+        action: deploy
+    on_success:
+      - action: common/slack-notify
+"#;
+        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
     }
 }

@@ -403,6 +403,8 @@ tasks:
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                on_success: vec![],
+                on_error: vec![],
             },
         );
 
@@ -458,6 +460,8 @@ tasks:
                 folder: None,
                 input: HashMap::new(),
                 flow: flow1,
+                on_success: vec![],
+                on_error: vec![],
             },
         );
 
@@ -498,6 +502,8 @@ tasks:
                 folder: None,
                 input: HashMap::new(),
                 flow: flow2,
+                on_success: vec![],
+                on_error: vec![],
             },
         );
 

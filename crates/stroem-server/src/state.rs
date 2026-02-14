@@ -1,5 +1,6 @@
 use crate::config::ServerConfig;
 use crate::log_broadcast::LogBroadcast;
+use crate::log_storage::LogStorage;
 use crate::oidc::OidcProvider;
 use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
@@ -14,6 +15,7 @@ pub struct AppState {
     pub workspaces: Arc<WorkspaceManager>,
     pub config: Arc<ServerConfig>,
     pub log_broadcast: Arc<LogBroadcast>,
+    pub log_storage: Arc<LogStorage>,
     pub oidc_providers: Arc<HashMap<String, OidcProvider>>,
 }
 
@@ -23,6 +25,7 @@ impl AppState {
         pool: PgPool,
         workspaces: WorkspaceManager,
         config: ServerConfig,
+        log_storage: LogStorage,
         oidc_providers: HashMap<String, OidcProvider>,
     ) -> Self {
         Self {
@@ -30,6 +33,7 @@ impl AppState {
             workspaces: Arc::new(workspaces),
             config: Arc::new(config),
             log_broadcast: Arc::new(LogBroadcast::new()),
+            log_storage: Arc::new(log_storage),
             oidc_providers: Arc::new(oidc_providers),
         }
     }
