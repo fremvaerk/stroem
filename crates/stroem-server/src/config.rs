@@ -87,6 +87,33 @@ pub struct AuthConfig {
     pub initial_user: Option<InitialUserConfig>,
 }
 
+/// Recovery configuration for detecting stale workers and recovering stuck steps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryConfig {
+    /// Seconds without heartbeat before a worker is considered stale (default: 120)
+    #[serde(default = "default_heartbeat_timeout")]
+    pub heartbeat_timeout_secs: u64,
+    /// How often the recovery sweeper runs in seconds (default: 60)
+    #[serde(default = "default_sweep_interval")]
+    pub sweep_interval_secs: u64,
+}
+
+fn default_heartbeat_timeout() -> u64 {
+    120
+}
+fn default_sweep_interval() -> u64 {
+    60
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_timeout_secs: 120,
+            sweep_interval_secs: 60,
+        }
+    }
+}
+
 /// Server configuration - loaded from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -96,6 +123,8 @@ pub struct ServerConfig {
     pub workspaces: HashMap<String, WorkspaceSourceDef>,
     pub worker_token: String, // shared secret for worker auth
     pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
 }
 
 #[cfg(test)]
@@ -709,6 +738,68 @@ auth:
             Some("123456.apps.googleusercontent.com")
         );
         assert_eq!(google.client_secret.as_deref(), Some("GOCSPX-secret"));
+    }
+
+    #[test]
+    fn test_parse_config_recovery_defaults() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.recovery.heartbeat_timeout_secs, 120);
+        assert_eq!(config.recovery.sweep_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_parse_config_recovery_custom() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+recovery:
+  heartbeat_timeout_secs: 300
+  sweep_interval_secs: 30
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.recovery.heartbeat_timeout_secs, 300);
+        assert_eq!(config.recovery.sweep_interval_secs, 30);
+    }
+
+    #[test]
+    fn test_parse_config_recovery_partial() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "token"
+recovery:
+  heartbeat_timeout_secs: 180
+"#;
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(config.recovery.heartbeat_timeout_secs, 180);
+        assert_eq!(config.recovery.sweep_interval_secs, 60); // default
     }
 
     #[test]

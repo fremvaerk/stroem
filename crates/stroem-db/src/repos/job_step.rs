@@ -41,6 +41,14 @@ pub struct NewJobStep {
     pub runner: String,
 }
 
+/// A stale running step with its job info for recovery.
+#[derive(Debug, sqlx::FromRow)]
+pub struct StaleStepInfo {
+    pub job_id: Uuid,
+    pub step_name: String,
+    pub worker_id: Uuid,
+}
+
 /// Repository for job step operations
 pub struct JobStepRepo;
 
@@ -454,5 +462,27 @@ impl JobStepRepo {
             }
         }
         Ok(skipped)
+    }
+
+    /// Find running steps assigned to any of the given (stale) workers.
+    pub async fn get_running_steps_for_workers(
+        pool: &PgPool,
+        worker_ids: &[Uuid],
+    ) -> Result<Vec<StaleStepInfo>> {
+        if worker_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query_as::<_, StaleStepInfo>(
+            r#"
+            SELECT job_id, step_name, worker_id
+            FROM job_step
+            WHERE status = 'running'
+              AND worker_id = ANY($1)
+            "#,
+        )
+        .bind(worker_ids)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
     }
 }

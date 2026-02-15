@@ -46,12 +46,12 @@ impl WorkerRepo {
         Ok(())
     }
 
-    /// Update worker heartbeat timestamp
+    /// Update worker heartbeat timestamp and ensure status is active
     pub async fn heartbeat(pool: &PgPool, worker_id: Uuid) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE worker
-            SET last_heartbeat = NOW()
+            SET last_heartbeat = NOW(), status = 'active'
             WHERE worker_id = $1
             "#,
         )
@@ -60,6 +60,27 @@ impl WorkerRepo {
         .await?;
 
         Ok(())
+    }
+
+    /// Mark workers as inactive if their heartbeat is older than the threshold.
+    /// Returns the IDs of newly-inactivated workers.
+    pub async fn mark_stale_inactive(
+        pool: &PgPool,
+        heartbeat_timeout_secs: i64,
+    ) -> Result<Vec<Uuid>> {
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            UPDATE worker
+            SET status = 'inactive'
+            WHERE status = 'active'
+              AND last_heartbeat < NOW() - make_interval(secs => $1::double precision)
+            RETURNING worker_id
+            "#,
+        )
+        .bind(heartbeat_timeout_secs as f64)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
     /// Get worker by ID

@@ -211,6 +211,19 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Sends existing log content (backfill) on connect, then streams live chunks
 - Per-job broadcast channels via `tokio::sync::broadcast` in `LogBroadcast`
 
+### Worker Recovery
+- `crates/stroem-server/src/recovery.rs` — background sweeper that detects stale workers
+- `crates/stroem-server/src/job_recovery.rs` — shared orchestration logic (used by both `complete_step` handler and recovery sweeper)
+- Config: optional `recovery` section in `server-config.yaml` with `heartbeat_timeout_secs` (default 120) and `sweep_interval_secs` (default 60)
+- Always active with defaults when config section is absent (`#[serde(default)]`)
+- Sweep cycle: mark stale workers inactive → fail their running steps → orchestrate each job (promote/skip/terminal) → propagate to parent
+- Worker heartbeat (`POST /worker/heartbeat`) also sets `status = 'active'`, so returning workers auto-reactivate
+- `WorkerRepo::mark_stale_inactive()` uses `make_interval(secs => $1)` for threshold comparison
+- `JobStepRepo::get_running_steps_for_workers()` finds stuck steps by worker ID
+- Failed steps get error message: `"Worker heartbeat timeout (worker {id} unresponsive)"`
+- Strategy: fail, don't retry — avoids data corruption from re-running non-idempotent steps
+- Clean shutdown via `CancellationToken` (same pattern as scheduler)
+
 ### React UI
 - Pages: Login, Dashboard, Tasks, Task Detail (with run dialog), Jobs, Job Detail (with live logs)
 - Auth-aware: detects if server has auth enabled, shows login page accordingly

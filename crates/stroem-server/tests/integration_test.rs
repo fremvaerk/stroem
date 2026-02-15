@@ -660,6 +660,7 @@ async fn setup() -> Result<(
         )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -2405,8 +2406,8 @@ async fn test_complete_step_nonexistent_job() -> Result<()> {
             json!({"output": {"result": "phantom"}}),
         ))
         .await?;
-    // mark_completed updates 0 rows (no error), then JobRepo::get returns None → 404
-    assert_eq!(response.status(), 404);
+    // mark_completed updates 0 rows (no error), orchestrator silently handles missing job
+    assert_eq!(response.status(), 200);
 
     Ok(())
 }
@@ -2847,6 +2848,7 @@ async fn setup_with_auth() -> Result<(
                 password: AUTH_USER_PASSWORD.to_string(),
             }),
         }),
+        recovery: Default::default(),
     };
 
     // Seed initial user
@@ -4480,6 +4482,7 @@ async fn setup_multi_workspace() -> Result<(
         ]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let ws_default = test_workspace();
@@ -4853,6 +4856,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(HashMap::from([(
@@ -5009,6 +5013,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(HashMap::from([(
@@ -5083,6 +5088,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(HashMap::from([(
@@ -5173,6 +5179,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(HashMap::from([(
@@ -5298,6 +5305,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         )]),
         worker_token: "test-token-secret".to_string(),
         auth: None,
+        recovery: Default::default(),
     };
 
     let mgr = WorkspaceManager::new(HashMap::from([(
@@ -6048,6 +6056,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
             providers: HashMap::new(),
             initial_user: None,
         }),
+        recovery: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -6125,6 +6134,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
             )]),
             initial_user: None,
         }),
+        recovery: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -6186,6 +6196,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
             )]),
             initial_user: None,
         }),
+        recovery: Default::default(),
     };
 
     let workspace = test_workspace();
@@ -7779,6 +7790,375 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         .as_ref()
         .unwrap()
         .contains("failed"));
+
+    Ok(())
+}
+
+// ─── Recovery sweeper tests ─────────────────────────────────────────────
+
+/// Helper: create an AppState with recovery config.
+async fn setup_recovery() -> Result<(
+    AppState,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: stroem_server::config::RecoveryConfig {
+            heartbeat_timeout_secs: 5, // short for tests
+            sweep_interval_secs: 1,
+        },
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+
+    Ok((state, pool, temp_dir, container))
+}
+
+/// Helper: set a worker's heartbeat to a time in the past.
+async fn set_worker_heartbeat_past(pool: &PgPool, worker_id: Uuid, seconds_ago: i64) {
+    sqlx::query(
+        "UPDATE worker SET last_heartbeat = NOW() - make_interval(secs => $1::double precision) WHERE worker_id = $2",
+    )
+    .bind(seconds_ago as f64)
+    .bind(worker_id)
+    .execute(pool)
+    .await
+    .expect("Failed to backdate worker heartbeat");
+}
+
+#[tokio::test]
+async fn test_recovery_marks_stale_worker_inactive() -> Result<()> {
+    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // Worker just registered — heartbeat is fresh
+    let stale = WorkerRepo::mark_stale_inactive(&pool, 5).await?;
+    assert!(stale.is_empty(), "Fresh worker should not be stale");
+
+    let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
+    assert_eq!(worker.status, "active");
+
+    // Backdate heartbeat to 10 seconds ago (timeout is 5)
+    set_worker_heartbeat_past(&pool, worker_id, 10).await;
+
+    let stale = WorkerRepo::mark_stale_inactive(&pool, 5).await?;
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0], worker_id);
+
+    let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
+    assert_eq!(worker.status, "inactive");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_ignores_active_workers() -> Result<()> {
+    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // Heartbeat is fresh — should not be marked stale
+    let stale = WorkerRepo::mark_stale_inactive(&pool, 5).await?;
+    assert!(stale.is_empty());
+
+    let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
+    assert_eq!(worker.status, "active");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_worker_reactivation_on_heartbeat() -> Result<()> {
+    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // Mark as stale
+    set_worker_heartbeat_past(&pool, worker_id, 10).await;
+    WorkerRepo::mark_stale_inactive(&pool, 5).await?;
+
+    let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
+    assert_eq!(worker.status, "inactive");
+
+    // Heartbeat should reactivate
+    WorkerRepo::heartbeat(&pool, worker_id).await?;
+
+    let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
+    assert_eq!(worker.status, "active");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_fails_stale_step() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery().await?;
+
+    // Create a job
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Register worker and claim step
+    let worker_id = register_test_worker(&pool).await;
+    let tags = vec!["shell".to_string()];
+    let step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id)
+        .await?
+        .expect("Should claim step");
+    assert_eq!(step.job_id, job_id);
+    assert_eq!(step.status, "running");
+
+    // Backdate worker heartbeat so it's stale
+    set_worker_heartbeat_past(&pool, worker_id, 10).await;
+
+    // Run recovery sweep
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    // Worker should be inactive
+    let worker = WorkerRepo::get(&pool, worker_id).await?.unwrap();
+    assert_eq!(worker.status, "inactive");
+
+    // Step should be failed with timeout error
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("heartbeat timeout"));
+
+    // Job should be failed (single step task)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery().await?;
+
+    // Create a multi-step job: step1 → step2 → step3
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "linear-3",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Claim step1
+    let worker_id = register_test_worker(&pool).await;
+    let tags = vec!["shell".to_string()];
+    let step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id)
+        .await?
+        .expect("Should claim step1");
+    assert_eq!(step.step_name, "step1");
+
+    // Backdate heartbeat → worker is stale
+    set_worker_heartbeat_past(&pool, worker_id, 10).await;
+
+    // Run sweep
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    // step1 should be failed
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step1 = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(step1.status, "failed");
+
+    // step2 and step3 should be skipped (unreachable)
+    let step2 = steps.iter().find(|s| s.step_name == "step2").unwrap();
+    assert_eq!(step2.status, "skipped");
+
+    let step3 = steps.iter().find(|s| s.step_name == "step3").unwrap();
+    assert_eq!(step3.status, "skipped");
+
+    // Job should be failed
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_get_running_steps_for_workers_empty() -> Result<()> {
+    let (_state, pool, _tmp, _container) = setup_recovery().await?;
+
+    // Empty worker list returns empty steps
+    let steps = JobStepRepo::get_running_steps_for_workers(&pool, &[]).await?;
+    assert!(steps.is_empty());
+
+    // Non-existent worker returns empty steps
+    let steps = JobStepRepo::get_running_steps_for_workers(&pool, &[Uuid::new_v4()]).await?;
+    assert!(steps.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_propagates_to_parent() -> Result<()> {
+    // Use task_action_test_workspace which has deploy(build → run-cleanup) with type:task
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: stroem_server::config::RecoveryConfig {
+            heartbeat_timeout_secs: 5,
+            sweep_interval_secs: 1,
+        },
+    };
+
+    let workspace = task_action_test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace.clone());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+
+    // Create parent job: deploy (build → run-cleanup via task action)
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // First, complete the "build" step so "run-cleanup" (task step) gets promoted
+    let worker_id = register_test_worker(&pool).await;
+    let tags = vec!["shell".to_string()];
+    let build_step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id)
+        .await?
+        .expect("Should claim build step");
+    assert_eq!(build_step.step_name, "build");
+
+    // Complete build step
+    JobStepRepo::mark_completed(&pool, parent_job_id, "build", Some(json!({"ok": true}))).await?;
+
+    // Orchestrate to promote run-cleanup task step
+    orchestrator::on_step_completed(
+        &pool,
+        parent_job_id,
+        "build",
+        workspace.tasks.get("deploy").unwrap(),
+    )
+    .await?;
+
+    // Handle task steps (creates child job)
+    stroem_server::job_creator::handle_task_steps(&pool, &workspace, "default", parent_job_id)
+        .await?;
+
+    // Find child job
+    let child_jobs: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE parent_job_id = $1")
+            .bind(parent_job_id)
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(child_jobs.len(), 1);
+    let child_job_id = child_jobs[0].0;
+
+    // Claim the child job's "clean" step
+    let worker_id2 = register_test_worker(&pool).await;
+    let child_step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id2)
+        .await?
+        .expect("Should claim child step");
+    assert_eq!(child_step.job_id, child_job_id);
+    assert_eq!(child_step.step_name, "clean");
+
+    // Make the worker stale
+    set_worker_heartbeat_past(&pool, worker_id2, 10).await;
+
+    // Run sweep
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    // Child step should be failed
+    let child_steps = JobStepRepo::get_steps_for_job(&pool, child_job_id).await?;
+    let clean_step = child_steps.iter().find(|s| s.step_name == "clean").unwrap();
+    assert_eq!(clean_step.status, "failed");
+    assert!(clean_step
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("heartbeat timeout"));
+
+    // Child job should be failed
+    let child = JobRepo::get(&pool, child_job_id).await?.unwrap();
+    assert_eq!(child.status, "failed");
+
+    // Parent task step (cleanup) should be failed
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let task_step = parent_steps
+        .iter()
+        .find(|s| s.step_name == "cleanup")
+        .unwrap();
+    assert_eq!(task_step.status, "failed");
+
+    // Parent job should be failed
+    let parent = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(parent.status, "failed");
 
     Ok(())
 }
