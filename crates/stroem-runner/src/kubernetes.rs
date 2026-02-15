@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn test_pod_name_sanitization() {
         let name = KubeRunner::pod_name("12345678", "Step With Spaces!");
-        assert_eq!(name, "stroem-12345678-step-with-spaces-");
+        assert_eq!(name, "stroem-12345678-step-with-spaces");
     }
 
     #[test]
