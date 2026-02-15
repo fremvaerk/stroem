@@ -137,7 +137,7 @@ jobs:
         id: versions
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
-          CHART_VERSION="0.0.0-sha.${SHORT_SHA}"
+          CHART_VERSION="0.0.0-sha${SHORT_SHA}"
           APP_VERSION="sha-${SHORT_SHA}"
           echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
