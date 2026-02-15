@@ -12,7 +12,7 @@ Phase 3: Multi-workspace support, tarball distribution, Docker and Kubernetes ru
 
 - **stroem-common**: Shared types, models, DAG walker, Tera templating, validation
 - **stroem-db**: PostgreSQL layer via sqlx (runtime queries), migrations, repositories
-- **stroem-runner**: Execution backends (ShellRunner, DockerRunner via bollard, KubeRunner via kube). Docker and Kubernetes runners are behind optional cargo features.
+- **stroem-runner**: Execution backends (ShellRunner, DockerRunner via bollard, KubeRunner via kube). All runners enabled by default.
 - **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed
 - **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs
 - **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs, workspaces)
@@ -52,29 +52,17 @@ Every new feature or significant change **must** include documentation updates:
 ## Build & Test
 
 ```bash
-# Build everything (shell runner only)
+# Build everything (all features enabled by default: docker, kubernetes, s3)
 cargo build --workspace
-
-# Build with container runners
-cargo build --workspace --features stroem-worker/docker,stroem-worker/kubernetes
-
-# Build with S3 log archival
-cargo build -p stroem-server --features s3
 
 # Run all tests (needs Docker for integration tests)
 cargo test --workspace
-
-# Run server tests with S3 (needs Docker for MinIO)
-cargo test -p stroem-server --features s3
-
-# Run runner tests with features
-cargo test -p stroem-runner --features docker
-cargo test -p stroem-runner --features kubernetes
 
 # Run specific crate tests
 cargo test -p stroem-common
 cargo test -p stroem-db
 cargo test -p stroem-runner
+cargo test -p stroem-server
 
 # Check formatting
 cargo fmt --check --all
@@ -126,9 +114,8 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
   - `("shell", "pod")` or `("pod", _)` → KubeRunner
 - **DockerRunner** (`crates/stroem-runner/src/docker.rs`): Uses `bollard` crate. Dual mode: `WithWorkspace` bind-mounts workspace at `/workspace:ro`; `NoWorkspace` runs image standalone with optional entrypoint/command.
 - **KubeRunner** (`crates/stroem-runner/src/kubernetes.rs`): Uses `kube` + `k8s-openapi`. Dual mode: `WithWorkspace` has init container + workspace volume; `NoWorkspace` runs image directly.
-- Feature-gated: `stroem-runner/docker` and `stroem-runner/kubernetes` cargo features, forwarded through `stroem-worker/docker` and `stroem-worker/kubernetes`
+- All runners enabled by default via cargo features (`docker`, `kubernetes` on stroem-runner/stroem-worker)
 - Worker config: optional `docker` and `kubernetes` sections, plus `tags` and `runner_image` in `worker-config.yaml`
-- Build: `cargo build --workspace` (shell only), `cargo build --features stroem-worker/docker,stroem-worker/kubernetes` (all runners)
 
 ### Tags and Step Claiming
 - Workers declare `tags` (replaces `capabilities`) — e.g. `["shell", "docker", "gpu"]`
@@ -200,7 +187,7 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Log Storage
 - `LogStorage` in `AppState` — local JSONL files + optional S3 archival
-- Feature-gated: `s3` cargo feature on `stroem-server` enables `aws-sdk-s3` + `aws-config`
+- S3 support enabled by default via `s3` cargo feature on `stroem-server` (`aws-sdk-s3` + `aws-config`)
 - S3 upload spawned as background task when a job reaches terminal state (completed/failed)
 - Read fallback: local file → legacy .log → S3 (if configured)
 - Config: optional `s3` section in `log_storage` with `bucket`, `region`, `prefix`, `endpoint`

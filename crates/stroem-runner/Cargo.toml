@@ -22,7 +22,7 @@ kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 
 [features]
-default = []
+default = ["docker", "kubernetes"]
 docker = ["bollard", "futures-util"]
 kubernetes = ["kube", "k8s-openapi", "futures-util"]
 

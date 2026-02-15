@@ -22,7 +22,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 # Build only dependencies - this layer is cached unless Cargo.toml/Cargo.lock change
-RUN cargo chef cook --release --recipe-path recipe.json -p stroem-server
+RUN cargo chef cook --release --recipe-path recipe.json -p stroem-server --features s3
 
 # Now copy actual source and build
 COPY Cargo.toml Cargo.lock ./
@@ -31,7 +31,7 @@ COPY crates/ crates/
 # Copy built frontend into the static folder for rust-embed
 COPY --from=frontend /app/crates/stroem-server/static/ crates/stroem-server/static/
 
-RUN cargo build --release -p stroem-server
+RUN cargo build --release -p stroem-server --features s3
 
 # Stage 4: Runtime
 FROM debian:bookworm-slim

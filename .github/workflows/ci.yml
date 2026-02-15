@@ -32,11 +32,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check --all
 
-      - name: Clippy (default features)
+      - name: Clippy
         run: cargo clippy --workspace -- -D warnings
-
-      - name: Clippy (all features)
-        run: cargo clippy --workspace --features stroem-worker/docker,stroem-worker/kubernetes -- -D warnings
 
   test:
     name: Tests

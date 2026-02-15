@@ -20,7 +20,7 @@ flate2.workspace = true
 tar.workspace = true
 
 [features]
-default = []
+default = ["docker", "kubernetes"]
 docker = ["stroem-runner/docker"]
 kubernetes = ["stroem-runner/kubernetes"]
 

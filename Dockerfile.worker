@@ -10,24 +10,15 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: Build dependencies (cached layer)
 FROM chef AS builder
-ARG FEATURES=""
 COPY --from=planner /app/recipe.json recipe.json
 # Build only dependencies - this layer is cached unless Cargo.toml/Cargo.lock change
-RUN if [ -n "$FEATURES" ]; then \
-      cargo chef cook --release --recipe-path recipe.json -p stroem-worker --features "$FEATURES"; \
-    else \
-      cargo chef cook --release --recipe-path recipe.json -p stroem-worker; \
-    fi
+RUN cargo chef cook --release --recipe-path recipe.json -p stroem-worker
 
 # Now copy actual source and build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 
-RUN if [ -n "$FEATURES" ]; then \
-      cargo build --release -p stroem-worker --features "$FEATURES"; \
-    else \
-      cargo build --release -p stroem-worker; \
-    fi
+RUN cargo build --release -p stroem-worker
 
 # Stage 3: Runtime
 FROM debian:bookworm-slim
