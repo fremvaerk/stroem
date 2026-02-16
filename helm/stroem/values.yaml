@@ -1,5 +1,5 @@
-# Global image tag for both server and worker. Per-component tag overrides this.
-imageTag: latest
+# Global image tag override. Defaults to Chart.appVersion if not set.
+imageTag: ""
 
 server:
   image:

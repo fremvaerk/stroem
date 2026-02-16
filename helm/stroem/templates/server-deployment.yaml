@@ -25,7 +25,7 @@ spec:
       serviceAccountName: {{ include "stroem.serviceAccountName" . }}
       containers:
         - name: stroem-server
-          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag | default .Values.imageTag }}"
+          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag | default .Values.imageTag | default .Chart.AppVersion }}"
           ports:
             - name: http
               containerPort: {{ .Values.server.service.port }}
