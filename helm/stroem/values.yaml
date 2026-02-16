@@ -6,13 +6,28 @@ server:
   service:
     type: ClusterIP
     port: 8080
+  # Full server-config.yaml content — passed as-is to the ConfigMap.
+  # Secrets (db.url, worker_token, auth secrets) should be set via extraSecretEnv
+  # using STROEM__ env var overrides instead of putting them here.
   config:
-    logStorageDir: /var/stroem/logs
-    # Workspaces map matching server-config.yaml format
+    listen: "0.0.0.0:8080"
+    db:
+      url: "postgres://stroem:stroem@postgres:5432/stroem"
+    log_storage:
+      local_dir: /var/stroem/logs
     workspaces:
       default:
         type: folder
         path: /workspace
+    worker_token: "change-me-in-production"
+  # Extra env vars injected as a Secret (for STROEM__ overrides of sensitive values)
+  extraSecretEnv: {}
+  #  STROEM__DB__URL: "postgres://real-user:real-pass@rds:5432/stroem"
+  #  STROEM__WORKER_TOKEN: "production-secret"
+  #  STROEM__AUTH__JWT_SECRET: "jwt-secret"
+  #  STROEM__AUTH__REFRESH_SECRET: "refresh-secret"
+  # Extra plain env vars
+  extraEnv: {}
   resources: {}
 
 worker:
@@ -20,49 +35,28 @@ worker:
     repository: stroem-worker
     tag: latest
   replicas: 2
+  # Full worker-config.yaml content — passed as-is to the ConfigMap.
+  # server_url and worker_name are auto-injected via env vars.
   config:
-    maxConcurrent: 4
-    pollIntervalSecs: 2
-    workspaceCacheDir: /var/stroem/workspace-cache
-    capabilities: ["shell"]
+    server_url: "http://stroem-server:8080"
+    worker_token: "change-me-in-production"
+    worker_name: "k8s-worker"
+    max_concurrent: 4
+    poll_interval_secs: 2
+    workspace_cache_dir: /var/stroem/workspace-cache
+    capabilities:
+      - shell
+  # Extra env vars injected as a Secret
+  extraSecretEnv: {}
+  #  STROEM__WORKER_TOKEN: "production-secret"
+  # Extra plain env vars
+  extraEnv: {}
   # Docker-in-Docker sidecar for DockerRunner
   dind:
     enabled: false
     image: docker:27-dind
     resources: {}
-  # KubeRunner configuration
-  kubernetes:
-    enabled: false
-    namespace: stroem-jobs
-    initImage: curlimages/curl:latest
   resources: {}
-
-# Shared auth token between server and workers
-workerToken: "change-me-in-production"
-
-# Authentication (optional)
-auth:
-  enabled: false
-  jwtSecret: ""
-  refreshSecret: ""
-  # Base URL for OIDC redirect URIs (e.g. https://stroem.example.com)
-  baseUrl: ""
-  # Initial admin user (created on first deploy)
-  initialUser:
-    username: admin
-    password: ""
-  # OIDC providers
-  providers: []
-  #  - name: google
-  #    displayName: Google
-  #    providerType: oidc
-  #    issuerUrl: https://accounts.google.com
-  #    clientId: ""
-  #    clientSecret: ""
-
-# External PostgreSQL (required)
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
 
 # RBAC for pod creation (needed for KubeRunner)
 rbac:

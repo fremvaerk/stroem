@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 
@@ -49,6 +49,9 @@ sha2 = "0.10"
 # Static file embedding
 rust-embed = "8"
 mime_guess = "2"
+
+# Config loading with env override
+config = { version = "0.15", default-features = false, features = ["yaml"] }
 
 # Scheduler
 croner = "2"

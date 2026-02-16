@@ -6,48 +6,4 @@ metadata:
     {{- include "stroem.labels" . | nindent 4 }}
 data:
   server-config.yaml: |
-    listen: "0.0.0.0:{{ .Values.server.service.port }}"
-
-    db:
-      url: "PLACEHOLDER_DATABASE_URL"
-
-    log_storage:
-      local_dir: {{ .Values.server.config.logStorageDir | quote }}
-
-    workspaces:
-      {{- range $name, $ws := .Values.server.config.workspaces }}
-      {{ $name }}:
-        {{- if eq $ws.type "folder" }}
-        type: folder
-        path: {{ $ws.path | quote }}
-        {{- else if eq $ws.type "git" }}
-        type: git
-        url: {{ $ws.url | quote }}
-        ref: {{ $ws.ref | default "main" | quote }}
-        {{- if $ws.poll_interval_secs }}
-        poll_interval_secs: {{ $ws.poll_interval_secs }}
-        {{- end }}
-        {{- end }}
-      {{- end }}
-
-    worker_token: "PLACEHOLDER_WORKER_TOKEN"
-
-    {{- if .Values.auth.enabled }}
-    auth:
-      jwt_secret: "PLACEHOLDER_JWT_SECRET"
-      refresh_secret: "PLACEHOLDER_REFRESH_SECRET"
-      {{- if .Values.auth.baseUrl }}
-      base_url: {{ .Values.auth.baseUrl | quote }}
-      {{- end }}
-      {{- if .Values.auth.providers }}
-      providers:
-        {{- range .Values.auth.providers }}
-        - name: {{ .name | quote }}
-          display_name: {{ .displayName | quote }}
-          provider_type: {{ .providerType | quote }}
-          issuer_url: {{ .issuerUrl | quote }}
-          client_id: {{ .clientId | quote }}
-          client_secret: {{ .clientSecret | quote }}
-        {{- end }}
-      {{- end }}
-    {{- end }}
+    {{- toYaml .Values.server.config | nindent 4 }}

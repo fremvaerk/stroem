@@ -17,11 +17,6 @@ helm install stroem oci://ghcr.io/fremvaerk/charts/stroem
 # Install specific version
 helm install stroem oci://ghcr.io/fremvaerk/charts/stroem --version 1.0.0
 
-# Install with custom values
-helm install stroem oci://ghcr.io/fremvaerk/charts/stroem \
-  --set database.url="postgres://user:pass@db:5432/stroem" \
-  --set workerToken="my-secret-token"
-
 # Install with values file
 helm install stroem oci://ghcr.io/fremvaerk/charts/stroem -f values.yaml
 ```
@@ -38,6 +33,25 @@ helm upgrade stroem oci://ghcr.io/fremvaerk/charts/stroem --version 1.1.0
 helm uninstall stroem
 ```
 
+## Architecture
+
+The chart uses a **config pass-through** pattern:
+
+- `server.config` and `worker.config` contain the **full** YAML config passed as-is to ConfigMaps
+- Secrets are injected via `extraSecretEnv` as `STROEM__` environment variables that override config values at runtime
+- No init containers or sed templating — clean and debuggable
+
+### How env var overrides work
+
+The server and worker binaries support `STROEM__` prefixed environment variables that override any YAML config value. The separator is `__` (double underscore) for nested keys:
+
+| Env Var | Overrides YAML key |
+|---------|--------------------|
+| `STROEM__DB__URL` | `db.url` |
+| `STROEM__WORKER_TOKEN` | `worker_token` |
+| `STROEM__AUTH__JWT_SECRET` | `auth.jwt_secret` |
+| `STROEM__LISTEN` | `listen` |
+
 ## Configuration
 
 ### Server
@@ -49,8 +63,9 @@ helm uninstall stroem
 | `server.replicas` | Number of server replicas | `1` |
 | `server.service.type` | Kubernetes service type | `ClusterIP` |
 | `server.service.port` | Service port | `8080` |
-| `server.config.logStorageDir` | Log storage directory | `/var/stroem/logs` |
-| `server.config.workspaces` | Workspace definitions | `{default: {type: folder, path: /workspace}}` |
+| `server.config` | Full `server-config.yaml` content (pass-through) | See `values.yaml` |
+| `server.extraSecretEnv` | Secret env vars for `STROEM__` overrides | `{}` |
+| `server.extraEnv` | Plain env vars | `{}` |
 | `server.resources` | CPU/memory resource limits | `{}` |
 
 ### Worker
@@ -60,33 +75,19 @@ helm uninstall stroem
 | `worker.image.repository` | Worker image repository | `stroem-worker` |
 | `worker.image.tag` | Worker image tag | `latest` |
 | `worker.replicas` | Number of worker replicas | `2` |
-| `worker.config.maxConcurrent` | Max concurrent jobs per worker | `4` |
-| `worker.config.pollIntervalSecs` | Server poll interval | `2` |
-| `worker.config.capabilities` | Worker capabilities | `["shell"]` |
+| `worker.config` | Full `worker-config.yaml` content (pass-through) | See `values.yaml` |
+| `worker.extraSecretEnv` | Secret env vars for `STROEM__` overrides | `{}` |
+| `worker.extraEnv` | Plain env vars | `{}` |
 | `worker.dind.enabled` | Enable Docker-in-Docker sidecar | `false` |
 | `worker.dind.image` | DinD image | `docker:27-dind` |
-| `worker.kubernetes.enabled` | Enable KubeRunner | `false` |
-| `worker.kubernetes.namespace` | Namespace for job pods | `stroem-jobs` |
 | `worker.resources` | CPU/memory resource limits | `{}` |
 
-### Authentication
-
-| Key | Description | Default |
-|-----|-------------|---------|
-| `auth.enabled` | Enable JWT authentication | `false` |
-| `auth.jwtSecret` | JWT signing secret | `""` |
-| `auth.refreshSecret` | Refresh token signing secret | `""` |
-| `auth.baseUrl` | Base URL for OIDC redirects | `""` |
-| `auth.initialUser.username` | Initial admin username | `admin` |
-| `auth.initialUser.password` | Initial admin password | `""` |
-| `auth.providers` | OIDC provider configurations | `[]` |
+**Note:** `server_url` and `worker_name` are automatically injected via env vars — `server_url` is derived from the Helm release name, and `worker_name` is set to the pod name for uniqueness.
 
 ### Infrastructure
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `database.url` | PostgreSQL connection URL | `postgres://stroem:stroem@postgres:5432/stroem` |
-| `workerToken` | Shared auth token for workers | `change-me-in-production` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `serviceAccount.create` | Create service account | `true` |
 | `serviceAccount.name` | Service account name override | `""` |
@@ -98,63 +99,99 @@ helm uninstall stroem
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
 | `ingress.annotations` | Ingress annotations | `{}` |
-| `ingress.hosts` | Ingress host rules | `[{host: stroem.example.com, paths: [{path: /, pathType: Prefix}]}]` |
+| `ingress.hosts` | Ingress host rules | See `values.yaml` |
 | `ingress.tls` | TLS configuration | `[]` |
 
 ## Examples
 
-### Minimal
+### Minimal (dev)
 
 ```yaml
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
-workerToken: "my-secret-token"
+server:
+  config:
+    listen: "0.0.0.0:8080"
+    db:
+      url: "postgres://stroem:stroem@postgres:5432/stroem"
+    log_storage:
+      local_dir: /var/stroem/logs
+    workspaces:
+      default:
+        type: folder
+        path: /workspace
+    worker_token: "dev-token"
+```
+
+### Production (secrets via env overrides)
+
+```yaml
+server:
+  config:
+    listen: "0.0.0.0:8080"
+    db:
+      url: "placeholder"  # overridden by extraSecretEnv
+    log_storage:
+      local_dir: /var/stroem/logs
+    workspaces:
+      default:
+        type: folder
+        path: /workspace
+    worker_token: "placeholder"  # overridden by extraSecretEnv
+  extraSecretEnv:
+    STROEM__DB__URL: "postgres://real-user:real-pass@rds:5432/stroem"
+    STROEM__WORKER_TOKEN: "production-secret-token"
+
+worker:
+  extraSecretEnv:
+    STROEM__WORKER_TOKEN: "production-secret-token"
 ```
 
 ### With Authentication
 
 ```yaml
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
-workerToken: "my-secret-token"
-auth:
-  enabled: true
-  jwtSecret: "generate-a-random-secret"
-  refreshSecret: "generate-another-random-secret"
-  initialUser:
-    username: admin
-    password: "admin-password"
-```
+server:
+  config:
+    listen: "0.0.0.0:8080"
+    db:
+      url: "placeholder"
+    log_storage:
+      local_dir: /var/stroem/logs
+    workspaces:
+      default:
+        type: folder
+        path: /workspace
+    worker_token: "placeholder"
+    auth:
+      jwt_secret: "placeholder"
+      refresh_secret: "placeholder"
+      initial_user:
+        email: admin@example.com
+        password: "placeholder"
+  extraSecretEnv:
+    STROEM__DB__URL: "postgres://user:pass@db:5432/stroem"
+    STROEM__WORKER_TOKEN: "secret-token"
+    STROEM__AUTH__JWT_SECRET: "real-jwt-secret"
+    STROEM__AUTH__REFRESH_SECRET: "real-refresh-secret"
+    STROEM__AUTH__INITIAL_USER__PASSWORD: "real-admin-password"
 
-### With OIDC
-
-```yaml
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
-workerToken: "my-secret-token"
-auth:
-  enabled: true
-  jwtSecret: "generate-a-random-secret"
-  refreshSecret: "generate-another-random-secret"
-  baseUrl: "https://stroem.example.com"
-  providers:
-    - name: google
-      displayName: Google
-      providerType: oidc
-      issuerUrl: https://accounts.google.com
-      clientId: "your-client-id"
-      clientSecret: "your-client-secret"
+worker:
+  extraSecretEnv:
+    STROEM__WORKER_TOKEN: "secret-token"
 ```
 
 ### With Docker-in-Docker
 
 ```yaml
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
-workerToken: "my-secret-token"
 worker:
   config:
-    capabilities: ["shell", "docker"]
+    server_url: "http://stroem-server:8080"
+    worker_token: "placeholder"
+    worker_name: "k8s-worker"
+    max_concurrent: 4
+    poll_interval_secs: 2
+    workspace_cache_dir: /var/stroem/workspace-cache
+    capabilities:
+      - shell
+      - docker
   dind:
     enabled: true
     resources:
@@ -166,15 +203,19 @@ worker:
 ### With KubeRunner
 
 ```yaml
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
-workerToken: "my-secret-token"
 worker:
   config:
-    capabilities: ["shell", "kubernetes"]
-  kubernetes:
-    enabled: true
-    namespace: stroem-jobs
+    server_url: "http://stroem-server:8080"
+    worker_token: "placeholder"
+    worker_name: "k8s-worker"
+    max_concurrent: 4
+    poll_interval_secs: 2
+    workspace_cache_dir: /var/stroem/workspace-cache
+    capabilities:
+      - shell
+      - kubernetes
+    kubernetes:
+      namespace: stroem-jobs
 rbac:
   create: true
 ```
@@ -182,9 +223,6 @@ rbac:
 ### With Ingress
 
 ```yaml
-database:
-  url: "postgres://stroem:stroem@postgres:5432/stroem"
-workerToken: "my-secret-token"
 ingress:
   enabled: true
   className: nginx

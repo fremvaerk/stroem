@@ -22,7 +22,7 @@ Phase 3: Multi-workspace support, tarball distribution, Docker and Kubernetes ru
 - **Error handling**: `anyhow::Result` everywhere. Use `.context("msg")` for error chain.
 - **Async runtime**: tokio
 - **Logging**: `tracing` crate. Use `#[tracing::instrument]` on public functions.
-- **YAML parsing**: `serde_yml`
+- **YAML parsing**: `serde_yml` (direct parsing in tests/models), `config` crate (loading with env var overrides)
 - **Database**: sqlx with runtime queries (`sqlx::query()` / `sqlx::query_as()`), NOT compile-time macros.
 - **Tests**: Unit tests in-module (`#[cfg(test)] mod tests`). Integration tests in `tests/` dirs using `testcontainers` for Postgres.
 - **Frontend**: React 19 + TypeScript + Vite + Tailwind v4 + shadcn/ui in `ui/` directory. Package manager: `bun`.
@@ -164,6 +164,13 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `propagate_to_parent()` in `complete_step` handler: child completes → parent step updated → parent orchestrated → recurse up chain
 - Child jobs: `source_type = "task"`, `source_id = "{parent_job_id}/{step_name}"`
 - Validation: self-referencing task actions rejected (direct and via hooks)
+
+### Config Loading (env var overrides)
+- Both server and worker use the `config` crate to load YAML + env var overrides
+- `config::load_config()` in `stroem-server/src/config.rs`, `load_config()` in `stroem-worker/src/config.rs`
+- Env vars prefixed with `STROEM__` override YAML values; `__` is the separator for nested keys
+- Example: `STROEM__DB__URL` overrides `db.url`, `STROEM__WORKER_TOKEN` overrides `worker_token`
+- Helm chart uses this pattern: ConfigMap has full YAML config, secrets injected via `extraSecretEnv` as `STROEM__` env vars
 
 ### Database
 - Runtime sqlx queries, NOT compile-time checked

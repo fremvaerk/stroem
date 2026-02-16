@@ -127,6 +127,23 @@ pub struct ServerConfig {
     pub recovery: RecoveryConfig,
 }
 
+/// Load server config from a YAML file with STROEM__ env var overrides.
+pub fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
+    use anyhow::Context;
+    let config: ServerConfig = config::Config::builder()
+        .add_source(config::File::new(path, config::FileFormat::Yaml))
+        .add_source(
+            config::Environment::with_prefix("STROEM")
+                .prefix_separator("__")
+                .separator("__"),
+        )
+        .build()
+        .with_context(|| format!("Failed to build config from: {}", path))?
+        .try_deserialize()
+        .with_context(|| format!("Failed to deserialize config from: {}", path))?;
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +849,76 @@ auth:
         assert!(google.display_name.is_none());
         // base_url is optional
         assert!(auth.base_url.is_none());
+    }
+
+    /// Serialize access to env vars in tests to avoid races between parallel tests
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_env_override_db_url() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://placeholder:5432/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "yaml-token"
+"#;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__DB__URL", "postgres://overridden:5432/stroem");
+            std::env::set_var("STROEM__WORKER_TOKEN", "env-token");
+        }
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+
+        unsafe {
+            std::env::remove_var("STROEM__DB__URL");
+            std::env::remove_var("STROEM__WORKER_TOKEN");
+        }
+
+        assert_eq!(config.db.url, "postgres://overridden:5432/stroem");
+        assert_eq!(config.worker_token, "env-token");
+        // Non-overridden values preserved from YAML
+        assert_eq!(config.listen, "0.0.0.0:8080");
+        assert_eq!(config.log_storage.local_dir, "./logs");
+    }
+
+    #[test]
+    fn test_env_override_listen() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost:5432/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "token"
+"#;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__LISTEN", "0.0.0.0:9090");
+        }
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+
+        unsafe {
+            std::env::remove_var("STROEM__LISTEN");
+        }
+
+        assert_eq!(config.listen, "0.0.0.0:9090");
     }
 }

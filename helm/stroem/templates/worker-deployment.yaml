@@ -18,29 +18,11 @@ spec:
         app.kubernetes.io/component: worker
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/worker-configmap.yaml") . | sha256sum }}
-        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if .Values.worker.extraSecretEnv }}
+        checksum/secret: {{ include (print $.Template.BasePath "/worker-secret-env.yaml") . | sha256sum }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "stroem.serviceAccountName" . }}
-      initContainers:
-        - name: config-renderer
-          image: busybox:1.36
-          command: ["sh", "-c"]
-          args:
-            - |
-              cp /etc/stroem-template/worker-config.yaml /etc/stroem/worker-config.yaml
-              sed -i "s|PLACEHOLDER_WORKER_TOKEN|$WORKER_TOKEN|g" /etc/stroem/worker-config.yaml
-          env:
-            - name: WORKER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "stroem.fullname" . }}
-                  key: worker-token
-          volumeMounts:
-            - name: config-template
-              mountPath: /etc/stroem-template
-              readOnly: true
-            - name: config
-              mountPath: /etc/stroem
       containers:
         - name: stroem-worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
@@ -49,6 +31,14 @@ spec:
               value: /etc/stroem/worker-config.yaml
             - name: RUST_LOG
               value: info
+            # Override server_url with dynamic service name from Helm
+            - name: STROEM__SERVER_URL
+              value: "http://{{ include "stroem.fullname" . }}-server:{{ .Values.server.service.port }}"
+            # Override worker_name with unique pod name
+            - name: STROEM__WORKER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             {{- if .Values.worker.dind.enabled }}
             - name: DOCKER_HOST
               value: tcp://localhost:2376
@@ -59,12 +49,21 @@ spec:
             - name: DOCKER_TLS_VERIFY
               value: "1"
             {{- end }}
+            {{- range $name, $value := .Values.worker.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- if .Values.worker.extraSecretEnv }}
+          envFrom:
+            - secretRef:
+                name: {{ include "stroem.fullname" . }}-worker-env
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/stroem
               readOnly: true
             - name: workspace-cache
-              mountPath: {{ .Values.worker.config.workspaceCacheDir }}
+              mountPath: {{ .Values.worker.config.workspace_cache_dir }}
             {{- if .Values.worker.dind.enabled }}
             - name: dind-certs
               mountPath: /certs/client
@@ -93,11 +92,9 @@ spec:
           {{- end }}
         {{- end }}
       volumes:
-        - name: config-template
+        - name: config
           configMap:
             name: {{ include "stroem.fullname" . }}-worker
-        - name: config
-          emptyDir: {}
         - name: workspace-cache
           emptyDir: {}
         {{- if .Values.worker.dind.enabled }}

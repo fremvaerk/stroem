@@ -52,10 +52,17 @@ fn default_capabilities() -> Vec<String> {
 }
 
 pub fn load_config(path: &str) -> Result<WorkerConfig> {
-    let content =
-        std::fs::read_to_string(path).context(format!("Failed to read config file: {}", path))?;
-    let config: WorkerConfig =
-        serde_yml::from_str(&content).context("Failed to parse worker config YAML")?;
+    let config: WorkerConfig = config::Config::builder()
+        .add_source(config::File::new(path, config::FileFormat::Yaml))
+        .add_source(
+            config::Environment::with_prefix("STROEM")
+                .prefix_separator("__")
+                .separator("__"),
+        )
+        .build()
+        .context(format!("Failed to build config from: {}", path))?
+        .try_deserialize()
+        .context("Failed to deserialize worker config")?;
     Ok(config)
 }
 
@@ -241,6 +248,75 @@ runner_image: "ghcr.io/myorg/stroem-runner:latest"
             Some("ghcr.io/myorg/stroem-runner:latest".to_string())
         );
         assert_eq!(config.effective_tags(), &["shell", "docker", "gpu"]);
+    }
+
+    /// Serialize access to env vars in tests to avoid races between parallel tests
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_env_override_worker_token() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "yaml-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__WORKER_TOKEN", "env-token");
+            std::env::set_var("STROEM__SERVER_URL", "http://overridden:8080");
+        }
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+
+        unsafe {
+            std::env::remove_var("STROEM__WORKER_TOKEN");
+            std::env::remove_var("STROEM__SERVER_URL");
+        }
+
+        assert_eq!(config.worker_token, "env-token");
+        assert_eq!(config.server_url, "http://overridden:8080");
+        // Non-overridden values preserved from YAML
+        assert_eq!(config.worker_name, "worker-1");
+        assert_eq!(config.max_concurrent, 4);
+    }
+
+    #[test]
+    fn test_env_override_worker_name() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "yaml-worker"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(yaml.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__WORKER_NAME", "k8s-worker-pod-abc");
+        }
+
+        let config = load_config(file.path().to_str().unwrap()).unwrap();
+
+        unsafe {
+            std::env::remove_var("STROEM__WORKER_NAME");
+        }
+
+        assert_eq!(config.worker_name, "k8s-worker-pod-abc");
     }
 
     #[test]
