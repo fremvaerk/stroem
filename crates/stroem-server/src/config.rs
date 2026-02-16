@@ -120,6 +120,7 @@ pub struct ServerConfig {
     pub listen: String, // "0.0.0.0:8080"
     pub db: DbConfig,
     pub log_storage: LogStorageConfig,
+    #[serde(default)]
     pub workspaces: HashMap<String, WorkspaceSourceDef>,
     pub worker_token: String, // shared secret for worker auth
     pub auth: Option<AuthConfig>,
@@ -415,7 +416,7 @@ auth:
     }
 
     #[test]
-    fn test_parse_missing_workspaces_field_fails() {
+    fn test_parse_missing_workspaces_field_defaults_to_empty() {
         let yaml = r#"
 listen: "0.0.0.0:8080"
 db:
@@ -424,10 +425,10 @@ log_storage:
   local_dir: "./logs"
 worker_token: "token"
 "#;
-        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
         assert!(
-            result.is_err(),
-            "Config without workspaces field should fail"
+            config.workspaces.is_empty(),
+            "Config without workspaces field should default to empty"
         );
     }
 
