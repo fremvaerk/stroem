@@ -3,7 +3,7 @@ imageTag: latest
 
 server:
   image:
-    repository: stroem-server
+    repository: ghcr.io/fremvaerk/stroem-server
     tag: ""
   replicas: 1
   service:
@@ -35,7 +35,7 @@ server:
 
 worker:
   image:
-    repository: stroem-worker
+    repository: ghcr.io/fremvaerk/stroem-worker
     tag: ""
   replicas: 2
   # Full worker-config.yaml content — passed as-is to the ConfigMap.
