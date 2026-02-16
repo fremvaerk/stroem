@@ -155,4 +155,4 @@ jobs:
         run: helm package ./helm/stroem
 
       - name: Push chart
-        run: helm push stroem-helm-${{ steps.versions.outputs.chart_version }}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+        run: helm push stroem-${{ steps.versions.outputs.chart_version }}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts

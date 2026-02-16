@@ -810,7 +810,7 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 12. ~~**Sub-task execution (`type: task` action)**~~: **DONE** -- Server-side dispatch, recursive child jobs, depth limit (10), parent propagation.
 13. ~~**Worker heartbeat + stale job recovery**~~: **DONE** -- Background sweeper, stale worker detection, step failure + job orchestration.
 14. ~~**stroem-cli**~~: **DONE** -- Commands: `validate`, `trigger`, `status`, `logs`, `tasks`, `jobs`, `workspaces`. Workspace-scoped with `--workspace` flag.
-15. ~~**Helm chart**~~: **DONE** -- Full chart at `helm/stroem/` (OCI: `stroem-helm`), server + worker deployments, RBAC for KubeRunner, optional DinD sidecar, ingress, secrets, configmaps.
+15. ~~**Helm chart**~~: **DONE** -- Full chart at `helm/stroem/` (OCI: `charts/stroem`), server + worker deployments, RBAC for KubeRunner, optional DinD sidecar, ingress, secrets, configmaps.
 16. ~~**Default features + release workflow**~~: **DONE** -- All cargo features (docker, kubernetes, s3) enabled by default. Dedicated release workflow on `v*` tags (Docker images + Helm chart + GitHub Release). Dev builds on main only.
 
 ### Phase 4 -- Advanced Features

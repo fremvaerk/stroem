@@ -12,24 +12,24 @@ Helm chart for deploying [Stroem](https://github.com/fremvaerk/stroem) workflow 
 
 ```bash
 # Install latest version
-helm install stroem oci://ghcr.io/fremvaerk/charts/stroem-helm
+helm install stroem oci://ghcr.io/fremvaerk/charts/stroem
 
 # Install specific version
-helm install stroem oci://ghcr.io/fremvaerk/charts/stroem-helm --version 1.0.0
+helm install stroem oci://ghcr.io/fremvaerk/charts/stroem --version 1.0.0
 
 # Install with custom values
-helm install stroem oci://ghcr.io/fremvaerk/charts/stroem-helm \
+helm install stroem oci://ghcr.io/fremvaerk/charts/stroem \
   --set database.url="postgres://user:pass@db:5432/stroem" \
   --set workerToken="my-secret-token"
 
 # Install with values file
-helm install stroem oci://ghcr.io/fremvaerk/charts/stroem-helm -f values.yaml
+helm install stroem oci://ghcr.io/fremvaerk/charts/stroem -f values.yaml
 ```
 
 ## Upgrade
 
 ```bash
-helm upgrade stroem oci://ghcr.io/fremvaerk/charts/stroem-helm --version 1.1.0
+helm upgrade stroem oci://ghcr.io/fremvaerk/charts/stroem --version 1.1.0
 ```
 
 ## Uninstall
