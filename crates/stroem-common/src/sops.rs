@@ -26,8 +26,10 @@ pub fn decrypt_sops_file(path: &Path) -> Result<String> {
         );
     }
 
-    String::from_utf8(output.stdout)
-        .context(format!("sops output for {} is not valid UTF-8", path.display()))
+    String::from_utf8(output.stdout).context(format!(
+        "sops output for {} is not valid UTF-8",
+        path.display()
+    ))
 }
 
 /// Read a YAML file, decrypting it first if it's a SOPS file.

@@ -551,11 +551,7 @@ actions:
         // Should fail because sops decryption fails (not installed or file not encrypted)
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("sops"),
-            "Error should mention sops: {}",
-            err
-        );
+        assert!(err.contains("sops"), "Error should mention sops: {}", err);
     }
 
     #[tokio::test]
