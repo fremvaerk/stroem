@@ -32,6 +32,9 @@ server:
   #  STROEM__AUTH__REFRESH_SECRET: "refresh-secret"
   # Extra plain env vars
   extraEnv: {}
+  # Extra volumes and mounts (e.g., for SSH deploy keys)
+  extraVolumes: []
+  extraVolumeMounts: []
   resources: {}
 
 worker:
