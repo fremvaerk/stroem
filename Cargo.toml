@@ -43,7 +43,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Auth
 argon2 = "0.5"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 sha2 = "0.10"
 
 # Static file embedding
