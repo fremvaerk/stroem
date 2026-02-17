@@ -733,7 +733,7 @@ Goal: End-to-end execution of a simple workflow via CLI/API.
 
 **Step 1 -- Workspace + common types**
 - Init Cargo workspace with all crate stubs (empty lib.rs/main.rs that compile)
-- `stroem-common`: Workflow YAML models (`ActionDef`, `TaskDef`, `FlowStep`, `TriggerDef`, `WorkflowConfig`) with serde deserialization via `serde_yml`
+- `stroem-common`: Workflow YAML models (`ActionDef`, `TaskDef`, `FlowStep`, `TriggerDef`, `WorkflowConfig`) with serde deserialization via `serde_yaml`
 - `stroem-common`: DAG walker (`fn ready_steps(steps, completed) -> Vec<StepName>`)
 - `stroem-common`: Tera template renderer (`fn render_input(template_map, context) -> Result<Value>`)
 - Unit tests for YAML parsing, DAG resolution, template rendering

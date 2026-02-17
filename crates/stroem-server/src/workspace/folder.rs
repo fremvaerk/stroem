@@ -123,7 +123,7 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read file: {:?}", path))?;
 
-                let config: WorkflowConfig = serde_yml::from_str(&content)
+                let config: WorkflowConfig = serde_yaml::from_str(&content)
                     .with_context(|| format!("Failed to parse YAML: {:?}", path))?;
 
                 workspace.merge(config);

@@ -205,7 +205,7 @@ tasks:
         input:
           name: "{{ input.name }}"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.actions.len(), 1);
         assert_eq!(config.tasks.len(), 1);
 
@@ -232,7 +232,7 @@ actions:
       cpu: "500m"
       memory: "512Mi"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let backup = config.actions.get("backup").unwrap();
         assert_eq!(backup.action_type, "docker");
         assert_eq!(backup.image.as_ref().unwrap(), "company/db-backup:v2.1");
@@ -253,7 +253,7 @@ triggers:
     task: nightly-backup
     enabled: true
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("nightly").unwrap();
         assert_eq!(trigger.trigger_type, "scheduler");
         assert_eq!(trigger.cron.as_ref().unwrap(), "0 0 2 * * *");
@@ -263,7 +263,7 @@ triggers:
 
     #[test]
     fn test_workspace_merge() {
-        let config1: WorkflowConfig = serde_yml::from_str(
+        let config1: WorkflowConfig = serde_yaml::from_str(
             r#"
 actions:
   action1:
@@ -278,7 +278,7 @@ tasks:
         )
         .unwrap();
 
-        let config2: WorkflowConfig = serde_yml::from_str(
+        let config2: WorkflowConfig = serde_yaml::from_str(
             r#"
 actions:
   action2:
@@ -312,7 +312,7 @@ tasks:
       step1:
         action: test
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         assert_eq!(task.mode, "distributed");
     }
@@ -326,7 +326,7 @@ triggers:
     cron: "* * * * * *"
     task: test-task
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("test").unwrap();
         assert!(trigger.enabled);
     }
@@ -340,7 +340,7 @@ tasks:
       step1:
         action: action1
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         let step = task.flow.get("step1").unwrap();
         assert!(!step.continue_on_failure);
@@ -357,7 +357,7 @@ tasks:
         depends_on: [step0]
         continue_on_failure: true
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         let step = task.flow.get("step1").unwrap();
         assert!(step.continue_on_failure);
@@ -378,7 +378,7 @@ tasks:
         action: action3
         depends_on: [step1, step2]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
 
         let step1 = task.flow.get("step1").unwrap();
@@ -405,7 +405,7 @@ actions:
     env:
       DB_PASSWORD: "{{ secret.db_password }}"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.secrets.len(), 2);
         assert_eq!(
             config.secrets.get("db_password").unwrap(),
@@ -427,7 +427,7 @@ secrets:
     host: "ref+sops://secrets.enc.yaml#/db/host"
   api_key: "ref+vault://secret/data/api#key"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.secrets.len(), 2);
 
         // db is a nested object
@@ -458,7 +458,7 @@ actions:
     runner: docker
     cmd: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("test").unwrap();
         assert_eq!(action.runner.as_deref(), Some("docker"));
     }
@@ -473,7 +473,7 @@ actions:
     tags: ["node-20", "gpu"]
     cmd: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("test").unwrap();
         assert_eq!(action.tags, vec!["node-20", "gpu"]);
     }
@@ -488,7 +488,7 @@ actions:
     entrypoint: ["/app/run"]
     command: ["--env", "prod"]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("deploy").unwrap();
         assert_eq!(
             action.entrypoint.as_ref().unwrap(),
@@ -508,7 +508,7 @@ actions:
     type: shell
     cmd: "echo test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
         assert!(action.runner.is_none());
         assert!(action.tags.is_empty());
@@ -540,7 +540,7 @@ tasks:
         action: run-cleanup
         depends_on: [build]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("run-cleanup").unwrap();
         assert_eq!(action.action_type, "task");
         assert_eq!(action.task.as_deref(), Some("cleanup-resources"));
@@ -558,7 +558,7 @@ tasks:
       step1:
         action: deploy
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("deploy-staging").unwrap();
         assert_eq!(task.folder.as_deref(), Some("deploy/staging"));
     }
@@ -572,14 +572,14 @@ tasks:
       step1:
         action: test
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         assert!(task.folder.is_none());
     }
 
     #[test]
     fn test_workspace_merge_secrets() {
-        let config1: WorkflowConfig = serde_yml::from_str(
+        let config1: WorkflowConfig = serde_yaml::from_str(
             r#"
 secrets:
   db_password: "ref+awsssm:///prod/db/password"
@@ -591,7 +591,7 @@ actions:
         )
         .unwrap();
 
-        let config2: WorkflowConfig = serde_yml::from_str(
+        let config2: WorkflowConfig = serde_yaml::from_str(
             r#"
 secrets:
   api_key: "ref+vault://secret/data/api#key"
@@ -644,7 +644,7 @@ tasks:
         input:
           message: "Deploy FAILED"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("release").unwrap();
         assert_eq!(task.on_success.len(), 2);
         assert_eq!(task.on_error.len(), 1);
@@ -669,7 +669,7 @@ tasks:
       step1:
         action: test
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         assert!(task.on_success.is_empty());
         assert!(task.on_error.is_empty());

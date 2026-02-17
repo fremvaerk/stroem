@@ -48,7 +48,7 @@ triggers:
 
     // Parse the workflow
     println!("Parsing workflow YAML...");
-    let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+    let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
 
     // Validate the workflow
     println!("Validating workflow...");

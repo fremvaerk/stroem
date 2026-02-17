@@ -22,7 +22,7 @@ Phase 3: Multi-workspace support, tarball distribution, Docker and Kubernetes ru
 - **Error handling**: `anyhow::Result` everywhere. Use `.context("msg")` for error chain.
 - **Async runtime**: tokio
 - **Logging**: `tracing` crate. Use `#[tracing::instrument]` on public functions.
-- **YAML parsing**: `serde_yml` (direct parsing in tests/models), `config` crate (loading with env var overrides)
+- **YAML parsing**: `serde_yaml` (direct parsing in tests/models), `config` crate (loading with env var overrides)
 - **Database**: sqlx with runtime queries (`sqlx::query()` / `sqlx::query_as()`), NOT compile-time macros.
 - **Tests**: Unit tests in-module (`#[cfg(test)] mod tests`). Integration tests in `tests/` dirs using `testcontainers` for Postgres.
 - **Frontend**: React 19 + TypeScript + Vite + Tailwind v4 + shadcn/ui in `ui/` directory. Package manager: `bun`.

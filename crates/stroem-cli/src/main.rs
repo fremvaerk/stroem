@@ -459,7 +459,7 @@ fn validate_workflows(path: &str) -> Result<()> {
 
     for file in &files {
         let content = std::fs::read_to_string(file)?;
-        match serde_yml::from_str::<WorkflowConfig>(&content) {
+        match serde_yaml::from_str::<WorkflowConfig>(&content) {
             Ok(config) => match validate_workflow_config(&config) {
                 Ok(warnings) => {
                     println!("[OK] {}", file.display());

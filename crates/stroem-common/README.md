@@ -51,7 +51,7 @@ use stroem_common::validation;
 use stroem_common::dag;
 
 // Parse workflow YAML
-let config: WorkflowConfig = serde_yml::from_str(yaml)?;
+let config: WorkflowConfig = serde_yaml::from_str(yaml)?;
 
 // Validate
 let warnings = validation::validate_workflow_config(&config)?;
@@ -79,7 +79,7 @@ cargo run -p stroem-common --example parse_workflow
 
 ## Dependencies
 
-- `serde` + `serde_json` + `serde_yml`: Serialization and YAML parsing
+- `serde` + `serde_json` + `serde_yaml`: Serialization and YAML parsing
 - `tera`: Template rendering
 - `anyhow`: Error handling
 - `chrono`: Date/time types

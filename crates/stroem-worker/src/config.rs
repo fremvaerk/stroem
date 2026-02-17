@@ -85,7 +85,7 @@ capabilities:
   - shell
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.server_url, "http://localhost:8080");
         assert_eq!(config.worker_token, "test-token");
         assert_eq!(config.worker_name, "worker-1");
@@ -106,7 +106,7 @@ poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.capabilities, vec!["shell"]);
     }
 
@@ -123,7 +123,7 @@ docker:
   host: "tcp://localhost:2376"
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         let docker = config.docker.unwrap();
         assert_eq!(docker.host, Some("tcp://localhost:2376".to_string()));
     }
@@ -142,7 +142,7 @@ kubernetes:
   init_image: "curlimages/curl:8.5.0"
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         let kube = config.kubernetes.unwrap();
         assert_eq!(kube.namespace, "stroem-jobs");
         assert_eq!(kube.init_image, Some("curlimages/curl:8.5.0".to_string()));
@@ -165,7 +165,7 @@ tags:
   - node-20
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         // When tags is set, effective_tags() returns tags (not capabilities)
         assert_eq!(config.effective_tags(), &["shell", "docker", "node-20"]);
     }
@@ -184,7 +184,7 @@ capabilities:
   - docker
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         // When tags is not set, effective_tags() falls back to capabilities
         assert!(config.tags.is_none());
         assert_eq!(config.effective_tags(), &["shell", "docker"]);
@@ -206,7 +206,7 @@ tags:
 runner_image: "ghcr.io/myorg/stroem-runner:latest"
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             config.tags,
             Some(vec![
@@ -302,7 +302,7 @@ poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 "#;
 
-        let config: WorkerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.docker.is_none());
         assert!(config.kubernetes.is_none());
     }

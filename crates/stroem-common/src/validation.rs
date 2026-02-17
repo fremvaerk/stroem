@@ -518,7 +518,7 @@ triggers:
     cron: "0 0 * * * *"
     task: test
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -530,7 +530,7 @@ actions:
   bad:
     type: shell
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -548,7 +548,7 @@ actions:
     cmd: "echo test"
     script: "test.sh"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -565,7 +565,7 @@ actions:
     type: docker
     command: ["echo", "test"]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing 'image'"));
@@ -578,7 +578,7 @@ actions:
   bad:
     type: pod
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing 'image'"));
@@ -591,7 +591,7 @@ actions:
   bad:
     type: invalid
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid type"));
@@ -611,7 +611,7 @@ tasks:
       step1:
         action: nonexistent
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -635,7 +635,7 @@ tasks:
         action: greet
         depends_on: [nonexistent]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -662,7 +662,7 @@ tasks:
         action: greet
         depends_on: [step1]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cycle detected"));
@@ -677,7 +677,7 @@ triggers:
     cron: "0 0 * * * *"
     task: nonexistent
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -787,7 +787,7 @@ tasks:
       step1:
         action: common/slack-notify
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
         let warnings = result.unwrap();
@@ -804,7 +804,7 @@ actions:
     type: shell
     script: actions/deploy.sh
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -818,7 +818,7 @@ actions:
     image: node:20
     cmd: "npm run build"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -860,7 +860,7 @@ triggers:
     type: webhook
     task: ci-pipeline
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -872,7 +872,7 @@ secrets:
   db_password: "ref+awsssm:///prod/db/password"
   api_key_2: "ref+vault://secret/data/api#key"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -885,7 +885,7 @@ secrets:
     password: "ref+sops://secrets.enc.yaml#/db/password"
     host: "ref+sops://secrets.enc.yaml#/db/host"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -896,7 +896,7 @@ secrets:
 secrets:
   "db-password": "ref+awsssm:///prod/db/password"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -912,7 +912,7 @@ secrets:
   db:
     "my-password": "ref+sops://x"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -927,7 +927,7 @@ secrets:
 secrets:
   db_password: ""
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty value"));
@@ -940,7 +940,7 @@ secrets:
   db:
     password: ""
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty value"));
@@ -960,7 +960,7 @@ actions:
       DB_PASSWORD: "{{ secret.db_password }}"
       API_KEY: "{{ secret.missing_key }}"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
         let warnings = result.unwrap();
@@ -985,7 +985,7 @@ actions:
       DB_PASSWORD: "{{ secret.db.password }}"
       DB_HOST: "{{ secret.db.host }}"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
         let warnings = result.unwrap();
@@ -1004,7 +1004,7 @@ actions:
     runner: docker
     cmd: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1018,7 +1018,7 @@ actions:
     runner: invalid
     cmd: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid runner"));
@@ -1033,7 +1033,7 @@ actions:
     cmd: "echo hi"
     entrypoint: ["/bin/sh"]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("entrypoint"));
@@ -1048,7 +1048,7 @@ actions:
     image: alpine:latest
     runner: local
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("runner"));
@@ -1063,7 +1063,7 @@ actions:
     image: alpine:latest
     script: "deploy.sh"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("script"));
@@ -1078,7 +1078,7 @@ actions:
     type: docker
     image: company/db-migrations:v3
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1093,7 +1093,7 @@ actions:
     entrypoint: ["/bin/sh", "-c"]
     cmd: "echo hello"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1108,7 +1108,7 @@ actions:
     tags: ["node-20"]
     cmd: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1116,7 +1116,7 @@ actions:
     #[test]
     fn test_compute_required_tags_shell_local() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 cmd: "echo test"
@@ -1129,7 +1129,7 @@ cmd: "echo test"
     #[test]
     fn test_compute_required_tags_shell_docker() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 runner: docker
@@ -1143,7 +1143,7 @@ cmd: "npm test"
     #[test]
     fn test_compute_required_tags_shell_docker_with_tags() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 runner: docker
@@ -1158,7 +1158,7 @@ cmd: "npm test"
     #[test]
     fn test_compute_required_tags_docker() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: docker
 image: alpine:latest
@@ -1171,7 +1171,7 @@ image: alpine:latest
     #[test]
     fn test_compute_required_tags_pod() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: pod
 image: alpine:latest
@@ -1184,7 +1184,7 @@ image: alpine:latest
     #[test]
     fn test_compute_required_tags_pod_with_tags() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: pod
 image: alpine:latest
@@ -1198,7 +1198,7 @@ tags: ["gpu"]
     #[test]
     fn test_compute_required_tags_shell_pod() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 runner: pod
@@ -1213,7 +1213,7 @@ cmd: "npm test"
     fn test_compute_required_tags_dedup_base_tag() {
         use crate::models::workflow::ActionDef;
         // If tags already include the base tag, it should not be duplicated
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: docker
 image: alpine:latest
@@ -1236,7 +1236,7 @@ actions:
     image: alpine:latest
     runner: local
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("runner"));
@@ -1251,7 +1251,7 @@ actions:
     image: alpine:latest
     script: "deploy.sh"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("script"));
@@ -1266,7 +1266,7 @@ actions:
     runner: pod
     cmd: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1280,7 +1280,7 @@ actions:
     runner: local
     cmd: "echo test"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1288,7 +1288,7 @@ actions:
     #[test]
     fn test_derive_runner_shell_default() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 cmd: "echo test"
@@ -1301,7 +1301,7 @@ cmd: "echo test"
     #[test]
     fn test_derive_runner_shell_docker() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 runner: docker
@@ -1315,7 +1315,7 @@ cmd: "npm test"
     #[test]
     fn test_derive_runner_shell_pod() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: shell
 runner: pod
@@ -1329,7 +1329,7 @@ cmd: "npm test"
     #[test]
     fn test_derive_runner_docker() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: docker
 image: alpine:latest
@@ -1342,7 +1342,7 @@ image: alpine:latest
     #[test]
     fn test_derive_runner_pod() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: pod
 image: alpine:latest
@@ -1377,7 +1377,7 @@ tasks:
         input:
           message: "Deploy FAILED"
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1398,7 +1398,7 @@ tasks:
     on_success:
       - action: nonexistent
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1422,7 +1422,7 @@ tasks:
     on_success:
       - action: common/slack-notify
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1451,7 +1451,7 @@ tasks:
         action: run-cleanup
         depends_on: [build]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
@@ -1468,7 +1468,7 @@ tasks:
       s:
         action: bad
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing 'task'"));
@@ -1488,7 +1488,7 @@ tasks:
       s:
         action: bad
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("'cmd'"));
@@ -1508,7 +1508,7 @@ tasks:
       s:
         action: bad
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("'image'"));
@@ -1527,7 +1527,7 @@ tasks:
       s:
         action: run-missing
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result
@@ -1555,7 +1555,7 @@ tasks:
         action: run-self
         depends_on: [step1]
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("self-reference"));
@@ -1579,7 +1579,7 @@ tasks:
     on_error:
       - action: run-self
 "#;
-        let config: WorkflowConfig = serde_yml::from_str(yaml).unwrap();
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("self-reference"));
@@ -1588,7 +1588,7 @@ tasks:
     #[test]
     fn test_compute_required_tags_task() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: task
 task: other-task
@@ -1601,7 +1601,7 @@ task: other-task
     #[test]
     fn test_derive_runner_task() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yml::from_str(
+        let action: ActionDef = serde_yaml::from_str(
             r#"
 type: task
 task: other-task

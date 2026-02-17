@@ -164,7 +164,7 @@ workspaces:
     path: "/var/stroem/workspace"
 worker_token: "secret-token-123"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.db.url, "postgres://user:pass@localhost:5432/stroem");
         assert_eq!(config.log_storage.local_dir, "/var/stroem/logs");
@@ -198,7 +198,7 @@ workspaces:
     poll_interval_secs: 120
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.workspaces.len(), 2);
         match &config.workspaces["default"] {
             WorkspaceSourceDef::Folder { path } => assert_eq!(path, "./workspace"),
@@ -237,7 +237,7 @@ workspaces:
       key_path: "/home/user/.ssh/id_rsa"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         match &config.workspaces["private"] {
             WorkspaceSourceDef::Git {
                 url,
@@ -275,7 +275,7 @@ workspaces:
       username: "x-access-token"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         match &config.workspaces["private"] {
             WorkspaceSourceDef::Git { auth, git_ref, .. } => {
                 assert_eq!(git_ref, "develop");
@@ -306,7 +306,7 @@ workspaces:
     path: "./workspace"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         let s3 = config.log_storage.s3.unwrap();
         assert_eq!(s3.bucket, "my-stroem-logs");
         assert_eq!(s3.region, "eu-west-1");
@@ -328,7 +328,7 @@ workspaces:
     path: "./workspace"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.log_storage.s3.is_none());
     }
 
@@ -350,7 +350,7 @@ workspaces:
     path: "./workspace"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         let s3 = config.log_storage.s3.unwrap();
         assert_eq!(s3.bucket, "stroem-logs");
         assert_eq!(s3.region, "us-east-1");
@@ -381,7 +381,7 @@ auth:
     email: "admin@example.com"
     password: "changeme"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         let auth = config.auth.unwrap();
         assert_eq!(auth.jwt_secret, "my-jwt-secret");
         assert_eq!(auth.refresh_secret, "my-refresh-secret");
@@ -409,7 +409,7 @@ auth:
   jwt_secret: "secret"
   refresh_secret: "refresh"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         let auth = config.auth.unwrap();
         assert_eq!(auth.jwt_secret, "secret");
         assert!(auth.initial_user.is_none());
@@ -426,7 +426,7 @@ log_storage:
   local_dir: "./logs"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(
             config.workspaces.is_empty(),
             "Config without workspaces field should default to empty"
@@ -444,7 +444,7 @@ log_storage:
 workspaces: {}
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.workspaces.is_empty());
     }
 
@@ -462,7 +462,7 @@ workspaces:
     bucket: my-bucket
 worker_token: "token"
 "#;
-        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
         assert!(result.is_err(), "Unknown workspace type should fail");
     }
 
@@ -478,7 +478,7 @@ workspaces:
     path: "./workspace"
 worker_token: "token"
 "#;
-        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
         assert!(result.is_err(), "Config without db section should fail");
     }
 
@@ -495,7 +495,7 @@ workspaces:
     type: folder
     path: "./workspace"
 "#;
-        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
         assert!(result.is_err(), "Config without worker_token should fail");
     }
 
@@ -513,7 +513,7 @@ workspaces:
     url: "https://github.com/org/repo.git"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         match &config.workspaces["repo"] {
             WorkspaceSourceDef::Git {
                 url,
@@ -544,7 +544,7 @@ workspaces:
     ref: main
 worker_token: "token"
 "#;
-        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
         assert!(result.is_err(), "Git workspace without url should fail");
     }
 
@@ -561,7 +561,7 @@ workspaces:
     type: folder
 worker_token: "token"
 "#;
-        let result = serde_yml::from_str::<ServerConfig>(yaml);
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
         assert!(result.is_err(), "Folder workspace without path should fail");
     }
 
@@ -581,7 +581,7 @@ workspaces:
       type: ssh_key
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         match &config.workspaces["private"] {
             WorkspaceSourceDef::Git { auth, .. } => {
                 let auth = auth.as_ref().unwrap();
@@ -609,7 +609,7 @@ workspaces:
       token: "ghp_xxxx"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         match &config.workspaces["private"] {
             WorkspaceSourceDef::Git { auth, .. } => {
                 let auth = auth.as_ref().unwrap();
@@ -658,7 +658,7 @@ workspaces:
     path: "/tmp/workflows"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.workspaces.len(), 5);
 
         match &config.workspaces["local-dev"] {
@@ -737,7 +737,7 @@ auth:
       client_id: "123456.apps.googleusercontent.com"
       client_secret: "GOCSPX-secret"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         let auth = config.auth.unwrap();
         assert_eq!(auth.base_url.as_deref(), Some("https://stroem.company.com"));
         assert_eq!(auth.providers.len(), 2);
@@ -773,7 +773,7 @@ workspaces:
     path: "./workspace"
 worker_token: "token"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.recovery.heartbeat_timeout_secs, 120);
         assert_eq!(config.recovery.sweep_interval_secs, 60);
     }
@@ -795,7 +795,7 @@ recovery:
   heartbeat_timeout_secs: 300
   sweep_interval_secs: 30
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.recovery.heartbeat_timeout_secs, 300);
         assert_eq!(config.recovery.sweep_interval_secs, 30);
     }
@@ -816,7 +816,7 @@ worker_token: "token"
 recovery:
   heartbeat_timeout_secs: 180
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.recovery.heartbeat_timeout_secs, 180);
         assert_eq!(config.recovery.sweep_interval_secs, 60); // default
     }
@@ -844,7 +844,7 @@ auth:
       client_id: "id"
       client_secret: "secret"
 "#;
-        let config: ServerConfig = serde_yml::from_str(yaml).unwrap();
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         let auth = config.auth.unwrap();
         let google = &auth.providers["google"];
         // display_name is optional (defaults to None, handled at runtime)

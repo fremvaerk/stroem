@@ -7652,7 +7652,7 @@ tasks:
         depends_on: [step1]
 "#;
     let config: stroem_common::models::workflow::WorkflowConfig =
-        serde_yml::from_str(yaml).unwrap();
+        serde_yaml::from_str(yaml).unwrap();
     let result = validate_workflow_config(&config);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("self-reference"));

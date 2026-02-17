@@ -2819,16 +2819,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libyml"
-version = "0.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3302702afa434ffa30847a83305f0a69d6abd74293b6554c18ec85c7ef30c980"
-dependencies = [
- "anyhow",
- "version_check",
-]
-
-[[package]]
 name = "libz-sys"
 version = "1.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4357,21 +4347,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yml"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59e2dd588bf1597a252c3b920e0143eb99b0f76e4e082f4c92ce34fbc9e71ddd"
-dependencies = [
- "indexmap 2.13.0",
- "itoa",
- "libyml",
- "memchr",
- "ryu",
- "serde",
- "version_check",
-]
-
-[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4753,38 +4728,38 @@ dependencies = [
 
 [[package]]
 name = "stroem-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
- "serde_yml",
  "stroem-common",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yaml_serde",
 ]
 
 [[package]]
 name = "stroem-common"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
  "croner",
  "serde",
  "serde_json",
- "serde_yml",
  "tera",
  "tracing",
  "uuid",
+ "yaml_serde",
 ]
 
 [[package]]
 name = "stroem-db"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4801,7 +4776,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-runner"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4819,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-server"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4845,7 +4820,6 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
- "serde_yml",
  "sha2",
  "sqlx",
  "stroem-common",
@@ -4864,11 +4838,12 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+ "yaml_serde",
 ]
 
 [[package]]
 name = "stroem-worker"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4877,7 +4852,6 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
- "serde_yml",
  "stroem-common",
  "stroem-runner",
  "tar",
@@ -4886,6 +4860,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -6382,6 +6357,19 @@ dependencies = [
  "arraydeque",
  "encoding_rs",
  "hashlink",
+]
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a7f5270edc6fab0529a772a772b3e505dfd883a8de5cc5b464e35fabe586411"
+dependencies = [
+ "indexmap 2.13.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
