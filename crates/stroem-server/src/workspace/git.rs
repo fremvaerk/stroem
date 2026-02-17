@@ -63,10 +63,8 @@ impl GitSource {
             let mut remote = repo.find_remote("origin").context("No remote 'origin'")?;
 
             let mut fetch_options = git2::FetchOptions::new();
-            if let Some(ref auth) = self.auth {
-                let callbacks = Self::build_callbacks(auth);
-                fetch_options.remote_callbacks(callbacks);
-            }
+            let callbacks = Self::build_remote_callbacks(&self.auth);
+            fetch_options.remote_callbacks(callbacks);
 
             remote
                 .fetch(&[&self.git_ref], Some(&mut fetch_options), None)
@@ -93,10 +91,8 @@ impl GitSource {
             let mut builder = git2::build::RepoBuilder::new();
 
             let mut fetch_options = git2::FetchOptions::new();
-            if let Some(ref auth) = self.auth {
-                let callbacks = Self::build_callbacks(auth);
-                fetch_options.remote_callbacks(callbacks);
-            }
+            let callbacks = Self::build_remote_callbacks(&self.auth);
+            fetch_options.remote_callbacks(callbacks);
             builder.fetch_options(fetch_options);
             builder.branch(&self.git_ref);
 
@@ -111,35 +107,40 @@ impl GitSource {
         }
     }
 
-    fn build_callbacks(auth: &GitAuthConfig) -> git2::RemoteCallbacks<'_> {
+    fn build_remote_callbacks(auth: &Option<GitAuthConfig>) -> git2::RemoteCallbacks<'_> {
         let mut callbacks = git2::RemoteCallbacks::new();
 
-        match auth.auth_type.as_str() {
-            "ssh_key" => {
-                let key_path = auth.key_path.clone();
-                let key_content = auth.key.clone();
-                callbacks.credentials(move |_url, username_from_url, _allowed_types| {
-                    let username = username_from_url.unwrap_or("git");
-                    if let Some(ref content) = key_content {
-                        git2::Cred::ssh_key_from_memory(username, None, content, None)
-                    } else if let Some(ref path) = key_path {
-                        git2::Cred::ssh_key(username, None, Path::new(path), None)
-                    } else {
-                        git2::Cred::ssh_key_from_agent(username)
-                    }
-                });
+        // Accept SSH host keys (the container has no known_hosts file)
+        callbacks.certificate_check(|_cert, _host| Ok(git2::CertificateCheckStatus::CertificateOk));
+
+        if let Some(auth) = auth {
+            match auth.auth_type.as_str() {
+                "ssh_key" => {
+                    let key_path = auth.key_path.clone();
+                    let key_content = auth.key.clone();
+                    callbacks.credentials(move |_url, username_from_url, _allowed_types| {
+                        let username = username_from_url.unwrap_or("git");
+                        if let Some(ref content) = key_content {
+                            git2::Cred::ssh_key_from_memory(username, None, content, None)
+                        } else if let Some(ref path) = key_path {
+                            git2::Cred::ssh_key(username, None, Path::new(path), None)
+                        } else {
+                            git2::Cred::ssh_key_from_agent(username)
+                        }
+                    });
+                }
+                "token" => {
+                    let token = auth.token.clone().unwrap_or_default();
+                    let username = auth
+                        .username
+                        .clone()
+                        .unwrap_or_else(|| "x-access-token".to_string());
+                    callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
+                        git2::Cred::userpass_plaintext(&username, &token)
+                    });
+                }
+                _ => {}
             }
-            "token" => {
-                let token = auth.token.clone().unwrap_or_default();
-                let username = auth
-                    .username
-                    .clone()
-                    .unwrap_or_else(|| "x-access-token".to_string());
-                callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
-                    git2::Cred::userpass_plaintext(&username, &token)
-                });
-            }
-            _ => {}
         }
 
         callbacks
@@ -524,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_callbacks_with_ssh_key_auth_valid_config() {
+    fn test_build_remote_callbacks_with_ssh_key_auth_valid_config() {
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("id_rsa");
         std::fs::write(&key_path, "fake key content").unwrap();
@@ -538,11 +539,12 @@ mod tests {
         };
 
         // Should not panic
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
-    fn test_build_callbacks_with_token_auth() {
+    fn test_build_remote_callbacks_with_token_auth() {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
@@ -552,11 +554,12 @@ mod tests {
         };
 
         // Should not panic
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
-    fn test_build_callbacks_with_unknown_auth_type() {
+    fn test_build_remote_callbacks_with_unknown_auth_type() {
         let auth = GitAuthConfig {
             auth_type: "unknown".to_string(),
             key_path: None,
@@ -566,11 +569,12 @@ mod tests {
         };
 
         // Should not panic (no-op for unknown types)
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
-    fn test_build_callbacks_with_ssh_key_from_memory() {
+    fn test_build_remote_callbacks_with_ssh_key_from_memory() {
         let auth = GitAuthConfig {
             auth_type: "ssh_key".to_string(),
             key_path: None,
@@ -583,11 +587,12 @@ mod tests {
         };
 
         // Should not panic — uses ssh_key_from_memory
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
-    fn test_build_callbacks_with_ssh_key_but_no_key_path() {
+    fn test_build_remote_callbacks_with_ssh_key_but_no_key_path() {
         let auth = GitAuthConfig {
             auth_type: "ssh_key".to_string(),
             key_path: None,
@@ -597,11 +602,12 @@ mod tests {
         };
 
         // Should not panic, falls back to agent
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
-    fn test_build_callbacks_with_token_but_no_token_value() {
+    fn test_build_remote_callbacks_with_token_but_no_token_value() {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
@@ -611,11 +617,12 @@ mod tests {
         };
 
         // Should not panic, defaults to empty string for token
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
-    fn test_build_callbacks_with_token_defaults_username() {
+    fn test_build_remote_callbacks_with_token_defaults_username() {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
@@ -625,7 +632,8 @@ mod tests {
         };
 
         // Should not panic, defaults username to "x-access-token"
-        let _callbacks = GitSource::build_callbacks(&auth);
+        let auth = Some(auth);
+        let _callbacks = GitSource::build_remote_callbacks(&auth);
     }
 
     #[test]
