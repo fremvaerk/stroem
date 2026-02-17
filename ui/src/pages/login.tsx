@@ -56,7 +56,7 @@ export function LoginPage() {
             <Zap className="h-6 w-6" />
           </div>
           <div className="text-center">
-            <h1 className="text-xl font-semibold tracking-tight">Stroem</h1>
+            <h1 className="text-xl font-semibold tracking-tight">Strøm</h1>
             <p className="text-sm text-muted-foreground">
               Sign in to your account
             </p>
