@@ -10,6 +10,24 @@ A single YAML file can contain multiple actions and tasks.
 
 For the default folder workspace, files are at `workspace/.workflows/`. For git-sourced workspaces, the repository must contain a `.workflows/` directory at the root.
 
+## SOPS Encrypted Files
+
+Workflow files can be encrypted with [SOPS](https://github.com/getsops/sops).
+Name encrypted files with a `.sops.yaml` or `.sops.yml` suffix
+(e.g. `secrets.sops.yaml`). The server and CLI automatically detect these
+files and decrypt them using the `sops` binary before loading.
+
+Requirements:
+- `sops` must be installed and available on PATH
+- Decryption keys must be configured (age, AWS KMS, GCP KMS, etc.)
+- The `.sops.yaml` configuration file (if present) is ignored by the loader
+
+Example: encrypting a secrets file with age:
+
+```bash
+sops -e --age age1... secrets.yaml > secrets.sops.yaml
+```
+
 ## YAML Structure
 
 ```yaml

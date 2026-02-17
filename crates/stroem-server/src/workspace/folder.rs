@@ -118,9 +118,13 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         // Check if it's a YAML file
         if let Some(ext) = path.extension() {
             if ext == "yaml" || ext == "yml" {
-                tracing::info!("Loading workflow file: {:?}", path);
+                if stroem_common::sops::is_sops_file(&path) {
+                    tracing::info!("Loading SOPS-encrypted workflow file: {:?}", path);
+                } else {
+                    tracing::info!("Loading workflow file: {:?}", path);
+                }
 
-                let content = std::fs::read_to_string(&path)
+                let content = stroem_common::sops::read_yaml_file(&path)
                     .with_context(|| format!("Failed to read file: {:?}", path))?;
 
                 let config: WorkflowConfig = serde_yaml::from_str(&content)
@@ -521,5 +525,67 @@ actions:
         );
         // Blake2s256 produces 32 bytes = 64 hex chars
         assert_eq!(rev.len(), 64, "Blake2s256 should produce 64 hex chars");
+    }
+
+    #[tokio::test]
+    async fn test_sops_file_triggers_decryption() {
+        // A *.sops.yaml file should trigger SOPS decryption, which fails
+        // when sops is not installed or the file isn't actually encrypted.
+        let temp_dir = TempDir::new().unwrap();
+
+        // Add a regular file so the workspace isn't empty
+        fs::write(
+            temp_dir.path().join("regular.yaml"),
+            "actions:\n  test:\n    type: shell\n    cmd: echo hi\n",
+        )
+        .unwrap();
+
+        // Add a file named *.sops.yaml — this triggers the SOPS code path
+        fs::write(
+            temp_dir.path().join("secrets.sops.yaml"),
+            "actions:\n  secret:\n    type: shell\n    cmd: echo secret\n",
+        )
+        .unwrap();
+
+        let result = load_folder_workspace(temp_dir.path().to_str().unwrap()).await;
+        // Should fail because sops decryption fails (not installed or file not encrypted)
+        assert!(result.is_err());
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("sops"),
+            "Error should mention sops: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sops_config_file_ignored_as_sops() {
+        // .sops.yaml (dot-prefixed) is a SOPS config file, not an encrypted file.
+        // It should be read as plain YAML (not decrypted).
+        let temp_dir = TempDir::new().unwrap();
+
+        // Write .sops.yaml — serde_yaml will parse it; unknown fields are
+        // silently ignored, producing an empty WorkflowConfig.
+        fs::write(
+            temp_dir.path().join(".sops.yaml"),
+            "creation_rules:\n  - path_regex: \\.sops\\.yaml$\n    age: age1test\n",
+        )
+        .unwrap();
+
+        // Also add a real workflow so we can verify it loads
+        fs::write(
+            temp_dir.path().join("workflow.yaml"),
+            "actions:\n  greet:\n    type: shell\n    cmd: echo hi\n",
+        )
+        .unwrap();
+
+        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        // The .sops.yaml config file should not cause an error and should not
+        // contribute any actions/tasks (it merges as empty).
+        assert_eq!(workspace.actions.len(), 1);
+        assert!(workspace.actions.contains_key("greet"));
     }
 }

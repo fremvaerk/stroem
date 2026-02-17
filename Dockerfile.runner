@@ -13,6 +13,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tar \
   && rm -rf /var/lib/apt/lists/*
 
+# Install sops and vals for secret decryption
+ARG SOPS_VERSION=3.11.0
+ARG VALS_VERSION=0.43.3
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${ARCH}" \
+      -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops && \
+    curl -fsSL "https://github.com/helmfile/vals/releases/download/v${VALS_VERSION}/vals_${VALS_VERSION}_linux_${ARCH}.tar.gz" \
+      | tar xz -C /usr/local/bin vals
+
 # Default workspace mount point
 WORKDIR /workspace
 

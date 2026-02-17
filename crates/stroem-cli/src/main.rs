@@ -458,7 +458,7 @@ fn validate_workflows(path: &str) -> Result<()> {
     let mut all_valid = true;
 
     for file in &files {
-        let content = std::fs::read_to_string(file)?;
+        let content = stroem_common::sops::read_yaml_file(file)?;
         match serde_yaml::from_str::<WorkflowConfig>(&content) {
             Ok(config) => match validate_workflow_config(&config) {
                 Ok(warnings) => {
