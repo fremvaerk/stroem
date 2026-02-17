@@ -78,6 +78,15 @@ export interface JobDetail {
   steps: JobStep[];
 }
 
+export interface WorkerListItem {
+  worker_id: string;
+  name: string;
+  status: string;
+  tags: string[];
+  last_heartbeat: string | null;
+  registered_at: string;
+}
+
 export interface TokenResponse {
   access_token: string;
   refresh_token: string;

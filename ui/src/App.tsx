@@ -10,6 +10,7 @@ import { JobsPage } from "@/pages/jobs";
 import { JobDetailPage } from "@/pages/job-detail";
 import { TaskRunPage } from "@/pages/task-run";
 import { WorkspacesPage } from "@/pages/workspaces";
+import { WorkersPage } from "@/pages/workers";
 import { LoginCallbackPage } from "@/pages/login-callback";
 
 export default function App() {
@@ -33,6 +34,7 @@ export default function App() {
             />
             <Route path="jobs" element={<JobsPage />} />
             <Route path="jobs/:id" element={<JobDetailPage />} />
+            <Route path="workers" element={<WorkersPage />} />
           </Route>
         </Route>
       </Routes>

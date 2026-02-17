@@ -10,6 +10,7 @@ pub struct WorkerRow {
     pub worker_id: Uuid,
     pub name: String,
     pub capabilities: JsonValue,
+    pub tags: JsonValue,
     pub last_heartbeat: Option<DateTime<Utc>>,
     pub registered_at: DateTime<Utc>,
     pub status: String,
@@ -87,7 +88,7 @@ impl WorkerRepo {
     pub async fn get(pool: &PgPool, worker_id: Uuid) -> Result<Option<WorkerRow>> {
         let worker = sqlx::query_as::<_, WorkerRow>(
             r#"
-            SELECT worker_id, name, capabilities, last_heartbeat, registered_at, status
+            SELECT worker_id, name, capabilities, tags, last_heartbeat, registered_at, status
             FROM worker
             WHERE worker_id = $1
             "#,
@@ -97,5 +98,23 @@ impl WorkerRepo {
         .await?;
 
         Ok(worker)
+    }
+
+    /// List workers ordered by status (active first), then by registered_at descending
+    pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<WorkerRow>> {
+        let workers = sqlx::query_as::<_, WorkerRow>(
+            r#"
+            SELECT worker_id, name, capabilities, tags, last_heartbeat, registered_at, status
+            FROM worker
+            ORDER BY status ASC, registered_at DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(workers)
     }
 }

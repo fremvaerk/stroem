@@ -844,6 +844,62 @@ async fn test_claim_with_capability_filter() -> Result<()> {
     Ok(())
 }
 
+// ─── Worker list tests ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_worker_list() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Register two workers with different tags
+    let w1 = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        w1,
+        "worker-alpha",
+        &["shell".to_string()],
+        &["shell".to_string(), "docker".to_string()],
+    )
+    .await?;
+
+    let w2 = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        w2,
+        "worker-beta",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    // List all workers
+    let workers = WorkerRepo::list(&pool, 50, 0).await?;
+    assert_eq!(workers.len(), 2);
+
+    // Verify both workers present with correct tags
+    let alpha = workers.iter().find(|w| w.name == "worker-alpha").unwrap();
+    assert_eq!(alpha.status, "active");
+    let alpha_tags: Vec<String> = serde_json::from_value(alpha.tags.clone())?;
+    assert!(alpha_tags.contains(&"shell".to_string()));
+    assert!(alpha_tags.contains(&"docker".to_string()));
+
+    let beta = workers.iter().find(|w| w.name == "worker-beta").unwrap();
+    assert_eq!(beta.status, "active");
+    let beta_tags: Vec<String> = serde_json::from_value(beta.tags.clone())?;
+    assert_eq!(beta_tags, vec!["shell".to_string()]);
+
+    // Test pagination
+    let page1 = WorkerRepo::list(&pool, 1, 0).await?;
+    assert_eq!(page1.len(), 1);
+
+    let page2 = WorkerRepo::list(&pool, 1, 1).await?;
+    assert_eq!(page2.len(), 1);
+
+    let page3 = WorkerRepo::list(&pool, 1, 2).await?;
+    assert_eq!(page3.len(), 0);
+
+    Ok(())
+}
+
 // ─── User repo tests ──────────────────────────────────────────────────
 
 #[tokio::test]

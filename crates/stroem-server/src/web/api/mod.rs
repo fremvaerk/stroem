@@ -3,6 +3,7 @@ pub mod jobs;
 pub mod middleware;
 pub mod oidc;
 pub mod tasks;
+pub mod workers;
 pub mod workspaces;
 pub mod ws;
 
@@ -63,6 +64,8 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/workspaces/{ws}/tasks/{name}/execute",
             post(tasks::execute_task),
         )
+        // Worker routes
+        .route("/workers", get(workers::list_workers))
         // Job routes (jobs have workspace stored in DB)
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))

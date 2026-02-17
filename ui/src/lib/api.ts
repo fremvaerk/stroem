@@ -4,6 +4,7 @@ import type {
   TaskDetail,
   JobListItem,
   JobDetail,
+  WorkerListItem,
   TokenResponse,
   AuthUser,
   ExecuteTaskResponse,
@@ -251,6 +252,16 @@ export async function getJobLogs(
   id: string,
 ): Promise<{ logs: string }> {
   return apiFetch<{ logs: string }>(`/api/jobs/${id}/logs`);
+}
+
+// Workers
+export async function listWorkers(
+  limit = 50,
+  offset = 0,
+): Promise<WorkerListItem[]> {
+  return apiFetch<WorkerListItem[]>(
+    `/api/workers?limit=${limit}&offset=${offset}`,
+  );
 }
 
 export async function getStepLogs(

@@ -5,6 +5,7 @@ import {
   ListChecks,
   Play,
   LogOut,
+  Server,
   Zap,
 } from "lucide-react";
 import { useAuth } from "@/context/auth-context";
@@ -18,6 +19,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarGroupLabel,
   SidebarSeparator,
 } from "@/components/ui/sidebar";
 
@@ -26,6 +28,10 @@ const navItems = [
   { title: "Workspaces", href: "/workspaces", icon: FolderOpen },
   { title: "Tasks", href: "/tasks", icon: ListChecks },
   { title: "Jobs", href: "/jobs", icon: Play },
+];
+
+const adminItems = [
+  { title: "Workers", href: "/workers", icon: Server },
 ];
 
 function isActive(pathname: string, href: string): boolean {
@@ -66,6 +72,27 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
+                <SidebarMenuItem key={item.href}>
+                  <SidebarMenuButton
+                    asChild
+                    isActive={isActive(pathname, item.href)}
+                    tooltip={item.title}
+                  >
+                    <Link to={item.href}>
+                      <item.icon />
+                      <span>{item.title}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupLabel>Admin</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {adminItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
                     asChild

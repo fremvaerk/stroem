@@ -325,6 +325,45 @@ curl -s http://localhost:8080/api/jobs/JOB_ID/steps/say-hello/logs | jq -r .logs
 
 ---
 
+### List Workers
+
+```
+GET /api/workers
+```
+
+Returns all registered workers with their current status and tags.
+
+**Query parameters:**
+- `limit` (optional, default: `50`) -- Number of workers to return
+- `offset` (optional, default: `0`) -- Pagination offset
+
+**Response:**
+
+```json
+[
+  {
+    "worker_id": "w1w2w3w4-w5w6-7890-abcd-ef1234567890",
+    "name": "worker-1",
+    "status": "active",
+    "tags": ["shell", "docker"],
+    "last_heartbeat": "2025-02-10T12:05:00Z",
+    "registered_at": "2025-02-10T12:00:00Z"
+  }
+]
+```
+
+Workers are sorted by status (active first), then by registration time (newest first).
+
+**Worker statuses:** `active`, `inactive`
+
+**Example:**
+
+```bash
+curl "http://localhost:8080/api/workers?limit=10"
+```
+
+---
+
 ### Stream Job Logs (WebSocket)
 
 ```
