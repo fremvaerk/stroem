@@ -146,9 +146,10 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 
         // Validate cron expression syntax
         if let Some(cron_expr) = &trigger.cron {
-            if croner::Cron::new(cron_expr)
-                .with_seconds_optional()
-                .parse()
+            if croner::parser::CronParser::builder()
+                .seconds(croner::parser::Seconds::Optional)
+                .build()
+                .parse(cron_expr)
                 .is_err()
             {
                 bail!(

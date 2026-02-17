@@ -1,6 +1,7 @@
 use crate::job_creator::create_job_for_task;
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
+use croner::parser::{CronParser, Seconds};
 use croner::Cron;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -126,7 +127,11 @@ async fn load_triggers(
                 None => continue,
             };
 
-            let cron = match Cron::new(&cron_expr).with_seconds_optional().parse() {
+            let cron = match CronParser::builder()
+                .seconds(Seconds::Optional)
+                .build()
+                .parse(&cron_expr)
+            {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(
@@ -244,26 +249,29 @@ mod tests {
     #[test]
     fn test_cron_parse_standard() {
         // 5-field: every minute
-        let cron = Cron::new("* * * * *").parse();
+        let cron: Result<Cron, _> = "* * * * *".parse();
         assert!(cron.is_ok());
     }
 
     #[test]
     fn test_cron_parse_with_seconds() {
         // 6-field: every 10 seconds
-        let cron = Cron::new("*/10 * * * * *").with_seconds_optional().parse();
+        let cron = CronParser::builder()
+            .seconds(Seconds::Optional)
+            .build()
+            .parse("*/10 * * * * *");
         assert!(cron.is_ok());
     }
 
     #[test]
     fn test_cron_invalid_expression() {
-        let cron = Cron::new("not a cron").parse();
+        let cron: Result<Cron, _> = "not a cron".parse();
         assert!(cron.is_err());
     }
 
     #[test]
     fn test_compute_next_run_finds_future_time() {
-        let cron = Cron::new("* * * * *").parse().unwrap();
+        let cron: Cron = "* * * * *".parse().unwrap();
         let now = Utc::now();
         let next = compute_next_run(&cron, None, now);
         assert!(next.is_some());
@@ -272,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_compute_next_run_after_last_run() {
-        let cron = Cron::new("* * * * *").parse().unwrap();
+        let cron: Cron = "* * * * *".parse().unwrap();
         let now = Utc::now();
         let last_run = Some(now);
         let next = compute_next_run(&cron, last_run, now);
@@ -429,7 +437,7 @@ mod tests {
     #[test]
     fn test_compute_next_run_uses_last_run_when_future() {
         // When last_run is in the future (e.g., clock skew), search from last_run
-        let cron = Cron::new("* * * * *").parse().unwrap();
+        let cron: Cron = "* * * * *".parse().unwrap();
         let now = Utc::now();
         let future_last_run = now + chrono::Duration::minutes(5);
         let next = compute_next_run(&cron, Some(future_last_run), now);
@@ -644,8 +652,8 @@ mod tests {
     #[test]
     fn test_update_wakeup_takes_minimum() {
         // Verify the min-duration logic: create two crons with different intervals
-        let cron1 = Cron::new("* * * * *").parse().unwrap(); // every minute
-        let cron2 = Cron::new("0 * * * *").parse().unwrap(); // every hour
+        let cron1: Cron = "* * * * *".parse().unwrap(); // every minute
+        let cron2: Cron = "0 * * * *".parse().unwrap(); // every hour
 
         let now = Utc::now();
         let next1 = cron1.find_next_occurrence(&now, false).unwrap();
