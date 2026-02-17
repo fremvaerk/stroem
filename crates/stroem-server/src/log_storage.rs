@@ -126,6 +126,8 @@ impl LogStorage {
             .await
             .context("Failed to write to log file")?;
 
+        file.flush().await.context("Failed to flush log file")?;
+
         Ok(())
     }
 
