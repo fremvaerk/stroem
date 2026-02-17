@@ -117,11 +117,15 @@ impl GitSource {
         match auth.auth_type.as_str() {
             "ssh_key" => {
                 let key_path = auth.key_path.clone();
+                let key_content = auth.key.clone();
                 callbacks.credentials(move |_url, username_from_url, _allowed_types| {
                     let username = username_from_url.unwrap_or("git");
-                    match &key_path {
-                        Some(path) => git2::Cred::ssh_key(username, None, Path::new(path), None),
-                        None => git2::Cred::ssh_key_from_agent(username),
+                    if let Some(ref content) = key_content {
+                        git2::Cred::ssh_key_from_memory(username, None, content, None)
+                    } else if let Some(ref path) = key_path {
+                        git2::Cred::ssh_key(username, None, Path::new(path), None)
+                    } else {
+                        git2::Cred::ssh_key_from_agent(username)
                     }
                 });
             }
@@ -528,6 +532,7 @@ mod tests {
         let auth = GitAuthConfig {
             auth_type: "ssh_key".to_string(),
             key_path: Some(key_path.to_str().unwrap().to_string()),
+            key: None,
             token: None,
             username: Some("git".to_string()),
         };
@@ -541,6 +546,7 @@ mod tests {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
+            key: None,
             token: Some("ghp_fake_token".to_string()),
             username: Some("oauth2".to_string()),
         };
@@ -554,6 +560,7 @@ mod tests {
         let auth = GitAuthConfig {
             auth_type: "unknown".to_string(),
             key_path: None,
+            key: None,
             token: None,
             username: None,
         };
@@ -563,10 +570,28 @@ mod tests {
     }
 
     #[test]
+    fn test_build_callbacks_with_ssh_key_from_memory() {
+        let auth = GitAuthConfig {
+            auth_type: "ssh_key".to_string(),
+            key_path: None,
+            key: Some(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----"
+                    .to_string(),
+            ),
+            token: None,
+            username: Some("git".to_string()),
+        };
+
+        // Should not panic — uses ssh_key_from_memory
+        let _callbacks = GitSource::build_callbacks(&auth);
+    }
+
+    #[test]
     fn test_build_callbacks_with_ssh_key_but_no_key_path() {
         let auth = GitAuthConfig {
             auth_type: "ssh_key".to_string(),
             key_path: None,
+            key: None,
             token: None,
             username: Some("git".to_string()),
         };
@@ -580,6 +605,7 @@ mod tests {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
+            key: None,
             token: None,
             username: None,
         };
@@ -593,6 +619,7 @@ mod tests {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
+            key: None,
             token: Some("token123".to_string()),
             username: None,
         };
@@ -630,6 +657,7 @@ mod tests {
         let auth = GitAuthConfig {
             auth_type: "token".to_string(),
             key_path: None,
+            key: None,
             token: Some("test_token".to_string()),
             username: Some("test_user".to_string()),
         };

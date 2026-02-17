@@ -30,6 +30,7 @@ pub struct GitAuthConfig {
     #[serde(rename = "type")]
     pub auth_type: String, // "ssh_key" | "token"
     pub key_path: Option<String>,
+    pub key: Option<String>,
     pub token: Option<String>,
     pub username: Option<String>,
 }
