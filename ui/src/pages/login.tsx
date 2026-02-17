@@ -2,12 +2,14 @@ import { useState, type FormEvent } from "react";
 import { Navigate } from "react-router";
 import { Zap } from "lucide-react";
 import { useAuth } from "@/context/auth-context";
+import { useTitle } from "@/hooks/use-title";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export function LoginPage() {
+  useTitle("Login");
   const {
     authRequired,
     isAuthenticated,

@@ -5,10 +5,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { getTask } from "@/lib/api";
+import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail } from "@/lib/types";
 
 export function TaskDetailPage() {
   const { workspace, name } = useParams<{ workspace: string; name: string }>();
+  useTitle(name ? `Task: ${name}` : "Task");
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

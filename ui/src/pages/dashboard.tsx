@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
 import { listJobs } from "@/lib/api";
+import { useTitle } from "@/hooks/use-title";
 import type { JobListItem } from "@/lib/types";
 
 function formatRelative(dateStr: string): string {
@@ -29,6 +30,7 @@ function formatRelative(dateStr: string): string {
 }
 
 export function DashboardPage() {
+  useTitle("Dashboard");
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
 

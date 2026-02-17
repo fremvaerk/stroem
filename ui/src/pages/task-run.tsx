@@ -7,10 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { getTask, executeTask } from "@/lib/api";
+import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, InputField } from "@/lib/types";
 
 export function TaskRunPage() {
   const { workspace, name } = useParams<{ workspace: string; name: string }>();
+  useTitle(name ? `Run: ${name}` : "Run Task");
   const navigate = useNavigate();
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);

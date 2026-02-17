@@ -13,6 +13,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { useTitle } from "@/hooks/use-title";
 import { listJobs } from "@/lib/api";
 import type { JobListItem } from "@/lib/types";
 
@@ -41,6 +42,7 @@ function formatTime(dateStr: string): string {
 }
 
 export function JobsPage() {
+  useTitle("Jobs");
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);

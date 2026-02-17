@@ -7,6 +7,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { StepTimeline } from "@/components/step-timeline";
 import { JsonViewer } from "@/components/json-viewer";
 import { getJob } from "@/lib/api";
+import { useTitle } from "@/hooks/use-title";
 import type { JobDetail } from "@/lib/types";
 
 function formatTime(dateStr: string | null): string {
@@ -30,6 +31,7 @@ function formatDuration(start: string | null, end: string | null): string {
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
+  useTitle(id ? `Job: ${id.substring(0, 8)}` : "Job");
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

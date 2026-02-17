@@ -11,9 +11,11 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { listWorkspaces } from "@/lib/api";
+import { useTitle } from "@/hooks/use-title";
 import type { WorkspaceInfo } from "@/lib/types";
 
 export function WorkspacesPage() {
+  useTitle("Workspaces");
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [loading, setLoading] = useState(true);
 

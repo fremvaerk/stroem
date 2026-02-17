@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { listAllTasks } from "@/lib/api";
+import { useTitle } from "@/hooks/use-title";
 import type { TaskListItem } from "@/lib/types";
 
 interface FolderNode {
@@ -130,6 +131,7 @@ function allFolderPaths(folders: FolderNode[]): string[] {
 }
 
 export function TasksPage() {
+  useTitle("Tasks");
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
