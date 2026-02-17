@@ -18,10 +18,11 @@ server:
       url: "postgres://stroem:stroem@postgres:5432/stroem"
     log_storage:
       local_dir: /var/stroem/logs
-    workspaces:
-      default:
-        type: folder
-        path: /workspace
+    workspaces: {}
+    # Example:
+    #   default:
+    #     type: folder
+    #     path: /workspace
     worker_token: "change-me-in-production"
   # Extra env vars injected as a Secret (for STROEM__ overrides of sensitive values)
   extraSecretEnv: {}
