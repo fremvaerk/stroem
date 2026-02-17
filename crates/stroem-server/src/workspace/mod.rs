@@ -22,6 +22,12 @@ pub trait WorkspaceSource: Send + Sync {
     fn path(&self) -> &Path;
     /// Current revision identifier (content hash for folder, git OID for git)
     fn revision(&self) -> Option<String>;
+    /// Compute the current revision without a full load.
+    /// Used by the watcher to cheaply detect changes before doing expensive YAML parsing.
+    /// Default implementation returns `None` (forces a full reload every cycle).
+    fn peek_revision(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A loaded workspace entry with its source and cached config
@@ -57,6 +63,10 @@ impl WorkspaceSource for InMemorySource {
     }
 
     fn revision(&self) -> Option<String> {
+        None
+    }
+
+    fn peek_revision(&self) -> Option<String> {
         None
     }
 }
@@ -191,7 +201,8 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    /// Start background watchers for hot-reload (folder watchers + git pollers)
+    /// Start background watchers for hot-reload (folder watchers + git pollers).
+    /// Only reloads when the source revision changes.
     pub fn start_watchers(&self) {
         for (name, entry) in &self.entries {
             let config_lock = entry.config.clone();
@@ -200,13 +211,30 @@ impl WorkspaceManager {
 
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut last_revision = source.revision();
                 loop {
                     interval.tick().await;
+
+                    // Check revision cheaply first (for folder sources this
+                    // hashes file metadata+content without parsing YAML).
+                    let current_revision = source.peek_revision();
+                    if current_revision == last_revision && current_revision.is_some() {
+                        continue;
+                    }
+
+                    // Revision changed (or source doesn't support peek) — do full reload
                     match source.load().await {
                         Ok(new_config) => {
-                            let mut config = config_lock.write().await;
-                            *config = new_config;
-                            tracing::debug!("Reloaded workspace '{}'", ws_name);
+                            let new_revision = source.revision();
+                            if new_revision != last_revision {
+                                let mut config = config_lock.write().await;
+                                *config = new_config;
+                                tracing::info!(
+                                    "Workspace '{}' reloaded (revision changed)",
+                                    ws_name
+                                );
+                                last_revision = new_revision;
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("Failed to reload workspace '{}': {}", ws_name, e);

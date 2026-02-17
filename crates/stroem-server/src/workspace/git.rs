@@ -167,6 +167,12 @@ impl WorkspaceSource for GitSource {
     fn revision(&self) -> Option<String> {
         self.revision.read().ok().and_then(|r| r.clone())
     }
+
+    fn peek_revision(&self) -> Option<String> {
+        // Git sources detect changes via fetch in load(), so peek returns
+        // None to always trigger a full reload cycle (which does git fetch).
+        None
+    }
 }
 
 #[cfg(test)]

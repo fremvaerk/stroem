@@ -81,6 +81,10 @@ impl WorkspaceSource for FolderSource {
     fn revision(&self) -> Option<String> {
         self.revision.read().ok().and_then(|r| r.clone())
     }
+
+    fn peek_revision(&self) -> Option<String> {
+        Self::compute_revision(&self.path)
+    }
 }
 
 /// Load workspace from a folder containing workflow YAML files
