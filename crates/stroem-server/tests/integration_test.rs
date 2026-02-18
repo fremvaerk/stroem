@@ -3089,14 +3089,14 @@ async fn test_auth_me_without_token() -> Result<()> {
 // ─── Test 48: Existing API routes still work without auth ─────────────
 
 #[tokio::test]
-async fn test_existing_routes_work_without_auth() -> Result<()> {
+async fn test_protected_routes_require_auth() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup_with_auth().await?;
 
-    // /api/tasks should work without auth (no AuthUser extractor)
+    // /api/workspaces/default/tasks requires auth when auth is enabled
     let response = router
         .oneshot(api_get("/api/workspaces/default/tasks"))
         .await?;
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), 401);
 
     Ok(())
 }
@@ -8306,6 +8306,106 @@ async fn test_execute_task_no_token_when_auth_enabled_returns_401() -> Result<()
         .await?;
 
     assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test: Auth middleware protects all API endpoints ──────────────────
+
+#[tokio::test]
+async fn test_auth_middleware_protects_jobs_endpoint() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router.oneshot(api_get("/api/jobs")).await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_middleware_protects_workers_endpoint() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router.oneshot(api_get("/api/workers")).await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_middleware_protects_workspaces_endpoint() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router.oneshot(api_get("/api/workspaces")).await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_middleware_allows_with_valid_token() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let token = stroem_server::auth::create_access_token(
+        &Uuid::new_v4().to_string(),
+        AUTH_USER_EMAIL,
+        AUTH_JWT_SECRET,
+    )?;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/jobs")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await?;
+    assert_eq!(response.status(), 200);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_middleware_rejects_invalid_token() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/jobs")
+        .header("Authorization", "Bearer not-a-valid-jwt")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_public_routes_accessible_without_auth() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router.oneshot(api_get("/api/config")).await?;
+    assert_eq!(response.status(), 200);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_no_auth_configured_all_routes_open() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.clone().oneshot(api_get("/api/jobs")).await?;
+    assert_eq!(response.status(), 200);
+
+    let response = router.clone().oneshot(api_get("/api/workers")).await?;
+    assert_eq!(response.status(), 200);
+
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks"))
+        .await?;
+    assert_eq!(response.status(), 200);
 
     Ok(())
 }

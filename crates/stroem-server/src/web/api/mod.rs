@@ -9,7 +9,8 @@ pub mod ws;
 
 use crate::state::AppState;
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use serde_json::json;
@@ -51,35 +52,74 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
+/// Middleware that rejects unauthenticated requests when auth is enabled.
+/// When auth is not configured, all requests pass through.
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let auth_config = match &state.config.auth {
+        Some(cfg) => cfg,
+        None => return next.run(req).await,
+    };
+
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match token {
+        Some(t) => match crate::auth::validate_access_token(t, &auth_config.jwt_secret) {
+            Ok(_) => next.run(req).await,
+            Err(_) => (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Invalid or expired token"})),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Authentication required"})),
+        )
+            .into_response(),
+    }
+}
+
 pub fn build_api_routes(state: Arc<AppState>) -> Router {
-    Router::new()
-        // Public config endpoint
-        .route("/config", get(get_config))
-        // Workspace listing
+    // Routes that require authentication (when auth is enabled)
+    let protected = Router::new()
         .route("/workspaces", get(workspaces::list_workspaces))
-        // Workspace-scoped task routes
         .route("/workspaces/{ws}/tasks", get(tasks::list_tasks))
         .route("/workspaces/{ws}/tasks/{name}", get(tasks::get_task))
         .route(
             "/workspaces/{ws}/tasks/{name}/execute",
             post(tasks::execute_task),
         )
-        // Worker routes
         .route("/workers", get(workers::list_workers))
-        // Job routes (jobs have workspace stored in DB)
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
-        // WebSocket log streaming
         .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
-        // Auth routes
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ));
+
+    // Public routes (no auth required)
+    let public = Router::new()
+        .route("/config", get(get_config))
         .route("/auth/login", post(auth::login))
         .route("/auth/refresh", post(auth::refresh))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
-        // OIDC routes
         .route("/auth/oidc/{provider}", get(oidc::oidc_start))
-        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback))
+        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback));
+
+    Router::new()
+        .merge(protected)
+        .merge(public)
         .with_state(state)
 }
