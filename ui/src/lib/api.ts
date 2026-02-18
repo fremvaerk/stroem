@@ -5,6 +5,7 @@ import type {
   JobListItem,
   JobDetail,
   WorkerListItem,
+  WorkerDetail,
   TokenResponse,
   AuthUser,
   ExecuteTaskResponse,
@@ -255,6 +256,10 @@ export async function getJobLogs(
 }
 
 // Workers
+export async function getWorker(id: string): Promise<WorkerDetail> {
+  return apiFetch<WorkerDetail>(`/api/workers/${id}`);
+}
+
 export async function listWorkers(
   limit = 50,
   offset = 0,

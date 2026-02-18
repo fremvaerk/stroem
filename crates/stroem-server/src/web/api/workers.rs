@@ -1,13 +1,14 @@
 use crate::state::AppState;
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use stroem_db::WorkerRepo;
+use stroem_db::{JobRepo, WorkerRepo};
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct ListWorkersQuery {
@@ -54,4 +55,83 @@ pub async fn list_workers(
                 .into_response()
         }
     }
+}
+
+/// GET /api/workers/:id - Get worker detail with recent jobs
+#[tracing::instrument(skip(state))]
+pub async fn get_worker(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let worker_id = match id.parse::<Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid worker ID"})),
+            )
+                .into_response();
+        }
+    };
+
+    let worker = match WorkerRepo::get(&state.pool, worker_id).await {
+        Ok(Some(w)) => w,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"error": "Worker not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to get worker: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get worker: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let jobs = match JobRepo::list_by_worker(&state.pool, worker_id, 50, 0).await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::error!("Failed to list jobs for worker: {}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to list jobs: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let jobs_json: Vec<serde_json::Value> = jobs
+        .iter()
+        .map(|j| {
+            json!({
+                "job_id": j.job_id,
+                "workspace": j.workspace,
+                "task_name": j.task_name,
+                "mode": j.mode,
+                "status": j.status,
+                "source_type": j.source_type,
+                "source_id": j.source_id,
+                "worker_id": j.worker_id,
+                "created_at": j.created_at,
+                "started_at": j.started_at,
+                "completed_at": j.completed_at,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "worker_id": worker.worker_id,
+        "name": worker.name,
+        "status": worker.status,
+        "tags": worker.tags,
+        "last_heartbeat": worker.last_heartbeat,
+        "registered_at": worker.registered_at,
+        "jobs": jobs_json,
+    }))
+    .into_response()
 }

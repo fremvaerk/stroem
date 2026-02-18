@@ -8462,3 +8462,110 @@ async fn test_worker_id_in_job_list_and_detail() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Worker Detail Endpoint ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_middleware_protects_worker_detail_endpoint() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+
+    let worker_id = register_test_worker(&pool).await;
+    let response = router
+        .oneshot(api_get(&format!("/api/workers/{}", worker_id)))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_worker_invalid_uuid() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.oneshot(api_get("/api/workers/not-a-uuid")).await?;
+    assert_eq!(response.status(), 400);
+    let body = body_json(response).await;
+    assert!(body["error"].as_str().unwrap().contains("Invalid"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_worker_not_found() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let random_id = Uuid::new_v4();
+    let response = router
+        .oneshot(api_get(&format!("/api/workers/{}", random_id)))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_worker_success() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    let response = router
+        .oneshot(api_get(&format!("/api/workers/{}", worker_id)))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let body = body_json(response).await;
+    assert_eq!(body["worker_id"].as_str().unwrap(), worker_id.to_string());
+    assert_eq!(body["name"].as_str().unwrap(), "test-worker");
+    assert_eq!(body["status"].as_str().unwrap(), "active");
+    assert!(body["tags"].is_array());
+    assert!(
+        body.get("registered_at").is_some(),
+        "registered_at field must be present"
+    );
+    assert!(
+        body.get("last_heartbeat").is_some(),
+        "last_heartbeat field must be present"
+    );
+    assert!(body["jobs"].is_array());
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_worker_with_jobs() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // Create a job and assign the worker to it
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Test"})),
+        "api",
+        None,
+    )
+    .await?;
+    JobRepo::mark_running(&pool, job_id, worker_id).await?;
+
+    let response = router
+        .oneshot(api_get(&format!("/api/workers/{}", worker_id)))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let body = body_json(response).await;
+    let jobs = body["jobs"].as_array().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["job_id"].as_str().unwrap(), job_id.to_string());
+    assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "hello-world");
+    assert_eq!(
+        jobs[0]["worker_id"].as_str().unwrap(),
+        worker_id.to_string()
+    );
+
+    Ok(())
+}

@@ -140,7 +140,14 @@ export function JobsPage() {
                       <StatusBadge status={job.status} />
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
-                      {job.worker_id ? (workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)) : "-"}
+                      {job.worker_id ? (
+                        <Link
+                          to={`/workers/${job.worker_id}`}
+                          className="hover:underline"
+                        >
+                          {workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)}
+                        </Link>
+                      ) : "-"}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {job.source_id ? `${job.source_type} (${job.source_id})` : job.source_type}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -98,7 +99,14 @@ export function WorkersPage() {
               <TableBody>
                 {workers.map((w) => (
                   <TableRow key={w.worker_id}>
-                    <TableCell className="font-medium">{w.name}</TableCell>
+                    <TableCell>
+                      <Link
+                        to={`/workers/${w.worker_id}`}
+                        className="font-medium hover:underline"
+                      >
+                        {w.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>
                       <Badge
                         variant="secondary"

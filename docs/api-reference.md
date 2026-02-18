@@ -370,6 +370,57 @@ curl "http://localhost:8080/api/workers?limit=10"
 
 ---
 
+### Get Worker Detail
+
+```
+GET /api/workers/{id}
+```
+
+Returns a single worker's info along with its recent jobs (up to 50).
+
+**Path parameters:**
+- `id` -- Worker ID (UUID)
+
+**Response:**
+
+```json
+{
+  "worker_id": "w1w2w3w4-w5w6-7890-abcd-ef1234567890",
+  "name": "worker-1",
+  "status": "active",
+  "tags": ["shell", "docker"],
+  "last_heartbeat": "2025-02-10T12:05:00Z",
+  "registered_at": "2025-02-10T12:00:00Z",
+  "jobs": [
+    {
+      "job_id": "a1b2c3d4-...",
+      "workspace": "default",
+      "task_name": "hello-world",
+      "mode": "distributed",
+      "status": "completed",
+      "source_type": "api",
+      "source_id": null,
+      "worker_id": "w1w2w3w4-w5w6-7890-abcd-ef1234567890",
+      "created_at": "2025-02-10T12:10:00Z",
+      "started_at": "2025-02-10T12:10:01Z",
+      "completed_at": "2025-02-10T12:10:05Z"
+    }
+  ]
+}
+```
+
+**Error responses:**
+- `400` -- Invalid UUID format
+- `404` -- Worker not found
+
+**Example:**
+
+```bash
+curl "http://localhost:8080/api/workers/w1w2w3w4-w5w6-7890-abcd-ef1234567890"
+```
+
+---
+
 ### Stream Job Logs (WebSocket)
 
 ```

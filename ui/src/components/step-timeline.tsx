@@ -1,3 +1,4 @@
+import { Link } from "react-router";
 import {
   AlertCircle,
   CheckCircle2,
@@ -54,12 +55,19 @@ export function StepTimeline({
         const isExpanded = selectedStep === step.step_name;
         return (
           <div key={step.step_name}>
-            <button
-              type="button"
-              className="flex w-full gap-3 text-left hover:bg-muted/50 rounded-md px-1 -mx-1 transition-colors"
+            <div
+              role="button"
+              tabIndex={0}
+              className="flex w-full gap-3 text-left hover:bg-muted/50 rounded-md px-1 -mx-1 transition-colors cursor-pointer"
               onClick={() =>
                 onSelectStep(isExpanded ? null : step.step_name)
               }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelectStep(isExpanded ? null : step.step_name);
+                }
+              }}
             >
               <div className="flex flex-col items-center">
                 <div className="flex h-6 w-6 items-center justify-center">
@@ -85,9 +93,13 @@ export function StepTimeline({
                     {step.action_name}
                   </span>
                   {step.worker_id && workerNames && (
-                    <span className="text-xs text-muted-foreground/60">
+                    <Link
+                      to={`/workers/${step.worker_id}`}
+                      className="text-xs text-muted-foreground/60 hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       {workerNames.get(step.worker_id) ?? step.worker_id.substring(0, 8)}
-                    </span>
+                    </Link>
                   )}
                   {(step.started_at || step.completed_at) && (
                     <span className="ml-auto font-mono text-xs text-muted-foreground">
@@ -104,7 +116,7 @@ export function StepTimeline({
                   </div>
                 )}
               </div>
-            </button>
+            </div>
             {isExpanded && (
               <div className="ml-9 mb-4">
                 <StepDetail jobId={jobId} step={step} />

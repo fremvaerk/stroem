@@ -89,6 +89,10 @@ export interface WorkerListItem {
   registered_at: string;
 }
 
+export interface WorkerDetail extends WorkerListItem {
+  jobs: JobListItem[];
+}
+
 export interface TokenResponse {
   access_token: string;
   refresh_token: string;
