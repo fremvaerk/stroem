@@ -11,6 +11,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useAuth } from "@/context/auth-context";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   Sidebar,
   SidebarContent,
@@ -121,11 +122,25 @@ export function AppSidebar() {
         {authRequired && user && (
           <>
             <SidebarSeparator />
-            <div className="px-2 py-1">
-              <p className="truncate text-sm font-medium">{user.name}</p>
-              <p className="truncate text-xs text-muted-foreground">
-                {user.email}
-              </p>
+            <div className="flex items-center gap-2 px-2 py-1">
+              <Avatar className="h-8 w-8">
+                <AvatarFallback className="text-xs">
+                  {user.name
+                    ? user.name
+                        .split(" ")
+                        .slice(0, 2)
+                        .map((w) => w[0])
+                        .join("")
+                        .toUpperCase()
+                    : user.email[0].toUpperCase()}
+                </AvatarFallback>
+              </Avatar>
+              <div className="grid flex-1 text-left leading-tight">
+                <p className="truncate text-sm font-medium">{user.name}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {user.email}
+                </p>
+              </div>
             </div>
             <SidebarMenu>
               <SidebarMenuItem>
