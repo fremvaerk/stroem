@@ -1121,6 +1121,41 @@ async fn test_user_list() -> Result<()> {
     Ok(())
 }
 
+// ─── User last login tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_user_touch_last_login() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let uid = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        uid,
+        "login@example.com",
+        Some("$argon2id$hashed"),
+        None,
+    )
+    .await?;
+
+    // Initially null
+    let user = UserRepo::get_by_id(&pool, uid).await?.unwrap();
+    assert!(user.last_login_at.is_none());
+
+    // Touch
+    UserRepo::touch_last_login(&pool, uid).await?;
+    let user = UserRepo::get_by_id(&pool, uid).await?.unwrap();
+    assert!(user.last_login_at.is_some());
+    let first_login = user.last_login_at.unwrap();
+
+    // Touch again — timestamp should advance
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    UserRepo::touch_last_login(&pool, uid).await?;
+    let user = UserRepo::get_by_id(&pool, uid).await?.unwrap();
+    assert!(user.last_login_at.unwrap() > first_login);
+
+    Ok(())
+}
+
 // ─── User auth link batch tests ──────────────────────────────────────
 
 #[tokio::test]

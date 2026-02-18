@@ -106,6 +106,12 @@ export function UserDetailPage() {
           </div>
         </div>
         <div className="rounded-lg border px-4 py-3">
+          <p className="text-xs text-muted-foreground">Last Login</p>
+          <p className="mt-0.5 text-sm font-medium">
+            {user.last_login_at ? formatTime(user.last_login_at) : "-"}
+          </p>
+        </div>
+        <div className="rounded-lg border px-4 py-3">
           <p className="text-xs text-muted-foreground">Created</p>
           <p className="mt-0.5 text-sm font-medium">
             {formatTime(user.created_at)}

@@ -99,6 +99,10 @@ pub async fn login(
         }
     }
 
+    if let Err(e) = UserRepo::touch_last_login(&state.pool, user.user_id).await {
+        tracing::warn!("Failed to update last_login_at: {}", e);
+    }
+
     let access_token = match create_access_token(
         &user.user_id.to_string(),
         &user.email,

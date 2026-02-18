@@ -12,7 +12,7 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use stroem_db::RefreshTokenRepo;
+use stroem_db::{RefreshTokenRepo, UserRepo};
 
 const STATE_COOKIE_NAME: &str = "stroem_oidc_state";
 
@@ -246,6 +246,10 @@ pub async fn oidc_callback(
             return error_redirect("User provisioning failed");
         }
     };
+
+    if let Err(e) = UserRepo::touch_last_login(&state.pool, user.user_id).await {
+        tracing::warn!("Failed to update last_login_at: {}", e);
+    }
 
     // Issue internal JWT tokens
     let access_token = match create_access_token(

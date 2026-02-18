@@ -77,6 +77,7 @@ export function UsersPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>Auth Method</TableHead>
+                  <TableHead>Last Login</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
               </TableHeader>
@@ -106,6 +107,9 @@ export function UsersPage() {
                           </Badge>
                         ))}
                       </div>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {u.last_login_at ? formatTime(u.last_login_at) : "-"}
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {formatTime(u.created_at)}

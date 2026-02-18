@@ -10,6 +10,7 @@ pub struct UserRow {
     pub email: String,
     pub password_hash: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
 }
 
 pub struct UserRepo;
@@ -37,7 +38,7 @@ impl UserRepo {
 
     pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<UserRow>> {
         let row = sqlx::query_as::<_, UserRow>(
-            r#"SELECT user_id, name, email, password_hash, created_at FROM "user" WHERE email = $1"#,
+            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at FROM "user" WHERE email = $1"#,
         )
         .bind(email)
         .fetch_optional(pool)
@@ -48,7 +49,7 @@ impl UserRepo {
 
     pub async fn get_by_id(pool: &PgPool, user_id: Uuid) -> Result<Option<UserRow>> {
         let row = sqlx::query_as::<_, UserRow>(
-            r#"SELECT user_id, name, email, password_hash, created_at FROM "user" WHERE user_id = $1"#,
+            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at FROM "user" WHERE user_id = $1"#,
         )
         .bind(user_id)
         .fetch_optional(pool)
@@ -57,9 +58,18 @@ impl UserRepo {
         Ok(row)
     }
 
+    pub async fn touch_last_login(pool: &PgPool, user_id: Uuid) -> Result<()> {
+        sqlx::query(r#"UPDATE "user" SET last_login_at = NOW() WHERE user_id = $1"#)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .context("Failed to update last_login_at")?;
+        Ok(())
+    }
+
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<UserRow>> {
         let rows = sqlx::query_as::<_, UserRow>(
-            r#"SELECT user_id, name, email, password_hash, created_at FROM "user" ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
+            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at FROM "user" ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
         )
         .bind(limit)
         .bind(offset)

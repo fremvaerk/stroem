@@ -76,6 +76,7 @@ pub async fn list_users(
                 "email": u.email,
                 "auth_methods": auth_method(u.password_hash.is_some(), &providers),
                 "created_at": u.created_at,
+                "last_login_at": u.last_login_at,
             })
         })
         .collect();
@@ -139,6 +140,7 @@ pub async fn get_user(
         "email": user.email,
         "auth_methods": auth_method(user.password_hash.is_some(), &providers),
         "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
     }))
     .into_response()
 }

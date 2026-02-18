@@ -99,6 +99,7 @@ export interface UserListItem {
   email: string;
   auth_methods: string[];
   created_at: string;
+  last_login_at: string | null;
 }
 
 export interface UserDetail {
@@ -107,6 +108,7 @@ export interface UserDetail {
   email: string;
   auth_methods: string[];
   created_at: string;
+  last_login_at: string | null;
 }
 
 export interface TokenResponse {

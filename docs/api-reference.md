@@ -353,12 +353,13 @@ Returns all registered users with their authentication methods. Never exposes pa
     "name": "Alice",
     "email": "alice@example.com",
     "auth_methods": ["password", "google"],
-    "created_at": "2025-02-10T12:00:00Z"
+    "created_at": "2025-02-10T12:00:00Z",
+    "last_login_at": "2025-02-18T09:30:00Z"
   }
 ]
 ```
 
-Users are sorted by creation time (newest first).
+Users are sorted by creation time (newest first). `last_login_at` is `null` if the user has never logged in.
 
 **Auth method values:** `password` (has password hash), or OIDC provider IDs (e.g., `google`, `github`)
 
@@ -389,7 +390,8 @@ Returns a single user's info including authentication methods.
   "name": "Alice",
   "email": "alice@example.com",
   "auth_methods": ["password", "google"],
-  "created_at": "2025-02-10T12:00:00Z"
+  "created_at": "2025-02-10T12:00:00Z",
+  "last_login_at": "2025-02-18T09:30:00Z"
 }
 ```
 
