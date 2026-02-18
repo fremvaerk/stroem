@@ -2,6 +2,7 @@ export interface WorkspaceInfo {
   name: string;
   tasks_count: number;
   actions_count: number;
+  triggers_count: number;
   revision?: string;
 }
 
@@ -10,6 +11,7 @@ export interface TaskListItem {
   mode: string;
   workspace: string;
   folder?: string;
+  has_triggers: boolean;
 }
 
 export interface InputField {
@@ -26,12 +28,23 @@ export interface FlowStep {
   continue_on_failure?: boolean;
 }
 
+export interface TriggerInfo {
+  name: string;
+  type: string;
+  cron: string | null;
+  task: string;
+  enabled: boolean;
+  input: Record<string, unknown>;
+  next_runs: string[];
+}
+
 export interface TaskDetail {
   name: string;
   mode: string;
   folder?: string;
   input: Record<string, InputField>;
   flow: Record<string, FlowStep>;
+  triggers: TriggerInfo[];
 }
 
 export interface JobListItem {

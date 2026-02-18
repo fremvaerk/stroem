@@ -1,6 +1,7 @@
 use crate::job_creator::create_job_for_task;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
+use crate::web::api::triggers::TriggerInfo;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -19,6 +20,7 @@ pub struct TaskListItem {
     pub workspace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    pub has_triggers: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +31,7 @@ pub struct TaskDetail {
     pub folder: Option<String>,
     pub input: HashMap<String, serde_json::Value>,
     pub flow: HashMap<String, serde_json::Value>,
+    pub triggers: Vec<TriggerInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,11 +65,18 @@ pub async fn list_tasks(
     let tasks: Vec<TaskListItem> = workspace
         .tasks
         .iter()
-        .map(|(name, task)| TaskListItem {
-            name: name.clone(),
-            mode: task.mode.clone(),
-            workspace: ws.clone(),
-            folder: task.folder.clone(),
+        .map(|(name, task)| {
+            let has_triggers = workspace
+                .triggers
+                .values()
+                .any(|t| t.enabled && t.task == *name);
+            TaskListItem {
+                name: name.clone(),
+                mode: task.mode.clone(),
+                workspace: ws.clone(),
+                folder: task.folder.clone(),
+                has_triggers,
+            }
         })
         .collect();
 
@@ -101,6 +111,13 @@ pub async fn get_task(
         }
     };
 
+    let triggers: Vec<TriggerInfo> = workspace
+        .triggers
+        .iter()
+        .filter(|(_, t)| t.task == name)
+        .map(|(trig_name, trigger)| TriggerInfo::from_def(trig_name, trigger, 5))
+        .collect();
+
     let detail = TaskDetail {
         name: name.clone(),
         mode: task.mode.clone(),
@@ -115,6 +132,7 @@ pub async fn get_task(
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or_default()))
             .collect(),
+        triggers,
     };
 
     Json(detail).into_response()

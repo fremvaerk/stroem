@@ -2,6 +2,7 @@ import type {
   WorkspaceInfo,
   TaskListItem,
   TaskDetail,
+  TriggerInfo,
   JobListItem,
   JobDetail,
   WorkerListItem,
@@ -234,6 +235,15 @@ export async function executeTask(
       method: "POST",
       body: JSON.stringify({ input }),
     },
+  );
+}
+
+// Triggers
+export async function listTriggers(
+  workspace: string,
+): Promise<TriggerInfo[]> {
+  return apiFetch<TriggerInfo[]>(
+    `/api/workspaces/${encodeURIComponent(workspace)}/triggers`,
   );
 }
 

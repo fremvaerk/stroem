@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft, Folder, Play } from "lucide-react";
+import { ArrowLeft, Clock, Folder, Play } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -39,6 +39,19 @@ function formatDuration(start: string | null, end: string | null): string {
   const minutes = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${minutes}m ${secs}s`;
+}
+
+function formatRelativeTime(isoStr: string): string {
+  const target = new Date(isoStr).getTime();
+  const now = Date.now();
+  const diff = target - now;
+  if (diff < 0) return "past";
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `in ${days}d ${hours % 24}h`;
 }
 
 export function TaskDetailPage() {
@@ -188,6 +201,70 @@ export function TaskDetailPage() {
                       </Badge>
                     )}
                   </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {task.triggers.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              <Clock className="mr-2 inline-block h-4 w-4" />
+              Triggers
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {task.triggers.map((trigger) => (
+                <div
+                  key={trigger.name}
+                  className="rounded-md border px-3 py-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-sm font-medium">
+                      {trigger.name}
+                    </span>
+                    <Badge variant="outline" className="text-xs">
+                      {trigger.type}
+                    </Badge>
+                    {trigger.cron && (
+                      <Badge
+                        variant="secondary"
+                        className="font-mono text-xs"
+                      >
+                        {trigger.cron}
+                      </Badge>
+                    )}
+                    <Badge
+                      variant="secondary"
+                      className={`text-xs ${trigger.enabled ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400" : "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"}`}
+                    >
+                      {trigger.enabled ? "enabled" : "disabled"}
+                    </Badge>
+                  </div>
+                  {trigger.next_runs.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        Upcoming
+                      </p>
+                      {trigger.next_runs.map((run, i) => (
+                        <div
+                          key={i}
+                          className="flex items-center gap-2 text-xs text-muted-foreground"
+                        >
+                          <span className="font-mono">
+                            {formatRelativeTime(run)}
+                          </span>
+                          <span className="text-muted-foreground/60">
+                            {new Date(run).toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

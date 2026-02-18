@@ -190,6 +190,7 @@ impl WorkspaceManager {
                 name: name.clone(),
                 tasks_count: config.tasks.len(),
                 actions_count: config.actions.len(),
+                triggers_count: config.triggers.len(),
                 revision: entry.source.revision(),
             });
         }
@@ -267,6 +268,7 @@ pub struct WorkspaceInfo {
     pub name: String,
     pub tasks_count: usize,
     pub actions_count: usize,
+    pub triggers_count: usize,
     pub revision: Option<String>,
 }
 
@@ -394,6 +396,7 @@ tasks:
         assert_eq!(infos[0].name, "default");
         assert_eq!(infos[0].tasks_count, 1);
         assert_eq!(infos[0].actions_count, 1);
+        assert_eq!(infos[0].triggers_count, 0);
     }
 
     #[tokio::test]

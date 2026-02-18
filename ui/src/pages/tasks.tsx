@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { ChevronRight, Folder } from "lucide-react";
+import { ChevronRight, Clock, Folder } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -246,13 +246,22 @@ export function TasksPage() {
                   return (
                     <TableRow key={`task:${task.workspace}/${task.name}`}>
                       <TableCell>
-                        <div style={{ paddingLeft: `${depth * 1.25 + 2.75}rem` }}>
+                        <div
+                          className="flex items-center gap-1.5"
+                          style={{ paddingLeft: `${depth * 1.25 + 2.75}rem` }}
+                        >
                           <Link
                             to={`/workspaces/${encodeURIComponent(task.workspace)}/tasks/${encodeURIComponent(task.name)}`}
                             className="font-medium hover:underline"
                           >
                             {task.name}
                           </Link>
+                          {task.has_triggers && (
+                            <Clock
+                              className="h-3.5 w-3.5 text-muted-foreground"
+                              title="Has scheduled triggers"
+                            />
+                          )}
                         </div>
                       </TableCell>
                       {showWorkspace && (

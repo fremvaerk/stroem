@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef, WorkspaceConfig,
+    ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -629,6 +629,30 @@ fn test_workspace() -> WorkspaceConfig {
             flow: ds_flow,
             on_success: vec![],
             on_error: vec![],
+        },
+    );
+
+    // Trigger: nightly (cron trigger targeting hello-world)
+    workspace.triggers.insert(
+        "nightly".to_string(),
+        TriggerDef {
+            trigger_type: "scheduler".to_string(),
+            cron: Some("0 2 * * *".to_string()),
+            task: "hello-world".to_string(),
+            input: HashMap::from([("name".to_string(), json!("nightly"))]),
+            enabled: true,
+        },
+    );
+
+    // Trigger: weekly-backup (cron trigger targeting backup-task, disabled)
+    workspace.triggers.insert(
+        "weekly-backup".to_string(),
+        TriggerDef {
+            trigger_type: "scheduler".to_string(),
+            cron: Some("0 3 * * 0".to_string()),
+            task: "backup-task".to_string(),
+            input: HashMap::from([("host".to_string(), json!("db.prod"))]),
+            enabled: false,
         },
     );
 
@@ -8566,6 +8590,144 @@ async fn test_get_worker_with_jobs() -> Result<()> {
         jobs[0]["worker_id"].as_str().unwrap(),
         worker_id.to_string()
     );
+
+    Ok(())
+}
+
+// ─── Triggers API tests ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_triggers() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/triggers"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let triggers = body.as_array().unwrap();
+    assert_eq!(triggers.len(), 2);
+
+    let names: Vec<&str> = triggers
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"nightly"));
+    assert!(names.contains(&"weekly-backup"));
+
+    // Verify nightly trigger details
+    let nightly = triggers.iter().find(|t| t["name"] == "nightly").unwrap();
+    assert_eq!(nightly["type"], "scheduler");
+    assert_eq!(nightly["cron"], "0 2 * * *");
+    assert_eq!(nightly["task"], "hello-world");
+    assert_eq!(nightly["enabled"], true);
+    assert_eq!(nightly["input"]["name"], "nightly");
+
+    // Cron trigger should have next_runs
+    let next_runs = nightly["next_runs"].as_array().unwrap();
+    assert_eq!(next_runs.len(), 5);
+
+    // Verify weekly-backup trigger (disabled)
+    let weekly = triggers
+        .iter()
+        .find(|t| t["name"] == "weekly-backup")
+        .unwrap();
+    assert_eq!(weekly["enabled"], false);
+    assert_eq!(weekly["task"], "backup-task");
+    // Disabled triggers still compute next_runs
+    assert_eq!(weekly["next_runs"].as_array().unwrap().len(), 5);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_triggers_nonexistent_workspace() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router
+        .oneshot(api_get("/api/workspaces/nonexistent/triggers"))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_list_has_triggers_field() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let tasks = body.as_array().unwrap();
+
+    // hello-world has an enabled trigger (nightly) → has_triggers = true
+    let hello_world = tasks.iter().find(|t| t["name"] == "hello-world").unwrap();
+    assert_eq!(hello_world["has_triggers"], true);
+
+    // backup-task has only a disabled trigger → has_triggers = false
+    let backup_task = tasks.iter().find(|t| t["name"] == "backup-task").unwrap();
+    assert_eq!(backup_task["has_triggers"], false);
+
+    // greet-and-shout has no triggers → has_triggers = false
+    let greet_and_shout = tasks
+        .iter()
+        .find(|t| t["name"] == "greet-and-shout")
+        .unwrap();
+    assert_eq!(greet_and_shout["has_triggers"], false);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_detail_includes_triggers() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // hello-world has the nightly trigger
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/workspaces/default/tasks/hello-world"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let triggers = body["triggers"].as_array().unwrap();
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0]["name"], "nightly");
+    assert_eq!(triggers[0]["type"], "scheduler");
+    assert_eq!(triggers[0]["cron"], "0 2 * * *");
+    assert_eq!(triggers[0]["task"], "hello-world");
+    assert_eq!(triggers[0]["enabled"], true);
+    assert_eq!(triggers[0]["next_runs"].as_array().unwrap().len(), 5);
+
+    // greet-and-shout has no triggers
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks/greet-and-shout"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let triggers = body["triggers"].as_array().unwrap();
+    assert!(triggers.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_workspace_info_includes_triggers_count() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.oneshot(api_get("/api/workspaces")).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    let workspaces = body.as_array().unwrap();
+    let default_ws = workspaces.iter().find(|w| w["name"] == "default").unwrap();
+    assert_eq!(default_ws["triggers_count"].as_u64().unwrap(), 2);
 
     Ok(())
 }

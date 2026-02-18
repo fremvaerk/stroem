@@ -22,13 +22,17 @@ Returns all configured workspaces with task and action counts.
 [
   {
     "name": "default",
-    "task_count": 3,
-    "action_count": 5
+    "tasks_count": 3,
+    "actions_count": 5,
+    "triggers_count": 1,
+    "revision": "abc123"
   },
   {
     "name": "data-team",
-    "task_count": 2,
-    "action_count": 4
+    "tasks_count": 2,
+    "actions_count": 4,
+    "triggers_count": 0,
+    "revision": "def456"
   }
 ]
 ```
@@ -53,18 +57,20 @@ Returns all tasks from the specified workspace.
   {
     "name": "hello-world",
     "workspace": "default",
-    "mode": "distributed"
+    "mode": "distributed",
+    "has_triggers": true
   },
   {
     "name": "deploy-staging",
     "workspace": "default",
     "mode": "distributed",
-    "folder": "deploy/staging"
+    "folder": "deploy/staging",
+    "has_triggers": false
   }
 ]
 ```
 
-The `folder` field is omitted when not set on the task.
+The `folder` field is omitted when not set on the task. `has_triggers` is `true` when at least one enabled trigger in the workspace targets this task.
 
 ---
 
@@ -98,9 +104,28 @@ GET /api/workspaces/{ws}/tasks/{name}
       "depends_on": ["say-hello"],
       "input": { "message": "{{ say_hello.output.greeting }}" }
     }
-  }
+  },
+  "triggers": [
+    {
+      "name": "nightly",
+      "type": "scheduler",
+      "cron": "0 0 2 * * *",
+      "task": "hello-world",
+      "enabled": true,
+      "input": {},
+      "next_runs": [
+        "2026-02-19T02:00:00+00:00",
+        "2026-02-20T02:00:00+00:00",
+        "2026-02-21T02:00:00+00:00",
+        "2026-02-22T02:00:00+00:00",
+        "2026-02-23T02:00:00+00:00"
+      ]
+    }
+  ]
 }
 ```
+
+The `triggers` array contains all triggers in the workspace that target this task. Each trigger includes a `next_runs` array with the next 5 upcoming fire times (ISO 8601 timestamps) for `scheduler` type triggers; empty for other trigger types.
 
 ---
 
@@ -142,6 +167,67 @@ The `input` object is matched against the task's input definition. Missing field
 curl -X POST http://localhost:8080/api/workspaces/default/tasks/hello-world/execute \
   -H "Content-Type: application/json" \
   -d '{"input": {"name": "World"}}'
+```
+
+---
+
+### List Triggers
+
+```
+GET /api/workspaces/{ws}/triggers
+```
+
+Returns all triggers defined in the specified workspace with upcoming fire times for cron-based triggers.
+
+**Path parameters:**
+- `ws` -- Workspace name (e.g., `default`)
+
+**Response:**
+
+```json
+[
+  {
+    "name": "nightly",
+    "type": "scheduler",
+    "cron": "0 0 2 * * *",
+    "task": "nightly-backup",
+    "enabled": true,
+    "input": { "env": "production" },
+    "next_runs": [
+      "2026-02-19T02:00:00+00:00",
+      "2026-02-20T02:00:00+00:00",
+      "2026-02-21T02:00:00+00:00",
+      "2026-02-22T02:00:00+00:00",
+      "2026-02-23T02:00:00+00:00"
+    ]
+  },
+  {
+    "name": "on-push",
+    "type": "webhook",
+    "task": "deploy",
+    "enabled": true,
+    "input": {},
+    "next_runs": []
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Trigger name |
+| `type` | string | Trigger type (`scheduler`, `webhook`, etc.) |
+| `cron` | string or null | Cron expression (only for `scheduler` type) |
+| `task` | string | Target task name |
+| `enabled` | boolean | Whether the trigger is active |
+| `input` | object | Input parameters passed to the task when triggered |
+| `next_runs` | string[] | Next 5 upcoming fire times as ISO 8601 timestamps. Populated for `scheduler` triggers with valid cron expressions; empty array for all other types. |
+
+The `cron` field is omitted when not set on the trigger.
+
+**Example:**
+
+```bash
+curl http://localhost:8080/api/workspaces/default/triggers
 ```
 
 ---
