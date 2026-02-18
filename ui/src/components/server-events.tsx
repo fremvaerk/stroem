@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { LogViewer } from "@/components/log-viewer";
 import { getStepLogs } from "@/lib/api";
@@ -11,27 +11,36 @@ interface ServerEventsProps {
 export function ServerEvents({ jobId, jobStatus }: ServerEventsProps) {
   const [logs, setLogs] = useState("");
 
-  const fetchLogs = useCallback(async () => {
-    try {
-      const data = await getStepLogs(jobId, "_server");
-      setLogs(data.logs);
-    } catch {
-      // Silently ignore — no server events is the common case
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchLogs() {
+      try {
+        const data = await getStepLogs(jobId, "_server");
+        if (!cancelled) setLogs(data.logs);
+      } catch {
+        // Silently ignore — no server events is the common case
+      }
     }
-  }, [jobId]);
 
-  // Fetch on mount and re-fetch when job status changes (server events
-  // like hook errors are written after a job becomes terminal).
-  useEffect(() => {
+    // Initial fetch
     fetchLogs();
-  }, [fetchLogs, jobStatus]);
 
-  // Poll while job is active
-  useEffect(() => {
-    if (jobStatus !== "pending" && jobStatus !== "running") return;
-    const interval = setInterval(fetchLogs, 3000);
-    return () => clearInterval(interval);
-  }, [jobStatus, fetchLogs]);
+    // Poll while job is active; also do one final fetch when it becomes
+    // terminal (hook errors are written after a job completes/fails).
+    const isActive = jobStatus === "pending" || jobStatus === "running";
+    if (isActive) {
+      const interval = setInterval(fetchLogs, 3000);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, jobStatus]);
 
   if (!logs) return null;
 
