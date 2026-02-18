@@ -1,9 +1,9 @@
-use crate::auth::validate_access_token;
 use crate::job_creator::create_job_for_task;
 use crate::state::AppState;
+use crate::web::api::middleware::AuthUser;
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -121,13 +121,26 @@ pub async fn get_task(
 }
 
 /// POST /api/workspaces/:ws/tasks/:name/execute - Trigger task execution
-#[tracing::instrument(skip(state, headers))]
+#[tracing::instrument(skip(state, auth_user, req))]
 pub async fn execute_task(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: Option<AuthUser>,
     Path((ws, name)): Path<(String, String)>,
     Json(req): Json<ExecuteTaskRequest>,
 ) -> impl IntoResponse {
+    // 1. Enforce auth: when auth is enabled, require a valid token
+    let (source_type, source_id) = match (state.config.auth.is_some(), auth_user) {
+        (false, _) => ("api", None),
+        (true, Some(user)) => ("user", Some(user.0.email)),
+        (true, None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Authentication required"})),
+            )
+                .into_response()
+        }
+    };
+
     let workspace = match state.get_workspace(&ws).await {
         Some(w) => w,
         None => {
@@ -139,7 +152,7 @@ pub async fn execute_task(
         }
     };
 
-    // 1. Verify task exists in workspace
+    // 2. Verify task exists in workspace
     if !workspace.tasks.contains_key(&name) {
         return (
             StatusCode::NOT_FOUND,
@@ -147,25 +160,6 @@ pub async fn execute_task(
         )
             .into_response();
     }
-
-    // 2. Determine source based on authentication
-    let (source_type, source_id) = {
-        let token = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-
-        match token {
-            Some(t) if state.config.auth.is_some() => {
-                let secret = &state.config.auth.as_ref().unwrap().jwt_secret;
-                match validate_access_token(t, secret) {
-                    Ok(claims) => ("user", Some(claims.email)),
-                    Err(_) => ("api", None),
-                }
-            }
-            _ => ("api", None),
-        }
-    };
 
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
 

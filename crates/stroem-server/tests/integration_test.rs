@@ -8209,3 +8209,103 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Test: Execute task source_type without auth ──────────────────────
+
+#[tokio::test]
+async fn test_execute_task_without_auth_sets_source_api() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Alice"}}),
+        ))
+        .await?;
+
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.source_type, "api");
+    assert!(job.source_id.is_none());
+
+    Ok(())
+}
+
+// ─── Test: Execute task with valid auth sets source_type user ─────────
+
+#[tokio::test]
+async fn test_execute_task_with_valid_auth_sets_source_user() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+
+    let token = stroem_server::auth::create_access_token(
+        &Uuid::new_v4().to_string(),
+        AUTH_USER_EMAIL,
+        AUTH_JWT_SECRET,
+    )?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/tasks/hello-world/execute")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::from(
+            serde_json::to_string(&json!({"input": {"name": "Bob"}})).unwrap(),
+        ))
+        .unwrap();
+
+    let response = router.oneshot(request).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.source_type, "user");
+    assert_eq!(job.source_id.as_deref(), Some(AUTH_USER_EMAIL));
+
+    Ok(())
+}
+
+// ─── Test: Execute task with invalid token returns 401 ────────────────
+
+#[tokio::test]
+async fn test_execute_task_with_invalid_token_returns_401() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/tasks/hello-world/execute")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer invalid-token")
+        .body(Body::from(
+            serde_json::to_string(&json!({"input": {"name": "Eve"}})).unwrap(),
+        ))
+        .unwrap();
+
+    let response = router.oneshot(request).await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+// ─── Test: Execute task with no token when auth enabled returns 401 ───
+
+#[tokio::test]
+async fn test_execute_task_no_token_when_auth_enabled_returns_401() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Eve"}}),
+        ))
+        .await?;
+
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
