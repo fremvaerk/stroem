@@ -4728,7 +4728,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -4744,7 +4744,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-common"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4760,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-db"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4777,7 +4777,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-runner"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4795,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-server"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4844,13 +4844,14 @@ dependencies = [
 
 [[package]]
 name = "stroem-worker"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
  "config",
  "flate2",
  "reqwest 0.13.2",
+ "rustls 0.23.36",
  "serde",
  "serde_json",
  "stroem-common",

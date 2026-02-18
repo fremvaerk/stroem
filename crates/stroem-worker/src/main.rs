@@ -5,6 +5,12 @@ use stroem_worker::poller::run_worker;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls crypto provider before any TLS usage (kube client)
+    #[cfg(feature = "kubernetes")]
+    {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(

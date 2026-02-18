@@ -123,9 +123,9 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         if let Some(ext) = path.extension() {
             if ext == "yaml" || ext == "yml" {
                 if stroem_common::sops::is_sops_file(&path) {
-                    tracing::info!("Loading SOPS-encrypted workflow file: {:?}", path);
+                    tracing::debug!("Loading SOPS-encrypted workflow file: {:?}", path);
                 } else {
-                    tracing::info!("Loading workflow file: {:?}", path);
+                    tracing::debug!("Loading workflow file: {:?}", path);
                 }
 
                 let content = stroem_common::sops::read_yaml_file(&path)
@@ -139,7 +139,7 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Loaded workspace: {} actions, {} tasks, {} triggers",
         workspace.actions.len(),
         workspace.tasks.len(),

@@ -19,11 +19,12 @@ uuid.workspace = true
 config.workspace = true
 flate2.workspace = true
 tar.workspace = true
+rustls = { workspace = true, optional = true }
 
 [features]
 default = ["docker", "kubernetes"]
 docker = ["stroem-runner/docker"]
-kubernetes = ["stroem-runner/kubernetes"]
+kubernetes = ["stroem-runner/kubernetes", "rustls"]
 
 [dev-dependencies]
 tempfile.workspace = true
