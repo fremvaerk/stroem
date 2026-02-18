@@ -1,8 +1,34 @@
+# Build artifacts
 target/
+
+# Version control
 .git/
+.gitignore
+
+# Frontend dependencies (reinstalled in Docker)
+ui/node_modules/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# CI/CD
+.github/
+
+# Documentation
+docs/
 *.md
-workspace/
-docker-compose.yml
-Dockerfile.*
-*.yaml
-!crates/
+
+# Docker configs (not needed inside builds)
+docker-compose*.yml
+
+# Helm chart
+helm/
+
+# Tests
+tests/
+ui/e2e/
+ui/playwright-report/
+ui/test-results/
