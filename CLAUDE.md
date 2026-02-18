@@ -130,6 +130,9 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `WorkspaceSource` trait in `crates/stroem-server/src/workspace/mod.rs` with `FolderSource` and `GitSource` impls
 - `GitSource` tests use local bare repos (`file://` URL) via `git2` — see `create_bare_repo` / `add_commit` helpers. Tests require `#[tokio::test(flavor = "multi_thread")]` due to `block_in_place` in `load()`.
 - `WorkspaceManager` holds all workspace entries, provides `get_config(name)`, `get_path(name)`, `get_revision(name)`
+- Smart polling: `start_watchers()` uses each source's `poll_interval_secs()` and `peek_revision()` to detect changes cheaply before doing full reloads
+- `FolderSource`: polls every 30s, `peek_revision()` hashes file metadata+content
+- `GitSource`: polls every `poll_interval_secs` (default 60), `peek_revision()` uses ls-remote (via `git2::Remote::connect_auth` + `list`) to check remote HEAD without fetching objects. `block_in_place` wraps the blocking network call.
 - API routes are workspace-scoped: `/api/workspaces/{ws}/tasks/{name}/execute`
 - Workers download workspace tarballs via `GET /worker/workspace/{ws}.tar.gz` with ETag caching
 - `WorkspaceCache` in worker manages per-workspace tarball extraction and revision tracking

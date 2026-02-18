@@ -28,6 +28,11 @@ pub trait WorkspaceSource: Send + Sync {
     fn peek_revision(&self) -> Option<String> {
         None
     }
+    /// Polling interval in seconds for the background watcher.
+    /// Default is 30 seconds. Git sources override with their configured value.
+    fn poll_interval_secs(&self) -> u64 {
+        30
+    }
 }
 
 /// A loaded workspace entry with its source and cached config
@@ -90,9 +95,15 @@ impl WorkspaceManager {
                 WorkspaceSourceDef::Git {
                     ref url,
                     ref git_ref,
-                    poll_interval_secs: _,
+                    poll_interval_secs,
                     ref auth,
-                } => Arc::new(git::GitSource::new(&name, url, git_ref, auth.clone())?),
+                } => Arc::new(git::GitSource::new(
+                    &name,
+                    url,
+                    git_ref,
+                    auth.clone(),
+                    poll_interval_secs,
+                )?),
             };
 
             let config = source
@@ -203,21 +214,25 @@ impl WorkspaceManager {
 
     /// Start background watchers for hot-reload (folder watchers + git pollers).
     /// Only reloads when the source revision changes.
+    /// Uses each source's `poll_interval_secs()` for the polling frequency.
     pub fn start_watchers(&self) {
         for (name, entry) in &self.entries {
             let config_lock = entry.config.clone();
             let source = entry.source.clone();
             let ws_name = name.clone();
+            let poll_secs = source.poll_interval_secs();
 
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
                 let mut last_revision = source.revision();
                 loop {
                     interval.tick().await;
 
-                    // Check revision cheaply first (for folder sources this
-                    // hashes file metadata+content without parsing YAML).
-                    let current_revision = source.peek_revision();
+                    // Check revision cheaply first. For folder sources this
+                    // hashes file metadata+content without parsing YAML.
+                    // For git sources this does a lightweight ls-remote
+                    // (blocking network call, so wrap in block_in_place).
+                    let current_revision = tokio::task::block_in_place(|| source.peek_revision());
                     if current_revision == last_revision && current_revision.is_some() {
                         continue;
                     }

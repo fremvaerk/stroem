@@ -14,6 +14,7 @@ pub struct GitSource {
     auth: Option<GitAuthConfig>,
     clone_dir: PathBuf,
     revision: RwLock<Option<String>>,
+    poll_interval_secs: u64,
 }
 
 impl GitSource {
@@ -22,6 +23,7 @@ impl GitSource {
         url: &str,
         git_ref: &str,
         auth: Option<GitAuthConfig>,
+        poll_interval_secs: u64,
     ) -> Result<Self> {
         let clone_dir = std::env::temp_dir()
             .join("stroem")
@@ -34,6 +36,7 @@ impl GitSource {
             auth,
             clone_dir,
             revision: RwLock::new(None),
+            poll_interval_secs,
         })
     }
 
@@ -50,6 +53,7 @@ impl GitSource {
             auth,
             clone_dir,
             revision: RwLock::new(None),
+            poll_interval_secs: 60,
         }
     }
 
@@ -169,9 +173,24 @@ impl WorkspaceSource for GitSource {
     }
 
     fn peek_revision(&self) -> Option<String> {
-        // Git sources detect changes via fetch in load(), so peek returns
-        // None to always trigger a full reload cycle (which does git fetch).
-        None
+        if !self.clone_dir.exists() {
+            return None; // Not cloned yet — force initial load
+        }
+        let repo = git2::Repository::open(&self.clone_dir).ok()?;
+        let mut remote = repo.find_remote("origin").ok()?;
+        let callbacks = Self::build_remote_callbacks(&self.auth);
+        let connection = remote
+            .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+            .ok()?;
+        let refs = connection.list().ok()?;
+        let target = format!("refs/heads/{}", self.git_ref);
+        refs.iter()
+            .find(|r| r.name() == target)
+            .map(|r| r.oid().to_string())
+    }
+
+    fn poll_interval_secs(&self) -> u64 {
+        self.poll_interval_secs
     }
 }
 
@@ -466,6 +485,7 @@ mod tests {
             "https://github.com/example/repo.git",
             "main",
             None,
+            60,
         )
         .unwrap();
 
@@ -492,7 +512,7 @@ mod tests {
 
         for name in workspace_names {
             let source =
-                GitSource::new(name, "https://example.com/repo.git", "main", None).unwrap();
+                GitSource::new(name, "https://example.com/repo.git", "main", None, 60).unwrap();
 
             let expected_path = std::env::temp_dir().join("stroem").join("git").join(name);
             assert_eq!(source.clone_dir, expected_path);
@@ -506,6 +526,7 @@ mod tests {
             "https://github.com/example/repo.git",
             "main",
             None,
+            60,
         )
         .unwrap();
 
@@ -519,6 +540,7 @@ mod tests {
             "https://github.com/example/repo.git",
             "main",
             None,
+            60,
         )
         .unwrap();
 
@@ -651,6 +673,7 @@ mod tests {
             "https://github.com/nonexistent-user-12345/nonexistent-repo-67890.git",
             "main",
             None,
+            60,
         )
         .unwrap();
 
@@ -681,6 +704,7 @@ mod tests {
             "https://github.com/example/repo.git",
             "develop",
             Some(auth),
+            60,
         )
         .unwrap();
 
@@ -699,6 +723,7 @@ mod tests {
             "https://github.com/example/repo.git",
             "main",
             None,
+            60,
         )
         .unwrap();
 
@@ -711,5 +736,89 @@ mod tests {
                 .join(workspace_name)
                 .as_path()
         );
+    }
+
+    #[test]
+    fn test_peek_revision_before_clone_returns_none() {
+        let clone_dir = TempDir::new().unwrap();
+        // Point to a subdirectory that doesn't exist yet
+        let source = GitSource::with_clone_dir(
+            "file:///nonexistent",
+            "main",
+            None,
+            clone_dir.path().join("not-cloned"),
+        );
+
+        assert!(
+            source.peek_revision().is_none(),
+            "peek_revision should return None when clone dir doesn't exist"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_peek_revision_matches_revision_after_load() {
+        let (_bare_dir, url) = create_bare_repo(&[(
+            "test.yaml",
+            "actions:\n  a:\n    type: shell\n    cmd: echo hi\n",
+        )]);
+
+        let clone_dir = TempDir::new().unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
+
+        source.load().await.unwrap();
+        let stored_revision = source.revision().unwrap();
+        let peeked_revision = source.peek_revision().unwrap();
+
+        assert_eq!(
+            stored_revision, peeked_revision,
+            "peek_revision should match stored revision when no changes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_peek_revision_detects_new_commit() {
+        let (bare_dir, url) = create_bare_repo(&[(
+            "test.yaml",
+            "actions:\n  a:\n    type: shell\n    cmd: echo v1\n",
+        )]);
+
+        let clone_dir = TempDir::new().unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
+
+        source.load().await.unwrap();
+        let stored_revision = source.revision().unwrap();
+
+        // Push a new commit to the bare repo
+        add_commit(
+            bare_dir.path(),
+            "main",
+            &[(
+                "test.yaml",
+                "actions:\n  a:\n    type: shell\n    cmd: echo v2\n",
+            )],
+            "update",
+        );
+
+        let peeked_revision = source.peek_revision().unwrap();
+        assert_ne!(
+            stored_revision, peeked_revision,
+            "peek_revision should detect new remote commit"
+        );
+    }
+
+    #[test]
+    fn test_poll_interval_secs_default() {
+        let source =
+            GitSource::new("test-ws", "https://example.com/repo.git", "main", None, 60).unwrap();
+
+        assert_eq!(source.poll_interval_secs(), 60);
+    }
+
+    #[test]
+    fn test_poll_interval_secs_custom() {
+        let source =
+            GitSource::new("test-ws", "https://example.com/repo.git", "main", None, 300).unwrap();
+
+        assert_eq!(source.poll_interval_secs(), 300);
     }
 }

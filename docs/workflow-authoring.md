@@ -771,6 +771,8 @@ workspaces:
     poll_interval_secs: 60
 ```
 
+Git workspaces use `poll_interval_secs` (default: 60) to control how often the server checks for new commits. The check uses a lightweight ls-remote operation — only when the remote HEAD actually changes does the server perform a full fetch and reload. Folder workspaces use content hashing for change detection and poll every 30 seconds.
+
 Each workspace is independent -- tasks, actions, and scripts are scoped to their workspace. Tasks are accessed via workspace-scoped API routes:
 
 ```bash
