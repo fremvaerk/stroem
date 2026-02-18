@@ -12,6 +12,8 @@ import { TaskRunPage } from "@/pages/task-run";
 import { WorkspacesPage } from "@/pages/workspaces";
 import { WorkersPage } from "@/pages/workers";
 import { WorkerDetailPage } from "@/pages/worker-detail";
+import { UsersPage } from "@/pages/users";
+import { UserDetailPage } from "@/pages/user-detail";
 import { LoginCallbackPage } from "@/pages/login-callback";
 
 export default function App() {
@@ -37,6 +39,8 @@ export default function App() {
             <Route path="jobs/:id" element={<JobDetailPage />} />
             <Route path="workers" element={<WorkersPage />} />
             <Route path="workers/:id" element={<WorkerDetailPage />} />
+            <Route path="users" element={<UsersPage />} />
+            <Route path="users/:id" element={<UserDetailPage />} />
           </Route>
         </Route>
       </Routes>

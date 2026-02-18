@@ -93,6 +93,22 @@ export interface WorkerDetail extends WorkerListItem {
   jobs: JobListItem[];
 }
 
+export interface UserListItem {
+  user_id: string;
+  name: string | null;
+  email: string;
+  auth_methods: string[];
+  created_at: string;
+}
+
+export interface UserDetail {
+  user_id: string;
+  name: string | null;
+  email: string;
+  auth_methods: string[];
+  created_at: string;
+}
+
 export interface TokenResponse {
   access_token: string;
   refresh_token: string;

@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Link, useLocation } from "react-router";
 import {
   FolderOpen,
@@ -6,6 +7,7 @@ import {
   Play,
   LogOut,
   Server,
+  Users,
   Zap,
 } from "lucide-react";
 import { useAuth } from "@/context/auth-context";
@@ -30,10 +32,6 @@ const navItems = [
   { title: "Jobs", href: "/jobs", icon: Play },
 ];
 
-const adminItems = [
-  { title: "Workers", href: "/workers", icon: Server },
-];
-
 function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   return pathname.startsWith(href);
@@ -42,6 +40,14 @@ function isActive(pathname: string, href: string): boolean {
 export function AppSidebar() {
   const { pathname } = useLocation();
   const { user, authRequired, logout } = useAuth();
+
+  const adminItems = useMemo(() => {
+    const items = [{ title: "Workers", href: "/workers", icon: Server }];
+    if (authRequired) {
+      items.push({ title: "Users", href: "/users", icon: Users });
+    }
+    return items;
+  }, [authRequired]);
 
   return (
     <Sidebar>

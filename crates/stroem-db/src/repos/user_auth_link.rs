@@ -47,4 +47,18 @@ impl UserAuthLinkRepo {
         .context("Failed to create auth link")?;
         Ok(())
     }
+
+    pub async fn list_by_user_ids(
+        pool: &PgPool,
+        user_ids: &[Uuid],
+    ) -> Result<Vec<UserAuthLinkRow>> {
+        let rows = sqlx::query_as::<_, UserAuthLinkRow>(
+            "SELECT user_id, provider_id, external_id, created_at FROM user_auth_link WHERE user_id = ANY($1)",
+        )
+        .bind(user_ids)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list auth links by user ids")?;
+        Ok(rows)
+    }
 }

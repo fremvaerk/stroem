@@ -56,4 +56,16 @@ impl UserRepo {
         .context("Failed to get user by id")?;
         Ok(row)
     }
+
+    pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<UserRow>> {
+        let rows = sqlx::query_as::<_, UserRow>(
+            r#"SELECT user_id, name, email, password_hash, created_at FROM "user" ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list users")?;
+        Ok(rows)
+    }
 }

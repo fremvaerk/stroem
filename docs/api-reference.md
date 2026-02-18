@@ -154,6 +154,7 @@ GET /api/jobs
 
 **Query parameters:**
 - `workspace` (optional) -- Filter by workspace name
+- `task_name` (optional) -- Filter by task name (requires `workspace`)
 - `limit` (optional, default: `50`) -- Number of jobs to return
 - `offset` (optional, default: `0`) -- Pagination offset
 
@@ -327,6 +328,79 @@ curl -s http://localhost:8080/api/jobs/JOB_ID/steps/say-hello/logs | jq -r .logs
 
 # Server events (hook errors, recovery timeouts, etc.)
 curl -s http://localhost:8080/api/jobs/JOB_ID/steps/_server/logs | jq -r .logs
+```
+
+---
+
+### List Users
+
+```
+GET /api/users
+```
+
+Returns all registered users with their authentication methods. Never exposes password hashes.
+
+**Query parameters:**
+- `limit` (optional, default: `50`) -- Number of users to return
+- `offset` (optional, default: `0`) -- Pagination offset
+
+**Response:**
+
+```json
+[
+  {
+    "user_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Alice",
+    "email": "alice@example.com",
+    "auth_methods": ["password", "google"],
+    "created_at": "2025-02-10T12:00:00Z"
+  }
+]
+```
+
+Users are sorted by creation time (newest first).
+
+**Auth method values:** `password` (has password hash), or OIDC provider IDs (e.g., `google`, `github`)
+
+**Example:**
+
+```bash
+curl "http://localhost:8080/api/users?limit=10"
+```
+
+---
+
+### Get User Detail
+
+```
+GET /api/users/{id}
+```
+
+Returns a single user's info including authentication methods.
+
+**Path parameters:**
+- `id` -- User ID (UUID)
+
+**Response:**
+
+```json
+{
+  "user_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "Alice",
+  "email": "alice@example.com",
+  "auth_methods": ["password", "google"],
+  "created_at": "2025-02-10T12:00:00Z"
+}
+```
+
+**Error responses:**
+- `400` -- Invalid UUID format
+- `404` -- User not found
+
+**Example:**
+
+```bash
+curl "http://localhost:8080/api/users/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 ```
 
 ---

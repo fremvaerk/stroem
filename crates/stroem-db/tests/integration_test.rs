@@ -4,8 +4,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{
-    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, UserRepo,
-    WorkerRepo,
+    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo,
+    UserAuthLinkRepo, UserRepo, WorkerRepo,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -81,6 +81,38 @@ async fn test_list_jobs() -> Result<()> {
     // List with workspace filter
     let jobs = JobRepo::list(&pool, Some("default"), 10, 0).await?;
     assert_eq!(jobs.len(), 5);
+
+    // List by task name — single match
+    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].task_name, "task-0");
+
+    // List by task name — nonexistent task
+    let jobs = JobRepo::list_by_task(&pool, "default", "nope", 10, 0).await?;
+    assert!(jobs.is_empty());
+
+    // List by task name — wrong workspace
+    let jobs = JobRepo::list_by_task(&pool, "other", "task-0", 10, 0).await?;
+    assert!(jobs.is_empty());
+
+    // List by task name — multiple jobs for same task, newest first
+    for _ in 0..3 {
+        JobRepo::create(&pool, "default", "task-0", "distributed", None, "api", None).await?;
+    }
+    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", 10, 0).await?;
+    assert_eq!(jobs.len(), 4); // 1 original + 3 new
+                               // Verify newest-first ordering
+    for pair in jobs.windows(2) {
+        assert!(pair[0].created_at >= pair[1].created_at);
+    }
+
+    // Pagination on list_by_task
+    let page1 = JobRepo::list_by_task(&pool, "default", "task-0", 2, 0).await?;
+    assert_eq!(page1.len(), 2);
+    let page2 = JobRepo::list_by_task(&pool, "default", "task-0", 2, 2).await?;
+    assert_eq!(page2.len(), 2);
+    let page3 = JobRepo::list_by_task(&pool, "default", "task-0", 2, 4).await?;
+    assert!(page3.is_empty());
 
     Ok(())
 }
@@ -1024,6 +1056,177 @@ async fn test_delete_all_tokens_for_user() -> Result<()> {
     assert!(RefreshTokenRepo::get_by_hash(&pool, "tok2")
         .await?
         .is_none());
+
+    Ok(())
+}
+
+// ─── User list tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_user_list() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Empty list on fresh DB
+    let empty = UserRepo::list(&pool, 50, 0).await?;
+    assert!(empty.is_empty());
+
+    // Create users with mixed auth: some with password, some without
+    for i in 0..5 {
+        let password = if i % 2 == 0 {
+            Some("$argon2id$hashed")
+        } else {
+            None
+        };
+        UserRepo::create(
+            &pool,
+            Uuid::new_v4(),
+            &format!("user{}@example.com", i),
+            password,
+            Some(&format!("User {}", i)),
+        )
+        .await?;
+        // Small sleep so created_at ordering is deterministic
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    // List all
+    let users = UserRepo::list(&pool, 50, 0).await?;
+    assert_eq!(users.len(), 5);
+    // Newest first
+    assert_eq!(users[0].email, "user4@example.com");
+    assert_eq!(users[4].email, "user0@example.com");
+
+    // Verify password_hash presence matches what we created
+    // Even-indexed users (0,2,4) have passwords; odd (1,3) don't
+    // List is newest-first: user4, user3, user2, user1, user0
+    assert!(users[0].password_hash.is_some()); // user4 (even)
+    assert!(users[1].password_hash.is_none()); // user3 (odd)
+    assert!(users[2].password_hash.is_some()); // user2 (even)
+    assert!(users[3].password_hash.is_none()); // user1 (odd)
+    assert!(users[4].password_hash.is_some()); // user0 (even)
+
+    // Pagination
+    let page1 = UserRepo::list(&pool, 2, 0).await?;
+    assert_eq!(page1.len(), 2);
+
+    let page2 = UserRepo::list(&pool, 2, 2).await?;
+    assert_eq!(page2.len(), 2);
+
+    let page3 = UserRepo::list(&pool, 2, 4).await?;
+    assert_eq!(page3.len(), 1);
+
+    let empty = UserRepo::list(&pool, 2, 6).await?;
+    assert!(empty.is_empty());
+
+    Ok(())
+}
+
+// ─── User auth link batch tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_auth_link_list_by_user_ids() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let u1 = Uuid::new_v4();
+    let u2 = Uuid::new_v4();
+    let u3 = Uuid::new_v4();
+    UserRepo::create(&pool, u1, "a@example.com", None, None).await?;
+    UserRepo::create(&pool, u2, "b@example.com", None, None).await?;
+    UserRepo::create(&pool, u3, "c@example.com", None, None).await?;
+
+    // u1 has two auth links, u2 has one, u3 has none
+    UserAuthLinkRepo::create(&pool, u1, "google", "ext1").await?;
+    UserAuthLinkRepo::create(&pool, u1, "github", "ext2").await?;
+    UserAuthLinkRepo::create(&pool, u2, "google", "ext3").await?;
+
+    // Batch query for u1 and u2
+    let links = UserAuthLinkRepo::list_by_user_ids(&pool, &[u1, u2]).await?;
+    assert_eq!(links.len(), 3);
+
+    // Only u1
+    let links = UserAuthLinkRepo::list_by_user_ids(&pool, &[u1]).await?;
+    assert_eq!(links.len(), 2);
+
+    // u3 has no links
+    let links = UserAuthLinkRepo::list_by_user_ids(&pool, &[u3]).await?;
+    assert!(links.is_empty());
+
+    // Empty input
+    let links = UserAuthLinkRepo::list_by_user_ids(&pool, &[]).await?;
+    assert!(links.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_user_list_with_auth_links() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // User with password + OIDC
+    let u1 = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        u1,
+        "both@example.com",
+        Some("$argon2id$hash"),
+        Some("Both"),
+    )
+    .await?;
+    UserAuthLinkRepo::create(&pool, u1, "google", "g1").await?;
+
+    // User with OIDC only (no password)
+    let u2 = Uuid::new_v4();
+    UserRepo::create(&pool, u2, "oidc@example.com", None, Some("OIDC Only")).await?;
+    UserAuthLinkRepo::create(&pool, u2, "github", "gh1").await?;
+
+    // User with password only (no OIDC)
+    let u3 = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        u3,
+        "pass@example.com",
+        Some("$argon2id$hash"),
+        Some("Password Only"),
+    )
+    .await?;
+
+    // List users and their auth links together (simulates what the API handler does)
+    let users = UserRepo::list(&pool, 50, 0).await?;
+    let user_ids: Vec<Uuid> = users.iter().map(|u| u.user_id).collect();
+    let links = UserAuthLinkRepo::list_by_user_ids(&pool, &user_ids).await?;
+
+    assert_eq!(users.len(), 3);
+    assert_eq!(links.len(), 2); // u1 has 1 link, u2 has 1 link, u3 has 0
+
+    // Verify u1 (both) has password and an auth link
+    let u1_row = users.iter().find(|u| u.user_id == u1).unwrap();
+    assert!(u1_row.password_hash.is_some());
+    let u1_links: Vec<&str> = links
+        .iter()
+        .filter(|l| l.user_id == u1)
+        .map(|l| l.provider_id.as_str())
+        .collect();
+    assert_eq!(u1_links, vec!["google"]);
+
+    // Verify u2 (OIDC only) has no password but has auth link
+    let u2_row = users.iter().find(|u| u.user_id == u2).unwrap();
+    assert!(u2_row.password_hash.is_none());
+    let u2_links: Vec<&str> = links
+        .iter()
+        .filter(|l| l.user_id == u2)
+        .map(|l| l.provider_id.as_str())
+        .collect();
+    assert_eq!(u2_links, vec!["github"]);
+
+    // Verify u3 (password only) has password but no auth link
+    let u3_row = users.iter().find(|u| u.user_id == u3).unwrap();
+    assert!(u3_row.password_hash.is_some());
+    let u3_links: Vec<&str> = links
+        .iter()
+        .filter(|l| l.user_id == u3)
+        .map(|l| l.provider_id.as_str())
+        .collect();
+    assert!(u3_links.is_empty());
 
     Ok(())
 }

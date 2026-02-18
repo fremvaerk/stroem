@@ -6,6 +6,8 @@ import type {
   JobDetail,
   WorkerListItem,
   WorkerDetail,
+  UserListItem,
+  UserDetail,
   TokenResponse,
   AuthUser,
   ExecuteTaskResponse,
@@ -239,10 +241,15 @@ export async function executeTask(
 export async function listJobs(
   limit = 50,
   offset = 0,
+  filters?: { workspace?: string; taskName?: string },
 ): Promise<JobListItem[]> {
-  return apiFetch<JobListItem[]>(
-    `/api/jobs?limit=${limit}&offset=${offset}`,
-  );
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (filters?.workspace) params.set("workspace", filters.workspace);
+  if (filters?.taskName) params.set("task_name", filters.taskName);
+  return apiFetch<JobListItem[]>(`/api/jobs?${params}`);
 }
 
 export async function getJob(id: string): Promise<JobDetail> {
@@ -267,6 +274,20 @@ export async function listWorkers(
   return apiFetch<WorkerListItem[]>(
     `/api/workers?limit=${limit}&offset=${offset}`,
   );
+}
+
+// Users
+export async function listUsers(
+  limit = 50,
+  offset = 0,
+): Promise<UserListItem[]> {
+  return apiFetch<UserListItem[]>(
+    `/api/users?limit=${limit}&offset=${offset}`,
+  );
+}
+
+export async function getUser(id: string): Promise<UserDetail> {
+  return apiFetch<UserDetail>(`/api/users/${id}`);
 }
 
 export async function getStepLogs(

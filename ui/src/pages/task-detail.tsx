@@ -1,12 +1,45 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
 import { ArrowLeft, Folder, Play } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { getTask } from "@/lib/api";
+import { StatusBadge } from "@/components/status-badge";
+import { getTask, listJobs } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
-import type { TaskDetail } from "@/lib/types";
+import type { TaskDetail, JobListItem } from "@/lib/types";
+
+const JOBS_PAGE_SIZE = 20;
+
+function formatTime(dateStr: string | null): string {
+  if (!dateStr) return "-";
+  return new Date(dateStr).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDuration(start: string | null, end: string | null): string {
+  if (!start) return "-";
+  const s = new Date(start).getTime();
+  const e = end ? new Date(end).getTime() : Date.now();
+  const diff = Math.max(0, e - s);
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${minutes}m ${secs}s`;
+}
 
 export function TaskDetailPage() {
   const { workspace, name } = useParams<{ workspace: string; name: string }>();
@@ -14,6 +47,9 @@ export function TaskDetailPage() {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [jobs, setJobs] = useState<JobListItem[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(true);
+  const [jobsOffset, setJobsOffset] = useState(0);
 
   useEffect(() => {
     if (!workspace || !name) return;
@@ -36,6 +72,26 @@ export function TaskDetailPage() {
       cancelled = true;
     };
   }, [workspace, name]);
+
+  const loadJobs = useCallback(async () => {
+    if (!workspace || !name) return;
+    try {
+      const data = await listJobs(JOBS_PAGE_SIZE, jobsOffset, {
+        workspace,
+        taskName: name,
+      });
+      setJobs(data);
+    } catch {
+      // ignore
+    } finally {
+      setJobsLoading(false);
+    }
+  }, [workspace, name, jobsOffset]);
+
+  useEffect(() => {
+    setJobsLoading(true);
+    loadJobs();
+  }, [loadJobs]);
 
   if (loading) {
     return (
@@ -164,6 +220,90 @@ export function TaskDetailPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Recent Runs</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {jobsLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+            </div>
+          ) : jobs.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No runs yet.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Job ID</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Source</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="text-right">Duration</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {jobs.map((job) => (
+                  <TableRow key={job.job_id}>
+                    <TableCell>
+                      <Link
+                        to={`/jobs/${job.job_id}`}
+                        className="font-mono text-sm font-medium hover:underline"
+                      >
+                        {job.job_id.substring(0, 8)}...
+                      </Link>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge status={job.status} />
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {job.source_type}
+                      {job.source_id && (
+                        <span className="ml-1 text-muted-foreground/60">
+                          ({job.source_id})
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {formatTime(job.created_at)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                      {formatDuration(job.started_at, job.completed_at)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+
+          <div className="mt-4 flex items-center justify-between">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={jobsOffset === 0}
+              onClick={() =>
+                setJobsOffset((o) => Math.max(0, o - JOBS_PAGE_SIZE))
+              }
+            >
+              Previous
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Page {Math.floor(jobsOffset / JOBS_PAGE_SIZE) + 1}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={jobs.length < JOBS_PAGE_SIZE}
+              onClick={() => setJobsOffset((o) => o + JOBS_PAGE_SIZE)}
+            >
+              Next
+            </Button>
           </div>
         </CardContent>
       </Card>

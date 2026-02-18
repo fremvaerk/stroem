@@ -260,6 +260,35 @@ impl JobRepo {
         Ok(())
     }
 
+    /// List jobs by workspace + task name with pagination
+    pub async fn list_by_task(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<JobRow>> {
+        let jobs = sqlx::query_as::<_, JobRow>(
+            r#"
+            SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
+                   source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
+                   parent_job_id, parent_step_name
+            FROM job
+            WHERE workspace = $1 AND task_name = $2
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(workspace)
+        .bind(task_name)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(jobs)
+    }
+
     /// List jobs by worker ID with pagination
     pub async fn list_by_worker(
         pool: &PgPool,

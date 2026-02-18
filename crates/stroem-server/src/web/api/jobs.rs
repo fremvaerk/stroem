@@ -15,6 +15,7 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub struct ListJobsQuery {
     pub workspace: Option<String>,
+    pub task_name: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
@@ -31,14 +32,30 @@ pub async fn list_jobs(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListJobsQuery>,
 ) -> impl IntoResponse {
-    match JobRepo::list(
-        &state.pool,
-        query.workspace.as_deref(),
-        query.limit,
-        query.offset,
-    )
-    .await
-    {
+    if query.task_name.is_some() && query.workspace.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "task_name filter requires workspace"})),
+        )
+            .into_response();
+    }
+
+    let result = match (query.workspace.as_deref(), query.task_name.as_deref()) {
+        (Some(ws), Some(task)) => {
+            JobRepo::list_by_task(&state.pool, ws, task, query.limit, query.offset).await
+        }
+        _ => {
+            JobRepo::list(
+                &state.pool,
+                query.workspace.as_deref(),
+                query.limit,
+                query.offset,
+            )
+            .await
+        }
+    };
+
+    match result {
         Ok(jobs) => {
             let jobs_json: Vec<serde_json::Value> = jobs
                 .iter()
