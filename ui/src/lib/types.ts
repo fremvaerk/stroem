@@ -42,6 +42,7 @@ export interface JobListItem {
   status: string;
   source_type: string;
   source_id: string | null;
+  worker_id: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -72,6 +73,7 @@ export interface JobDetail {
   status: string;
   source_type: string;
   source_id: string | null;
+  worker_id: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

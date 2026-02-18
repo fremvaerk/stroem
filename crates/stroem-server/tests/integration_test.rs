@@ -8409,3 +8409,56 @@ async fn test_no_auth_configured_all_routes_open() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Test: worker_id exposed in job list and detail API ─────────────
+
+#[tokio::test]
+async fn test_worker_id_in_job_list_and_detail() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Create a job
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "WorkerTest"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+
+    // Job list should include worker_id field (null before any worker claims)
+    let response = router.clone().oneshot(api_get("/api/jobs")).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let jobs = body.as_array().unwrap();
+    assert!(!jobs.is_empty());
+    let job = &jobs[0];
+    assert!(
+        job.get("worker_id").is_some(),
+        "worker_id field must be present in job list"
+    );
+    assert!(
+        job["worker_id"].is_null(),
+        "worker_id should be null before worker claims"
+    );
+
+    // Job detail should include worker_id field
+    let response = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert!(
+        body.get("worker_id").is_some(),
+        "worker_id field must be present in job detail"
+    );
+    assert!(
+        body["worker_id"].is_null(),
+        "worker_id should be null before worker claims"
+    );
+
+    Ok(())
+}

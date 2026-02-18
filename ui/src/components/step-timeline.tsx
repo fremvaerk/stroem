@@ -38,6 +38,7 @@ interface StepTimelineProps {
   steps: JobStep[];
   selectedStep: string | null;
   onSelectStep: (stepName: string | null) => void;
+  workerNames?: Map<string, string>;
 }
 
 export function StepTimeline({
@@ -45,6 +46,7 @@ export function StepTimeline({
   steps,
   selectedStep,
   onSelectStep,
+  workerNames,
 }: StepTimelineProps) {
   return (
     <div className="space-y-0">
@@ -82,6 +84,11 @@ export function StepTimeline({
                   <span className="text-xs text-muted-foreground">
                     {step.action_name}
                   </span>
+                  {step.worker_id && workerNames && (
+                    <span className="text-xs text-muted-foreground/60">
+                      {workerNames.get(step.worker_id) ?? step.worker_id.substring(0, 8)}
+                    </span>
+                  )}
                   {(step.started_at || step.completed_at) && (
                     <span className="ml-auto font-mono text-xs text-muted-foreground">
                       {formatDuration(step.started_at, step.completed_at)}

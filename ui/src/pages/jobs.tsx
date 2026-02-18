@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { useTitle } from "@/hooks/use-title";
+import { useWorkerNames } from "@/hooks/use-worker-names";
 import { listJobs } from "@/lib/api";
 import type { JobListItem } from "@/lib/types";
 
@@ -43,6 +44,7 @@ function formatTime(dateStr: string): string {
 
 export function JobsPage() {
   useTitle("Jobs");
+  const workerNames = useWorkerNames();
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
@@ -112,6 +114,7 @@ export function JobsPage() {
                   <TableHead>Task</TableHead>
                   <TableHead>Workspace</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Worker</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead className="text-right">Duration</TableHead>
@@ -135,6 +138,9 @@ export function JobsPage() {
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={job.status} />
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {job.worker_id ? (workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)) : "-"}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {job.source_id ? `${job.source_type} (${job.source_id})` : job.source_type}

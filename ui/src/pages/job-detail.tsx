@@ -9,6 +9,7 @@ import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
 import { getJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
+import { useWorkerNames } from "@/hooks/use-worker-names";
 import type { JobDetail } from "@/lib/types";
 
 function formatTime(dateStr: string | null): string {
@@ -33,6 +34,7 @@ function formatDuration(start: string | null, end: string | null): string {
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   useTitle(id ? `Job: ${id.substring(0, 8)}` : "Job");
+  const workerNames = useWorkerNames();
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -121,9 +123,10 @@ export function JobDetailPage() {
           </div>
         )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
         {[
           { label: "Workspace", value: job.workspace },
+          { label: "Worker", value: job.worker_id ? (workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)) : "-" },
           { label: "Source", value: job.source_id ? `${job.source_type} (${job.source_id})` : job.source_type },
           { label: "Created", value: formatTime(job.created_at) },
           { label: "Started", value: formatTime(job.started_at) },
@@ -179,6 +182,7 @@ export function JobDetailPage() {
               steps={job.steps}
               selectedStep={selectedStep}
               onSelectStep={setSelectedStep}
+              workerNames={workerNames}
             />
           )}
         </CardContent>
