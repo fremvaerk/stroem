@@ -3,4 +3,4 @@ name: stroem
 description: A Helm chart for Strøm workflow orchestration platform
 type: application
 version: 0.1.8
-appVersion: "0.1.13"
+appVersion: "0.1.14"
