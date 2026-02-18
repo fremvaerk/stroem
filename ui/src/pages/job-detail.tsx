@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { StepTimeline } from "@/components/step-timeline";
+import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
 import { getJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
@@ -137,6 +138,8 @@ export function JobDetailPage() {
           </div>
         ))}
       </div>
+
+      <ServerEvents jobId={job.job_id} jobStatus={job.status} />
 
       {(job.input || job.output) && (
         <div className="grid gap-4 lg:grid-cols-2">

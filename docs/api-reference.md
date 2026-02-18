@@ -317,10 +317,16 @@ Returns the JSONL log output for a specific step within a job. Lines are filtere
 
 For jobs created before JSONL log format was introduced, this endpoint returns an empty string (legacy plain-text lines are skipped).
 
+**Server events:** Use `_server` as the step name to retrieve server-side log entries (hook failures, orchestration errors, recovery timeouts). These are written automatically by the server when infrastructure errors affect a job.
+
 **Example:**
 
 ```bash
+# Step logs
 curl -s http://localhost:8080/api/jobs/JOB_ID/steps/say-hello/logs | jq -r .logs
+
+# Server events (hook errors, recovery timeouts, etc.)
+curl -s http://localhost:8080/api/jobs/JOB_ID/steps/_server/logs | jq -r .logs
 ```
 
 ---

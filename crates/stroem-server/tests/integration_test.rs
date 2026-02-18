@@ -6307,6 +6307,30 @@ fn hook_test_workspace() -> WorkspaceConfig {
     workspace
 }
 
+fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
+    let temp_dir = std::env::temp_dir().join(format!("stroem-hook-test-{}", Uuid::new_v4()));
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://test".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: temp_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::new(),
+        worker_token: "test".to_string(),
+        auth: None,
+        recovery: stroem_server::config::RecoveryConfig {
+            heartbeat_timeout_secs: 120,
+            sweep_interval_secs: 60,
+        },
+    };
+    let mgr = WorkspaceManager::from_config("default", workspace.clone());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    AppState::new(pool, mgr, config, log_storage, HashMap::new())
+}
+
 #[tokio::test]
 async fn test_hook_fires_on_job_success() -> Result<()> {
     let container = Postgres::default().start().await?;
@@ -6381,7 +6405,8 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
     assert_eq!(job.status, "completed");
 
     // Fire hooks
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // Verify hook job was created
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
@@ -6474,7 +6499,8 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
     assert_eq!(job.status, "failed");
 
     // Fire hooks
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // Verify hook job was created
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
@@ -6549,7 +6575,8 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
     assert_eq!(hook_job.source_type, "hook");
 
     // Fire hooks — should be a no-op because source_type is "hook"
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &hook_job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &hook_job, task).await;
 
     // Verify no additional hook jobs were created
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
@@ -6618,7 +6645,8 @@ async fn test_hook_input_contains_context() -> Result<()> {
     stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
     let hook_job = all_jobs
@@ -6715,7 +6743,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     assert_eq!(job.status, "failed");
 
     // Fire hooks
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
     let hook_job = all_jobs
@@ -6832,7 +6861,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     assert_eq!(job.status, "completed");
 
     // on_success fires
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
     let hook_job = all_jobs
@@ -6928,7 +6958,8 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
 
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
     let hook_job = all_jobs
@@ -7033,7 +7064,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     assert_eq!(job.status, "failed");
 
     // Fire hooks → creates hook job
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;
     let hook_job = all_jobs
@@ -7619,7 +7651,8 @@ async fn test_task_action_in_hook() -> Result<()> {
     assert_eq!(job.status, "failed");
 
     // Fire hooks
-    stroem_server::hooks::fire_hooks(&pool, &workspace, &job, task).await;
+    let state = hook_test_state(pool.clone(), &workspace);
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // A hook job should have been created with task_name = "cleanup" (not "_hook:run-cleanup")
     let all_jobs = JobRepo::list(&pool, Some("default"), 100, 0).await?;

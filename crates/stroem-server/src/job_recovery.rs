@@ -53,6 +53,12 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
         crate::job_creator::handle_task_steps(&state.pool, &workspace, &job.workspace, job_id).await
     {
         tracing::error!("Failed to handle task steps for job {}: {}", job_id, e);
+        state
+            .append_server_log(
+                job_id,
+                &format!("[orchestration] Failed to handle task steps: {}", e),
+            )
+            .await;
     }
 
     // Check if job reached terminal state
@@ -79,11 +85,20 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                         parent_job_id,
                         e
                     );
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!(
+                                "[orchestration] Failed to propagate to parent job {}: {}",
+                                parent_job_id, e
+                            ),
+                        )
+                        .await;
                 }
             }
 
             // Fire hooks (best-effort)
-            crate::hooks::fire_hooks(&state.pool, &workspace, &job_after, &task).await;
+            crate::hooks::fire_hooks(state, &workspace, &job_after, &task).await;
         }
     }
 
@@ -172,8 +187,7 @@ async fn propagate_to_parent(
                     }
 
                     // Fire hooks for the parent
-                    crate::hooks::fire_hooks(&state.pool, &parent_ws, &parent_after, &parent_task)
-                        .await;
+                    crate::hooks::fire_hooks(state, &parent_ws, &parent_after, &parent_task).await;
                 }
             }
         }
@@ -212,6 +226,15 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
                 parent_job_id,
                 e
             );
+            state
+                .append_server_log(
+                    job_id,
+                    &format!(
+                        "[orchestration] Failed to propagate to parent job {}: {}",
+                        parent_job_id, e
+                    ),
+                )
+                .await;
         }
     }
 
@@ -222,7 +245,7 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
             None if job.source_type == "hook" => build_minimal_task_def(state, job_id).await?,
             None => return Ok(()),
         };
-        crate::hooks::fire_hooks(&state.pool, &workspace, &job, &task).await;
+        crate::hooks::fire_hooks(state, &workspace, &job, &task).await;
     }
 
     Ok(())

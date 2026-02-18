@@ -1,3 +1,4 @@
+use crate::state::AppState;
 use anyhow::Context;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -38,9 +39,9 @@ pub struct FailedStepInfo {
 /// - Selects `on_success` or `on_error` hooks based on job status.
 /// - Each hook creates a new single-step job with `source_type = "hook"`.
 /// - Failures are logged but never affect the original job.
-#[tracing::instrument(skip(pool, workspace_config, task))]
+#[tracing::instrument(skip(state, workspace_config, task))]
 pub async fn fire_hooks(
-    pool: &PgPool,
+    state: &AppState,
     workspace_config: &WorkspaceConfig,
     job: &stroem_db::JobRow,
     task: &TaskDef,
@@ -62,10 +63,16 @@ pub async fn fire_hooks(
     }
 
     // Build hook context
-    let ctx = match build_hook_context(pool, job, task).await {
+    let ctx = match build_hook_context(&state.pool, job, task).await {
         Ok(ctx) => ctx,
         Err(e) => {
             tracing::error!("Failed to build hook context for job {}: {}", job.job_id, e);
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!("[hooks] Failed to build hook context: {}", e),
+                )
+                .await;
             return;
         }
     };
@@ -74,6 +81,12 @@ pub async fn fire_hooks(
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Failed to serialize hook context: {}", e);
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!("[hooks] Failed to serialize hook context: {}", e),
+                )
+                .await;
             return;
         }
     };
@@ -91,7 +104,7 @@ pub async fn fire_hooks(
         );
 
         if let Err(e) = fire_single_hook(
-            pool,
+            &state.pool,
             workspace_config,
             &job.workspace,
             hook,
@@ -107,6 +120,15 @@ pub async fn fire_hooks(
                 job.job_id,
                 e
             );
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!(
+                        "[hooks] Failed to fire hook {}[{}] for action '{}': {}",
+                        hook_type, i, hook.action, e
+                    ),
+                )
+                .await;
         }
     }
 }

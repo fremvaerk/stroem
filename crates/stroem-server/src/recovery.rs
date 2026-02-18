@@ -69,6 +69,17 @@ async fn sweep(state: &AppState) -> Result<()> {
             "Worker heartbeat timeout (worker {} unresponsive)",
             step_info.worker_id
         );
+
+        state
+            .append_server_log(
+                step_info.job_id,
+                &format!(
+                    "[recovery] Worker {} unresponsive (heartbeat timeout), failing step '{}'",
+                    step_info.worker_id, step_info.step_name
+                ),
+            )
+            .await;
+
         JobStepRepo::mark_failed(
             &state.pool,
             step_info.job_id,
@@ -86,6 +97,15 @@ async fn sweep(state: &AppState) -> Result<()> {
                 step_info.step_name,
                 e
             );
+            state
+                .append_server_log(
+                    step_info.job_id,
+                    &format!(
+                        "[recovery] Failed to orchestrate after recovering step '{}': {}",
+                        step_info.step_name, e
+                    ),
+                )
+                .await;
         }
     }
 

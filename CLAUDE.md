@@ -200,6 +200,7 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Read fallback: local file → legacy .log → S3 (if configured)
 - Config: optional `s3` section in `log_storage` with `bucket`, `region`, `prefix`, `endpoint`
 - Credentials via standard AWS chain (env vars, IAM role, `~/.aws/credentials`)
+- **Server events**: `AppState::append_server_log()` writes JSONL entries with `step: "_server"`, `stream: "stderr"` — makes server-side errors (hook failures, orchestration errors, recovery timeouts) visible in the job's log stream via UI and API (`GET /api/jobs/{id}/steps/_server/logs`)
 
 ### WebSocket Log Streaming
 - `GET /api/jobs/{id}/logs/stream` -- WebSocket upgrade endpoint
