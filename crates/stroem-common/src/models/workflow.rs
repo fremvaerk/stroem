@@ -79,6 +79,11 @@ pub struct ActionDef {
     pub input: HashMap<String, InputFieldDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<OutputDef>,
+
+    /// Raw Kubernetes pod manifest overrides — deep-merged into the generated pod spec.
+    /// Only valid on `type: pod` and `type: shell` + `runner: pod`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<serde_json::Value>,
 }
 
 /// Hook definition — an action to run when a job completes or fails
@@ -673,5 +678,65 @@ tasks:
         let task = config.tasks.get("test").unwrap();
         assert!(task.on_success.is_empty());
         assert!(task.on_error.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pod_action_with_manifest() {
+        let yaml = r#"
+actions:
+  curl-foo:
+    type: pod
+    image: curlimages/curl:latest
+    cmd: "curl -fsSL https://example.com"
+    manifest:
+      metadata:
+        annotations:
+          iam.amazonaws.com/role: my-role
+      spec:
+        serviceAccountName: my-sa
+        nodeSelector:
+          gpu: "true"
+        tolerations:
+          - key: gpu
+            operator: Exists
+            effect: NoSchedule
+        containers:
+          - name: step
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "500m"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("curl-foo").unwrap();
+        assert_eq!(action.action_type, "pod");
+        let manifest = action.manifest.as_ref().unwrap();
+        assert!(manifest.is_object());
+        assert_eq!(
+            manifest["metadata"]["annotations"]["iam.amazonaws.com/role"],
+            "my-role"
+        );
+        assert_eq!(manifest["spec"]["serviceAccountName"], "my-sa");
+        assert_eq!(manifest["spec"]["nodeSelector"]["gpu"], "true");
+        let tolerations = manifest["spec"]["tolerations"].as_array().unwrap();
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0]["key"], "gpu");
+        let containers = manifest["spec"]["containers"].as_array().unwrap();
+        assert_eq!(containers[0]["name"], "step");
+        assert_eq!(containers[0]["resources"]["requests"]["memory"], "256Mi");
+    }
+
+    #[test]
+    fn test_parse_action_without_manifest() {
+        let yaml = r#"
+actions:
+  simple:
+    type: pod
+    image: alpine:latest
+    cmd: "echo hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("simple").unwrap();
+        assert!(action.manifest.is_none());
     }
 }

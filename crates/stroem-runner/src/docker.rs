@@ -285,6 +285,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -322,6 +323,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -341,6 +343,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -371,6 +374,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -405,6 +409,7 @@ mod tests {
             runner_image: None,
             entrypoint: Some(vec!["/app/run".to_string()]),
             command: Some(vec!["--env".to_string(), "prod".to_string()]),
+            pod_manifest_overrides: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -433,6 +438,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -463,6 +469,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let result = runner.execute(config, None).await.unwrap();

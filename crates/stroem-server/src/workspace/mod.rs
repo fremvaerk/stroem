@@ -411,6 +411,7 @@ tasks:
                 resources: None,
                 input: HashMap::new(),
                 output: None,
+                manifest: None,
             },
         );
 
@@ -470,6 +471,7 @@ tasks:
                 resources: None,
                 input: HashMap::new(),
                 output: None,
+                manifest: None,
             },
         );
 
@@ -513,6 +515,7 @@ tasks:
                 resources: None,
                 input: HashMap::new(),
                 output: None,
+                manifest: None,
             },
         );
 

@@ -326,6 +326,24 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
                     action_name
                 );
             }
+
+            // Manifest is only valid on shell + runner: pod
+            if let Some(ref manifest) = action.manifest {
+                let runner = action.runner.as_deref().unwrap_or("local");
+                if runner != "pod" {
+                    bail!(
+                        "Action '{}' has 'manifest' field but runner is '{}' (manifest is only valid on pod actions)",
+                        action_name,
+                        runner
+                    );
+                }
+                if !manifest.is_object() {
+                    bail!(
+                        "Action '{}' has 'manifest' field but it is not an object",
+                        action_name
+                    );
+                }
+            }
         }
         "docker" => {
             // Docker actions must have image
@@ -348,6 +366,14 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
             if action.script.is_some() {
                 bail!(
                     "Action '{}' is type 'docker' but has 'script' field (use cmd or entrypoint instead)",
+                    action_name
+                );
+            }
+
+            // Docker actions must not have manifest (use type: pod for Kubernetes manifest overrides)
+            if action.manifest.is_some() {
+                bail!(
+                    "Action '{}' is type 'docker' but has 'manifest' field (manifest is only valid on pod actions)",
                     action_name
                 );
             }
@@ -375,6 +401,16 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
                     "Action '{}' is type 'pod' but has 'script' field (use cmd or entrypoint instead)",
                     action_name
                 );
+            }
+
+            // Validate manifest if present — must be a JSON object
+            if let Some(ref manifest) = action.manifest {
+                if !manifest.is_object() {
+                    bail!(
+                        "Action '{}' has 'manifest' field but it is not an object",
+                        action_name
+                    );
+                }
             }
         }
         "task" => {
@@ -408,6 +444,12 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
             if action.runner.is_some() {
                 bail!(
                     "Action '{}' is type 'task' but has 'runner' field (task actions only reference another task)",
+                    action_name
+                );
+            }
+            if action.manifest.is_some() {
+                bail!(
+                    "Action '{}' is type 'task' but has 'manifest' field (task actions only reference another task)",
                     action_name
                 );
             }
@@ -1609,5 +1651,129 @@ task: other-task
         )
         .unwrap();
         assert_eq!(derive_runner(&action), "none");
+    }
+
+    // --- manifest validation tests ---
+
+    #[test]
+    fn test_manifest_rejected_on_shell_local() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    cmd: "echo hi"
+    manifest:
+      spec:
+        serviceAccountName: my-sa
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("manifest"));
+    }
+
+    #[test]
+    fn test_manifest_rejected_on_shell_docker() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: docker
+    cmd: "echo hi"
+    manifest:
+      spec:
+        serviceAccountName: my-sa
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("manifest"));
+    }
+
+    #[test]
+    fn test_manifest_rejected_on_docker() {
+        let yaml = r#"
+actions:
+  test:
+    type: docker
+    image: alpine:latest
+    manifest:
+      spec:
+        serviceAccountName: my-sa
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("manifest"));
+    }
+
+    #[test]
+    fn test_manifest_rejected_on_task() {
+        let yaml = r#"
+actions:
+  test:
+    type: task
+    task: other
+    manifest:
+      spec:
+        serviceAccountName: my-sa
+tasks:
+  other:
+    flow:
+      s:
+        action: test
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("manifest"));
+    }
+
+    #[test]
+    fn test_manifest_accepted_on_pod_type() {
+        let yaml = r#"
+actions:
+  test:
+    type: pod
+    image: alpine:latest
+    manifest:
+      spec:
+        serviceAccountName: my-sa
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_manifest_accepted_on_shell_runner_pod() {
+        let yaml = r#"
+actions:
+  test:
+    type: shell
+    runner: pod
+    cmd: "echo hi"
+    manifest:
+      spec:
+        serviceAccountName: my-sa
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_manifest_must_be_object() {
+        let yaml = r#"
+actions:
+  test:
+    type: pod
+    image: alpine:latest
+    manifest: "not an object"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not an object"));
     }
 }

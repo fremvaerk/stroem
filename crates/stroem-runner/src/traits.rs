@@ -51,6 +51,8 @@ pub struct RunConfig {
     pub entrypoint: Option<Vec<String>>,
     /// Command args for Type 1 docker/pod
     pub command: Option<Vec<String>>,
+    /// Raw pod manifest overrides (deep-merged into generated pod JSON)
+    pub pod_manifest_overrides: Option<serde_json::Value>,
 }
 
 /// A callback for receiving log lines as they're produced

@@ -5,6 +5,7 @@ use futures_util::io::AsyncBufReadExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, DeleteParams, LogParams, PostParams};
 use kube::Client;
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// Kubernetes runner that executes commands inside Kubernetes pods
@@ -43,7 +44,7 @@ impl KubeRunner {
         config: &RunConfig,
         workspace_name: &str,
         labels: HashMap<String, String>,
-    ) -> Pod {
+    ) -> Result<Pod> {
         let image = config
             .image
             .as_deref()
@@ -61,7 +62,7 @@ impl KubeRunner {
             })
             .collect();
 
-        match config.runner_mode {
+        let mut pod_json = match config.runner_mode {
             RunnerMode::WithWorkspace => {
                 // Type 2: Shell in container with workspace via init container
                 let cmd = if let Some(ref command) = config.cmd {
@@ -77,7 +78,7 @@ impl KubeRunner {
                     self.server_url, workspace_name
                 );
 
-                let pod: Pod = serde_json::from_value(serde_json::json!({
+                serde_json::json!({
                     "apiVersion": "v1",
                     "kind": "Pod",
                     "metadata": {
@@ -114,9 +115,7 @@ impl KubeRunner {
                             "emptyDir": {},
                         }],
                     },
-                }))
-                .expect("Pod spec should be valid JSON");
-                pod
+                })
             }
             RunnerMode::NoWorkspace => {
                 // Type 1: Run user's prepared image, no init container, no workspace volume
@@ -144,7 +143,7 @@ impl KubeRunner {
                 }
                 // If nothing is set, image default entrypoint/cmd runs
 
-                let pod: Pod = serde_json::from_value(serde_json::json!({
+                serde_json::json!({
                     "apiVersion": "v1",
                     "kind": "Pod",
                     "metadata": {
@@ -155,11 +154,17 @@ impl KubeRunner {
                         "restartPolicy": "Never",
                         "containers": [container],
                     },
-                }))
-                .expect("Pod spec should be valid JSON");
-                pod
+                })
             }
+        };
+
+        // Apply pod manifest overrides via deep-merge
+        if let Some(ref overrides) = config.pod_manifest_overrides {
+            merge_json(&mut pod_json, overrides);
         }
+
+        serde_json::from_value(pod_json)
+            .context("Failed to build pod spec (manifest overrides may contain invalid fields)")
     }
 
     /// Generate a pod name from job_id and step_name
@@ -188,6 +193,47 @@ impl KubeRunner {
             .cloned()
             .unwrap_or_else(|| "default".to_string())
     }
+}
+
+/// Deep-merge two JSON values. For objects, keys are merged recursively.
+/// For arrays of objects with "name" fields, elements are matched by name
+/// and merged; unmatched entries are appended. Everything else is replaced.
+fn merge_json(base: &mut Value, overrides: &Value) {
+    match (base, overrides) {
+        (Value::Object(base_map), Value::Object(over_map)) => {
+            for (key, val) in over_map {
+                let entry = base_map.entry(key.clone()).or_insert(Value::Null);
+                merge_json(entry, val);
+            }
+        }
+        (Value::Array(base_arr), Value::Array(over_arr))
+            if is_named_array(base_arr) && is_named_array(over_arr) =>
+        {
+            for over_item in over_arr {
+                if let Some(over_name) = over_item.get("name").and_then(|n| n.as_str()) {
+                    if let Some(base_item) = base_arr
+                        .iter_mut()
+                        .find(|b| b.get("name").and_then(|n| n.as_str()) == Some(over_name))
+                    {
+                        merge_json(base_item, over_item);
+                    } else {
+                        base_arr.push(over_item.clone());
+                    }
+                }
+            }
+        }
+        (base, overrides) => {
+            *base = overrides.clone();
+        }
+    }
+}
+
+/// Returns true if every element in the array has a string "name" field.
+fn is_named_array(arr: &[Value]) -> bool {
+    !arr.is_empty()
+        && arr
+            .iter()
+            .all(|item| item.get("name").and_then(|n| n.as_str()).is_some())
 }
 
 #[async_trait]
@@ -221,7 +267,9 @@ impl Runner for KubeRunner {
         labels.insert("stroem.io/job-id".to_string(), job_id.clone());
         labels.insert("stroem.io/step".to_string(), step_name.clone());
 
-        let pod_spec = self.build_pod_spec(&pod_name, &config, &workspace_name, labels);
+        let pod_spec = self
+            .build_pod_spec(&pod_name, &config, &workspace_name, labels)
+            .context("Failed to build pod spec")?;
 
         // Create the pod
         tracing::info!("Creating pod: {}", pod_name);
@@ -380,6 +428,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let mut labels = HashMap::new();
@@ -387,7 +436,9 @@ mod tests {
         labels.insert("stroem.io/job-id".to_string(), "test-job".to_string());
         labels.insert("stroem.io/step".to_string(), "test-step".to_string());
 
-        let pod = runner.build_pod_spec("test-pod", &config, "default", labels);
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", labels)
+            .unwrap();
 
         // Verify metadata
         let metadata = pod.metadata;
@@ -444,12 +495,15 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let mut labels = HashMap::new();
         labels.insert("app".to_string(), "stroem-step".to_string());
 
-        let pod = runner.build_pod_spec("test-pod-nows", &config, "default", labels);
+        let pod = runner
+            .build_pod_spec("test-pod-nows", &config, "default", labels)
+            .unwrap();
 
         let spec = pod.spec.unwrap();
 
@@ -487,12 +541,15 @@ mod tests {
             runner_image: None,
             entrypoint: Some(vec!["/app/run".to_string()]),
             command: Some(vec!["--verbose".to_string()]),
+            pod_manifest_overrides: None,
         };
 
         let mut labels = HashMap::new();
         labels.insert("app".to_string(), "stroem-step".to_string());
 
-        let pod = runner.build_pod_spec("test-pod-ep", &config, "default", labels);
+        let pod = runner
+            .build_pod_spec("test-pod-ep", &config, "default", labels)
+            .unwrap();
 
         let spec = pod.spec.unwrap();
         let container = &spec.containers[0];
@@ -533,10 +590,335 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         };
 
         let result = runner.execute(config, None).await.unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello-from-kube"));
+    }
+
+    // --- merge_json tests ---
+
+    #[test]
+    fn test_merge_json_objects() {
+        let mut base = serde_json::json!({"a": 1, "b": {"x": 10}});
+        let over = serde_json::json!({"b": {"y": 20}, "c": 3});
+        merge_json(&mut base, &over);
+        assert_eq!(
+            base,
+            serde_json::json!({"a": 1, "b": {"x": 10, "y": 20}, "c": 3})
+        );
+    }
+
+    #[test]
+    fn test_merge_json_named_arrays() {
+        let mut base = serde_json::json!([
+            {"name": "a", "value": 1},
+            {"name": "b", "value": 2}
+        ]);
+        let over = serde_json::json!([
+            {"name": "b", "value": 99, "extra": true},
+            {"name": "c", "value": 3}
+        ]);
+        merge_json(&mut base, &over);
+        let arr = base.as_array().unwrap();
+        assert_eq!(arr.len(), 3); // a, b (merged), c (appended)
+        assert_eq!(arr[1]["value"], 99);
+        assert_eq!(arr[1]["extra"], true);
+        assert_eq!(arr[2]["name"], "c");
+    }
+
+    #[test]
+    fn test_merge_json_replaces_non_named_arrays() {
+        let mut base = serde_json::json!([1, 2, 3]);
+        let over = serde_json::json!([4, 5]);
+        merge_json(&mut base, &over);
+        assert_eq!(base, serde_json::json!([4, 5]));
+    }
+
+    #[test]
+    fn test_merge_json_scalars_replaced() {
+        let mut base = serde_json::json!("old");
+        let over = serde_json::json!("new");
+        merge_json(&mut base, &over);
+        assert_eq!(base, serde_json::json!("new"));
+    }
+
+    // --- build_pod_spec with overrides tests ---
+
+    fn make_runner() -> KubeRunner {
+        KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        )
+    }
+
+    fn make_pod_config(overrides: Option<serde_json::Value>) -> RunConfig {
+        RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: overrides,
+        }
+    }
+
+    fn make_labels() -> HashMap<String, String> {
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "stroem-step".to_string());
+        labels
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_service_account() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "serviceAccountName": "my-sa"
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.service_account_name, Some("my-sa".to_string()));
+        // Base fields preserved
+        assert_eq!(spec.restart_policy, Some("Never".to_string()));
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_annotations() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    "iam.amazonaws.com/role": "my-role"
+                }
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let annotations = pod.metadata.annotations.unwrap();
+        assert_eq!(
+            annotations.get("iam.amazonaws.com/role"),
+            Some(&"my-role".to_string())
+        );
+        // Labels preserved
+        assert_eq!(
+            pod.metadata.labels.unwrap().get("app"),
+            Some(&"stroem-step".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_node_selector() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "nodeSelector": {
+                    "gpu": "true"
+                }
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        let node_selector = spec.node_selector.unwrap();
+        assert_eq!(node_selector.get("gpu"), Some(&"true".to_string()));
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_resource_limits() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "step",
+                    "resources": {
+                        "requests": {"memory": "256Mi", "cpu": "500m"},
+                        "limits": {"memory": "512Mi"}
+                    }
+                }]
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        let container = &spec.containers[0];
+        assert_eq!(container.name, "step");
+        // Image should still be set from base
+        assert_eq!(container.image, Some("alpine:latest".to_string()));
+        // Resources should be merged
+        let resources = container.resources.as_ref().unwrap();
+        let requests = resources.requests.as_ref().unwrap();
+        assert!(requests.contains_key("memory"));
+        assert!(requests.contains_key("cpu"));
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_sidecar() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "sidecar",
+                    "image": "envoyproxy/envoy:v1.28"
+                }]
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        // Should have both step and sidecar containers
+        assert_eq!(spec.containers.len(), 2);
+        let names: Vec<&str> = spec.containers.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"step"));
+        assert!(names.contains(&"sidecar"));
+    }
+
+    #[test]
+    fn test_build_pod_spec_overrides_preserve_base() {
+        let runner = make_runner();
+        // WithWorkspace mode to test init container preservation
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: Some(serde_json::json!({
+                "spec": {
+                    "serviceAccountName": "my-sa"
+                }
+            })),
+        };
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        // Init container still exists
+        let init_containers = spec.init_containers.unwrap();
+        assert_eq!(init_containers.len(), 1);
+        assert_eq!(init_containers[0].name, "workspace-init");
+        // Labels still present
+        assert!(pod.metadata.labels.unwrap().contains_key("app"));
+        // Override applied
+        assert_eq!(spec.service_account_name, Some("my-sa".to_string()));
+        // restartPolicy preserved
+        assert_eq!(spec.restart_policy, Some("Never".to_string()));
+    }
+
+    #[test]
+    fn test_build_pod_spec_invalid_overrides_returns_error() {
+        let runner = make_runner();
+        // restartPolicy expects a string, not a number — Pod deserialization should fail
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "restartPolicy": 42
+            }
+        })));
+        let result = runner.build_pod_spec("test-pod", &config, "default", make_labels());
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("manifest overrides"));
+    }
+
+    #[test]
+    fn test_build_pod_spec_empty_overrides_noop() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({})));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy, Some("Never".to_string()));
+        assert_eq!(spec.containers[0].name, "step");
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_tolerations() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "tolerations": [{
+                    "key": "gpu",
+                    "operator": "Exists",
+                    "effect": "NoSchedule"
+                }]
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        let tolerations = spec.tolerations.unwrap();
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(tolerations[0].key, Some("gpu".to_string()));
+        assert_eq!(tolerations[0].operator, Some("Exists".to_string()));
+        assert_eq!(tolerations[0].effect, Some("NoSchedule".to_string()));
+    }
+
+    #[test]
+    fn test_build_pod_spec_none_overrides_noop() {
+        let runner = make_runner();
+        let config = make_pod_config(None);
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        assert_eq!(spec.restart_policy, Some("Never".to_string()));
+    }
+
+    #[test]
+    fn test_merge_json_nested_named_arrays() {
+        // Merging volumeMounts within a container matched by name
+        let mut base = serde_json::json!([{
+            "name": "step",
+            "volumeMounts": [
+                {"name": "workspace", "mountPath": "/workspace"}
+            ]
+        }]);
+        let over = serde_json::json!([{
+            "name": "step",
+            "volumeMounts": [
+                {"name": "workspace", "readOnly": true},
+                {"name": "secrets", "mountPath": "/secrets"}
+            ]
+        }]);
+        merge_json(&mut base, &over);
+        let container = &base.as_array().unwrap()[0];
+        let mounts = container["volumeMounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        // workspace mount merged — has both mountPath and readOnly
+        assert_eq!(mounts[0]["mountPath"], "/workspace");
+        assert_eq!(mounts[0]["readOnly"], true);
+        // secrets mount appended
+        assert_eq!(mounts[1]["name"], "secrets");
+    }
+
+    #[test]
+    fn test_merge_json_mixed_array_types() {
+        // Base is named array, override is not — should replace entirely
+        let mut base = serde_json::json!([{"name": "a", "value": 1}]);
+        let over = serde_json::json!([1, 2, 3]);
+        merge_json(&mut base, &over);
+        assert_eq!(base, serde_json::json!([1, 2, 3]));
     }
 }

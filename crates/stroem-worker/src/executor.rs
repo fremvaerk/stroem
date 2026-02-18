@@ -224,6 +224,9 @@ impl StepExecutor {
         env.insert("STROEM_STEP_NAME".to_string(), step.step_name.clone());
         env.insert("STROEM_WORKSPACE".to_string(), step.workspace.clone());
 
+        // Extract pod manifest overrides (raw JSON for deep-merge into pod spec)
+        let pod_manifest_overrides = action_spec.get("manifest").cloned();
+
         Ok(RunConfig {
             cmd,
             script,
@@ -235,6 +238,7 @@ impl StepExecutor {
             runner_image: self.runner_image.clone(),
             entrypoint,
             command,
+            pod_manifest_overrides,
         })
     }
 }
@@ -763,5 +767,42 @@ mod tests {
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
         assert_eq!(config.action_type, "shell");
+    }
+
+    #[test]
+    fn test_build_run_config_with_manifest_overrides() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({
+            "cmd": "echo hi",
+            "manifest": {
+                "spec": {
+                    "serviceAccountName": "my-sa",
+                    "nodeSelector": {"gpu": "true"}
+                }
+            }
+        })));
+        step.action_type = "pod".to_string();
+        step.action_image = Some("alpine:latest".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert!(config.pod_manifest_overrides.is_some());
+        let overrides = config.pod_manifest_overrides.unwrap();
+        assert_eq!(
+            overrides["spec"]["serviceAccountName"],
+            serde_json::json!("my-sa")
+        );
+        assert_eq!(
+            overrides["spec"]["nodeSelector"]["gpu"],
+            serde_json::json!("true")
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_without_manifest() {
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert!(config.pod_manifest_overrides.is_none());
     }
 }

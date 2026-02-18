@@ -104,6 +104,7 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Type 2 (Shell)**: `type: shell` + `runner: local|docker|pod` — shell commands in a runner environment with workspace files
 - **Type 3 (Sub-job)**: `type: task` — references another task, server creates a child job (see Task Actions below)
 - `type: shell` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: shell` + `runner: docker` (Type 2) instead.
+- **Pod manifest overrides**: `type: pod` and `type: shell` + `runner: pod` support a `manifest` field — a raw JSON/YAML object deep-merged into the generated pod spec (service accounts, node selectors, tolerations, resource limits, annotations, sidecars, etc.). See `docs/workflow-authoring.md` for details.
 
 ### Runner Architecture
 - `RunConfig` carries `action_type`, `image`, `runner_mode`, `runner_image`, `entrypoint`, `command`

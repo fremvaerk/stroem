@@ -176,6 +176,94 @@ actions:
     cmd: "python /workspace/test_gpu.py"
 ```
 
+### Pod Manifest Overrides
+
+Actions that run as Kubernetes pods (`type: pod` or `type: shell` + `runner: pod`) support a `manifest` field for injecting arbitrary Kubernetes pod configuration. The value is a raw YAML/JSON object that gets deep-merged into the generated pod manifest.
+
+This lets you configure any Kubernetes field without Strøm needing to model it explicitly: service accounts, node selectors, tolerations, resource limits, annotations, sidecars, volumes, etc.
+
+**Merge rules:**
+- **Objects**: recursively merged (override keys are merged into the base)
+- **Arrays of objects with `name` field** (e.g. `containers`, `initContainers`, `volumes`, `env`): matched by `name` and deep-merged per element; unmatched entries are appended
+- **Other arrays and scalars**: replaced entirely
+
+Strøm-managed fields (init container, `restartPolicy: Never`, base labels) are generated first, then `manifest` is merged on top.
+
+**Service account and annotations:**
+
+```yaml
+actions:
+  deploy:
+    type: pod
+    image: company/deploy:latest
+    cmd: "deploy --env production"
+    manifest:
+      metadata:
+        annotations:
+          iam.amazonaws.com/role: my-role
+      spec:
+        serviceAccountName: my-sa
+```
+
+**Node selector and tolerations:**
+
+```yaml
+actions:
+  train-model:
+    type: pod
+    image: pytorch/pytorch:2.1.0
+    tags: ["gpu"]
+    cmd: "python train.py"
+    manifest:
+      spec:
+        nodeSelector:
+          gpu: "true"
+        tolerations:
+          - key: "gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
+```
+
+**Resource limits (target the `step` container by name):**
+
+```yaml
+actions:
+  heavy-build:
+    type: pod
+    image: node:20
+    cmd: "npm run build"
+    manifest:
+      spec:
+        containers:
+          - name: step
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "500m"
+              limits:
+                memory: "512Mi"
+```
+
+**Adding a sidecar container:**
+
+```yaml
+actions:
+  test-with-db:
+    type: pod
+    image: node:20
+    cmd: "npm test"
+    manifest:
+      spec:
+        containers:
+          - name: postgres-sidecar
+            image: postgres:16
+            env:
+              - name: POSTGRES_PASSWORD
+                value: test
+```
+
+The `manifest` field is rejected on `type: docker`, `type: task`, and `type: shell` with `runner: local` or `runner: docker`. It must be a YAML/JSON object (not a scalar or array).
+
 ### Configuring Container Runners
 
 Container runners (Docker and Kubernetes) are optional features that must be enabled at build time and configured in the worker config.

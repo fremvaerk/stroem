@@ -61,6 +61,7 @@ fn test_workspace() -> WorkspaceConfig {
             resources: None,
             input: greet_input,
             output: None,
+            manifest: None,
         },
     );
 
@@ -82,6 +83,7 @@ fn test_workspace() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -107,6 +109,7 @@ fn test_workspace() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -443,6 +446,7 @@ fn test_workspace() -> WorkspaceConfig {
             resources: None,
             input: db_input,
             output: None,
+            manifest: None,
         },
     );
 
@@ -522,6 +526,7 @@ fn test_workspace() -> WorkspaceConfig {
             resources: None,
             input: transform_input,
             output: None,
+            manifest: None,
         },
     );
 
@@ -555,6 +560,7 @@ fn test_workspace() -> WorkspaceConfig {
             resources: None,
             input: summarize_input,
             output: None,
+            manifest: None,
         },
     );
 
@@ -4414,6 +4420,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -6240,6 +6247,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -6261,6 +6269,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -6291,6 +6300,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             resources: None,
             input: notify_input,
             output: None,
+            manifest: None,
         },
     );
 
@@ -7136,6 +7146,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -7157,6 +7168,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -7481,6 +7493,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 
@@ -7711,6 +7724,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             resources: None,
             input: HashMap::new(),
             output: None,
+            manifest: None,
         },
     );
 

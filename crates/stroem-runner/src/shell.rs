@@ -164,6 +164,7 @@ mod tests {
             runner_image: None,
             entrypoint: None,
             command: None,
+            pod_manifest_overrides: None,
         }
     }
 

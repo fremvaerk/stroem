@@ -312,6 +312,7 @@ mod tests {
                 resources: None,
                 input: HashMap::new(),
                 output: None,
+                manifest: None,
             },
         );
 
