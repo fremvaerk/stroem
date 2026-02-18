@@ -68,6 +68,12 @@ worker:
 # RBAC for pod creation (needed for KubeRunner)
 rbac:
   create: true
+  # Extra namespaces where the worker can create pods (for KubeRunner).
+  # A Role + RoleBinding will be created in each listed namespace.
+  # The release namespace is always included automatically.
+  namespaces: []
+  #  - jobs
+  #  - staging-jobs
 
 serviceAccount:
   create: true
