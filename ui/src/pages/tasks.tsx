@@ -257,10 +257,9 @@ export function TasksPage() {
                             {task.name}
                           </Link>
                           {task.has_triggers && (
-                            <Clock
-                              className="h-3.5 w-3.5 text-muted-foreground"
-                              title="Has scheduled triggers"
-                            />
+                            <span title="Has scheduled triggers">
+                              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                            </span>
                           )}
                         </div>
                       </TableCell>
