@@ -220,8 +220,13 @@ async fn fire_single_hook(
             )
         })?;
 
-    // Build Tera context: { "hook": <HookContext>, "input": <rendered_input> }
-    let template_context = serde_json::json!({ "hook": ctx_value });
+    // Build Tera context: { "hook": <HookContext>, "secret": <workspace secrets> }
+    let mut template_context = serde_json::json!({ "hook": ctx_value });
+    if !workspace_config.secrets.is_empty() {
+        if let Ok(secrets_value) = serde_json::to_value(&workspace_config.secrets) {
+            template_context["secret"] = secrets_value;
+        }
+    }
 
     // Render hook input through Tera templates
     let rendered_input = if hook.input.is_empty() {
@@ -311,6 +316,7 @@ async fn fire_single_hook(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn test_hook_context_serialization() {
@@ -408,5 +414,85 @@ mod tests {
         assert!(rendered.contains("Traceback (most recent call last):"));
         assert!(rendered.contains("RuntimeError: connection refused"));
         assert!(rendered.contains('\n'), "Newlines should be preserved");
+    }
+
+    #[test]
+    fn test_hook_template_with_secrets() {
+        let ctx = HookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "api".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: None,
+            failed_steps: vec![],
+        };
+
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+
+        // Simulate what fire_single_hook builds: { "hook": ..., "secret": ... }
+        let mut template_context = json!({ "hook": ctx_value });
+        let secrets: HashMap<String, serde_json::Value> = [
+            (
+                "WEBHOOK_URL".to_string(),
+                json!("https://chat.example.com/webhook"),
+            ),
+            ("API_KEY".to_string(), json!("ref+vault://secret/key")),
+        ]
+        .into();
+        template_context["secret"] = serde_json::to_value(&secrets).unwrap();
+
+        let mut input = std::collections::HashMap::new();
+        input.insert("webhook_url".to_string(), json!("{{ secret.WEBHOOK_URL }}"));
+        input.insert("api_key".to_string(), json!("{{ secret.API_KEY }}"));
+        input.insert(
+            "message".to_string(),
+            json!("Job {{ hook.job_id }} {{ hook.status }}"),
+        );
+
+        let result = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(result["webhook_url"], "https://chat.example.com/webhook");
+        assert_eq!(result["api_key"], "ref+vault://secret/key");
+        assert_eq!(result["message"], "Job abc-123 completed");
+    }
+
+    #[test]
+    fn test_hook_template_with_nested_secrets() {
+        let ctx = HookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "api".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: None,
+            failed_steps: vec![],
+        };
+
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        let mut template_context = json!({ "hook": ctx_value });
+        template_context["secret"] = json!({
+            "notifications": {
+                "google_chat": "https://chat.googleapis.com/webhook/123"
+            }
+        });
+
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "url".to_string(),
+            json!("{{ secret.notifications.google_chat }}"),
+        );
+
+        let result = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(result["url"], "https://chat.googleapis.com/webhook/123");
     }
 }

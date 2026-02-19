@@ -820,6 +820,7 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 3. **RBAC**: Roles, permissions, workspace-scoped access control
 4. **Secret resolution** via `vals` CLI
 5. **Resource types** (custom resource definitions in YAML)
+6. **DAG visualization** -- Interactive workflow graph on task detail and job detail pages. Auto-layout of steps as nodes with dependency edges, virtual start/finish nodes. Clickable steps to inspect inputs, outputs, and logs. On job detail, nodes reflect live step status (pending/running/completed/failed). Library candidates: dagre, elkjs, reactflow.
 
 ---
 

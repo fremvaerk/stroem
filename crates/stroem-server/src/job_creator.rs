@@ -166,8 +166,8 @@ pub async fn handle_task_steps(
             continue;
         }
 
-        // Build render context (same as claim_job)
-        let context_value = build_step_render_context(&job, &steps);
+        // Build render context (same as claim_job, with secrets)
+        let context_value = build_step_render_context(&job, &steps, workspace_config);
 
         // Render step input templates
         let rendered_input = if let Some(ref input) = step.input {
@@ -236,7 +236,12 @@ pub async fn handle_task_steps(
 
 /// Build a template render context from a job and its steps.
 /// Same logic as claim_job but without DB access (steps already loaded).
-fn build_step_render_context(job: &JobRow, steps: &[stroem_db::JobStepRow]) -> serde_json::Value {
+/// Includes workspace secrets under the `secret` key.
+fn build_step_render_context(
+    job: &JobRow,
+    steps: &[stroem_db::JobStepRow],
+    workspace_config: &WorkspaceConfig,
+) -> serde_json::Value {
     let mut ctx = serde_json::Map::new();
     if let Some(ref input) = job.input {
         ctx.insert("input".to_string(), input.clone());
@@ -249,6 +254,11 @@ fn build_step_render_context(job: &JobRow, steps: &[stroem_db::JobStepRow]) -> s
             }
             let safe_name = s.step_name.replace('-', "_");
             ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
+        }
+    }
+    if !workspace_config.secrets.is_empty() {
+        if let Ok(secrets_value) = serde_json::to_value(&workspace_config.secrets) {
+            ctx.insert("secret".to_string(), secrets_value);
         }
     }
     serde_json::Value::Object(ctx)
@@ -267,4 +277,145 @@ async fn compute_depth(pool: &PgPool, job: &JobRow) -> Result<u32> {
         current_parent = parent.and_then(|p| p.parent_job_id);
     }
     Ok(depth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn make_job(input: Option<serde_json::Value>) -> JobRow {
+        JobRow {
+            job_id: Uuid::new_v4(),
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            mode: "distributed".to_string(),
+            input,
+            output: None,
+            status: "running".to_string(),
+            source_type: "api".to_string(),
+            source_id: None,
+            worker_id: None,
+            revision: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            log_path: None,
+            parent_job_id: None,
+            parent_step_name: None,
+        }
+    }
+
+    fn make_step(
+        job_id: Uuid,
+        name: &str,
+        status: &str,
+        output: Option<serde_json::Value>,
+    ) -> stroem_db::JobStepRow {
+        stroem_db::JobStepRow {
+            job_id,
+            step_name: name.to_string(),
+            action_name: name.to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            output,
+            status: status.to_string(),
+            worker_id: None,
+            started_at: None,
+            completed_at: None,
+            error_message: None,
+            required_tags: json!([]),
+            runner: "local".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_build_step_render_context_with_secrets() {
+        let job = make_job(Some(json!({"env": "prod"})));
+        let steps = vec![make_step(
+            job.job_id,
+            "build",
+            "completed",
+            Some(json!({"tag": "v1.0"})),
+        )];
+
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("API_KEY".to_string(), json!("secret-value-123"));
+        ws.secrets.insert(
+            "WEBHOOK_URL".to_string(),
+            json!("https://hooks.example.com/x"),
+        );
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        // Input is present
+        assert_eq!(ctx["input"]["env"], "prod");
+        // Completed step output is present
+        assert_eq!(ctx["build"]["output"]["tag"], "v1.0");
+        // Secrets are present
+        assert_eq!(ctx["secret"]["API_KEY"], "secret-value-123");
+        assert_eq!(ctx["secret"]["WEBHOOK_URL"], "https://hooks.example.com/x");
+    }
+
+    #[test]
+    fn test_build_step_render_context_no_secrets() {
+        let job = make_job(Some(json!({"env": "staging"})));
+        let steps = vec![];
+        let ws = WorkspaceConfig::new();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        assert_eq!(ctx["input"]["env"], "staging");
+        // No secret key when secrets are empty
+        assert!(ctx.get("secret").is_none());
+    }
+
+    #[test]
+    fn test_build_step_render_context_hyphen_sanitization() {
+        let job = make_job(None);
+        let steps = vec![make_step(
+            job.job_id,
+            "build-app",
+            "completed",
+            Some(json!({"image": "app:latest"})),
+        )];
+        let ws = WorkspaceConfig::new();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        // Hyphens in step names become underscores
+        assert_eq!(ctx["build_app"]["output"]["image"], "app:latest");
+        assert!(ctx.get("build-app").is_none());
+    }
+
+    #[test]
+    fn test_build_step_render_context_only_completed_steps() {
+        let job = make_job(None);
+        let steps = vec![
+            make_step(
+                job.job_id,
+                "step1",
+                "completed",
+                Some(json!({"result": "ok"})),
+            ),
+            make_step(
+                job.job_id,
+                "step2",
+                "running",
+                Some(json!({"partial": true})),
+            ),
+            make_step(job.job_id, "step3", "pending", None),
+        ];
+        let ws = WorkspaceConfig::new();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        assert_eq!(ctx["step1"]["output"]["result"], "ok");
+        assert!(ctx.get("step2").is_none());
+        assert!(ctx.get("step3").is_none());
+    }
 }

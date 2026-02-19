@@ -239,10 +239,19 @@ pub async fn claim_job(
             break 'render step.input.clone();
         }
 
-        // Build template context: { "input": job.input, "step_name": { "output": ... }, ... }
+        // Build template context: { "input": job.input, "secret": ..., "step_name": { "output": ... }, ... }
         let mut context = serde_json::Map::new();
         if let Some(job_input) = &job.input {
             context.insert("input".to_string(), job_input.clone());
+        }
+
+        // Add workspace secrets
+        if let Some(ws_config) = state.get_workspace(&job.workspace).await {
+            if !ws_config.secrets.is_empty() {
+                if let Ok(secrets_value) = serde_json::to_value(&ws_config.secrets) {
+                    context.insert("secret".to_string(), secrets_value);
+                }
+            }
         }
 
         // Add completed step outputs to context
