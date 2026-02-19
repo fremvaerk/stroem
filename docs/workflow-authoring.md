@@ -592,6 +592,91 @@ cmd: "echo {{ name | default(value='World') }}"
 cmd: "{% if enabled %}echo Active{% else %}echo Inactive{% endif %}"
 ```
 
+### Secret Resolution with `| vals`
+
+The `| vals` filter resolves `ref+` secret references at template render time using the [vals](https://github.com/helmfile/vals) CLI.
+
+**Prerequisites:** The `vals` binary must be installed and available on PATH on the **server** (where templates are rendered). Install it from [github.com/helmfile/vals](https://github.com/helmfile/vals).
+
+**Usage:** Pipe any value through `| vals`. Only strings starting with `ref+` are resolved — plain strings pass through unchanged.
+
+#### How it works
+
+The `secrets:` section is rendered through Tera at **workspace load time**. Secrets are resolved once and cached in memory — all templates referencing `{{ secret.* }}` get the already-resolved plaintext value:
+
+```yaml
+secrets:
+  DB_PASSWORD: "{{ 'ref+awsssm:///prod/db/password' | vals }}"
+  API_TOKEN: "{{ 'ref+vault://secret/data/api#token' | vals }}"
+  SLACK_WEBHOOK: "{{ 'ref+gcpsecrets://my-project/slack-webhook' | vals }}"
+```
+
+Then use the resolved values in templates — no `| vals` needed:
+
+```yaml
+env:
+  DB_PASSWORD: "{{ secret.DB_PASSWORD }}"
+cmd: "deploy --token {{ secret.API_TOKEN }}"
+```
+
+Secrets are re-resolved when the workspace reloads (on config change or git poll), so rotated secrets are picked up automatically.
+
+You can also use `| vals` inline in any template expression (step `input:`, action `env:`, `cmd:`, `script:`, hook `input:`) without going through `secrets:`:
+
+```yaml
+env:
+  DB_PASSWORD: "{{ 'ref+awsssm:///prod/db/password' | vals }}"
+```
+
+This resolves at step claim time rather than workspace load time.
+
+#### Full example
+
+```yaml
+secrets:
+  DB_PASSWORD: "{{ 'ref+awsssm:///prod/db/password' | vals }}"
+  API_TOKEN: "{{ 'ref+vault://secret/data/api#token' | vals }}"
+  SLACK_WEBHOOK: "{{ 'ref+gcpsecrets://my-project/slack-webhook' | vals }}"
+
+actions:
+  deploy:
+    type: shell
+    cmd: "deploy --token {{ secret.API_TOKEN }}"
+    env:
+      DB_PASSWORD: "{{ secret.DB_PASSWORD }}"
+    input:
+      env: { type: string }
+
+tasks:
+  deploy:
+    flow:
+      deploy:
+        action: deploy
+        input:
+          env: "{{ input.env }}"
+    on_success:
+      - action: notify-slack
+        input:
+          webhook_url: "{{ secret.SLACK_WEBHOOK }}"
+          message: "Deploy succeeded"
+```
+
+**Supported backends** (any backend supported by vals):
+- `ref+awsssm://` — AWS SSM Parameter Store
+- `ref+vault://` — HashiCorp Vault
+- `ref+gcpsecrets://` — Google Cloud Secret Manager
+- `ref+azurekeyvault://` — Azure Key Vault
+- `ref+sops://` — SOPS encrypted files
+- And [many more](https://github.com/helmfile/vals#supported-backends)
+
+**Behavior:**
+- Plain strings (not starting with `ref+`) pass through unchanged — `{{ "hello" | vals }}` returns `"hello"`
+- Non-string values (numbers, booleans) pass through unchanged
+- If `vals` is not installed and a `ref+` value is encountered, the template render fails with a clear error
+- Each `| vals` usage invokes the vals CLI once — acceptable for typical 1-5 secrets per template
+
+**Note:** SOPS-encrypted workflow files (`.sops.yaml`) are decrypted at load time, so values from those files are already plaintext and don't need `| vals`. Use `| vals` for secret references that point to external secret stores.
+
 ### Step name rules
 
 - Step names in YAML can use hyphens: `say-hello`
@@ -866,16 +951,19 @@ tasks:
     on_success:
       - action: notify-slack
         input:
+          webhook_url: "{{ secret.SLACK_WEBHOOK_URL }}"
           message: "Deploy {{ hook.task_name }} succeeded ({{ hook.duration_secs }}s)"
     on_error:
       - action: notify-slack
         input:
+          webhook_url: "{{ secret.SLACK_WEBHOOK_URL }}"
           message: "Deploy {{ hook.task_name }} FAILED: {{ hook.error_message }}"
 ```
 
 ### Hook Context Variables
 
-Hook input values are Tera templates with access to a `hook` object containing job context:
+Hook input values are Tera templates with access to a `hook` object containing job context,
+plus any workspace `secrets` under the `secret` key (e.g. `{{ secret.WEBHOOK_URL }}`):
 
 | Variable | Type | Description |
 |----------|------|-------------|

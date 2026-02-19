@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -179,11 +180,60 @@ impl WorkspaceConfig {
         self.tasks.extend(config.tasks);
         self.triggers.extend(config.triggers);
     }
+
+    /// Render secret values through Tera templates.
+    ///
+    /// This allows secrets to use template expressions at load time, e.g.:
+    /// ```yaml
+    /// secrets:
+    ///   DB_URL: "{{ 'ref+awsssm:///prod/db/password' | vals }}"
+    /// ```
+    ///
+    /// String values are rendered with an empty context. Non-string values
+    /// and strings without template syntax pass through unchanged.
+    pub fn render_secrets(&mut self) -> anyhow::Result<()> {
+        let empty_context = serde_json::json!({});
+        for (key, value) in &mut self.secrets {
+            render_secret_value(value, &empty_context)
+                .with_context(|| format!("Failed to render secret '{key}'"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Recursively render string values in a serde_json::Value through Tera.
+fn render_secret_value(
+    value: &mut serde_json::Value,
+    context: &serde_json::Value,
+) -> anyhow::Result<()> {
+    use crate::template::render_template;
+
+    match value {
+        serde_json::Value::String(s) => {
+            if s.contains("{{") {
+                let rendered = render_template(s, context)?;
+                *s = rendered;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                render_secret_value(v, context)?;
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                render_secret_value(v, context)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_parse_simple_workflow() {
@@ -738,5 +788,105 @@ actions:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
         assert!(action.manifest.is_none());
+    }
+
+    #[test]
+    fn test_render_secrets_plain_values_unchanged() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("plain".to_string(), json!("just-a-string"));
+        ws.secrets.insert("number".to_string(), json!(42));
+        ws.secrets.insert("flag".to_string(), json!(true));
+        ws.render_secrets().unwrap();
+        assert_eq!(ws.secrets["plain"], "just-a-string");
+        assert_eq!(ws.secrets["number"], 42);
+        assert_eq!(ws.secrets["flag"], true);
+    }
+
+    #[test]
+    fn test_render_secrets_template_without_filter() {
+        // A template expression with no filter just renders to the literal
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert("key".to_string(), json!("{{ 'hello' }}"));
+        ws.render_secrets().unwrap();
+        assert_eq!(ws.secrets["key"], "hello");
+    }
+
+    #[test]
+    fn test_render_secrets_nested_values() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("db".to_string(), json!({"host": "localhost", "port": 5432}));
+        ws.render_secrets().unwrap();
+        assert_eq!(ws.secrets["db"]["host"], "localhost");
+        assert_eq!(ws.secrets["db"]["port"], 5432);
+    }
+
+    #[test]
+    fn test_render_secrets_skips_no_template_syntax() {
+        // Strings without {{ }} are not passed through Tera at all
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert(
+            "raw_ref".to_string(),
+            json!("ref+awsssm:///prod/db/password"),
+        );
+        ws.render_secrets().unwrap();
+        // No {{ }} so it passes through unchanged
+        assert_eq!(ws.secrets["raw_ref"], "ref+awsssm:///prod/db/password");
+    }
+
+    #[test]
+    fn test_render_secrets_error_on_bad_template() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("bad".to_string(), json!("{{ missing_var }}"));
+        let result = ws.render_secrets();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bad"), "Error should mention key name: {err}");
+    }
+
+    #[test]
+    fn test_render_secrets_empty() {
+        let mut ws = WorkspaceConfig::new();
+        ws.render_secrets().unwrap();
+        assert!(ws.secrets.is_empty());
+    }
+
+    #[test]
+    fn test_render_secrets_nested_object_with_template() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert(
+            "db".to_string(),
+            json!({"password": "{{ 'resolved-pw' }}", "host": "localhost"}),
+        );
+        ws.render_secrets().unwrap();
+        assert_eq!(ws.secrets["db"]["password"], "resolved-pw");
+        assert_eq!(ws.secrets["db"]["host"], "localhost");
+    }
+
+    #[test]
+    fn test_render_secrets_array_values() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert(
+            "hosts".to_string(),
+            json!(["{{ 'host-a' }}", "plain", "{{ 'host-c' }}"]),
+        );
+        ws.render_secrets().unwrap();
+        assert_eq!(ws.secrets["hosts"][0], "host-a");
+        assert_eq!(ws.secrets["hosts"][1], "plain");
+        assert_eq!(ws.secrets["hosts"][2], "host-c");
+    }
+
+    #[test]
+    fn test_render_secrets_deeply_nested() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert(
+            "cloud".to_string(),
+            json!({"providers": [{"name": "aws", "key": "{{ 'resolved' }}"}]}),
+        );
+        ws.render_secrets().unwrap();
+        assert_eq!(ws.secrets["cloud"]["providers"][0]["name"], "aws");
+        assert_eq!(ws.secrets["cloud"]["providers"][0]["key"], "resolved");
     }
 }

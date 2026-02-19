@@ -2,6 +2,70 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use tera::Tera;
 
+/// Tera filter that resolves `ref+` secret references via the vals CLI.
+///
+/// Usage in templates: `{{ secret.KEY | vals }}`
+/// - Non-string values pass through unchanged
+/// - Strings not starting with `ref+` pass through unchanged
+/// - Strings starting with `ref+` are resolved via `vals eval`
+fn vals_filter(
+    value: &tera::Value,
+    _args: &HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    let s = match value.as_str() {
+        Some(s) => s,
+        None => return Ok(value.clone()),
+    };
+
+    if !s.starts_with("ref+") {
+        return Ok(value.clone());
+    }
+
+    let input = serde_json::json!({"_v": s});
+    let input_str = serde_json::to_string(&input)
+        .map_err(|e| tera::Error::msg(format!("vals: serialize failed: {e}")))?;
+
+    let mut child = std::process::Command::new("vals")
+        .args(["eval", "-f", "-", "-o", "json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            tera::Error::msg(format!(
+                "vals CLI not found. Install vals to use ref+ secrets: {e}"
+            ))
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin
+            .write_all(input_str.as_bytes())
+            .map_err(|e| tera::Error::msg(format!("vals: stdin write failed: {e}")))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| tera::Error::msg(format!("vals: process failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(tera::Error::msg(format!(
+            "vals eval failed (exit {}): {}",
+            output.status,
+            stderr.trim()
+        )));
+    }
+
+    let resolved: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| tera::Error::msg(format!("vals: invalid output JSON: {e}")))?;
+
+    match resolved.get("_v").and_then(|v| v.as_str()) {
+        Some(resolved_str) => Ok(tera::Value::String(resolved_str.to_string())),
+        None => Err(tera::Error::msg("vals: resolved output missing '_v' key")),
+    }
+}
+
 /// Renders a single Tera template string against a JSON context
 pub fn render_template(template: &str, context: &serde_json::Value) -> Result<String> {
     let mut tera = Tera::default();
@@ -9,6 +73,8 @@ pub fn render_template(template: &str, context: &serde_json::Value) -> Result<St
 
     tera.add_raw_template(template_name, template)
         .context("Failed to parse template")?;
+
+    tera.register_filter("vals", vals_filter);
 
     let tera_context =
         tera::Context::from_serialize(context).context("Failed to convert JSON to Tera context")?;
@@ -380,5 +446,93 @@ mod tests {
         let context = json!({});
         let result = render_string_opt(&template, &context).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_vals_filter_passthrough_non_string() {
+        let value = json!(42);
+        let args = HashMap::new();
+        let result = vals_filter(&value, &args).unwrap();
+        assert_eq!(result, json!(42));
+    }
+
+    #[test]
+    fn test_vals_filter_passthrough_no_ref() {
+        let value = json!("plain-text");
+        let args = HashMap::new();
+        let result = vals_filter(&value, &args).unwrap();
+        assert_eq!(result, json!("plain-text"));
+    }
+
+    #[test]
+    fn test_vals_filter_passthrough_empty() {
+        let value = json!("");
+        let args = HashMap::new();
+        let result = vals_filter(&value, &args).unwrap();
+        assert_eq!(result, json!(""));
+    }
+
+    #[test]
+    fn test_vals_filter_passthrough_boolean() {
+        let args = HashMap::new();
+        let result = vals_filter(&json!(true), &args).unwrap();
+        assert_eq!(result, json!(true));
+    }
+
+    #[test]
+    fn test_vals_filter_passthrough_null() {
+        let args = HashMap::new();
+        let result = vals_filter(&json!(null), &args).unwrap();
+        assert_eq!(result, json!(null));
+    }
+
+    #[test]
+    fn test_vals_filter_ref_value_errors() {
+        // When vals is not installed: "vals CLI not found"
+        // When vals is installed but backend unreachable: "vals eval failed"
+        let value = json!("ref+vault://secret/key");
+        let args = HashMap::new();
+        let result = vals_filter(&value, &args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("vals CLI not found") || err.contains("vals eval failed"),
+            "Expected vals-related error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_vals_filter_in_template_passthrough() {
+        let template = "password={{ db_pw | vals }}";
+        let context = json!({"db_pw": "plain-value"});
+        let result = render_template(template, &context).unwrap();
+        assert_eq!(result, "password=plain-value");
+    }
+
+    #[test]
+    fn test_vals_filter_in_template_ref_errors() {
+        // With a ref+ value, vals is invoked — either it's missing or the backend is unreachable
+        let template = "password={{ secret.KEY | vals }}";
+        let context = json!({"secret": {"KEY": "ref+awsssm:///prod/db/password"}});
+        let result = render_template(template, &context);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vals_filter_chained_with_other_filters() {
+        // vals on a non-ref+ string passes through, then upper transforms it
+        let template = "{{ name | vals | upper }}";
+        let context = json!({"name": "hello"});
+        let result = render_template(template, &context).unwrap();
+        assert_eq!(result, "HELLO");
+    }
+
+    #[test]
+    fn test_vals_filter_with_literal_string() {
+        // Inline literal strings that don't start with ref+ pass through vals unchanged
+        let template = "{{ 'plain-value' | vals }}";
+        let context = json!({});
+        let result = render_template(template, &context).unwrap();
+        assert_eq!(result, "plain-value");
     }
 }

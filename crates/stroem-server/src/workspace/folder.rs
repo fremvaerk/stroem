@@ -139,11 +139,17 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         }
     }
 
+    // Render secret values through Tera (resolves {{ 'ref+...' | vals }} at load time)
+    workspace
+        .render_secrets()
+        .context("Failed to render workspace secrets")?;
+
     tracing::debug!(
-        "Loaded workspace: {} actions, {} tasks, {} triggers",
+        "Loaded workspace: {} actions, {} tasks, {} triggers, {} secrets",
         workspace.actions.len(),
         workspace.tasks.len(),
-        workspace.triggers.len()
+        workspace.triggers.len(),
+        workspace.secrets.len()
     );
 
     Ok(workspace)
