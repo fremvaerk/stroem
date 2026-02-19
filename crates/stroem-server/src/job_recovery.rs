@@ -68,7 +68,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             let log_storage = state.log_storage.clone();
             tokio::spawn(async move {
                 if let Err(e) = log_storage.upload_to_s3(job_id).await {
-                    tracing::warn!("Failed to upload logs to S3 for job {}: {}", job_id, e);
+                    tracing::warn!("Failed to upload logs to S3 for job {}: {:#}", job_id, e);
                 }
             });
 
@@ -166,7 +166,7 @@ async fn propagate_to_parent(
                     tokio::spawn(async move {
                         if let Err(e) = log_storage.upload_to_s3(pjid).await {
                             tracing::warn!(
-                                "Failed to upload logs to S3 for parent job {}: {}",
+                                "Failed to upload logs to S3 for parent job {}: {:#}",
                                 pjid,
                                 e
                             );
@@ -212,7 +212,7 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     let log_storage = state.log_storage.clone();
     tokio::spawn(async move {
         if let Err(e) = log_storage.upload_to_s3(job_id).await {
-            tracing::warn!("Failed to upload logs to S3 for job {}: {}", job_id, e);
+            tracing::warn!("Failed to upload logs to S3 for job {}: {:#}", job_id, e);
         }
     });
 

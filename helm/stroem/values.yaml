@@ -78,6 +78,8 @@ rbac:
 serviceAccount:
   create: true
   name: ""
+  annotations: {}
+  #  eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/stroem-s3
 
 # Optional Ingress for UI and webhook triggers
 ingress:
