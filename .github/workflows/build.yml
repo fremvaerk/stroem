@@ -22,15 +22,17 @@ jobs:
     outputs:
       is_release: ${{ steps.check.outputs.is_release }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Check if commit has a version tag
         id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          TAGS=$(gh api repos/${{ github.repository }}/git/matching-refs/tags/v \
-            --jq '.[].object.sha' 2>/dev/null || true)
-          if echo "$TAGS" | grep -q "${{ github.sha }}"; then
+          if git tag --points-at HEAD | grep -q '^v'; then
             echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "Commit has a release tag — skipping build (release workflow handles it)"
           else
             echo "is_release=false" >> "$GITHUB_OUTPUT"
           fi
