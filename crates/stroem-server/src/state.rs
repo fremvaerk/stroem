@@ -58,7 +58,7 @@ impl AppState {
         });
         let chunk = format!("{}\n", line);
         if let Err(e) = self.log_storage.append_log(job_id, &chunk).await {
-            tracing::warn!("Failed to write server log for job {}: {}", job_id, e);
+            tracing::warn!("Failed to write server log for job {}: {:#}", job_id, e);
             return;
         }
         self.log_broadcast.broadcast(job_id, chunk).await;

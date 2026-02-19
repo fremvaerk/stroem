@@ -190,7 +190,7 @@ fn compute_next_run(
     match cron.find_next_occurrence(&start, false) {
         Ok(next) => Some(next),
         Err(e) => {
-            tracing::warn!("Failed to compute next occurrence: {}", e);
+            tracing::warn!("Failed to compute next occurrence: {:#}", e);
             None
         }
     }
@@ -234,7 +234,7 @@ async fn fire_trigger(pool: &PgPool, workspaces: &WorkspaceManager, state: &Trig
             tracing::info!("Trigger '{}' created job {}", source_id, job_id);
         }
         Err(e) => {
-            tracing::error!("Trigger '{}' failed to create job: {}", source_id, e);
+            tracing::error!("Trigger '{}' failed to create job: {:#}", source_id, e);
         }
     }
 }

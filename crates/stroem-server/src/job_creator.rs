@@ -221,7 +221,10 @@ pub async fn handle_task_steps(
                 );
             }
             Err(e) => {
-                let err = format!("Failed to create child job for task '{}': {}", task_ref, e);
+                let err = format!(
+                    "Failed to create child job for task '{}': {:#}",
+                    task_ref, e
+                );
                 JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
                 tracing::error!("{}", err);
             }

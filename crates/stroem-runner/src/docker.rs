@@ -136,7 +136,7 @@ impl Runner for DockerRunner {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Image pull warning: {}", e);
+                    tracing::warn!("Image pull warning: {:#}", e);
                 }
             }
         }
@@ -218,7 +218,7 @@ impl Runner for DockerRunner {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Error reading container output: {}", e);
+                    tracing::warn!("Error reading container output: {:#}", e);
                     break;
                 }
             }
@@ -236,7 +236,7 @@ impl Runner for DockerRunner {
                     exit_code = response.status_code as i32;
                 }
                 Err(e) => {
-                    tracing::warn!("Error waiting for container: {}", e);
+                    tracing::warn!("Error waiting for container: {:#}", e);
                 }
             }
         }
@@ -251,7 +251,11 @@ impl Runner for DockerRunner {
             .remove_container(&container_id, Some(remove_opts))
             .await
         {
-            tracing::warn!("Failed to remove container {}: {}", &container_id[..12], e);
+            tracing::warn!(
+                "Failed to remove container {}: {:#}",
+                &container_id[..12],
+                e
+            );
         }
 
         Ok(RunResult {

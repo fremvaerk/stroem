@@ -79,7 +79,7 @@ pub async fn list_jobs(
             Json(jobs_json).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to list jobs: {}", e);
+            tracing::error!("Failed to list jobs: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to list jobs: {}", e)})),
@@ -135,7 +135,7 @@ pub async fn get_job(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to get job: {}", e);
+            tracing::error!("Failed to get job: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get job: {}", e)})),
@@ -148,7 +148,7 @@ pub async fn get_job(
     let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!("Failed to get job steps: {}", e);
+            tracing::error!("Failed to get job steps: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get job steps: {}", e)})),
@@ -264,7 +264,7 @@ pub async fn get_step_logs(
     match state.log_storage.get_step_log(job_id, &step_name).await {
         Ok(logs) => Json(json!({"logs": logs})).into_response(),
         Err(e) => {
-            tracing::error!("Failed to get step logs: {}", e);
+            tracing::error!("Failed to get step logs: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get step logs: {}", e)})),
@@ -294,7 +294,7 @@ pub async fn get_job_logs(
     match state.log_storage.get_log(job_id).await {
         Ok(logs) => Json(json!({"logs": logs})).into_response(),
         Err(e) => {
-            tracing::error!("Failed to get logs: {}", e);
+            tracing::error!("Failed to get logs: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get logs: {}", e)})),

@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
                     tracing::info!("Created initial user: {}", initial_user.email);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to check for initial user: {}", e);
+                    tracing::warn!("Failed to check for initial user: {:#}", e);
                 }
             }
         }

@@ -468,12 +468,12 @@ fn validate_workflows(path: &str) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    println!("[FAIL] {}: {}", file.display(), e);
+                    println!("[FAIL] {}: {:#}", file.display(), e);
                     all_valid = false;
                 }
             },
             Err(e) => {
-                println!("[FAIL] {}: parse error: {}", file.display(), e);
+                println!("[FAIL] {}: parse error: {:#}", file.display(), e);
                 all_valid = false;
             }
         }

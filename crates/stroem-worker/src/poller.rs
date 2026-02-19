@@ -18,7 +18,7 @@ async fn push_error_log(client: &ServerClient, job_id: Uuid, step_name: &str, me
         "line": message,
     });
     if let Err(e) = client.push_logs(job_id, step_name, vec![line]).await {
-        tracing::warn!("Failed to push error log: {}", e);
+        tracing::warn!("Failed to push error log: {:#}", e);
     }
 }
 
@@ -77,7 +77,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
         loop {
             interval.tick().await;
             if let Err(e) = heartbeat_client.heartbeat(heartbeat_worker_id).await {
-                tracing::warn!("Heartbeat failed: {}", e);
+                tracing::warn!("Heartbeat failed: {:#}", e);
             } else {
                 tracing::debug!("Heartbeat sent successfully");
             }
@@ -132,9 +132,9 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                     {
                         Ok(dir) => dir,
                         Err(e) => {
-                            let err_msg = format!("Failed to download workspace: {}", e);
+                            let err_msg = format!("Failed to download workspace: {:#}", e);
                             tracing::error!(
-                                "Failed to download workspace '{}': {}",
+                                "Failed to download workspace '{}': {:#}",
                                 step.workspace,
                                 e
                             );
@@ -159,7 +159,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                         .report_step_start(step.job_id, &step.step_name, step_worker_id)
                         .await
                     {
-                        let err_msg = format!("Failed to report step start: {}", e);
+                        let err_msg = format!("Failed to report step start: {:#}", e);
                         tracing::error!("{}", err_msg);
                         push_error_log(&client_clone, step.job_id, &step.step_name, &err_msg).await;
                         let _ = client_clone
@@ -192,7 +192,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                                     .push_logs(log_job_id, &log_step_name, lines)
                                     .await
                                 {
-                                    tracing::warn!("Failed to push logs: {}", e);
+                                    tracing::warn!("Failed to push logs: {:#}", e);
                                 }
                             }
                         }
@@ -225,7 +225,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                             .push_logs(step.job_id, &step.step_name, remaining)
                             .await
                         {
-                            tracing::warn!("Failed to push final logs: {}", e);
+                            tracing::warn!("Failed to push final logs: {:#}", e);
                         }
                     }
 
@@ -250,7 +250,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                                 )
                                 .await
                             {
-                                tracing::error!("Failed to report step complete: {}", e);
+                                tracing::error!("Failed to report step complete: {:#}", e);
                             } else {
                                 tracing::info!(
                                     "Successfully completed step '{}' for job {}",
@@ -260,7 +260,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                             }
                         }
                         Err(e) => {
-                            let err_msg = e.to_string();
+                            let err_msg = format!("{:#}", e);
                             tracing::error!("Step execution failed: {}", err_msg);
                             push_error_log(&client_clone, step.job_id, &step.step_name, &err_msg)
                                 .await;
@@ -274,7 +274,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                                 )
                                 .await
                             {
-                                tracing::error!("Failed to report step error: {}", e);
+                                tracing::error!("Failed to report step error: {:#}", e);
                             }
                         }
                     }
@@ -287,7 +287,7 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                 tokio::time::sleep(poll_interval).await;
             }
             Err(e) => {
-                tracing::warn!("Failed to claim step: {}", e);
+                tracing::warn!("Failed to claim step: {:#}", e);
                 drop(permit);
                 tokio::time::sleep(poll_interval).await;
             }

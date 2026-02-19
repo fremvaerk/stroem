@@ -47,7 +47,7 @@ pub async fn list_workers(
             Json(workers_json).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to list workers: {}", e);
+            tracing::error!("Failed to list workers: {:#}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to list workers: {}", e)})),
@@ -84,7 +84,7 @@ pub async fn get_worker(
                 .into_response();
         }
         Err(e) => {
-            tracing::error!("Failed to get worker: {}", e);
+            tracing::error!("Failed to get worker: {:#}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get worker: {}", e)})),
@@ -96,7 +96,7 @@ pub async fn get_worker(
     let jobs = match JobRepo::list_by_worker(&state.pool, worker_id, 50, 0).await {
         Ok(jobs) => jobs,
         Err(e) => {
-            tracing::error!("Failed to list jobs for worker: {}", e);
+            tracing::error!("Failed to list jobs for worker: {:#}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to list jobs: {}", e)})),

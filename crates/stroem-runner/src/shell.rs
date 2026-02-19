@@ -78,7 +78,7 @@ impl Runner for ShellRunner {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("Error reading stdout line: {}", e);
+                        tracing::warn!("Error reading stdout line: {:#}", e);
                         break;
                     }
                 }
@@ -97,7 +97,7 @@ impl Runner for ShellRunner {
                         collected.push(line);
                     }
                     Err(e) => {
-                        tracing::warn!("Error reading stderr line: {}", e);
+                        tracing::warn!("Error reading stderr line: {:#}", e);
                         break;
                     }
                 }

@@ -89,7 +89,7 @@ pub async fn oidc_start(
     let state_jwt = match create_state_jwt(&state_claims, &auth_config.jwt_secret) {
         Ok(jwt) => jwt,
         Err(e) => {
-            tracing::error!("Failed to create state JWT: {}", e);
+            tracing::error!("Failed to create state JWT: {:#}", e);
             return error_redirect("Internal server error");
         }
     };
@@ -174,7 +174,7 @@ pub async fn oidc_callback(
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to build HTTP client: {}", e);
+            tracing::error!("Failed to build HTTP client: {:#}", e);
             return error_redirect("Internal server error");
         }
     };
@@ -189,12 +189,12 @@ pub async fn oidc_callback(
         {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::error!("Token exchange failed: {}", e);
+                tracing::error!("Token exchange failed: {:#}", e);
                 return error_redirect("Token exchange failed");
             }
         },
         Err(e) => {
-            tracing::error!("Failed to build token exchange request: {}", e);
+            tracing::error!("Failed to build token exchange request: {:#}", e);
             return error_redirect("Token exchange configuration error");
         }
     };
@@ -210,7 +210,7 @@ pub async fn oidc_callback(
     let claims = match id_token.claims(&id_token_verifier, &nonce) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("ID token validation failed: {}", e);
+            tracing::error!("ID token validation failed: {:#}", e);
             return error_redirect("ID token validation failed");
         }
     };
@@ -242,13 +242,13 @@ pub async fn oidc_callback(
     {
         Ok(u) => u,
         Err(e) => {
-            tracing::error!("User provisioning failed: {}", e);
+            tracing::error!("User provisioning failed: {:#}", e);
             return error_redirect("User provisioning failed");
         }
     };
 
     if let Err(e) = UserRepo::touch_last_login(&state.pool, user.user_id).await {
-        tracing::warn!("Failed to update last_login_at: {}", e);
+        tracing::warn!("Failed to update last_login_at: {:#}", e);
     }
 
     // Issue internal JWT tokens
@@ -259,7 +259,7 @@ pub async fn oidc_callback(
     ) {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!("Failed to create access token: {}", e);
+            tracing::error!("Failed to create access token: {:#}", e);
             return error_redirect("Internal server error");
         }
     };
@@ -270,7 +270,7 @@ pub async fn oidc_callback(
     if let Err(e) =
         RefreshTokenRepo::create(&state.pool, &refresh_hash, user.user_id, expires_at).await
     {
-        tracing::error!("Failed to store refresh token: {}", e);
+        tracing::error!("Failed to store refresh token: {:#}", e);
         return error_redirect("Internal server error");
     }
 

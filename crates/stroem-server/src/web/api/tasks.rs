@@ -195,7 +195,7 @@ pub async fn execute_task(
     {
         Ok(id) => id,
         Err(e) => {
-            tracing::error!("Failed to create job: {}", e);
+            tracing::error!("Failed to create job: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to create job: {}", e)})),

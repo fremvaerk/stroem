@@ -47,7 +47,7 @@ pub async fn download_workspace(
     let tarball = match tokio::task::spawn_blocking(move || build_tarball(&workspace_path)).await {
         Ok(Ok(data)) => data,
         Ok(Err(e)) => {
-            tracing::error!("Failed to build workspace tarball: {}", e);
+            tracing::error!("Failed to build workspace tarball: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(json!({"error": "Failed to build tarball"})),
@@ -55,7 +55,7 @@ pub async fn download_workspace(
                 .into_response();
         }
         Err(e) => {
-            tracing::error!("Tarball task panicked: {}", e);
+            tracing::error!("Tarball task panicked: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(json!({"error": "Internal error"})),

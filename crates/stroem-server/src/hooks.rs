@@ -66,11 +66,15 @@ pub async fn fire_hooks(
     let ctx = match build_hook_context(&state.pool, job, task).await {
         Ok(ctx) => ctx,
         Err(e) => {
-            tracing::error!("Failed to build hook context for job {}: {}", job.job_id, e);
+            tracing::error!(
+                "Failed to build hook context for job {}: {:#}",
+                job.job_id,
+                e
+            );
             state
                 .append_server_log(
                     job.job_id,
-                    &format!("[hooks] Failed to build hook context: {}", e),
+                    &format!("[hooks] Failed to build hook context: {:#}", e),
                 )
                 .await;
             return;
@@ -80,11 +84,11 @@ pub async fn fire_hooks(
     let ctx_value = match serde_json::to_value(&ctx) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("Failed to serialize hook context: {}", e);
+            tracing::error!("Failed to serialize hook context: {:#}", e);
             state
                 .append_server_log(
                     job.job_id,
-                    &format!("[hooks] Failed to serialize hook context: {}", e),
+                    &format!("[hooks] Failed to serialize hook context: {:#}", e),
                 )
                 .await;
             return;
@@ -114,7 +118,7 @@ pub async fn fire_hooks(
         .await
         {
             tracing::error!(
-                "Failed to fire hook {}[{}] for job {}: {}",
+                "Failed to fire hook {}[{}] for job {}: {:#}",
                 hook_type,
                 i,
                 job.job_id,
@@ -124,7 +128,7 @@ pub async fn fire_hooks(
                 .append_server_log(
                     job.job_id,
                     &format!(
-                        "[hooks] Failed to fire hook {}[{}] for action '{}': {}",
+                        "[hooks] Failed to fire hook {}[{}] for action '{}': {:#}",
                         hook_type, i, hook.action, e
                     ),
                 )

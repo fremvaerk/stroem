@@ -40,7 +40,7 @@ pub async fn list_users(
     let users = match UserRepo::list(&state.pool, query.limit, query.offset).await {
         Ok(u) => u,
         Err(e) => {
-            tracing::error!("Failed to list users: {}", e);
+            tracing::error!("Failed to list users: {:#}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to list users: {}", e)})),
@@ -53,7 +53,7 @@ pub async fn list_users(
     let auth_links = match UserAuthLinkRepo::list_by_user_ids(&state.pool, &user_ids).await {
         Ok(links) => links,
         Err(e) => {
-            tracing::error!("Failed to list auth links: {}", e);
+            tracing::error!("Failed to list auth links: {:#}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to list auth links: {}", e)})),
@@ -111,7 +111,7 @@ pub async fn get_user(
                 .into_response();
         }
         Err(e) => {
-            tracing::error!("Failed to get user: {}", e);
+            tracing::error!("Failed to get user: {:#}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get user: {}", e)})),
@@ -123,7 +123,7 @@ pub async fn get_user(
     let auth_links = match UserAuthLinkRepo::list_by_user_ids(&state.pool, &[user_id]).await {
         Ok(links) => links,
         Err(e) => {
-            tracing::error!("Failed to list auth links: {}", e);
+            tracing::error!("Failed to list auth links: {:#}", e);
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to list auth links: {}", e)})),

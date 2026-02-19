@@ -253,7 +253,7 @@ impl WorkspaceManager {
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to reload workspace '{}': {}", ws_name, e);
+                            tracing::warn!("Failed to reload workspace '{}': {:#}", ws_name, e);
                         }
                     }
                 }

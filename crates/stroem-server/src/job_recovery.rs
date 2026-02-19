@@ -52,11 +52,11 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
     if let Err(e) =
         crate::job_creator::handle_task_steps(&state.pool, &workspace, &job.workspace, job_id).await
     {
-        tracing::error!("Failed to handle task steps for job {}: {}", job_id, e);
+        tracing::error!("Failed to handle task steps for job {}: {:#}", job_id, e);
         state
             .append_server_log(
                 job_id,
-                &format!("[orchestration] Failed to handle task steps: {}", e),
+                &format!("[orchestration] Failed to handle task steps: {:#}", e),
             )
             .await;
     }
@@ -80,7 +80,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                     propagate_to_parent(state, &job_after, parent_job_id, parent_step).await
                 {
                     tracing::error!(
-                        "Failed to propagate child job {} to parent {}: {}",
+                        "Failed to propagate child job {} to parent {}: {:#}",
                         job_after.job_id,
                         parent_job_id,
                         e
@@ -89,7 +89,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                         .append_server_log(
                             job_id,
                             &format!(
-                                "[orchestration] Failed to propagate to parent job {}: {}",
+                                "[orchestration] Failed to propagate to parent job {}: {:#}",
                                 parent_job_id, e
                             ),
                         )
@@ -221,7 +221,7 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     {
         if let Err(e) = propagate_to_parent(state, &job, parent_job_id, parent_step).await {
             tracing::error!(
-                "Failed to propagate child job {} to parent {}: {}",
+                "Failed to propagate child job {} to parent {}: {:#}",
                 job.job_id,
                 parent_job_id,
                 e
@@ -230,7 +230,7 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
                 .append_server_log(
                     job_id,
                     &format!(
-                        "[orchestration] Failed to propagate to parent job {}: {}",
+                        "[orchestration] Failed to propagate to parent job {}: {:#}",
                         parent_job_id, e
                     ),
                 )

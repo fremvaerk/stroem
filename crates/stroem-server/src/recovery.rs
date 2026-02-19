@@ -35,7 +35,7 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
         }
 
         if let Err(e) = sweep(&state).await {
-            tracing::error!("Recovery sweep error: {}", e);
+            tracing::error!("Recovery sweep error: {:#}", e);
         }
     }
 }
@@ -92,7 +92,7 @@ async fn sweep(state: &AppState) -> Result<()> {
         if let Err(e) = orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
         {
             tracing::error!(
-                "Failed to orchestrate after recovering step '{}/{}': {}",
+                "Failed to orchestrate after recovering step '{}/{}': {:#}",
                 step_info.job_id,
                 step_info.step_name,
                 e
@@ -101,7 +101,7 @@ async fn sweep(state: &AppState) -> Result<()> {
                 .append_server_log(
                     step_info.job_id,
                     &format!(
-                        "[recovery] Failed to orchestrate after recovering step '{}': {}",
+                        "[recovery] Failed to orchestrate after recovering step '{}': {:#}",
                         step_info.step_name, e
                     ),
                 )

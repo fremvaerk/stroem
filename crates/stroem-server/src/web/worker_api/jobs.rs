@@ -105,7 +105,7 @@ pub async fn register_worker(
             .into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to register worker: {}", e);
+            tracing::error!("Failed to register worker: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to register worker: {}", e)})),
@@ -135,7 +135,7 @@ pub async fn heartbeat(
     match WorkerRepo::heartbeat(&state.pool, worker_id).await {
         Ok(_) => Json(json!({"status": "ok"})).into_response(),
         Err(e) => {
-            tracing::error!("Failed to update heartbeat: {}", e);
+            tracing::error!("Failed to update heartbeat: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to update heartbeat: {}", e)})),
@@ -180,7 +180,7 @@ pub async fn claim_job(
             .into_response();
         }
         Err(e) => {
-            tracing::error!("Failed to claim job: {}", e);
+            tracing::error!("Failed to claim job: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to claim job: {}", e)})),
@@ -208,7 +208,7 @@ pub async fn claim_job(
                 .into_response();
         }
         Err(e) => {
-            tracing::error!("Failed to get job: {}", e);
+            tracing::error!("Failed to get job: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get job: {}", e)})),
@@ -266,7 +266,7 @@ pub async fn claim_job(
         match render_input_map(&flow_step.input, &context_value) {
             Ok(rendered) => Some(rendered),
             Err(e) => {
-                tracing::warn!("Failed to render step input template: {}", e);
+                tracing::warn!("Failed to render step input template: {:#}", e);
                 step.input.clone()
             }
         }
@@ -281,7 +281,7 @@ pub async fn claim_job(
     )
     .await
     {
-        tracing::warn!("Failed to persist rendered input: {}", e);
+        tracing::warn!("Failed to persist rendered input: {:#}", e);
     }
 
     // Render action_spec env/cmd/script templates at claim time
@@ -332,7 +332,7 @@ pub async fn claim_job(
                         );
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to render action_spec env templates: {}", e);
+                        tracing::warn!("Failed to render action_spec env templates: {:#}", e);
                     }
                 }
             }
@@ -348,7 +348,7 @@ pub async fn claim_job(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::warn!("Failed to render action_spec cmd template: {}", e);
+                        tracing::warn!("Failed to render action_spec cmd template: {:#}", e);
                     }
                 }
             }
@@ -367,7 +367,7 @@ pub async fn claim_job(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::warn!("Failed to render action_spec script template: {}", e);
+                        tracing::warn!("Failed to render action_spec script template: {:#}", e);
                     }
                 }
             }
@@ -423,12 +423,12 @@ pub async fn start_step(
         Ok(_) => {
             // Also transition the job itself to running (idempotent — no-op if already running)
             if let Err(e) = JobRepo::mark_running_if_pending(&state.pool, job_id, worker_id).await {
-                tracing::warn!("Failed to transition job to running: {}", e);
+                tracing::warn!("Failed to transition job to running: {:#}", e);
             }
             Json(json!({"status": "ok"})).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to mark step as running: {}", e);
+            tracing::error!("Failed to mark step as running: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to mark step as running: {}", e)})),
@@ -465,7 +465,7 @@ pub async fn complete_step(
             .unwrap_or_else(|| format!("Process exited with code {}", req.exit_code.unwrap_or(1)));
         if let Err(e) = JobStepRepo::mark_failed(&state.pool, job_id, &step_name, &error_msg).await
         {
-            tracing::error!("Failed to mark step as failed: {}", e);
+            tracing::error!("Failed to mark step as failed: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to mark step as failed: {}", e)})),
@@ -475,7 +475,7 @@ pub async fn complete_step(
     } else if let Err(e) =
         JobStepRepo::mark_completed(&state.pool, job_id, &step_name, req.output).await
     {
-        tracing::error!("Failed to mark step as completed: {}", e);
+        tracing::error!("Failed to mark step as completed: {:#}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to mark step as completed: {}", e)})),
@@ -485,7 +485,7 @@ pub async fn complete_step(
 
     // Orchestrate: promote steps, skip unreachable, propagate to parent, fire hooks
     if let Err(e) = crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await {
-        tracing::error!("Orchestration error after step completion: {}", e);
+        tracing::error!("Orchestration error after step completion: {:#}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Orchestrator error: {}", e)})),
@@ -537,7 +537,7 @@ pub async fn append_log(
             // Update log path in database (idempotent)
             let log_path = state.log_storage.get_log_path(job_id);
             if let Err(e) = JobRepo::set_log_path(&state.pool, job_id, &log_path).await {
-                tracing::warn!("Failed to update log path: {}", e);
+                tracing::warn!("Failed to update log path: {:#}", e);
             }
 
             // Broadcast to WebSocket subscribers
@@ -549,7 +549,7 @@ pub async fn append_log(
             Json(json!({"status": "ok"})).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to append log: {}", e);
+            tracing::error!("Failed to append log: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to append log: {}", e)})),
@@ -581,13 +581,13 @@ pub async fn complete_job(
         Ok(_) => {
             // Handle terminal state: S3 upload, parent propagation, hooks
             if let Err(e) = crate::job_recovery::handle_job_terminal(&state, job_id).await {
-                tracing::error!("Failed to handle job terminal state: {}", e);
+                tracing::error!("Failed to handle job terminal state: {:#}", e);
             }
 
             Json(json!({"status": "ok"})).into_response()
         }
         Err(e) => {
-            tracing::error!("Failed to mark job as completed: {}", e);
+            tracing::error!("Failed to mark job as completed: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to mark job as completed: {}", e)})),

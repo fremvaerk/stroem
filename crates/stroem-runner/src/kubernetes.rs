@@ -339,7 +339,7 @@ impl Runner for KubeRunner {
                     let line = match line_result {
                         Ok(l) => l,
                         Err(e) => {
-                            tracing::warn!("Error reading log line: {}", e);
+                            tracing::warn!("Error reading log line: {:#}", e);
                             break;
                         }
                     };
@@ -363,14 +363,14 @@ impl Runner for KubeRunner {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to stream pod logs: {}", e);
-                stderr_lines.push(format!("Failed to retrieve logs: {}", e));
+                tracing::warn!("Failed to stream pod logs: {:#}", e);
+                stderr_lines.push(format!("Failed to retrieve logs: {:#}", e));
             }
         }
 
         // Delete the pod
         if let Err(e) = pods.delete(&pod_name, &DeleteParams::default()).await {
-            tracing::warn!("Failed to delete pod {}: {}", pod_name, e);
+            tracing::warn!("Failed to delete pod {}: {:#}", pod_name, e);
         }
 
         Ok(RunResult {

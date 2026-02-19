@@ -60,7 +60,7 @@ pub async fn login(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("DB error during login: {}", e);
+            tracing::error!("DB error during login: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
@@ -90,7 +90,7 @@ pub async fn login(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("Password verification error: {}", e);
+            tracing::error!("Password verification error: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
@@ -100,7 +100,7 @@ pub async fn login(
     }
 
     if let Err(e) = UserRepo::touch_last_login(&state.pool, user.user_id).await {
-        tracing::warn!("Failed to update last_login_at: {}", e);
+        tracing::warn!("Failed to update last_login_at: {:#}", e);
     }
 
     let access_token = match create_access_token(
@@ -110,7 +110,7 @@ pub async fn login(
     ) {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!("Failed to create access token: {}", e);
+            tracing::error!("Failed to create access token: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
@@ -125,7 +125,7 @@ pub async fn login(
     if let Err(e) =
         RefreshTokenRepo::create(&state.pool, &refresh_hash, user.user_id, expires_at).await
     {
-        tracing::error!("Failed to store refresh token: {}", e);
+        tracing::error!("Failed to store refresh token: {:#}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "Internal server error"})),
@@ -169,7 +169,7 @@ pub async fn refresh(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("DB error during refresh: {}", e);
+            tracing::error!("DB error during refresh: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
@@ -189,7 +189,7 @@ pub async fn refresh(
 
     // Delete old token (rotation)
     if let Err(e) = RefreshTokenRepo::delete(&state.pool, &token_hash).await {
-        tracing::error!("Failed to delete old refresh token: {}", e);
+        tracing::error!("Failed to delete old refresh token: {:#}", e);
     }
 
     let user = match UserRepo::get_by_id(&state.pool, token_row.user_id).await {
@@ -202,7 +202,7 @@ pub async fn refresh(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("DB error looking up user: {}", e);
+            tracing::error!("DB error looking up user: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
@@ -218,7 +218,7 @@ pub async fn refresh(
     ) {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!("Failed to create access token: {}", e);
+            tracing::error!("Failed to create access token: {:#}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
@@ -233,7 +233,7 @@ pub async fn refresh(
     if let Err(e) =
         RefreshTokenRepo::create(&state.pool, &refresh_hash, user.user_id, expires_at).await
     {
-        tracing::error!("Failed to store new refresh token: {}", e);
+        tracing::error!("Failed to store new refresh token: {:#}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "Internal server error"})),
@@ -257,7 +257,7 @@ pub async fn logout(
     let token_hash = hash_refresh_token(&req.refresh_token);
 
     if let Err(e) = RefreshTokenRepo::delete(&state.pool, &token_hash).await {
-        tracing::error!("Failed to delete refresh token: {}", e);
+        tracing::error!("Failed to delete refresh token: {:#}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "Internal server error"})),
@@ -296,7 +296,7 @@ pub async fn me(State(state): State<Arc<AppState>>, auth: AuthUser) -> impl Into
         )
             .into_response(),
         Err(e) => {
-            tracing::error!("Failed to get user: {}", e);
+            tracing::error!("Failed to get user: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "Internal server error"})),
