@@ -1,0 +1,20 @@
+{{- if .Values.server.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "stroem.fullname" . }}-server
+  labels:
+    {{- include "stroem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  {{- with .Values.server.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ . }}
+  {{- end }}
+  {{- with .Values.server.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "stroem.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+{{- end }}

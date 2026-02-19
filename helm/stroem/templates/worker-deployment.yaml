@@ -6,7 +6,13 @@ metadata:
     {{- include "stroem.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
   replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  {{- with .Values.worker.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "stroem.selectorLabels" . | nindent 6 }}
@@ -16,21 +22,50 @@ spec:
       labels:
         {{- include "stroem.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: worker
+        {{- with .Values.worker.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/worker-configmap.yaml") . | sha256sum }}
         {{- if .Values.worker.extraSecretEnv }}
         checksum/secret: {{ include (print $.Template.BasePath "/worker-secret-env.yaml") . | sha256sum }}
         {{- end }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "stroem.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      {{- with .Values.worker.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.worker.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: stroem-worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag | default .Values.imageTag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          {{- with .Values.worker.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: STROEM_CONFIG
               value: /etc/stroem/worker-config.yaml
             - name: RUST_LOG
-              value: info
+              value: {{ .Values.worker.logLevel | quote }}
             # Override server_url with dynamic service name from Helm
             - name: STROEM__SERVER_URL
               value: "http://{{ include "stroem.fullname" . }}-server:{{ .Values.server.service.port }}"
@@ -57,6 +92,28 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "stroem.fullname" . }}-worker-env
+          {{- end }}
+          {{- with .Values.worker.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            {{- omit . "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.worker.readinessProbe }}
+          {{- if .enabled }}
+          readinessProbe:
+            {{- omit . "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.worker.startupProbe }}
+          {{- if .enabled }}
+          startupProbe:
+            {{- omit . "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.worker.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
             - name: config
@@ -91,15 +148,39 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
+        {{- with .Values.worker.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "stroem.fullname" . }}-worker
         - name: workspace-cache
+          {{- if .Values.worker.workspaceCache.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "stroem.fullname" . }}-worker-cache
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         {{- if .Values.worker.dind.enabled }}
         - name: dind-storage
           emptyDir: {}
         - name: dind-certs
           emptyDir: {}
         {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

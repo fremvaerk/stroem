@@ -1,14 +1,87 @@
 # Global image tag override. Defaults to Chart.appVersion if not set.
 imageTag: ""
 
+# Override chart name / fullname for resource naming
+nameOverride: ""
+fullnameOverride: ""
+
+# Image pull secrets shared by all pods
+imagePullSecrets: []
+#  - name: ghcr-secret
+
 server:
   image:
     repository: ghcr.io/fremvaerk/stroem-server
     tag: ""
+    pullPolicy: IfNotPresent
   replicas: 1
+  strategy: {}
+  #  type: RollingUpdate
+  #  rollingUpdate:
+  #    maxSurge: 1
+  #    maxUnavailable: 0
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  #  runAsNonRoot: true
+  #  runAsUser: 1000
+  #  fsGroup: 1000
+  securityContext: {}
+  #  readOnlyRootFilesystem: true
+  #  allowPrivilegeEscalation: false
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  # terminationGracePeriodSeconds:  # omit = k8s default 30s
+  lifecycle: {}
+  #  preStop:
+  #    exec:
+  #      command: [sleep, "5"]
+  initContainers: []
+  extraContainers: []
+  logLevel: info
+  livenessProbe:
+    enabled: true
+    httpGet:
+      path: /api/config
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    enabled: true
+    httpGet:
+      path: /api/config
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 5
+    failureThreshold: 3
+  startupProbe: {}
+  #  enabled: true
+  #  httpGet:
+  #    path: /api/config
+  #    port: http
+  #  failureThreshold: 30
+  #  periodSeconds: 2
+  logStorage:
+    persistence:
+      enabled: false
+      storageClass: ""
+      size: 10Gi
+      accessModes:
+        - ReadWriteOnce
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    # maxUnavailable: 1
   service:
     type: ClusterIP
     port: 8080
+    annotations: {}
   # Full server-config.yaml content — passed as-is to the ConfigMap.
   # Secrets (db.url, worker_token, auth secrets) should be set via extraSecretEnv
   # using STROEM__ env var overrides instead of putting them here.
@@ -41,7 +114,43 @@ worker:
   image:
     repository: ghcr.io/fremvaerk/stroem-worker
     tag: ""
+    pullPolicy: IfNotPresent
   replicas: 2
+  strategy: {}
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 300
+  lifecycle: {}
+  initContainers: []
+  extraContainers: []
+  logLevel: info
+  livenessProbe: {}
+  readinessProbe: {}
+  startupProbe: {}
+  workspaceCache:
+    persistence:
+      enabled: false
+      storageClass: ""
+      size: 5Gi
+      accessModes:
+        - ReadWriteOnce
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    # maxUnavailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
   # Full worker-config.yaml content — passed as-is to the ConfigMap.
   # server_url and worker_name are auto-injected via env vars.
   config:
@@ -95,3 +204,21 @@ ingress:
   #  - secretName: stroem-tls
   #    hosts:
   #      - stroem.example.com
+
+# Arbitrary extra manifests rendered with full Helm context.
+# Useful for ServiceMonitor, NetworkPolicy, CronJob, etc.
+extraManifests: []
+# - |
+#   apiVersion: monitoring.coreos.com/v1
+#   kind: ServiceMonitor
+#   metadata:
+#     name: {{ include "stroem.fullname" . }}
+#     labels:
+#       {{- include "stroem.labels" . | nindent 6 }}
+#   spec:
+#     endpoints:
+#       - port: http
+#         path: /metrics
+#     selector:
+#       matchLabels:
+#         app.kubernetes.io/component: server

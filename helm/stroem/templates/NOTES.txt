@@ -4,7 +4,7 @@ Server:
   {{ .Values.server.replicas }} replica(s) running
 
 Workers:
-  {{ .Values.worker.replicas }} replica(s) running (max {{ .Values.worker.config.maxConcurrent }} concurrent per worker)
+  {{ .Values.worker.replicas }} replica(s) running (max {{ .Values.worker.config.max_concurrent }} concurrent per worker)
   DinD sidecar: {{ if .Values.worker.dind.enabled }}enabled{{ else }}disabled{{ end }}
 
 {{- if .Values.ingress.enabled }}

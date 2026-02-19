@@ -7,6 +7,10 @@ metadata:
     app.kubernetes.io/component: server
 spec:
   replicas: {{ .Values.server.replicas }}
+  {{- with .Values.server.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "stroem.selectorLabels" . | nindent 6 }}
@@ -16,16 +20,45 @@ spec:
       labels:
         {{- include "stroem.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: server
+        {{- with .Values.server.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/server-configmap.yaml") . | sha256sum }}
         {{- if .Values.server.extraSecretEnv }}
         checksum/secret: {{ include (print $.Template.BasePath "/server-secret-env.yaml") . | sha256sum }}
         {{- end }}
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "stroem.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      {{- with .Values.server.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.server.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: stroem-server
           image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag | default .Values.imageTag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          {{- with .Values.server.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.server.service.port }}
@@ -34,7 +67,7 @@ spec:
             - name: STROEM_CONFIG
               value: /etc/stroem/server-config.yaml
             - name: RUST_LOG
-              value: info
+              value: {{ .Values.server.logLevel | quote }}
             {{- range $name, $value := .Values.server.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -44,18 +77,24 @@ spec:
             - secretRef:
                 name: {{ include "stroem.fullname" . }}-server-env
           {{- end }}
+          {{- if .Values.server.livenessProbe.enabled }}
           livenessProbe:
-            httpGet:
-              path: /api/config
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            {{- omit .Values.server.livenessProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- if .Values.server.readinessProbe.enabled }}
           readinessProbe:
-            httpGet:
-              path: /api/config
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 5
+            {{- omit .Values.server.readinessProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- with .Values.server.startupProbe }}
+          {{- if .enabled }}
+          startupProbe:
+            {{- omit . "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.server.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/stroem
@@ -69,12 +108,36 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+        {{- with .Values.server.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "stroem.fullname" . }}-server
         - name: logs
+          {{- if .Values.server.logStorage.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "stroem.fullname" . }}-server-logs
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         {{- with .Values.server.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
