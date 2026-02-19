@@ -61,12 +61,29 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
     std::fs::create_dir_all(&config.workspace_cache_dir)
         .context("Failed to create workspace cache directory")?;
 
-    // Register with server
+    // Register with server (retry with exponential backoff)
     let tags = config.tags.as_deref();
-    let worker_id = client
-        .register(&config.worker_name, &config.capabilities, tags)
-        .await
-        .context("Failed to register worker")?;
+    let worker_id = {
+        let mut attempt = 0u32;
+        loop {
+            match client
+                .register(&config.worker_name, &config.capabilities, tags)
+                .await
+            {
+                Ok(id) => break id,
+                Err(e) => {
+                    attempt += 1;
+                    let delay = Duration::from_secs(2u64.saturating_pow(attempt).min(60));
+                    tracing::warn!(
+                        "Failed to register worker (attempt {attempt}), retrying in {}s: {:#}",
+                        delay.as_secs(),
+                        e
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    };
     tracing::info!("Registered as worker {}", worker_id);
 
     // Spawn heartbeat task (every 30s)
