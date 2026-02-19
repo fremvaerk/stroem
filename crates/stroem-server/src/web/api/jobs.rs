@@ -1,3 +1,4 @@
+use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -261,7 +262,36 @@ pub async fn get_step_logs(
         }
     };
 
-    match state.log_storage.get_step_log(job_id, &step_name).await {
+    let job = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to get job: {:#}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get job: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let meta = JobLogMeta {
+        workspace: job.workspace,
+        task_name: job.task_name,
+        created_at: job.created_at,
+    };
+
+    match state
+        .log_storage
+        .get_step_log(job_id, &step_name, &meta)
+        .await
+    {
         Ok(logs) => Json(json!({"logs": logs})).into_response(),
         Err(e) => {
             tracing::error!("Failed to get step logs: {:#}", e);
@@ -291,7 +321,32 @@ pub async fn get_job_logs(
         }
     };
 
-    match state.log_storage.get_log(job_id).await {
+    let job = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to get job: {:#}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get job: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    let meta = JobLogMeta {
+        workspace: job.workspace,
+        task_name: job.task_name,
+        created_at: job.created_at,
+    };
+
+    match state.log_storage.get_log(job_id, &meta).await {
         Ok(logs) => Json(json!({"logs": logs})).into_response(),
         Err(e) => {
             tracing::error!("Failed to get logs: {:#}", e);

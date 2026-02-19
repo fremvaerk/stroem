@@ -199,7 +199,11 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 ### Log Storage
 - `LogStorage` in `AppState` — local JSONL files + optional S3 archival
 - S3 support enabled by default via `s3` cargo feature on `stroem-server` (`aws-sdk-s3` + `aws-config`)
-- S3 upload spawned as background task when a job reaches terminal state (completed/failed)
+- S3 upload spawned as background task when a job reaches terminal state — **after** hooks fire, so server events are included
+- **Structured S3 keys**: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz` (all datetimes in UTC)
+- **Gzip compression**: uploads compressed with `flate2::GzEncoder`, downloads decompressed with `GzDecoder`
+- `JobLogMeta` struct carries workspace, task_name, created_at — used to construct S3 keys (no DB column for the key)
+- `upload_to_s3(job_id, meta)`, `get_log(job_id, meta)`, `get_step_log(job_id, step, meta)` all require `&JobLogMeta`
 - Read fallback: local file → legacy .log → S3 (if configured)
 - Config: optional `s3` section in `log_storage` with `bucket`, `region`, `prefix`, `endpoint`
 - Credentials via standard AWS chain (env vars, IAM role, `~/.aws/credentials`)

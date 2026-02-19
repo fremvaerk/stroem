@@ -106,7 +106,12 @@ mod tests {
             .append_server_log(job_id, "Hook template rendering failed")
             .await;
 
-        let log = state.log_storage.get_log(job_id).await.unwrap();
+        let meta = crate::log_storage::JobLogMeta {
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let log = state.log_storage.get_log(job_id, &meta).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(parsed["step"], "_server");
         assert_eq!(parsed["stream"], "stderr");
@@ -152,10 +157,16 @@ mod tests {
         // Write a server log
         state.append_server_log(job_id, "Hook failed").await;
 
+        let meta = crate::log_storage::JobLogMeta {
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+
         // Regular step logs should not include _server entries
         let build_logs = state
             .log_storage
-            .get_step_log(job_id, "build")
+            .get_step_log(job_id, "build", &meta)
             .await
             .unwrap();
         assert!(build_logs.contains("compiling..."));
@@ -164,7 +175,7 @@ mod tests {
         // _server logs should be retrievable separately
         let server_logs = state
             .log_storage
-            .get_step_log(job_id, "_server")
+            .get_step_log(job_id, "_server", &meta)
             .await
             .unwrap();
         assert!(server_logs.contains("Hook failed"));
@@ -184,9 +195,14 @@ mod tests {
             .append_server_log(job_id, "[recovery] Worker abc unresponsive")
             .await;
 
+        let meta = crate::log_storage::JobLogMeta {
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        };
         let server_logs = state
             .log_storage
-            .get_step_log(job_id, "_server")
+            .get_step_log(job_id, "_server", &meta)
             .await
             .unwrap();
         let lines: Vec<&str> = server_logs.trim().lines().collect();
@@ -208,14 +224,19 @@ mod tests {
         state.append_server_log(job1, "error for job1").await;
         state.append_server_log(job2, "error for job2").await;
 
+        let meta = crate::log_storage::JobLogMeta {
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        };
         let logs1 = state
             .log_storage
-            .get_step_log(job1, "_server")
+            .get_step_log(job1, "_server", &meta)
             .await
             .unwrap();
         let logs2 = state
             .log_storage
-            .get_step_log(job2, "_server")
+            .get_step_log(job2, "_server", &meta)
             .await
             .unwrap();
 

@@ -15,6 +15,13 @@ struct S3Backend {
     prefix: String,
 }
 
+/// Metadata needed to construct structured S3 keys for job logs.
+pub struct JobLogMeta {
+    pub workspace: String,
+    pub task_name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Log storage handles writing and reading job logs
 #[derive(Clone)]
 pub struct LogStorage {
@@ -80,14 +87,22 @@ impl LogStorage {
         self
     }
 
-    /// Get the S3 object key for a job
+    /// Build a structured S3 key from job metadata.
+    /// Format: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz`
     #[cfg(feature = "s3")]
-    fn s3_key(&self, job_id: Uuid) -> String {
-        if let Some(ref s3) = self.s3 {
-            format!("{}{}.jsonl", s3.prefix, job_id)
-        } else {
-            format!("{}.jsonl", job_id)
-        }
+    fn s3_key(&self, job_id: Uuid, meta: &JobLogMeta) -> String {
+        let prefix = self.s3.as_ref().map(|s| s.prefix.as_str()).unwrap_or("");
+        let dt = meta.created_at;
+        format!(
+            "{}{}/{}/{}/{}/{}_{}.jsonl.gz",
+            prefix,
+            meta.workspace,
+            meta.task_name,
+            dt.format("%Y"),
+            dt.format("%m/%d"),
+            dt.format("%Y-%m-%dT%H-%M-%S"),
+            job_id,
+        )
     }
 
     /// Get the JSONL log file path for a job
@@ -131,9 +146,9 @@ impl LogStorage {
         Ok(())
     }
 
-    /// Upload a job's log file to S3. No-op if S3 is not configured.
+    /// Upload a job's log file to S3 (gzip-compressed). No-op if S3 is not configured.
     #[allow(unused_variables)]
-    pub async fn upload_to_s3(&self, job_id: Uuid) -> Result<()> {
+    pub async fn upload_to_s3(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
         #[cfg(feature = "s3")]
         if let Some(ref s3) = self.s3 {
             let path = self.log_path(job_id);
@@ -142,17 +157,30 @@ impl LogStorage {
                 return Ok(());
             }
 
-            let body = fs::read(&path)
+            let raw = fs::read(&path)
                 .await
                 .with_context(|| format!("Failed to read log file for S3 upload: {:?}", path))?;
 
-            let key = self.s3_key(job_id);
+            // Gzip compress
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder
+                .write_all(&raw)
+                .context("Failed to gzip-compress log data")?;
+            let compressed = encoder
+                .finish()
+                .context("Failed to finish gzip compression")?;
+
+            let key = self.s3_key(job_id, meta);
             s3.client
                 .put_object()
                 .bucket(&s3.bucket)
                 .key(&key)
-                .content_type("application/x-ndjson")
-                .body(body.into())
+                .content_type("application/gzip")
+                .body(compressed.into())
                 .send()
                 .await
                 .with_context(|| format!("Failed to upload log to S3: {}", key))?;
@@ -164,11 +192,11 @@ impl LogStorage {
         Ok(())
     }
 
-    /// Download a job's log from S3. Returns None if the key doesn't exist.
+    /// Download a job's log from S3 (gzip-compressed). Returns None if the key doesn't exist.
     #[cfg(feature = "s3")]
-    async fn get_log_from_s3(&self, job_id: Uuid) -> Result<Option<String>> {
+    async fn get_log_from_s3(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<Option<String>> {
         if let Some(ref s3) = self.s3 {
-            let key = self.s3_key(job_id);
+            let key = self.s3_key(job_id, meta);
             match s3
                 .client
                 .get_object()
@@ -184,8 +212,17 @@ impl LogStorage {
                         .await
                         .context("Failed to read S3 object body")?
                         .into_bytes();
-                    let content = String::from_utf8(bytes.to_vec())
-                        .context("S3 log content is not valid UTF-8")?;
+
+                    // Gzip decompress
+                    use flate2::read::GzDecoder;
+                    use std::io::Read;
+
+                    let mut decoder = GzDecoder::new(&bytes[..]);
+                    let mut content = String::new();
+                    decoder
+                        .read_to_string(&mut content)
+                        .context("Failed to gzip-decompress S3 log content")?;
+
                     Ok(Some(content))
                 }
                 Err(sdk_err) => {
@@ -204,7 +241,8 @@ impl LogStorage {
 
     /// Get the full log contents for a job.
     /// Checks for .jsonl first, falls back to legacy .log file, then S3.
-    pub async fn get_log(&self, job_id: Uuid) -> Result<String> {
+    #[allow(unused_variables)]
+    pub async fn get_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<String> {
         let path = self.log_path(job_id);
 
         if path.exists() {
@@ -219,7 +257,7 @@ impl LogStorage {
 
         // Fallback to S3
         #[cfg(feature = "s3")]
-        if let Some(content) = self.get_log_from_s3(job_id).await? {
+        if let Some(content) = self.get_log_from_s3(job_id, meta).await? {
             return Ok(content);
         }
 
@@ -243,8 +281,13 @@ impl LogStorage {
     /// Get log lines for a specific step within a job.
     /// Parses each line as JSON and filters by the `step` field.
     /// Non-JSON lines (legacy format) are skipped.
-    pub async fn get_step_log(&self, job_id: Uuid, step_name: &str) -> Result<String> {
-        let full_log = self.get_log(job_id).await?;
+    pub async fn get_step_log(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        meta: &JobLogMeta,
+    ) -> Result<String> {
+        let full_log = self.get_log(job_id, meta).await?;
         let filtered: Vec<&str> = full_log
             .lines()
             .filter(|line| {
@@ -283,6 +326,14 @@ mod tests {
         .to_string()
     }
 
+    fn test_meta() -> JobLogMeta {
+        JobLogMeta {
+            workspace: "main".to_string(),
+            task_name: "deploy".to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
     #[tokio::test]
     async fn test_append_and_read_log() {
         let temp_dir = TempDir::new().unwrap();
@@ -302,7 +353,7 @@ mod tests {
             .await
             .unwrap();
 
-        let log = storage.get_log(job_id).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
         assert_eq!(log, format!("{}\n{}\n", line1, line2));
     }
 
@@ -312,7 +363,7 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
 
         let job_id = Uuid::new_v4();
-        let log = storage.get_log(job_id).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
         assert_eq!(log, "");
     }
 
@@ -336,8 +387,9 @@ mod tests {
             .await
             .unwrap();
 
-        let log1 = storage.get_log(job1).await.unwrap();
-        let log2 = storage.get_log(job2).await.unwrap();
+        let meta = test_meta();
+        let log1 = storage.get_log(job1, &meta).await.unwrap();
+        let log2 = storage.get_log(job2, &meta).await.unwrap();
 
         assert_eq!(log1, format!("{}\n", l1));
         assert_eq!(log2, format!("{}\n", l2));
@@ -358,10 +410,11 @@ mod tests {
             .await
             .unwrap();
 
-        let build_logs = storage.get_step_log(job_id, "build").await.unwrap();
+        let meta = test_meta();
+        let build_logs = storage.get_step_log(job_id, "build", &meta).await.unwrap();
         assert_eq!(build_logs, format!("{}\n{}\n", build1, build2));
 
-        let test_logs = storage.get_step_log(job_id, "test").await.unwrap();
+        let test_logs = storage.get_step_log(job_id, "test", &meta).await.unwrap();
         assert_eq!(test_logs, format!("{}\n", test1));
     }
 
@@ -377,7 +430,10 @@ mod tests {
             .await
             .unwrap();
 
-        let logs = storage.get_step_log(job_id, "deploy").await.unwrap();
+        let logs = storage
+            .get_step_log(job_id, "deploy", &test_meta())
+            .await
+            .unwrap();
         assert_eq!(logs, "");
     }
 
@@ -397,7 +453,10 @@ mod tests {
             .await
             .unwrap();
 
-        let logs = storage.get_step_log(job_id, "build").await.unwrap();
+        let logs = storage
+            .get_step_log(job_id, "build", &test_meta())
+            .await
+            .unwrap();
         assert_eq!(logs, format!("{}\n", valid));
     }
 
@@ -407,7 +466,10 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
         let job_id = Uuid::new_v4();
 
-        let logs = storage.get_step_log(job_id, "build").await.unwrap();
+        let logs = storage
+            .get_step_log(job_id, "build", &test_meta())
+            .await
+            .unwrap();
         assert_eq!(logs, "");
     }
 
@@ -437,7 +499,7 @@ mod tests {
             .await
             .unwrap();
 
-        let log = storage.get_log(job_id).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
         assert_eq!(log, "legacy line 1\nlegacy line 2\n");
     }
 
@@ -459,7 +521,7 @@ mod tests {
             .await
             .unwrap();
 
-        let log = storage.get_log(job_id).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
         assert!(log.contains("new content"));
         assert!(!log.contains("legacy content"));
     }
@@ -483,7 +545,10 @@ mod tests {
             .unwrap();
 
         // Both stdout and stderr for "build" should be returned
-        let build_logs = storage.get_step_log(job_id, "build").await.unwrap();
+        let build_logs = storage
+            .get_step_log(job_id, "build", &test_meta())
+            .await
+            .unwrap();
         assert_eq!(build_logs, format!("{}\n{}\n", stdout_line, stderr_line));
     }
 
@@ -503,7 +568,7 @@ mod tests {
             .unwrap();
 
         // upload_to_s3 should be a no-op (no S3 configured) and return Ok
-        storage.upload_to_s3(job_id).await.unwrap();
+        storage.upload_to_s3(job_id, &test_meta()).await.unwrap();
     }
 
     #[tokio::test]
@@ -513,6 +578,111 @@ mod tests {
         let job_id = Uuid::new_v4();
 
         // No local file written — upload_to_s3 should return Ok (graceful skip)
-        storage.upload_to_s3(job_id).await.unwrap();
+        storage.upload_to_s3(job_id, &test_meta()).await.unwrap();
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn test_s3_key_format() {
+        let storage = LogStorage::new("/tmp/unused");
+        // Give it a fake S3 backend so prefix is used
+        let storage = storage.with_s3_client(
+            {
+                let creds = aws_sdk_s3::config::Credentials::new("x", "x", None, None, "t");
+                let config = aws_sdk_s3::Config::builder()
+                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                    .credentials_provider(creds)
+                    .build();
+                aws_sdk_s3::Client::from_conf(config)
+            },
+            "bucket".to_string(),
+            "logs/".to_string(),
+        );
+
+        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let meta = JobLogMeta {
+            workspace: "production".to_string(),
+            task_name: "deploy".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-03-15T14:30:45Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let key = storage.s3_key(job_id, &meta);
+        assert_eq!(
+            key,
+            "logs/production/deploy/2025/03/15/2025-03-15T14-30-45_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
+        );
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn test_s3_key_no_prefix() {
+        let storage = LogStorage::new("/tmp/unused");
+        let storage = storage.with_s3_client(
+            {
+                let creds = aws_sdk_s3::config::Credentials::new("x", "x", None, None, "t");
+                let config = aws_sdk_s3::Config::builder()
+                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                    .credentials_provider(creds)
+                    .build();
+                aws_sdk_s3::Client::from_conf(config)
+            },
+            "bucket".to_string(),
+            "".to_string(),
+        );
+
+        let job_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let meta = JobLogMeta {
+            workspace: "main".to_string(),
+            task_name: "build".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let key = storage.s3_key(job_id, &meta);
+        assert_eq!(
+            key,
+            "main/build/2025/01/02/2025-01-02T03-04-05_11111111-2222-3333-4444-555555555555.jsonl.gz"
+        );
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn test_s3_key_with_slash_in_task_name() {
+        let storage = LogStorage::new("/tmp/unused");
+        let storage = storage.with_s3_client(
+            {
+                let creds = aws_sdk_s3::config::Credentials::new("x", "x", None, None, "t");
+                let config = aws_sdk_s3::Config::builder()
+                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                    .credentials_provider(creds)
+                    .build();
+                aws_sdk_s3::Client::from_conf(config)
+            },
+            "bucket".to_string(),
+            "logs/".to_string(),
+        );
+
+        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        // Hook task names contain colons and may reference actions with slashes
+        let meta = JobLogMeta {
+            workspace: "main".to_string(),
+            task_name: "_hook:deploy/notify".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let key = storage.s3_key(job_id, &meta);
+        // Slashes in task name create extra path segments — this is fine for S3
+        assert_eq!(
+            key,
+            "logs/main/_hook:deploy/notify/2025/06/01/2025-06-01T12-00-00_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
+        );
     }
 }

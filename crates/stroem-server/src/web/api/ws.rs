@@ -1,3 +1,4 @@
+use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use axum::{
     extract::{ws::WebSocket, Path, State, WebSocketUpgrade},
@@ -7,6 +8,7 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
+use stroem_db::JobRepo;
 use uuid::Uuid;
 
 /// GET /api/jobs/{id}/logs/stream -- WebSocket upgrade for live log streaming
@@ -32,7 +34,23 @@ pub async fn job_log_stream(
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid) {
     // 1. Send backfill (existing log content)
-    if let Ok(existing) = state.log_storage.get_log(job_id).await {
+    let meta = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(job)) => JobLogMeta {
+            workspace: job.workspace,
+            task_name: job.task_name,
+            created_at: job.created_at,
+        },
+        _ => {
+            // If job not found, use dummy meta (local file lookup still works by job_id)
+            JobLogMeta {
+                workspace: String::new(),
+                task_name: String::new(),
+                created_at: chrono::Utc::now(),
+            }
+        }
+    };
+
+    if let Ok(existing) = state.log_storage.get_log(job_id, &meta).await {
         if !existing.is_empty()
             && socket
                 .send(axum::extract::ws::Message::Text(existing.into()))
