@@ -677,6 +677,8 @@ cmd: "deploy --token {{ secret.API_TOKEN }}"
 
 Secrets are re-resolved when the workspace reloads (on config change or git poll), so rotated secrets are picked up automatically.
 
+**API redaction:** Secret values are automatically redacted from API responses. When you view a job via `GET /api/jobs/:id`, any field (job input/output, step input/output) that contains a known secret value will have it replaced with `••••••`. Substring matches are also redacted (e.g., a secret embedded in a URL). Additionally, any unresolved `ref+` references (e.g., `ref+awsssm://...`) are redacted to avoid leaking secret-manager paths.
+
 You can also use `| vals` inline in any template expression (step `input:`, action `env:`, `cmd:`, `script:`, hook `input:`) without going through `secrets:`:
 
 ```yaml
