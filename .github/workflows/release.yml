@@ -17,90 +17,53 @@ env:
 
 jobs:
   build-binaries:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-amd64
-            runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            use_cross: false
-          # - name: linux-arm64
-          #   runner: ubuntu-latest
-          #   target: aarch64-unknown-linux-gnu
-          #   use_cross: true
-          # - name: darwin-amd64
-          #   runner: macos-13
-          #   target: x86_64-apple-darwin
-          #   use_cross: false
-          # - name: darwin-arm64
-          #   runner: macos-14
-          #   target: aarch64-apple-darwin
-          #   use_cross: false
-          # - name: windows-amd64
-          #   runner: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   use_cross: false
+    name: Build linux-amd64
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-bookworm
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --locked
+          shared-key: release-x86_64-unknown-linux-gnu
 
       # Build frontend (rust-embed needs static/ populated)
-      - uses: oven-sh/setup-bun@v2
+      - name: Install bun
+        run: |
+          apt-get update && apt-get install -y unzip
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
       - name: Build frontend
         working-directory: ui
-        run: bun install --frozen-lockfile && bun run build
+        run: |
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install --frozen-lockfile && bun run build
 
       # Build all three binaries
       - name: Build stroem-server
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} -p stroem-server
+        run: cargo build --release -p stroem-server
 
       - name: Build stroem-worker
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} -p stroem-worker
+        run: cargo build --release -p stroem-worker
 
       - name: Build stroem-cli
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} -p stroem-cli
+        run: cargo build --release -p stroem-cli
 
       # Package archives
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           for bin in stroem-server stroem-worker stroem-cli; do
-            tar czf "${bin}-${{ matrix.target }}.tar.gz" \
-              -C target/${{ matrix.target }}/release "${bin}"
+            tar czf "${bin}-x86_64-unknown-linux-gnu.tar.gz" \
+              -C target/release "${bin}"
           done
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          foreach ($bin in @("stroem-server", "stroem-worker", "stroem-cli")) {
-            Compress-Archive `
-              -Path "target/${{ matrix.target }}/release/${bin}.exe" `
-              -DestinationPath "${bin}-${{ matrix.target }}.zip"
-          }
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.name }}
-          path: |
-            stroem-*-${{ matrix.target }}.tar.gz
-            stroem-*-${{ matrix.target }}.zip
+          name: binaries-linux-amd64
+          path: stroem-*-x86_64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   build-server:
