@@ -1,0 +1,18 @@
+{{- if or .Values.startupScript .Values.worker.startupScript }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stroem.fullname" . }}-worker-startup
+  labels:
+    {{- include "stroem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+data:
+  {{- if .Values.startupScript }}
+  00-common.sh: |
+    {{- .Values.startupScript | nindent 4 }}
+  {{- end }}
+  {{- if .Values.worker.startupScript }}
+  10-worker.sh: |
+    {{- .Values.worker.startupScript | nindent 4 }}
+  {{- end }}
+{{- end }}

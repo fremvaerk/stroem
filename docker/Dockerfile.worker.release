@@ -45,5 +45,7 @@ RUN ARCH=$(dpkg --print-architecture) && \
     rm -rf /tmp/bun.zip /tmp/bun-linux-*
 
 COPY dist/stroem-worker-linux-${TARGETARCH} /usr/local/bin/stroem-worker
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["stroem-worker"]

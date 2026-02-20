@@ -1,3 +1,8 @@
+# Startup script shared by both worker and runner containers.
+# Runs before the main process via /etc/stroem/startup.d/00-common.sh.
+# Use this for common setup (CA certs, cloud CLI config, etc.).
+startupScript: ""
+
 # Global image tag override. Defaults to Chart.appVersion if not set.
 imageTag: ""
 
@@ -111,6 +116,9 @@ server:
   resources: {}
 
 worker:
+  # Worker-specific startup script. Runs after the shared startupScript
+  # via /etc/stroem/startup.d/10-worker.sh.
+  startupScript: ""
   image:
     repository: ghcr.io/fremvaerk/stroem-worker
     tag: ""
@@ -173,6 +181,11 @@ worker:
     image: docker:27-dind
     resources: {}
   resources: {}
+
+runner:
+  # Runner-specific startup script. Runs after the shared startupScript
+  # via /etc/stroem/startup.d/10-runner.sh. Applies to Docker and Kubernetes runner containers.
+  startupScript: ""
 
 # RBAC for pod creation (needed for KubeRunner)
 rbac:

@@ -1,0 +1,18 @@
+{{- if or .Values.startupScript .Values.runner.startupScript }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "stroem.fullname" . }}-runner-startup
+  labels:
+    {{- include "stroem.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+data:
+  {{- if .Values.startupScript }}
+  00-common.sh: |
+    {{- .Values.startupScript | nindent 4 }}
+  {{- end }}
+  {{- if .Values.runner.startupScript }}
+  10-runner.sh: |
+    {{- .Values.runner.startupScript | nindent 4 }}
+  {{- end }}
+{{- end }}

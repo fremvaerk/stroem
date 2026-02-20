@@ -14,6 +14,7 @@ pub struct KubeRunner {
     server_url: String,
     worker_token: String,
     init_image: String,
+    startup_configmap: Option<String>,
 }
 
 impl KubeRunner {
@@ -28,12 +29,19 @@ impl KubeRunner {
             server_url,
             worker_token,
             init_image: "curlimages/curl:latest".to_string(),
+            startup_configmap: None,
         }
     }
 
     /// Set custom init container image (default: curlimages/curl:latest)
     pub fn with_init_image(mut self, image: String) -> Self {
         self.init_image = image;
+        self
+    }
+
+    /// Set a ConfigMap containing startup scripts to mount at /etc/stroem/startup.d/
+    pub fn with_startup_configmap(mut self, configmap: String) -> Self {
+        self.startup_configmap = Some(configmap);
         self
     }
 
@@ -157,6 +165,43 @@ impl KubeRunner {
                 })
             }
         };
+
+        // Inject startup scripts volume + mount if configured
+        if let Some(ref cm_name) = self.startup_configmap {
+            let startup_volume = serde_json::json!({
+                "name": "startup-scripts",
+                "configMap": {
+                    "name": cm_name,
+                    "defaultMode": 493  // 0755
+                }
+            });
+            let startup_mount = serde_json::json!({
+                "name": "startup-scripts",
+                "mountPath": "/etc/stroem/startup.d",
+                "readOnly": true
+            });
+
+            // Ensure volumes array exists and append
+            if let Some(volumes) = pod_json["spec"]["volumes"].as_array_mut() {
+                volumes.push(startup_volume);
+            } else {
+                pod_json["spec"]["volumes"] = serde_json::json!([startup_volume]);
+            }
+
+            // Add mount to step container
+            if let Some(containers) = pod_json["spec"]["containers"].as_array_mut() {
+                if let Some(step_container) = containers
+                    .iter_mut()
+                    .find(|c| c.get("name").and_then(|n| n.as_str()) == Some("step"))
+                {
+                    if let Some(mounts) = step_container["volumeMounts"].as_array_mut() {
+                        mounts.push(startup_mount);
+                    } else {
+                        step_container["volumeMounts"] = serde_json::json!([startup_mount]);
+                    }
+                }
+            }
+        }
 
         // Apply pod manifest overrides via deep-merge
         if let Some(ref overrides) = config.pod_manifest_overrides {
@@ -884,6 +929,80 @@ mod tests {
             .unwrap();
         let spec = pod.spec.unwrap();
         assert_eq!(spec.restart_policy, Some("Never".to_string()));
+    }
+
+    // --- startup configmap tests ---
+
+    #[test]
+    fn test_build_pod_spec_with_startup_configmap_no_workspace() {
+        let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
+        let config = make_pod_config(None);
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+
+        // Should have startup-scripts volume
+        let volumes = spec.volumes.unwrap();
+        let startup_vol = volumes.iter().find(|v| v.name == "startup-scripts");
+        assert!(startup_vol.is_some(), "Should have startup-scripts volume");
+        let cm = startup_vol.unwrap().config_map.as_ref().unwrap();
+        assert_eq!(cm.name, "stroem-runner-startup");
+        assert_eq!(cm.default_mode, Some(493)); // 0755
+
+        // Step container should have the mount
+        let container = &spec.containers[0];
+        let mounts = container.volume_mounts.as_ref().unwrap();
+        let startup_mount = mounts.iter().find(|m| m.name == "startup-scripts");
+        assert!(startup_mount.is_some(), "Should have startup-scripts mount");
+        assert_eq!(startup_mount.unwrap().mount_path, "/etc/stroem/startup.d");
+        assert_eq!(startup_mount.unwrap().read_only, Some(true));
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_startup_configmap_with_workspace() {
+        let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+
+        // Should have both workspace and startup-scripts volumes
+        let volumes = spec.volumes.unwrap();
+        assert!(volumes.iter().any(|v| v.name == "workspace"));
+        assert!(volumes.iter().any(|v| v.name == "startup-scripts"));
+
+        // Step container should have both mounts
+        let container = &spec.containers[0];
+        let mounts = container.volume_mounts.as_ref().unwrap();
+        assert!(mounts.iter().any(|m| m.name == "workspace"));
+        assert!(mounts.iter().any(|m| m.name == "startup-scripts"));
+    }
+
+    #[test]
+    fn test_build_pod_spec_without_startup_configmap() {
+        let runner = make_runner(); // no startup configmap
+        let config = make_pod_config(None);
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+
+        // No volumes in NoWorkspace mode without startup configmap
+        assert!(spec.volumes.is_none() || spec.volumes.as_ref().unwrap().is_empty());
     }
 
     #[test]

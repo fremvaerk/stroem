@@ -30,6 +30,12 @@ spec:
         {{- if .Values.worker.extraSecretEnv }}
         checksum/secret: {{ include (print $.Template.BasePath "/worker-secret-env.yaml") . | sha256sum }}
         {{- end }}
+        {{- if or .Values.startupScript .Values.worker.startupScript }}
+        checksum/worker-startup: {{ include (print $.Template.BasePath "/worker-startup-configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if or .Values.startupScript .Values.runner.startupScript }}
+        checksum/runner-startup: {{ include (print $.Template.BasePath "/runner-startup-configmap.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.worker.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -84,6 +90,10 @@ spec:
             - name: DOCKER_TLS_VERIFY
               value: "1"
             {{- end }}
+            {{- if or .Values.startupScript .Values.runner.startupScript }}
+            - name: STROEM__KUBERNETES__RUNNER_STARTUP_CONFIGMAP
+              value: {{ include "stroem.fullname" . }}-runner-startup
+            {{- end }}
             {{- range $name, $value := .Values.worker.extraEnv }}
             - name: {{ $name }}
               value: {{ $value | quote }}
@@ -126,6 +136,11 @@ spec:
               mountPath: /certs/client
               readOnly: true
             {{- end }}
+            {{- if or .Values.startupScript .Values.worker.startupScript }}
+            - name: worker-startup
+              mountPath: /etc/stroem/startup.d
+              readOnly: true
+            {{- end }}
           {{- with .Values.worker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -143,6 +158,11 @@ spec:
               mountPath: /var/lib/docker
             - name: dind-certs
               mountPath: /certs
+            {{- if or .Values.startupScript .Values.runner.startupScript }}
+            - name: runner-startup
+              mountPath: /etc/stroem/startup.d
+              readOnly: true
+            {{- end }}
           {{- with .Values.worker.dind.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -167,6 +187,18 @@ spec:
           emptyDir: {}
         - name: dind-certs
           emptyDir: {}
+        {{- end }}
+        {{- if or .Values.startupScript .Values.worker.startupScript }}
+        - name: worker-startup
+          configMap:
+            name: {{ include "stroem.fullname" . }}-worker-startup
+            defaultMode: 0755
+        {{- end }}
+        {{- if and .Values.worker.dind.enabled (or .Values.startupScript .Values.runner.startupScript) }}
+        - name: runner-startup
+          configMap:
+            name: {{ include "stroem.fullname" . }}-runner-startup
+            defaultMode: 0755
         {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:

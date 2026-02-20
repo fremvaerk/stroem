@@ -42,9 +42,11 @@ RUN ARCH=$(dpkg --print-architecture) && \
     mv /tmp/bun-linux-${BUN_ARCH}/bun /usr/local/bin/bun && chmod +x /usr/local/bin/bun && \
     rm -rf /tmp/bun.zip /tmp/bun-linux-*
 
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+
 # Default workspace mount point
 WORKDIR /workspace
 
-# Default entrypoint — shell commands are passed via cmd
-ENTRYPOINT ["bash", "-c"]
+# Entrypoint runs startup scripts then passes control to bash -c
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "bash", "-c"]
 CMD ["echo 'Strøm runner ready'"]

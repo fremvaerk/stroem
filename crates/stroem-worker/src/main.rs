@@ -60,6 +60,9 @@ async fn main() -> Result<()> {
         if let Some(ref init_image) = kube_config.init_image {
             kube_runner = kube_runner.with_init_image(init_image.clone());
         }
+        if let Some(ref startup_cm) = kube_config.runner_startup_configmap {
+            kube_runner = kube_runner.with_startup_configmap(startup_cm.clone());
+        }
         executor = executor.with_kube_runner(kube_runner);
     }
 

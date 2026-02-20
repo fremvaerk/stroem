@@ -54,6 +54,8 @@ impl DockerRunner {
                 if !config.workdir.is_empty() {
                     binds.push(format!("{}:/workspace:ro", config.workdir));
                 }
+                // Mount startup scripts (if present on Docker host, otherwise empty dir)
+                binds.push("/etc/stroem/startup.d:/etc/stroem/startup.d:ro".to_string());
 
                 Config {
                     image: Some(image),
@@ -309,7 +311,9 @@ mod tests {
 
         let host_config = container_config.host_config.unwrap();
         let binds = host_config.binds.unwrap();
-        assert_eq!(binds, vec!["/tmp/workspace:/workspace:ro"]);
+        assert_eq!(binds.len(), 2);
+        assert_eq!(binds[0], "/tmp/workspace:/workspace:ro");
+        assert_eq!(binds[1], "/etc/stroem/startup.d:/etc/stroem/startup.d:ro");
 
         assert_eq!(container_config.working_dir, Some("/workspace".to_string()));
     }
@@ -358,6 +362,32 @@ mod tests {
                 "-c".to_string(),
                 "/workspace/deploy.sh".to_string()
             ])
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_startup_bind_mount() {
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/workspace".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let binds = container_config.host_config.unwrap().binds.unwrap();
+        assert!(
+            binds
+                .iter()
+                .any(|b| b == "/etc/stroem/startup.d:/etc/stroem/startup.d:ro"),
+            "WithWorkspace mode should always include startup.d bind mount"
         );
     }
 

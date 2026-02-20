@@ -117,6 +117,7 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **KubeRunner** (`crates/stroem-runner/src/kubernetes.rs`): Uses `kube` + `k8s-openapi`. Dual mode: `WithWorkspace` has init container + workspace volume; `NoWorkspace` runs image directly.
 - All runners enabled by default via cargo features (`docker`, `kubernetes` on stroem-runner/stroem-worker)
 - Worker config: optional `docker` and `kubernetes` sections, plus `tags` and `runner_image` in `worker-config.yaml`
+- **Startup scripts**: Worker and runner images use `docker/entrypoint.sh` which sources `*.sh` from `/etc/stroem/startup.d/` before the main process. DockerRunner always bind-mounts this path (WithWorkspace mode). KubeRunner injects a ConfigMap volume when `runner_startup_configmap` is set in worker config. Helm chart provides `startupScript`, `worker.startupScript`, and `runner.startupScript` values.
 
 ### Tags and Step Claiming
 - Workers declare `tags` (replaces `capabilities`) — e.g. `["shell", "docker", "gpu"]`

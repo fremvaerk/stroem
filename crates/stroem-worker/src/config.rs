@@ -45,6 +45,8 @@ pub struct KubeRunnerConfig {
     pub namespace: String,
     /// Custom init container image (default: curlimages/curl:latest)
     pub init_image: Option<String>,
+    /// ConfigMap name containing startup scripts for runner pods
+    pub runner_startup_configmap: Option<String>,
 }
 
 fn default_capabilities() -> Vec<String> {
@@ -146,6 +148,31 @@ kubernetes:
         let kube = config.kubernetes.unwrap();
         assert_eq!(kube.namespace, "stroem-jobs");
         assert_eq!(kube.init_image, Some("curlimages/curl:8.5.0".to_string()));
+        assert!(kube.runner_startup_configmap.is_none());
+    }
+
+    #[test]
+    fn test_config_with_kubernetes_startup_configmap() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+kubernetes:
+  namespace: "stroem-jobs"
+  runner_startup_configmap: "stroem-runner-startup"
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let kube = config.kubernetes.unwrap();
+        assert_eq!(kube.namespace, "stroem-jobs");
+        assert!(kube.init_image.is_none());
+        assert_eq!(
+            kube.runner_startup_configmap,
+            Some("stroem-runner-startup".to_string())
+        );
     }
 
     #[test]
