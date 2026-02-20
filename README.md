@@ -4,6 +4,36 @@ A workflow and task orchestration platform. Define workflows as YAML, execute th
 
 Strøm replaces the need for multiple tools (RunDeck, Windmill, GitHub Actions, Kubernetes CronJobs) with a single, unified platform.
 
+## Installation
+
+### Pre-built binaries
+
+Download the latest release from [GitHub Releases](https://github.com/fremvaerk/stroem/releases). Binaries are available for:
+
+| Platform | Archive |
+|----------|---------|
+| Linux (x86_64) | `stroem-{server,worker,cli}-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (ARM64) | `stroem-{server,worker,cli}-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS (Intel) | `stroem-{server,worker,cli}-x86_64-apple-darwin.tar.gz` |
+| macOS (Apple Silicon) | `stroem-{server,worker,cli}-aarch64-apple-darwin.tar.gz` |
+| Windows (x86_64) | `stroem-{server,worker,cli}-x86_64-pc-windows-msvc.zip` |
+
+```bash
+# Example: install the CLI on macOS ARM64
+curl -fsSL https://github.com/fremvaerk/stroem/releases/latest/download/stroem-cli-aarch64-apple-darwin.tar.gz \
+  | tar xz -C /usr/local/bin
+```
+
+### Docker images
+
+Multi-arch images (amd64 + arm64) are published to GHCR:
+
+```bash
+docker pull ghcr.io/fremvaerk/stroem-server:latest
+docker pull ghcr.io/fremvaerk/stroem-worker:latest
+docker pull ghcr.io/fremvaerk/stroem-runner:latest  # base image for shell-in-container steps
+```
+
 ## Quickstart (Docker Compose)
 
 Prerequisites: Docker, curl, jq.

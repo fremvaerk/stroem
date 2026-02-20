@@ -234,3 +234,12 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `ui/src/lib/api.ts` handles token management (access token in memory, refresh in localStorage, auto-refresh on 401)
 - `ui/src/hooks/use-job-logs.ts` WebSocket hook for live log streaming
 - Playwright E2E tests in `ui/e2e/`, can run locally or in Docker
+
+### Release Pipeline
+- **Binary releases**: 5 platforms (linux-amd64, linux-arm64, darwin-amd64, darwin-arm64, windows-amd64) via `build-binaries` matrix job in `.github/workflows/release.yml`
+- Cross-compilation for linux-arm64 uses `cross` (cargo cross-compilation tool); all others use native runners
+- Asset naming: `stroem-{binary}-{target}.tar.gz` (unix) / `.zip` (windows) — 3 binaries x 5 platforms = 15 assets
+- **Multi-arch Docker images**: amd64 + arm64 for server, worker, and runner images
+- Release Dockerfiles (`docker/Dockerfile.{server,worker}.release`) skip Rust compilation — they COPY pre-built binaries using Docker Buildx `TARGETARCH` arg
+- Runner image uses QEMU directly (no Rust, just apt packages + tool downloads)
+- Build workflow (`build.yml`) stays amd64-only; multi-arch is release-only
