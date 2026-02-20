@@ -309,6 +309,62 @@ kubernetes:
   namespace: stroem-jobs
 ```
 
+### Pre-installed Tools and Runtimes
+
+The official runner image (`Dockerfile.runner`) and worker image (`Dockerfile.worker`) ship with these tools pre-installed, available on PATH for all shell actions:
+
+**System tools:**
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Bourne-again shell (default entrypoint) |
+| `curl` | HTTP client |
+| `git` | Version control |
+| `jq` | JSON processor |
+| `yq` | YAML/JSON/XML processor (mikefarah/yq) |
+| `tar` / `gzip` | Archive and compression |
+| `unzip` | ZIP extraction |
+| `ssh` | OpenSSH client (ssh, scp, ssh-keygen) |
+
+**Secret management:**
+
+| Tool | Description |
+|------|-------------|
+| `sops` | Mozilla SOPS — encrypted file editing |
+| `vals` | Helmfile vals — multi-backend secret resolution |
+
+**Language runtimes:**
+
+| Tool | Description |
+|------|-------------|
+| `uv` | Python package manager and runner (astral-sh/uv). Use `uv run` to execute Python scripts, `uv pip install` for packages. |
+| `bun` | JavaScript/TypeScript runtime and package manager (oven-sh/bun). Use `bun run` for scripts, `bun install` for packages. |
+
+All tools are installed with pinned versions and support both `amd64` and `arm64` architectures. Version numbers are declared as `ARG` directives at the top of each Dockerfile for easy upgrades.
+
+**Example — Python script with dependencies:**
+
+```yaml
+actions:
+  analyze:
+    type: shell
+    cmd: |
+      uv pip install pandas requests --system
+      uv run python /workspace/scripts/analyze.py
+```
+
+**Example — TypeScript script:**
+
+```yaml
+actions:
+  generate-report:
+    type: shell
+    cmd: |
+      cd /workspace
+      bun install
+      bun run scripts/report.ts
+```
+
 ### Worker tags
 
 Tags control which steps a worker can claim. Each step computes `required_tags` based on its action type and runner:
