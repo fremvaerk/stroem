@@ -102,10 +102,7 @@ pub async fn fire_hooks(
     };
 
     for (i, hook) in hooks.iter().enumerate() {
-        let source_id = format!(
-            "{}/{}/{}/{}[{}]",
-            job.workspace, job.task_name, job.job_id, hook_type, i
-        );
+        let source_id = job.job_id.to_string();
 
         if let Err(e) = fire_single_hook(
             &state.pool,

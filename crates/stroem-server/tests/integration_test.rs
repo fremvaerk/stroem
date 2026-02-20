@@ -6441,7 +6441,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         .find(|j| j.source_type == "hook")
         .expect("Hook job not found");
     assert_eq!(hook_job.task_name, "_hook:notify");
-    assert!(hook_job.source_id.as_ref().unwrap().contains("on_success"));
+    assert_eq!(hook_job.source_id, Some(job_id.to_string()));
 
     // Verify hook step was created and is ready
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
@@ -6532,7 +6532,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
         .iter()
         .find(|j| j.source_type == "hook")
         .expect("Hook job not found");
-    assert!(hook_job.source_id.as_ref().unwrap().contains("on_error"));
+    assert_eq!(hook_job.source_id, Some(job_id.to_string()));
 
     // Verify rendered input contains error message
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
@@ -6893,7 +6893,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         .iter()
         .find(|j| j.source_type == "hook")
         .expect("on_success hook job should be created");
-    assert!(hook_job.source_id.as_ref().unwrap().contains("on_success"));
+    assert_eq!(hook_job.source_id, Some(job_id.to_string()));
 
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
     let input = hook_steps[0].input.as_ref().unwrap();

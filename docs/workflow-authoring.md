@@ -997,6 +997,7 @@ Each entry in `hook.failed_steps` contains:
 - **Normal execution**: Hook jobs go through the normal claim/execute flow on workers.
 - **Multiple hooks**: You can define multiple hooks per event. They all fire independently.
 - **Validation**: Hook action references are validated at parse time — referencing a non-existent action is an error.
+- **Failure visibility**: If a hook job fails at runtime, the failure is logged as a server event on the original job (visible in the "Server Events" panel on the job detail page).
 
 ## Worker Recovery
 
