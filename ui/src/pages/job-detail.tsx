@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft, TriangleAlert } from "lucide-react";
+import { ArrowLeft, LayoutList, Network, TriangleAlert } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { StepTimeline } from "@/components/step-timeline";
+import { StepDetail } from "@/components/step-detail";
+import { WorkflowDag } from "@/components/workflow-dag";
 import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
 import { getJob } from "@/lib/api";
@@ -39,6 +41,7 @@ export function JobDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"timeline" | "dag">("timeline");
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -177,12 +180,34 @@ export function JobDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Steps</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base">Steps</CardTitle>
+            {job.steps.length > 1 && (
+              <div className="flex gap-1 rounded-md border p-1">
+                <Button
+                  variant={viewMode === "timeline" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setViewMode("timeline")}
+                >
+                  <LayoutList className="mr-1.5 h-3.5 w-3.5" />
+                  Timeline
+                </Button>
+                <Button
+                  variant={viewMode === "dag" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => setViewMode("dag")}
+                >
+                  <Network className="mr-1.5 h-3.5 w-3.5" />
+                  Graph
+                </Button>
+              </div>
+            )}
+          </div>
         </CardHeader>
         <CardContent>
           {job.steps.length === 0 ? (
             <p className="text-sm text-muted-foreground">No steps</p>
-          ) : (
+          ) : viewMode === "timeline" ? (
             <StepTimeline
               jobId={job.job_id}
               steps={job.steps}
@@ -190,6 +215,23 @@ export function JobDetailPage() {
               onSelectStep={setSelectedStep}
               workerNames={workerNames}
             />
+          ) : (
+            <>
+              <WorkflowDag
+                steps={job.steps}
+                selectedStep={selectedStep}
+                onSelectStep={setSelectedStep}
+              />
+              {selectedStep &&
+                job.steps.find((s) => s.step_name === selectedStep) && (
+                  <div className="mt-4 border-t pt-4">
+                    <StepDetail
+                      jobId={job.job_id}
+                      step={job.steps.find((s) => s.step_name === selectedStep)!}
+                    />
+                  </div>
+                )}
+            </>
           )}
         </CardContent>
       </Card>

@@ -293,4 +293,67 @@ test.describe("Jobs", () => {
     await expect(stderrSpan).toBeVisible();
     await expect(stderrSpan).toHaveClass(/text-red-400/);
   });
+
+  test("job API response includes depends_on for multi-step task", async ({
+    baseURL,
+  }) => {
+    const jobId = await triggerJob(baseURL!, "data-pipeline", {
+      data: "dep-test",
+    });
+
+    // Wait for job to complete
+    await expect(async () => {
+      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
+      const data = await res.json();
+      expect(["completed", "failed"]).toContain(data.status);
+    }).toPass({ timeout: 30000 });
+
+    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const apiData = await apiRes.json();
+
+    // The transform step should have empty depends_on
+    const transform = apiData.steps.find(
+      (s: { step_name: string }) => s.step_name === "transform",
+    );
+    expect(transform.depends_on).toEqual([]);
+
+    // The summarize step should depend on transform
+    const summarize = apiData.steps.find(
+      (s: { step_name: string }) => s.step_name === "summarize",
+    );
+    expect(summarize.depends_on).toEqual(["transform"]);
+  });
+
+  test("job detail shows timeline/graph toggle for multi-step job", async ({
+    page,
+    baseURL,
+  }) => {
+    const jobId = await triggerJob(baseURL!, "data-pipeline", {
+      data: "dag-test",
+    });
+
+    // Wait for job to complete
+    await expect(async () => {
+      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
+      const data = await res.json();
+      expect(["completed", "failed"]).toContain(data.status);
+    }).toPass({ timeout: 30000 });
+
+    await page.goto(`/jobs/${jobId}`);
+    await expect(
+      page.getByRole("heading", { name: "data-pipeline" }),
+    ).toBeVisible();
+
+    // Toggle buttons should be visible for multi-step job
+    const timelineBtn = page.getByRole("button", { name: "Timeline" });
+    const graphBtn = page.getByRole("button", { name: "Graph" });
+    await expect(timelineBtn).toBeVisible();
+    await expect(graphBtn).toBeVisible();
+
+    // Click Graph to switch to DAG view
+    await graphBtn.click();
+
+    // React Flow canvas should be present
+    await expect(page.locator(".react-flow")).toBeVisible();
+  });
 });

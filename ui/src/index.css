@@ -115,6 +115,8 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+@import "@xyflow/react/dist/style.css";
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -122,4 +124,14 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* React Flow dark mode overrides */
+.dark .react-flow__controls button {
+  background: var(--card);
+  border-color: var(--border);
+  fill: var(--foreground);
+}
+.dark .react-flow__controls button:hover {
+  background: var(--accent);
 }

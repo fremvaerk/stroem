@@ -74,6 +74,7 @@ export interface JobStep {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  depends_on: string[];
 }
 
 export interface JobDetail {

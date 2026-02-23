@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
 import { ArrowLeft, Clock, Folder, Play } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { WorkflowDag } from "@/components/workflow-dag";
 import {
   Table,
   TableBody,
@@ -63,6 +64,7 @@ export function TaskDetailPage() {
   const [jobs, setJobs] = useState<JobListItem[]>([]);
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsOffset, setJobsOffset] = useState(0);
+  const [selectedDagStep, setSelectedDagStep] = useState<string | null>(null);
 
   useEffect(() => {
     if (!workspace || !name) return;
@@ -277,6 +279,15 @@ export function TaskDetailPage() {
           <CardTitle className="text-base">Flow Steps</CardTitle>
         </CardHeader>
         <CardContent>
+          {flowSteps.length > 1 && (
+            <div className="mb-4">
+              <WorkflowDag
+                flow={task.flow}
+                selectedStep={selectedDagStep}
+                onSelectStep={setSelectedDagStep}
+              />
+            </div>
+          )}
           <div className="space-y-2">
             {flowSteps.map(([stepName, step], index) => (
               <div

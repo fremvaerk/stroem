@@ -174,6 +174,7 @@ pub async fn get_job(
                 "started_at": step.started_at,
                 "completed_at": step.completed_at,
                 "error_message": step.error_message,
+                "depends_on": serde_json::Value::Array(vec![]),
             })
         })
         .collect();
@@ -225,6 +226,15 @@ pub async fn get_job(
                     .and_then(|n| pos.get(n).copied())
                     .unwrap_or(usize::MAX)
             });
+
+            // Enrich steps with depends_on from task flow
+            for step_json in &mut steps_json {
+                if let Some(step_name) = step_json["step_name"].as_str() {
+                    if let Some(flow_step) = task.flow.get(step_name) {
+                        step_json["depends_on"] = json!(&flow_step.depends_on);
+                    }
+                }
+            }
         }
     }
 
@@ -589,5 +599,80 @@ mod tests {
             response.steps[0]["error_message"],
             json!(format!("failed to connect: {REDACTED} rejected"))
         );
+    }
+
+    #[test]
+    fn test_depends_on_enriched_from_flow() {
+        use stroem_common::models::workflow::FlowStep;
+
+        // Build a task flow with dependencies
+        let mut flow = HashMap::new();
+        flow.insert(
+            "build".to_string(),
+            FlowStep {
+                action: "shell/bash".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "test".to_string(),
+            FlowStep {
+                action: "shell/bash".to_string(),
+                depends_on: vec!["build".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+        flow.insert(
+            "deploy".to_string(),
+            FlowStep {
+                action: "shell/bash".to_string(),
+                depends_on: vec!["build".to_string(), "test".to_string()],
+                input: HashMap::new(),
+                continue_on_failure: false,
+            },
+        );
+
+        // Build step JSON with empty depends_on (as created by the handler)
+        let mut steps_json: Vec<serde_json::Value> = vec![
+            json!({"step_name": "build", "depends_on": []}),
+            json!({"step_name": "test", "depends_on": []}),
+            json!({"step_name": "deploy", "depends_on": []}),
+        ];
+
+        // Enrich with depends_on from flow (same logic as get_job handler)
+        for step_json in &mut steps_json {
+            if let Some(step_name) = step_json["step_name"].as_str() {
+                if let Some(flow_step) = flow.get(step_name) {
+                    step_json["depends_on"] = json!(&flow_step.depends_on);
+                }
+            }
+        }
+
+        assert_eq!(steps_json[0]["depends_on"], json!([]));
+        assert_eq!(steps_json[1]["depends_on"], json!(["build"]));
+        assert_eq!(steps_json[2]["depends_on"], json!(["build", "test"]));
+    }
+
+    #[test]
+    fn test_depends_on_empty_for_missing_flow() {
+        // Steps not found in the flow should keep the default empty array
+        let flow: HashMap<String, stroem_common::models::workflow::FlowStep> = HashMap::new();
+
+        let mut steps_json: Vec<serde_json::Value> =
+            vec![json!({"step_name": "orphan_step", "depends_on": []})];
+
+        // Enrich — flow is empty, so no matches
+        for step_json in &mut steps_json {
+            if let Some(step_name) = step_json["step_name"].as_str() {
+                if let Some(flow_step) = flow.get(step_name) {
+                    step_json["depends_on"] = json!(&flow_step.depends_on);
+                }
+            }
+        }
+
+        assert_eq!(steps_json[0]["depends_on"], json!([]));
     }
 }

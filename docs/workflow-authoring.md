@@ -582,6 +582,15 @@ flow:
     # test waits for both checkout AND setup-db
 ```
 
+### DAG visualization
+
+The web UI provides an interactive graph view for step dependencies:
+
+- **Job Detail page**: Toggle between "Timeline" and "Graph" views using the buttons in the Steps card header. The graph shows each step as a node with live status (color-coded borders, animated edges for running steps). Click a node to view step details below the graph.
+- **Task Detail page**: Tasks with more than one step display a dependency graph above the step list, showing the static flow structure.
+
+The graph uses left-to-right layout with automatic positioning via the dagre layout algorithm. Nodes show the step name, action name, and current status. Pan and zoom controls are available in the bottom-left corner.
+
 ### Passing data between steps
 
 When a step emits structured output (via `OUTPUT: {json}`), downstream steps can reference it in templates.

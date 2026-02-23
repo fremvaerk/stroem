@@ -23,6 +23,21 @@ test.describe("Tasks", () => {
     await expect(page.locator("text=Run Task")).toBeVisible();
   });
 
+  test("task detail shows DAG for multi-step task", async ({ page }) => {
+    // Navigate to data-pipeline task (multi-step: transform -> summarize)
+    await page.goto("/workspaces/default/tasks/data-pipeline");
+    await expect(
+      page.getByRole("heading", { name: "data-pipeline" }),
+    ).toBeVisible();
+
+    // DAG should render for multi-step tasks
+    await expect(page.locator(".react-flow")).toBeVisible();
+
+    // Step list should still be visible below the DAG
+    await expect(page.getByText("transform")).toBeVisible();
+    await expect(page.getByText("summarize")).toBeVisible();
+  });
+
   test("run task creates job", async ({ page }) => {
     await page.click("text=Tasks");
     await page.locator("table tbody tr td a").first().click();
