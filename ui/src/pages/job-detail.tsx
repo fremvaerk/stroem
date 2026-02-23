@@ -182,26 +182,24 @@ export function JobDetailPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">Steps</CardTitle>
-            {job.steps.length > 1 && (
-              <div className="flex gap-1 rounded-md border p-1">
-                <Button
-                  variant={viewMode === "timeline" ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => setViewMode("timeline")}
-                >
-                  <LayoutList className="mr-1.5 h-3.5 w-3.5" />
-                  Timeline
-                </Button>
-                <Button
-                  variant={viewMode === "dag" ? "secondary" : "ghost"}
-                  size="sm"
-                  onClick={() => setViewMode("dag")}
-                >
-                  <Network className="mr-1.5 h-3.5 w-3.5" />
-                  Graph
-                </Button>
-              </div>
-            )}
+            <div className="flex gap-1 rounded-md border p-1">
+              <Button
+                variant={viewMode === "timeline" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setViewMode("timeline")}
+              >
+                <LayoutList className="mr-1.5 h-3.5 w-3.5" />
+                Timeline
+              </Button>
+              <Button
+                variant={viewMode === "dag" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setViewMode("dag")}
+              >
+                <Network className="mr-1.5 h-3.5 w-3.5" />
+                Graph
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>

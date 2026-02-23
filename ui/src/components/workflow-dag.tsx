@@ -25,7 +25,7 @@ import type { JobStep, FlowStep } from "@/lib/types";
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 72;
 const SENTINEL_WIDTH = 80;
-const SENTINEL_HEIGHT = 40;
+const SENTINEL_HEIGHT = NODE_HEIGHT;
 
 // --- Edge colors: use raw CSS variable values (oklch), no hsl() wrapper ---
 const EDGE_COLOR_DEFAULT = "oklch(0.7 0 0)";
