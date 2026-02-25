@@ -16,9 +16,55 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { getTask, listJobs } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
-import type { TaskDetail, JobListItem } from "@/lib/types";
+import type { TaskDetail, JobListItem, FlowStep } from "@/lib/types";
 
 const JOBS_PAGE_SIZE = 20;
+
+/** Topological sort of flow steps (Kahn's algorithm).
+ *  Steps with no unmet dependencies come first; ties broken alphabetically. */
+function topoSortFlow(
+  flow: Record<string, FlowStep>,
+): [string, FlowStep][] {
+  const entries = Object.entries(flow);
+  const inDegree = new Map<string, number>();
+  for (const [name, step] of entries) {
+    inDegree.set(name, step.depends_on?.length ?? 0);
+  }
+
+  const sorted: [string, FlowStep][] = [];
+  const queue: string[] = [];
+
+  for (const [name] of entries) {
+    if ((inDegree.get(name) ?? 0) === 0) queue.push(name);
+  }
+  queue.sort();
+
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    sorted.push([name, flow[name]]);
+    // Decrease in-degree for dependents
+    for (const [dep, step] of entries) {
+      if (step.depends_on?.includes(name)) {
+        const d = (inDegree.get(dep) ?? 1) - 1;
+        inDegree.set(dep, d);
+        if (d === 0) {
+          // Insert into queue in sorted position
+          const idx = queue.findIndex((q) => q > dep);
+          queue.splice(idx === -1 ? queue.length : idx, 0, dep);
+        }
+      }
+    }
+  }
+
+  // Append any remaining (cycle) steps at the end
+  for (const [name] of entries) {
+    if (!sorted.some(([n]) => n === name)) {
+      sorted.push([name, flow[name]]);
+    }
+  }
+
+  return sorted;
+}
 
 function formatTime(dateStr: string | null): string {
   if (!dateStr) return "-";
@@ -127,7 +173,7 @@ export function TaskDetailPage() {
     );
   }
 
-  const flowSteps = Object.entries(task.flow);
+  const flowSteps = topoSortFlow(task.flow);
   const inputFields = Object.entries(task.input);
 
   return (
