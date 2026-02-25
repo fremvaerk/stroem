@@ -4896,7 +4896,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
             path: ws_dir.path().to_string_lossy().to_string(),
         },
     )]))
-    .await?;
+    .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
@@ -5053,7 +5053,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
             path: ws_dir.path().to_string_lossy().to_string(),
         },
     )]))
-    .await?;
+    .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
@@ -5128,7 +5128,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
             path: ws_dir.path().to_string_lossy().to_string(),
         },
     )]))
-    .await?;
+    .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
@@ -5219,7 +5219,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
             path: ws_path_str.clone(),
         },
     )]))
-    .await?;
+    .await;
 
     // AppState is Clone and shares Arc<WorkspaceManager> across clones
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -5345,7 +5345,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
             path: ws_dir.path().to_string_lossy().to_string(),
         },
     )]))
-    .await?;
+    .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());

@@ -1,7 +1,21 @@
 use anyhow::Result;
+use clap::Parser;
 use stroem_worker::config::load_config;
 use stroem_worker::executor::StepExecutor;
 use stroem_worker::poller::run_worker;
+
+#[derive(Parser)]
+#[command(name = "stroem-worker", about = "Strøm workflow worker")]
+struct Cli {
+    /// Path to worker configuration file
+    #[arg(
+        short,
+        long,
+        env = "STROEM_CONFIG",
+        default_value = "worker-config.yaml"
+    )]
+    config: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,9 +34,8 @@ async fn main() -> Result<()> {
         .init();
 
     // Load configuration
-    let config_path =
-        std::env::var("STROEM_CONFIG").unwrap_or_else(|_| "worker-config.yaml".to_string());
-    let config = load_config(&config_path)?;
+    let cli = Cli::parse();
+    let config = load_config(&cli.config)?;
 
     tracing::info!("Starting worker '{}'", config.worker_name);
 

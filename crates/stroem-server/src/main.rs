@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::Parser;
 use stroem_db::{create_pool, run_migrations, UserRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
@@ -6,6 +7,19 @@ use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::workspace::WorkspaceManager;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Parser)]
+#[command(name = "stroem-server", about = "Strøm workflow orchestration server")]
+struct Cli {
+    /// Path to server configuration file
+    #[arg(
+        short,
+        long,
+        env = "STROEM_CONFIG",
+        default_value = "server-config.yaml"
+    )]
+    config: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,8 +34,8 @@ async fn main() -> Result<()> {
     tracing::info!("Starting Strøm server");
 
     // Load configuration
-    let config_path =
-        std::env::var("STROEM_CONFIG").unwrap_or_else(|_| "server-config.yaml".to_string());
+    let cli = Cli::parse();
+    let config_path = cli.config;
 
     tracing::info!("Loading config from: {}", config_path);
 
@@ -72,19 +86,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Load workspaces
+    // Load workspaces (individual failures are logged but don't crash the server)
     tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
-    let workspace_manager = WorkspaceManager::new(config.workspaces.clone())
-        .await
-        .context("Failed to load workspaces")?;
+    let workspace_manager = WorkspaceManager::new(config.workspaces.clone()).await;
 
     for info in workspace_manager.list_workspace_info().await {
-        tracing::info!(
-            "Workspace '{}': {} actions, {} tasks",
-            info.name,
-            info.actions_count,
-            info.tasks_count
-        );
+        if let Some(ref error) = info.error {
+            tracing::error!("Workspace '{}': failed to load: {}", info.name, error);
+        } else {
+            tracing::info!(
+                "Workspace '{}': {} actions, {} tasks",
+                info.name,
+                info.actions_count,
+                info.tasks_count
+            );
+        }
     }
 
     // Start background watchers for hot-reload

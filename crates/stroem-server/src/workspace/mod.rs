@@ -80,12 +80,16 @@ impl WorkspaceSource for InMemorySource {
 #[derive(Debug)]
 pub struct WorkspaceManager {
     entries: HashMap<String, WorkspaceEntry>,
+    load_errors: HashMap<String, String>,
 }
 
 impl WorkspaceManager {
-    /// Create a new WorkspaceManager from config definitions
-    pub async fn new(defs: HashMap<String, WorkspaceSourceDef>) -> Result<Self> {
+    /// Create a new WorkspaceManager from config definitions.
+    /// Individual workspace failures are captured in `load_errors` rather than
+    /// failing the entire server — other workspaces continue to load normally.
+    pub async fn new(defs: HashMap<String, WorkspaceSourceDef>) -> Self {
         let mut entries = HashMap::new();
+        let mut load_errors = HashMap::new();
 
         for (name, def) in defs {
             let source: Arc<dyn WorkspaceSource> = match def {
@@ -97,39 +101,51 @@ impl WorkspaceManager {
                     ref git_ref,
                     poll_interval_secs,
                     ref auth,
-                } => Arc::new(git::GitSource::new(
-                    &name,
-                    url,
-                    git_ref,
-                    auth.clone(),
-                    poll_interval_secs,
-                )?),
+                } => {
+                    match git::GitSource::new(&name, url, git_ref, auth.clone(), poll_interval_secs)
+                    {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            tracing::error!("Failed to init workspace '{}': {:#}", name, e);
+                            load_errors.insert(name, format!("{:#}", e));
+                            continue;
+                        }
+                    }
+                }
             };
 
-            let config = source
-                .load()
-                .await
-                .with_context(|| format!("Failed to load workspace '{}'", name))?;
-
-            let source_path = source.path().to_path_buf();
-
-            entries.insert(
-                name.clone(),
-                WorkspaceEntry {
-                    config: Arc::new(RwLock::new(config)),
-                    source,
-                    name: name.clone(),
-                    source_path,
-                },
-            );
+            match source.load().await {
+                Ok(config) => {
+                    let source_path = source.path().to_path_buf();
+                    entries.insert(
+                        name.clone(),
+                        WorkspaceEntry {
+                            config: Arc::new(RwLock::new(config)),
+                            source,
+                            name: name.clone(),
+                            source_path,
+                        },
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load workspace '{}': {:#}", name, e);
+                    load_errors.insert(name, format!("{:#}", e));
+                }
+            }
         }
 
-        Ok(Self { entries })
+        Self {
+            entries,
+            load_errors,
+        }
     }
 
     /// Create a WorkspaceManager from pre-built entries (for testing)
     pub fn from_entries(entries: HashMap<String, WorkspaceEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            load_errors: HashMap::new(),
+        }
     }
 
     /// Create a WorkspaceManager from an in-memory WorkspaceConfig (for testing).
@@ -148,7 +164,10 @@ impl WorkspaceManager {
                 source_path: PathBuf::from("/dev/null"),
             },
         );
-        Self { entries }
+        Self {
+            entries,
+            load_errors: HashMap::new(),
+        }
     }
 
     /// Get the workspace config for a given name
@@ -181,7 +200,8 @@ impl WorkspaceManager {
         self.entries.keys().map(|s| s.as_str()).collect()
     }
 
-    /// List all tasks across all workspaces: (workspace_name, task_name, task_count)
+    /// List all workspaces including ones that failed to load.
+    /// Failed workspaces have `error` set and zero counts.
     pub async fn list_workspace_info(&self) -> Vec<WorkspaceInfo> {
         let mut infos = Vec::new();
         for (name, entry) in &self.entries {
@@ -192,6 +212,17 @@ impl WorkspaceManager {
                 actions_count: config.actions.len(),
                 triggers_count: config.triggers.len(),
                 revision: entry.source.revision(),
+                error: None,
+            });
+        }
+        for (name, error) in &self.load_errors {
+            infos.push(WorkspaceInfo {
+                name: name.clone(),
+                tasks_count: 0,
+                actions_count: 0,
+                triggers_count: 0,
+                revision: None,
+                error: Some(error.clone()),
             });
         }
         infos
@@ -270,6 +301,8 @@ pub struct WorkspaceInfo {
     pub actions_count: usize,
     pub triggers_count: usize,
     pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -311,7 +344,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         assert_eq!(mgr.names().len(), 1);
 
         let config = mgr.get_config_async("default").await.unwrap();
@@ -353,7 +386,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         assert_eq!(mgr.names().len(), 2);
 
         let default_config = mgr.get_config_async("default").await.unwrap();
@@ -374,7 +407,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         assert!(mgr.get_config_async("nonexistent").await.is_none());
         assert!(mgr.get_path("nonexistent").is_none());
     }
@@ -390,7 +423,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "default");
@@ -401,7 +434,7 @@ tasks:
 
     #[tokio::test]
     async fn test_workspace_manager_empty() {
-        let mgr = WorkspaceManager::new(HashMap::new()).await.unwrap();
+        let mgr = WorkspaceManager::new(HashMap::new()).await;
         assert_eq!(mgr.names().len(), 0);
         assert!(mgr.get_config("anything").await.is_none());
         assert!(mgr.get_path("anything").is_none());
@@ -591,7 +624,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let path = mgr.get_path("default").unwrap();
         assert_eq!(path.to_str().unwrap(), temp_path);
     }
@@ -607,7 +640,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let revision = mgr.get_revision("default");
         assert!(revision.is_some());
         // Verify it's a valid hex string (blake2 hash)
@@ -629,7 +662,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let revision1 = mgr.get_revision("default").unwrap();
 
         // Modify the file content
@@ -656,7 +689,7 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder { path: temp_path },
         );
-        let mgr2 = WorkspaceManager::new(defs2).await.unwrap();
+        let mgr2 = WorkspaceManager::new(defs2).await;
         let revision2 = mgr2.get_revision("default").unwrap();
 
         // Revision should have changed
@@ -664,7 +697,7 @@ tasks:
     }
 
     #[tokio::test]
-    async fn test_workspace_manager_nonexistent_folder_fails() {
+    async fn test_workspace_manager_nonexistent_folder_records_error() {
         let mut defs = HashMap::new();
         defs.insert(
             "nonexistent".to_string(),
@@ -673,10 +706,17 @@ tasks:
             },
         );
 
-        let result = WorkspaceManager::new(defs).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("nonexistent"));
+        let mgr = WorkspaceManager::new(defs).await;
+        // Workspace should not be in entries
+        assert_eq!(mgr.names().len(), 0);
+        assert!(mgr.get_config_async("nonexistent").await.is_none());
+        // But should appear in list_workspace_info with error
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        let info = &infos[0];
+        assert_eq!(info.name, "nonexistent");
+        assert!(info.error.is_some());
+        assert_eq!(info.tasks_count, 0);
     }
 
     #[tokio::test]
@@ -722,7 +762,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let infos = mgr.list_workspace_info().await;
 
         assert_eq!(infos.len(), 2);
@@ -764,7 +804,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let names = mgr.names();
 
         assert_eq!(names.len(), 3);
@@ -774,7 +814,7 @@ tasks:
     }
 
     #[tokio::test]
-    async fn test_malformed_yaml_fails() {
+    async fn test_malformed_yaml_records_error() {
         let temp = TempDir::new().unwrap();
         let workflows_dir = temp.path().join(".workflows");
         fs::create_dir(&workflows_dir).unwrap();
@@ -798,12 +838,13 @@ actions:
             },
         );
 
-        let result = WorkspaceManager::new(defs).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let err_str = err.to_string();
-        // Should mention either YAML parsing or the workspace name
-        assert!(err_str.contains("bad") || err_str.contains("parse") || err_str.contains("YAML"));
+        let mgr = WorkspaceManager::new(defs).await;
+        // Should not crash, but record the error
+        assert_eq!(mgr.names().len(), 0);
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "bad");
+        assert!(infos[0].error.is_some());
     }
 
     #[tokio::test]
@@ -834,7 +875,7 @@ tasks:
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
 
         let config1 = mgr.get_config_async("default").await.unwrap();
         assert_eq!(config1.actions.len(), 1);
@@ -888,7 +929,7 @@ tasks:
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
         let rev1 = mgr.get_revision("default").unwrap();
 
         // Modify content
@@ -914,7 +955,7 @@ tasks:
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
-        let mgr = WorkspaceManager::new(defs).await.unwrap();
+        let mgr = WorkspaceManager::new(defs).await;
 
         let result = mgr.reload("nonexistent").await;
         assert!(result.is_err());
@@ -970,5 +1011,113 @@ tasks:
         assert!(config.actions.contains_key("action2"));
         assert!(config.tasks.contains_key("task1"));
         assert!(config.tasks.contains_key("task2"));
+    }
+
+    #[tokio::test]
+    async fn test_bad_workspace_does_not_block_good_workspace() {
+        let good_temp = create_test_workspace_dir();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "good".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: good_temp.path().to_str().unwrap().to_string(),
+            },
+        );
+        defs.insert(
+            "bad".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/path/12345".to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs).await;
+
+        // Good workspace loaded
+        assert_eq!(mgr.names().len(), 1);
+        assert!(mgr.get_config_async("good").await.is_some());
+
+        // Bad workspace not in entries
+        assert!(mgr.get_config_async("bad").await.is_none());
+
+        // Both appear in workspace info
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 2);
+
+        let good_info = infos.iter().find(|i| i.name == "good").unwrap();
+        assert!(good_info.error.is_none());
+        assert_eq!(good_info.tasks_count, 1);
+
+        let bad_info = infos.iter().find(|i| i.name == "bad").unwrap();
+        assert!(bad_info.error.is_some());
+        assert_eq!(bad_info.tasks_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_all_workspaces_bad() {
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ws1".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/a".to_string(),
+            },
+        );
+        defs.insert(
+            "ws2".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/b".to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs).await;
+        assert_eq!(mgr.names().len(), 0);
+
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 2);
+        assert!(infos.iter().all(|i| i.error.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_load_error_message_preserved() {
+        let mut defs = HashMap::new();
+        defs.insert(
+            "missing".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/path/12345/xyz".to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs).await;
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        let error = infos[0].error.as_ref().unwrap();
+        // Error message should contain the path or be meaningful
+        assert!(
+            error.contains("nonexistent")
+                || error.contains("No such file")
+                || error.contains("not found"),
+            "Error message should be meaningful, got: {}",
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_info_error_field_skipped_when_none() {
+        let temp = create_test_workspace_dir();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ok".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs).await;
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+
+        // Serialize to JSON and verify "error" key is absent
+        let json = serde_json::to_value(&infos[0]).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("error"));
     }
 }

@@ -8,3 +8,8 @@ crates/stroem-server/static/*
 
 /workspace-ops
 /ui/test-results
+
+server-config.*.yaml
+worker-config.*.yaml
+
+.envrc

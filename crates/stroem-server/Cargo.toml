@@ -35,6 +35,7 @@ notify.workspace = true
 blake2.workspace = true
 flate2.workspace = true
 tar.workspace = true
+clap.workspace = true
 config.workspace = true
 croner.workspace = true
 tokio-util.workspace = true

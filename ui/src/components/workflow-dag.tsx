@@ -25,7 +25,7 @@ import type { JobStep, FlowStep } from "@/lib/types";
 const NODE_WIDTH = 200;
 const NODE_HEIGHT = 72;
 const SENTINEL_WIDTH = 80;
-const SENTINEL_HEIGHT = NODE_HEIGHT;
+const SENTINEL_HEIGHT = 40;
 
 // --- Edge colors: use raw CSS variable values (oklch), no hsl() wrapper ---
 const EDGE_COLOR_DEFAULT = "oklch(0.7 0 0)";
@@ -154,10 +154,12 @@ function getLayoutedElements(
   g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 100 });
 
   for (const node of nodes) {
-    const isSentinel = node.type === "sentinel";
+    // Tell dagre all nodes are the same height so sentinels align vertically
+    // with step nodes. Sentinels render smaller visually but occupy the same
+    // layout slot.
     g.setNode(node.id, {
-      width: isSentinel ? SENTINEL_WIDTH : NODE_WIDTH,
-      height: isSentinel ? SENTINEL_HEIGHT : NODE_HEIGHT,
+      width: node.type === "sentinel" ? SENTINEL_WIDTH : NODE_WIDTH,
+      height: NODE_HEIGHT,
     });
   }
   for (const edge of edges) {
@@ -168,11 +170,11 @@ function getLayoutedElements(
 
   const layoutedNodes = nodes.map((node) => {
     const pos = g.node(node.id);
-    const isSentinel = node.type === "sentinel";
-    const w = isSentinel ? SENTINEL_WIDTH : NODE_WIDTH;
-    const h = isSentinel ? SENTINEL_HEIGHT : NODE_HEIGHT;
+    const w = node.type === "sentinel" ? SENTINEL_WIDTH : NODE_WIDTH;
+    const h = node.type === "sentinel" ? SENTINEL_HEIGHT : NODE_HEIGHT;
     return {
       ...node,
+      // Center the visual node within the dagre layout slot
       position: { x: pos.x - w / 2, y: pos.y - h / 2 },
     };
   });
@@ -231,7 +233,7 @@ export function WorkflowDag({
             id: `${dep}->${step.step_name}`,
             source: dep,
             target: step.step_name,
-            type: "smoothstep",
+            type: "default",
             animated:
               sourceStatus === "completed" && step.status === "running",
             style: {
@@ -259,7 +261,7 @@ export function WorkflowDag({
           id: `${START_ID}->${root}`,
           source: START_ID,
           target: root,
-          type: "smoothstep",
+          type: "default",
           style: { stroke: EDGE_COLOR_DEFAULT, strokeWidth: 2 },
         });
       }
@@ -279,7 +281,7 @@ export function WorkflowDag({
           id: `${leaf}->${FINISH_ID}`,
           source: leaf,
           target: FINISH_ID,
-          type: "smoothstep",
+          type: "default",
           style: {
             stroke: edgeColor(statusMap.get(leaf)),
             strokeWidth: 2,
@@ -306,7 +308,7 @@ export function WorkflowDag({
             id: `${dep}->${name}`,
             source: dep,
             target: name,
-            type: "smoothstep",
+            type: "default",
             style: { stroke: EDGE_COLOR_DEFAULT, strokeWidth: 2 },
           });
         }
@@ -327,7 +329,7 @@ export function WorkflowDag({
           id: `${START_ID}->${root}`,
           source: START_ID,
           target: root,
-          type: "smoothstep",
+          type: "default",
           style: { stroke: EDGE_COLOR_DEFAULT, strokeWidth: 2 },
         });
       }
@@ -346,7 +348,7 @@ export function WorkflowDag({
           id: `${leaf}->${FINISH_ID}`,
           source: leaf,
           target: FINISH_ID,
-          type: "smoothstep",
+          type: "default",
           style: { stroke: EDGE_COLOR_DEFAULT, strokeWidth: 2 },
         });
       }
