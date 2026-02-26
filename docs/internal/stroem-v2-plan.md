@@ -805,7 +805,7 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 7. ~~**OIDC auth provider**~~: **DONE** -- Authorization Code + PKCE flow, JIT user provisioning, state cookie.
 8. ~~**S3 log upload**~~: **DONE** -- Background upload on job completion, read fallback chain (local → S3).
 9. **API keys**: Create, list, revoke, authenticate
-10. **Webhook triggers**: `POST /hooks/{name}` endpoint
+10. ~~**Webhook triggers**~~: **DONE** -- `GET`/`POST /hooks/{name}` endpoint, optional secret auth, input mapping (body, headers, method, query).
 11. ~~**on_error / on_success hooks**~~: **DONE** -- Task-level hooks with Tera-rendered input, recursion guard, supports `type: task` hook actions.
 12. ~~**Sub-task execution (`type: task` action)**~~: **DONE** -- Server-side dispatch, recursive child jobs, depth limit (10), parent propagation.
 13. ~~**Worker heartbeat + stale job recovery**~~: **DONE** -- Background sweeper, stale worker detection, step failure + job orchestration.
@@ -816,11 +816,11 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 ### Phase 4 -- Advanced Features
 
 1. **Local mode** execution (Worker-side DAG walker, shared workspace)
-2. **`type: pod` actions** -- full k8s pod spec (tolerations, node selectors, volumes, init containers, sidecars)
+2. ~~**`type: pod` actions**~~: **DONE** -- Pod manifest overrides via `manifest` field, deep-merged into generated pod spec. Supports service accounts, node selectors, tolerations, resource limits, annotations, sidecars.
 3. **RBAC**: Roles, permissions, workspace-scoped access control
-4. **Secret resolution** via `vals` CLI
+4. ~~**Secret resolution**~~: **DONE** -- Tera `| vals` filter for inline resolution + worker-side `resolve_secrets()` for env vars. Supports all vals backends (AWS SSM, Vault, GCP, Azure, SOPS). Full docs at `docs/src/content/docs/guides/secrets.md`.
 5. **Resource types** (custom resource definitions in YAML)
-6. **DAG visualization** -- Interactive workflow graph on task detail and job detail pages. Auto-layout of steps as nodes with dependency edges, virtual start/finish nodes. Clickable steps to inspect inputs, outputs, and logs. On job detail, nodes reflect live step status (pending/running/completed/failed). Library candidates: dagre, elkjs, reactflow.
+6. ~~**DAG visualization**~~: **DONE** -- React Flow + Dagre in `ui/src/components/workflow-dag.tsx`. Interactive graph on task detail (static preview) and job detail (live status). Auto-layout with virtual start/end sentinel nodes, status-based edge coloring and animation, clickable step selection.
 
 ---
 
