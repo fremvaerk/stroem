@@ -86,6 +86,21 @@ cmd: "{% if enabled %}echo Active{% else %}echo Inactive{% endif %}"
 
 See the [Tera documentation](https://keats.github.io/tera/docs/) for the full feature set.
 
+## Input defaults with templates
+
+Task input defaults support Tera templates with access to `secret.*`. Defaults are rendered at job creation time, before the job is persisted:
+
+```yaml
+tasks:
+  deploy:
+    input:
+      api_key:
+        type: string
+        default: "{{ secret.DEPLOY_KEY }}"
+```
+
+See [Input & Output](/guides/input-and-output/) for full details on default values.
+
 ## Secret references in templates
 
 The `| vals` filter resolves secret references at template render time. See [Secrets & Encryption](/guides/secrets/) for details.

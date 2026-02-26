@@ -33,6 +33,34 @@ Or via CLI:
 stroem trigger deploy-pipeline --input '{"env": "production"}'
 ```
 
+### Default values
+
+Fields with a `default` are automatically filled in when not provided by the caller. This works across all job creation paths (API, CLI, triggers, webhooks, hooks, and task actions).
+
+Default values can use [Tera templates](/guides/templating/) with access to `secret.*` (workspace secrets):
+
+```yaml
+tasks:
+  deploy:
+    input:
+      env:
+        type: string
+        default: "staging"
+      api_key:
+        type: string
+        default: "{{ secret.DEPLOY_API_KEY }}"
+    flow:
+      run:
+        action: deploy-app
+        input:
+          env: "{{ input.env }}"
+          api_key: "{{ input.api_key }}"
+```
+
+When triggered without specifying `env` or `api_key`, the defaults are applied automatically. Non-string defaults (numbers, booleans) pass through unchanged.
+
+Fields marked `required: true` without a default will produce an error if not provided.
+
 ### Action-level input
 
 Action input is provided by the step definition in the task flow. Values support [Tera templates](/guides/templating/):

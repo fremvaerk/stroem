@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_common::template::render_input_map;
+use stroem_common::template::{merge_defaults, render_input_map};
 use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
@@ -59,13 +59,18 @@ fn create_job_for_task_inner<'a>(
             )
         })?;
 
+        // Merge input defaults from the task schema
+        let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
+        let merged_input = merge_defaults(&input, &task.input, &secrets_ctx)
+            .context("Failed to merge input defaults")?;
+
         // Create job record
         let job_id = JobRepo::create_with_parent(
             pool,
             workspace_name,
             task_name,
             &task.mode,
-            Some(input),
+            Some(merged_input),
             source_type,
             source_id,
             parent_job_id,

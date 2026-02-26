@@ -1,6 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use tera::Tera;
+
+use crate::models::workflow::InputFieldDef;
 
 /// Tera filter that resolves `ref+` secret references via the vals CLI.
 ///
@@ -134,6 +136,58 @@ pub fn render_input_map(
             other => other.clone(),
         };
         result.insert(key.clone(), rendered_value);
+    }
+
+    Ok(serde_json::Value::Object(result))
+}
+
+/// Merge task input defaults into user-provided input.
+///
+/// For each field in the input schema that is missing from `user_input`:
+/// - If the field has a `default`, insert it (rendering string defaults through Tera with `context`)
+/// - If the field is `required` and has no default, return an error
+///
+/// User-provided fields always take precedence. Extra user fields not in the schema pass through.
+pub fn merge_defaults(
+    user_input: &serde_json::Value,
+    input_schema: &HashMap<String, InputFieldDef>,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let empty = serde_json::Map::new();
+    let user_map = user_input.as_object().unwrap_or(&empty);
+
+    let mut result = user_map.clone();
+
+    // Fill in defaults for schema fields not provided by the user
+    for (field_name, field_def) in input_schema {
+        if result.contains_key(field_name) {
+            continue;
+        }
+
+        if let Some(ref default_value) = field_def.default {
+            let resolved = match default_value {
+                serde_json::Value::String(s) => {
+                    if s.contains("{{") {
+                        let rendered = render_template(s, context).with_context(|| {
+                            format!(
+                                "Failed to render default template for input field '{}'",
+                                field_name
+                            )
+                        })?;
+                        serde_json::Value::String(rendered)
+                    } else {
+                        default_value.clone()
+                    }
+                }
+                _ => default_value.clone(),
+            };
+            result.insert(field_name.clone(), resolved);
+        } else if field_def.required {
+            bail!(
+                "Required input field '{}' is missing and has no default",
+                field_name
+            );
+        }
     }
 
     Ok(serde_json::Value::Object(result))
@@ -534,5 +588,217 @@ mod tests {
         let context = json!({});
         let result = render_template(template, &context).unwrap();
         assert_eq!(result, "plain-value");
+    }
+
+    // --- merge_defaults tests ---
+
+    fn field(
+        field_type: &str,
+        required: bool,
+        default: Option<serde_json::Value>,
+    ) -> InputFieldDef {
+        InputFieldDef {
+            field_type: field_type.to_string(),
+            required,
+            default,
+        }
+    }
+
+    #[test]
+    fn test_merge_defaults_fills_missing_fields() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "env".to_string(),
+            field("string", false, Some(json!("staging"))),
+        );
+        schema.insert(
+            "retries".to_string(),
+            field("number", false, Some(json!(3))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["env"], "staging");
+        assert_eq!(result["retries"], 3);
+    }
+
+    #[test]
+    fn test_merge_defaults_user_values_take_precedence() {
+        let user_input = json!({"env": "production"});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "env".to_string(),
+            field("string", false, Some(json!("staging"))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["env"], "production");
+    }
+
+    #[test]
+    fn test_merge_defaults_template_rendered_with_secrets() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "api_key".to_string(),
+            field("string", false, Some(json!("{{ secret.API_KEY }}"))),
+        );
+
+        let context = json!({ "secret": { "API_KEY": "sk-12345" } });
+        let result = merge_defaults(&user_input, &schema, &context).unwrap();
+        assert_eq!(result["api_key"], "sk-12345");
+    }
+
+    #[test]
+    fn test_merge_defaults_required_field_missing_errors() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert("name".to_string(), field("string", true, None));
+
+        let result = merge_defaults(&user_input, &schema, &json!({}));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Error should mention field name: {err}"
+        );
+        assert!(
+            err.contains("Required"),
+            "Error should mention required: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_defaults_required_field_with_default_ok() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "name".to_string(),
+            field("string", true, Some(json!("default-name"))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["name"], "default-name");
+    }
+
+    #[test]
+    fn test_merge_defaults_extra_user_fields_preserved() {
+        let user_input = json!({"env": "prod", "custom_flag": true});
+        let mut schema = HashMap::new();
+        schema.insert("env".to_string(), field("string", false, None));
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["env"], "prod");
+        assert_eq!(result["custom_flag"], true);
+    }
+
+    #[test]
+    fn test_merge_defaults_empty_schema_empty_input() {
+        let result = merge_defaults(&json!({}), &HashMap::new(), &json!({})).unwrap();
+        assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn test_merge_defaults_non_string_defaults_passthrough() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert("count".to_string(), field("number", false, Some(json!(42))));
+        schema.insert(
+            "enabled".to_string(),
+            field("boolean", false, Some(json!(true))),
+        );
+        schema.insert(
+            "tags".to_string(),
+            field("string", false, Some(json!(["a", "b"]))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["count"], 42);
+        assert_eq!(result["enabled"], true);
+        assert_eq!(result["tags"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn test_merge_defaults_string_without_template_passthrough() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "env".to_string(),
+            field("string", false, Some(json!("staging"))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["env"], "staging");
+    }
+
+    #[test]
+    fn test_merge_defaults_template_render_error() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "key".to_string(),
+            field("string", false, Some(json!("{{ missing.var }}"))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({}));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("key"),
+            "Error should mention field name: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_defaults_optional_field_no_default_omitted() {
+        let user_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert("optional_field".to_string(), field("string", false, None));
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert!(result.get("optional_field").is_none());
+    }
+
+    #[test]
+    fn test_merge_defaults_null_input() {
+        // null input treated as empty object
+        let mut schema = HashMap::new();
+        schema.insert(
+            "env".to_string(),
+            field("string", false, Some(json!("staging"))),
+        );
+
+        let result = merge_defaults(&json!(null), &schema, &json!({})).unwrap();
+        assert_eq!(result["env"], "staging");
+    }
+
+    #[test]
+    fn test_merge_defaults_required_field_provided_by_user() {
+        let user_input = json!({"name": "alice"});
+        let mut schema = HashMap::new();
+        schema.insert("name".to_string(), field("string", true, None));
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["name"], "alice");
+    }
+
+    #[test]
+    fn test_merge_defaults_mix_provided_and_defaulted() {
+        let user_input = json!({"env": "production"});
+        let mut schema = HashMap::new();
+        schema.insert("env".to_string(), field("string", true, None));
+        schema.insert(
+            "retries".to_string(),
+            field("number", false, Some(json!(3))),
+        );
+        schema.insert(
+            "notify".to_string(),
+            field("boolean", false, Some(json!(true))),
+        );
+
+        let result = merge_defaults(&user_input, &schema, &json!({})).unwrap();
+        assert_eq!(result["env"], "production");
+        assert_eq!(result["retries"], 3);
+        assert_eq!(result["notify"], true);
     }
 }
