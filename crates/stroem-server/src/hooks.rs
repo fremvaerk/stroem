@@ -37,6 +37,7 @@ pub struct FailedStepInfo {
 ///
 /// - Jobs with `source_type = "hook"` never trigger further hooks (recursion guard).
 /// - Selects `on_success` or `on_error` hooks based on job status.
+/// - Task-level hooks take priority; workspace-level hooks fire as fallback for top-level jobs only.
 /// - Each hook creates a new single-step job with `source_type = "hook"`.
 /// - Failures are logged but never affect the original job.
 #[tracing::instrument(skip(state, workspace_config, task))]
@@ -51,11 +52,21 @@ pub async fn fire_hooks(
         return;
     }
 
-    // Only fire on terminal states
-    let hooks: &[HookDef] = match job.status.as_str() {
-        "completed" => &task.on_success,
-        "failed" => &task.on_error,
+    // Select task-level and workspace-level hooks for this event type
+    let (task_hooks, ws_hooks) = match job.status.as_str() {
+        "completed" => (&task.on_success, &workspace_config.on_success),
+        "failed" => (&task.on_error, &workspace_config.on_error),
         _ => return,
+    };
+
+    // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.
+    let is_top_level = matches!(job.source_type.as_str(), "api" | "trigger" | "webhook");
+    let hooks: &[HookDef] = if !task_hooks.is_empty() {
+        task_hooks
+    } else if is_top_level {
+        ws_hooks
+    } else {
+        return;
     };
 
     if hooks.is_empty() {

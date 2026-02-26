@@ -1,6 +1,6 @@
 ---
 title: Hooks
-description: on_success and on_error hooks for automated job responses
+description: Task-level and workspace-level on_success / on_error hooks for automated job responses
 ---
 
 Tasks can define `on_success` and `on_error` hooks that fire automatically when a job reaches a terminal state. Each hook references an existing action and can pass input rendered with job context.
@@ -65,6 +65,55 @@ Each entry in `hook.failed_steps` contains:
 - **Multiple hooks**: You can define multiple hooks per event. They all fire independently.
 - **Validation**: Hook action references are validated at parse time — referencing a non-existent action is an error.
 - **Failure visibility**: If a hook job fails at runtime, the failure is logged as a server event on the original job (visible in the "Server Events" panel on the job detail page).
+
+## Workspace-level hooks
+
+You can define `on_success` and `on_error` hooks at the top level of your workflow YAML. These act as **fallback defaults**: they fire only when the specific task has no hooks defined for that event type.
+
+```yaml
+actions:
+  notify-slack:
+    type: shell
+    cmd: 'curl -X POST "$WEBHOOK_URL" -d "{\"text\": \"$MESSAGE\"}"'
+    input:
+      message:
+        type: string
+
+on_success:
+  - action: notify-slack
+    input:
+      message: "Job {{ hook.task_name }} in {{ hook.workspace }} completed successfully"
+
+on_error:
+  - action: notify-slack
+    input:
+      message: "Job {{ hook.task_name }} in {{ hook.workspace }} FAILED: {{ hook.error_message }}"
+
+tasks:
+  deploy:
+    flow:
+      step1:
+        action: deploy-app
+    # No on_success/on_error here — workspace-level hooks fire
+
+  backup:
+    flow:
+      step1:
+        action: backup-db
+    on_error:
+      - action: notify-slack
+        input:
+          message: "Backup failed — page oncall!"
+    # Task-level on_error takes precedence; workspace on_error is skipped
+    # Workspace on_success still fires (because task has no on_success)
+```
+
+### Rules
+
+- `on_success` and `on_error` are evaluated independently. A task can override one while inheriting the other.
+- Workspace hooks only fire for **top-level jobs** (source type `api`, `trigger`, or `webhook`). Child jobs from `type: task` actions do not trigger workspace hooks.
+- If multiple YAML files define workspace-level hooks, they are merged (extended, not replaced).
+- The same `hook.*` template context and `secret.*` variables are available as in task-level hooks.
 
 ## Task actions in hooks
 

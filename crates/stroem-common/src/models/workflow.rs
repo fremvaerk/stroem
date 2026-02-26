@@ -202,6 +202,10 @@ pub struct WorkflowConfig {
     pub tasks: HashMap<String, TaskDef>,
     #[serde(default)]
     pub triggers: HashMap<String, TriggerDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_success: Vec<HookDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_error: Vec<HookDef>,
 }
 
 /// Merged workspace - all YAML files combined
@@ -211,6 +215,8 @@ pub struct WorkspaceConfig {
     pub actions: HashMap<String, ActionDef>,
     pub tasks: HashMap<String, TaskDef>,
     pub triggers: HashMap<String, TriggerDef>,
+    pub on_success: Vec<HookDef>,
+    pub on_error: Vec<HookDef>,
 }
 
 impl WorkspaceConfig {
@@ -225,6 +231,8 @@ impl WorkspaceConfig {
         self.actions.extend(config.actions);
         self.tasks.extend(config.tasks);
         self.triggers.extend(config.triggers);
+        self.on_success.extend(config.on_success);
+        self.on_error.extend(config.on_error);
     }
 
     /// Render secret values through Tera templates.
@@ -837,6 +845,99 @@ actions:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
         assert!(action.manifest.is_none());
+    }
+
+    #[test]
+    fn test_parse_workspace_level_hooks() {
+        let yaml = r#"
+actions:
+  notify:
+    type: shell
+    cmd: "curl $WEBHOOK"
+
+on_success:
+  - action: notify
+    input:
+      message: "Job succeeded"
+on_error:
+  - action: notify
+    input:
+      message: "Job FAILED"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.on_success.len(), 1);
+        assert_eq!(config.on_error.len(), 1);
+        assert_eq!(config.on_success[0].action, "notify");
+        assert_eq!(
+            config.on_success[0].input.get("message").unwrap(),
+            "Job succeeded"
+        );
+        assert_eq!(config.on_error[0].action, "notify");
+        assert_eq!(
+            config.on_error[0].input.get("message").unwrap(),
+            "Job FAILED"
+        );
+    }
+
+    #[test]
+    fn test_parse_workflow_without_workspace_hooks() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.on_success.is_empty());
+        assert!(config.on_error.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_merge_hooks() {
+        let config1: WorkflowConfig = serde_yaml::from_str(
+            r#"
+actions:
+  notify:
+    type: shell
+    cmd: "curl $WEBHOOK"
+on_success:
+  - action: notify
+    input:
+      message: "from config1"
+"#,
+        )
+        .unwrap();
+
+        let config2: WorkflowConfig = serde_yaml::from_str(
+            r#"
+on_success:
+  - action: notify
+    input:
+      message: "from config2"
+on_error:
+  - action: notify
+    input:
+      message: "error from config2"
+"#,
+        )
+        .unwrap();
+
+        let mut workspace = WorkspaceConfig::new();
+        workspace.merge(config1);
+        workspace.merge(config2);
+
+        // on_success should have 2 entries (extended, not replaced)
+        assert_eq!(workspace.on_success.len(), 2);
+        assert_eq!(
+            workspace.on_success[0].input.get("message").unwrap(),
+            "from config1"
+        );
+        assert_eq!(
+            workspace.on_success[1].input.get("message").unwrap(),
+            "from config2"
+        );
+        // on_error should have 1 entry
+        assert_eq!(workspace.on_error.len(), 1);
     }
 
     #[test]

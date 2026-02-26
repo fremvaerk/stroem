@@ -178,10 +178,11 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 ### Hooks (on_success / on_error)
 - `HookDef` struct in `crates/stroem-common/src/models/workflow.rs` — `action` + `input` map
 - `TaskDef` has `on_success: Vec<HookDef>` and `on_error: Vec<HookDef>` (default empty)
+- **Workspace-level hooks**: `WorkflowConfig` and `WorkspaceConfig` also have `on_success`/`on_error` fields — act as fallback defaults when a task has no hooks defined for that event type. Only fire for top-level jobs (`source_type` is `api`, `trigger`, or `webhook`). Evaluated independently per event type.
 - `crates/stroem-server/src/hooks.rs` — `fire_hooks()` builds `HookContext`, renders input through Tera, creates single-step hook jobs
 - Recursion guard: jobs with `source_type = "hook"` never trigger further hooks
 - Hook jobs: `task_name = "_hook:{action}"`, `source_type = "hook"`, `source_id = "{ws}/{task}/{job_id}/{hook_type}[idx]"`
-- Validation in `validation.rs` — hook action references must exist (or be library actions with `/`)
+- Validation in `validation.rs` — hook action references must exist (or be library actions with `/`), both task-level and workspace-level
 - Migration `005_hooks.sql` adds `'hook'` to `source_type` CHECK constraint
 - Hook actions can be `type: task` — creates a full child job instead of a single-step hook job
 

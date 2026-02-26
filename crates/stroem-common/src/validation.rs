@@ -119,10 +119,18 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 
         // Validate hooks reference existing actions
         for (i, hook) in task.on_success.iter().enumerate() {
-            validate_hook_action(task_name, "on_success", i, &hook.action, config)?;
+            validate_hook_action_exists(
+                &format!("Task '{task_name}' on_success[{i}]"),
+                &hook.action,
+                config,
+            )?;
         }
         for (i, hook) in task.on_error.iter().enumerate() {
-            validate_hook_action(task_name, "on_error", i, &hook.action, config)?;
+            validate_hook_action_exists(
+                &format!("Task '{task_name}' on_error[{i}]"),
+                &hook.action,
+                config,
+            )?;
         }
     }
 
@@ -169,6 +177,14 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                 }
             }
         }
+    }
+
+    // Validate workspace-level hooks reference existing actions
+    for (i, hook) in config.on_success.iter().enumerate() {
+        validate_hook_action_exists(&format!("Workspace on_success[{i}]"), &hook.action, config)?;
+    }
+    for (i, hook) in config.on_error.iter().enumerate() {
+        validate_hook_action_exists(&format!("Workspace on_error[{i}]"), &hook.action, config)?;
     }
 
     // Validate secrets
@@ -477,24 +493,12 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
 }
 
 /// Validates that a hook references an existing action (or a library action).
-fn validate_hook_action(
-    task_name: &str,
-    hook_type: &str,
-    idx: usize,
-    action: &str,
-    config: &WorkflowConfig,
-) -> Result<()> {
+fn validate_hook_action_exists(label: &str, action: &str, config: &WorkflowConfig) -> Result<()> {
     if action.contains('/') {
         return Ok(()); // library action — skip
     }
     if !config.actions.contains_key(action) {
-        bail!(
-            "Task '{}' {}[{}] references non-existent action '{}'",
-            task_name,
-            hook_type,
-            idx,
-            action
-        );
+        bail!("{} references non-existent action '{}'", label, action);
     }
     Ok(())
 }
@@ -1908,5 +1912,78 @@ triggers:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("on-push").unwrap();
         assert!(!trigger.enabled());
+    }
+
+    // --- workspace-level hook validation tests ---
+
+    #[test]
+    fn test_validate_workspace_hook_valid_action() {
+        let yaml = r#"
+actions:
+  notify:
+    type: shell
+    cmd: "curl $WEBHOOK"
+
+on_success:
+  - action: notify
+    input:
+      message: "All good"
+on_error:
+  - action: notify
+    input:
+      message: "Something failed"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_workspace_hook_missing_action() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+
+on_success:
+  - action: nonexistent
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Workspace on_success[0]"));
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_validate_workspace_hook_on_error_missing_action() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+
+on_error:
+  - action: missing-action
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Workspace on_error[0]"));
+        assert!(err.contains("missing-action"));
+    }
+
+    #[test]
+    fn test_validate_workspace_hook_library_action() {
+        let yaml = r#"
+on_success:
+  - action: common/slack-notify
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
     }
 }
