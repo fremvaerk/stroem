@@ -148,6 +148,17 @@ See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Jobs created by triggers have `source_type = "trigger"`, `source_id = "{workspace}/{trigger_name}"`
 - Cron validation at YAML parse time in `validation.rs` (CLI `validate` catches bad expressions)
 
+### Webhook Triggers
+- `TriggerDef` is a tagged enum (`#[serde(tag = "type")]`) with `Scheduler` and `Webhook` variants
+- Accessor methods: `task()`, `input()`, `enabled()`, `trigger_type_str()`
+- `crates/stroem-server/src/web/hooks.rs` — webhook HTTP handler (GET+POST `/hooks/{name}`)
+- Not under `/api/` — avoids user auth middleware. Auth: optional `secret` field on trigger
+- Secret validation: `?secret=xxx` query param or `Authorization: Bearer xxx` header
+- Input mapping: `body` (parsed JSON or raw string), `headers`, `method`, `query` + YAML `input` defaults
+- Jobs created by webhooks have `source_type = "webhook"`, `source_id = "{workspace}/{trigger_key}"`
+- Webhook name validation: must match `^[a-zA-Z0-9_-]+$` (URL-safe)
+- Duplicate webhook names across workspaces: first match wins at dispatch time (no startup validation)
+
 ### Hooks (on_success / on_error)
 - `HookDef` struct in `crates/stroem-common/src/models/workflow.rs` — `action` + `input` map
 - `TaskDef` has `on_success: Vec<HookDef>` and `on_error: Vec<HookDef>` (default empty)

@@ -69,7 +69,7 @@ pub async fn list_tasks(
             let has_triggers = workspace
                 .triggers
                 .values()
-                .any(|t| t.enabled && t.task == *name);
+                .any(|t| t.enabled() && t.task() == *name);
             TaskListItem {
                 name: name.clone(),
                 mode: task.mode.clone(),
@@ -114,7 +114,7 @@ pub async fn get_task(
     let triggers: Vec<TriggerInfo> = workspace
         .triggers
         .iter()
-        .filter(|(_, t)| t.task == name)
+        .filter(|(_, t)| t.task() == name)
         .map(|(trig_name, trigger)| TriggerInfo::from_def(trig_name, trigger, 5))
         .collect();
 

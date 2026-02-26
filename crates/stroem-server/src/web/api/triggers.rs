@@ -30,13 +30,17 @@ impl TriggerInfo {
     /// Build a TriggerInfo from a name and TriggerDef, computing next_runs for cron triggers.
     pub fn from_def(name: &str, trigger: &TriggerDef, next_runs_count: usize) -> Self {
         let next_runs = compute_next_runs(trigger, next_runs_count);
+        let cron = match trigger {
+            TriggerDef::Scheduler { cron, .. } => Some(cron.clone()),
+            _ => None,
+        };
         Self {
             name: name.to_string(),
-            trigger_type: trigger.trigger_type.clone(),
-            cron: trigger.cron.clone(),
-            task: trigger.task.clone(),
-            enabled: trigger.enabled,
-            input: trigger.input.clone(),
+            trigger_type: trigger.trigger_type_str().to_string(),
+            cron,
+            task: trigger.task().to_string(),
+            enabled: trigger.enabled(),
+            input: trigger.input().clone(),
             next_runs: next_runs.iter().map(|dt| dt.to_rfc3339()).collect(),
         }
     }
@@ -47,13 +51,9 @@ impl TriggerInfo {
 /// Returns ISO 8601 timestamps for scheduler-type triggers with a valid cron expression.
 /// Returns an empty vec for non-scheduler types or invalid/missing cron expressions.
 pub fn compute_next_runs(trigger: &TriggerDef, count: usize) -> Vec<DateTime<Utc>> {
-    if trigger.trigger_type != "scheduler" {
-        return vec![];
-    }
-
-    let cron_expr = match &trigger.cron {
-        Some(expr) => expr,
-        None => return vec![],
+    let cron_expr = match trigger {
+        TriggerDef::Scheduler { cron, .. } => cron,
+        _ => return vec![],
     };
 
     let cron = match CronParser::builder()
@@ -102,12 +102,21 @@ mod tests {
     use stroem_common::models::workflow::TriggerDef;
 
     fn make_trigger(trigger_type: &str, cron: Option<&str>, enabled: bool) -> TriggerDef {
-        TriggerDef {
-            trigger_type: trigger_type.to_string(),
-            cron: cron.map(|s| s.to_string()),
-            task: "test-task".to_string(),
-            input: HashMap::new(),
-            enabled,
+        match trigger_type {
+            "scheduler" => TriggerDef::Scheduler {
+                cron: cron.unwrap_or("* * * * *").to_string(),
+                task: "test-task".to_string(),
+                input: HashMap::new(),
+                enabled,
+            },
+            "webhook" => TriggerDef::Webhook {
+                name: "test-hook".to_string(),
+                task: "test-task".to_string(),
+                secret: None,
+                input: HashMap::new(),
+                enabled,
+            },
+            _ => panic!("Unknown trigger type: {trigger_type}"),
         }
     }
 
@@ -144,8 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_next_runs_missing_cron() {
-        let trigger = make_trigger("scheduler", None, true);
+    fn test_compute_next_runs_webhook_type() {
+        // Webhook triggers should return no next_runs
+        let trigger = make_trigger("webhook", None, true);
         let runs = compute_next_runs(&trigger, 5);
         assert!(runs.is_empty());
     }

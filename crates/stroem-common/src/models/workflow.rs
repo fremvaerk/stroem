@@ -129,16 +129,62 @@ fn default_mode() -> String {
 
 /// Trigger definition - represents automated task execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TriggerDef {
-    #[serde(rename = "type")]
-    pub trigger_type: String, // "scheduler", "webhook"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cron: Option<String>,
-    pub task: String,
-    #[serde(default)]
-    pub input: HashMap<String, serde_json::Value>,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
+#[serde(tag = "type")]
+pub enum TriggerDef {
+    #[serde(rename = "scheduler")]
+    Scheduler {
+        cron: String,
+        task: String,
+        #[serde(default)]
+        input: HashMap<String, serde_json::Value>,
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
+    #[serde(rename = "webhook")]
+    Webhook {
+        name: String,
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<String>,
+        #[serde(default)]
+        input: HashMap<String, serde_json::Value>,
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
+}
+
+impl TriggerDef {
+    /// Get the task name this trigger targets.
+    pub fn task(&self) -> &str {
+        match self {
+            TriggerDef::Scheduler { task, .. } => task,
+            TriggerDef::Webhook { task, .. } => task,
+        }
+    }
+
+    /// Get the input map for this trigger.
+    pub fn input(&self) -> &HashMap<String, serde_json::Value> {
+        match self {
+            TriggerDef::Scheduler { input, .. } => input,
+            TriggerDef::Webhook { input, .. } => input,
+        }
+    }
+
+    /// Get whether this trigger is enabled.
+    pub fn enabled(&self) -> bool {
+        match self {
+            TriggerDef::Scheduler { enabled, .. } => *enabled,
+            TriggerDef::Webhook { enabled, .. } => *enabled,
+        }
+    }
+
+    /// Get the trigger type as a string (for API responses).
+    pub fn trigger_type_str(&self) -> &str {
+        match self {
+            TriggerDef::Scheduler { .. } => "scheduler",
+            TriggerDef::Webhook { .. } => "webhook",
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -310,10 +356,13 @@ triggers:
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("nightly").unwrap();
-        assert_eq!(trigger.trigger_type, "scheduler");
-        assert_eq!(trigger.cron.as_ref().unwrap(), "0 0 2 * * *");
-        assert_eq!(trigger.task, "nightly-backup");
-        assert!(trigger.enabled);
+        assert_eq!(trigger.trigger_type_str(), "scheduler");
+        match trigger {
+            TriggerDef::Scheduler { cron, .. } => assert_eq!(cron, "0 0 2 * * *"),
+            _ => panic!("Expected Scheduler variant"),
+        }
+        assert_eq!(trigger.task(), "nightly-backup");
+        assert!(trigger.enabled());
     }
 
     #[test]
@@ -383,7 +432,7 @@ triggers:
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("test").unwrap();
-        assert!(trigger.enabled);
+        assert!(trigger.enabled());
     }
 
     #[test]

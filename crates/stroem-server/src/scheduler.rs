@@ -117,14 +117,15 @@ async fn load_triggers(
         };
 
         for (trigger_name, trigger_def) in &config.triggers {
-            // Only process enabled scheduler triggers with a cron expression
-            if trigger_def.trigger_type != "scheduler" || !trigger_def.enabled {
-                continue;
-            }
-
-            let cron_expr = match &trigger_def.cron {
-                Some(expr) => expr.clone(),
-                None => continue,
+            // Only process enabled scheduler triggers
+            let (cron_expr, task, input) = match trigger_def {
+                stroem_common::models::workflow::TriggerDef::Scheduler {
+                    cron,
+                    task,
+                    input,
+                    enabled,
+                } if *enabled => (cron.clone(), task.clone(), input.clone()),
+                _ => continue,
             };
 
             let cron = match CronParser::builder()
@@ -162,8 +163,8 @@ async fn load_triggers(
                     cron,
                     cron_expr,
                     workspace: ws_name.to_string(),
-                    task: trigger_def.task.clone(),
-                    input: trigger_def.input.clone(),
+                    task,
+                    input,
                     trigger_name: trigger_name.clone(),
                     last_run,
                     next_run,
@@ -339,9 +340,8 @@ mod tests {
         );
         config.triggers.insert(
             "every-minute".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("* * * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "* * * * *".to_string(),
                 task: "hello".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -368,9 +368,8 @@ mod tests {
         let mut config = WorkspaceConfig::new();
         config.triggers.insert(
             "disabled-trigger".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("* * * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "* * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: false,
@@ -389,10 +388,10 @@ mod tests {
         let mut config = WorkspaceConfig::new();
         config.triggers.insert(
             "on-push".to_string(),
-            TriggerDef {
-                trigger_type: "webhook".to_string(),
-                cron: None,
+            TriggerDef::Webhook {
+                name: "on-push".to_string(),
                 task: "test".to_string(),
+                secret: None,
                 input: HashMap::new(),
                 enabled: true,
             },
@@ -410,9 +409,8 @@ mod tests {
         let mut config = WorkspaceConfig::new();
         config.triggers.insert(
             "nightly".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("0 0 2 * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "0 0 2 * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -448,36 +446,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_triggers_skips_missing_cron() {
-        use stroem_common::models::workflow::{TriggerDef, WorkspaceConfig};
-
-        let mut config = WorkspaceConfig::new();
-        config.triggers.insert(
-            "no-cron".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: None, // missing cron
-                task: "test".to_string(),
-                input: HashMap::new(),
-                enabled: true,
-            },
-        );
-
-        let mgr = WorkspaceManager::from_config("default", config);
-        let triggers = load_triggers(&mgr, None).await;
-        assert!(triggers.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_load_triggers_skips_invalid_cron() {
         use stroem_common::models::workflow::{TriggerDef, WorkspaceConfig};
 
         let mut config = WorkspaceConfig::new();
         config.triggers.insert(
             "bad-cron".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("not valid cron".to_string()),
+            TriggerDef::Scheduler {
+                cron: "not valid cron".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -497,9 +473,8 @@ mod tests {
         let mut config1 = WorkspaceConfig::new();
         config1.triggers.insert(
             "my-trigger".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("* * * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "* * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -520,9 +495,8 @@ mod tests {
         let mut config2 = WorkspaceConfig::new();
         config2.triggers.insert(
             "my-trigger".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("0 * * * *".to_string()), // changed from * to 0
+            TriggerDef::Scheduler {
+                cron: "0 * * * *".to_string(), // changed from * to 0
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -545,9 +519,8 @@ mod tests {
         let mut config = WorkspaceConfig::new();
         config.triggers.insert(
             "every-minute".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("* * * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "* * * * *".to_string(),
                 task: "task-a".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -555,9 +528,8 @@ mod tests {
         );
         config.triggers.insert(
             "nightly".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("0 0 2 * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "0 0 2 * * *".to_string(),
                 task: "task-b".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -566,9 +538,8 @@ mod tests {
         // This one should be skipped (disabled)
         config.triggers.insert(
             "disabled-one".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("0 0 * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "0 0 * * *".to_string(),
                 task: "task-c".to_string(),
                 input: HashMap::new(),
                 enabled: false,
@@ -598,9 +569,8 @@ mod tests {
         let mut config = WorkspaceConfig::new();
         config.triggers.insert(
             "deploy".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("0 0 * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "0 0 * * *".to_string(),
                 task: "deploy-task".to_string(),
                 input: input.clone(),
                 enabled: true,

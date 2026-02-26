@@ -128,35 +128,45 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 
     // Validate triggers reference existing tasks
     for (trigger_name, trigger) in &config.triggers {
-        if !config.tasks.contains_key(&trigger.task) {
+        if !config.tasks.contains_key(trigger.task()) {
             bail!(
                 "Trigger '{}' references non-existent task '{}'",
                 trigger_name,
-                trigger.task
+                trigger.task()
             );
         }
 
-        // Validate scheduler triggers have cron
-        if trigger.trigger_type == "scheduler" && trigger.cron.is_none() {
-            bail!(
-                "Trigger '{}' is type 'scheduler' but missing 'cron' field",
-                trigger_name
-            );
-        }
-
-        // Validate cron expression syntax
-        if let Some(cron_expr) = &trigger.cron {
-            if croner::parser::CronParser::builder()
-                .seconds(croner::parser::Seconds::Optional)
-                .build()
-                .parse(cron_expr)
-                .is_err()
-            {
-                bail!(
-                    "Trigger '{}' has invalid cron expression '{}'",
-                    trigger_name,
-                    cron_expr
-                );
+        match trigger {
+            crate::models::workflow::TriggerDef::Scheduler { cron, .. } => {
+                // Validate cron expression syntax
+                if croner::parser::CronParser::builder()
+                    .seconds(croner::parser::Seconds::Optional)
+                    .build()
+                    .parse(cron)
+                    .is_err()
+                {
+                    bail!(
+                        "Trigger '{}' has invalid cron expression '{}'",
+                        trigger_name,
+                        cron
+                    );
+                }
+            }
+            crate::models::workflow::TriggerDef::Webhook { name, .. } => {
+                // Validate webhook name is URL-safe
+                if !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    bail!(
+                        "Trigger '{}' has invalid webhook name '{}' (only alphanumeric, hyphens, and underscores allowed)",
+                        trigger_name,
+                        name
+                    );
+                }
+                if name.is_empty() {
+                    bail!("Trigger '{}' has empty webhook name", trigger_name);
+                }
             }
         }
     }
@@ -744,9 +754,8 @@ triggers:
         );
         config.triggers.insert(
             "bad-cron".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("not a cron".to_string()),
+            TriggerDef::Scheduler {
+                cron: "not a cron".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -777,9 +786,8 @@ triggers:
         );
         config.triggers.insert(
             "every-10s".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: Some("*/10 * * * * *".to_string()),
+            TriggerDef::Scheduler {
+                cron: "*/10 * * * * *".to_string(),
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
@@ -792,32 +800,21 @@ triggers:
 
     #[test]
     fn test_validate_trigger_scheduler_missing_cron() {
-        let mut config = WorkflowConfig::default();
-        config.tasks.insert(
-            "test".to_string(),
-            TaskDef {
-                mode: "distributed".to_string(),
-                folder: None,
-                input: HashMap::new(),
-                flow: HashMap::new(),
-                on_success: vec![],
-                on_error: vec![],
-            },
-        );
-        config.triggers.insert(
-            "bad".to_string(),
-            TriggerDef {
-                trigger_type: "scheduler".to_string(),
-                cron: None,
-                task: "test".to_string(),
-                input: HashMap::new(),
-                enabled: true,
-            },
-        );
-
-        let result = validate_workflow_config(&config);
+        // With the tagged enum, `cron` is a required field on the Scheduler variant.
+        // Missing cron now causes a serde parse error rather than a validation error.
+        let yaml = r#"
+triggers:
+  bad:
+    type: scheduler
+    task: test
+"#;
+        let result: Result<crate::models::workflow::WorkflowConfig, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing 'cron'"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cron"),
+            "Error should mention missing cron field: {err}"
+        );
     }
 
     #[test]
@@ -900,6 +897,7 @@ tasks:
 triggers:
   on-push:
     type: webhook
+    name: github-push
     task: ci-pipeline
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -1775,5 +1773,140 @@ actions:
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not an object"));
+    }
+
+    // --- webhook trigger validation tests ---
+
+    #[test]
+    fn test_webhook_trigger_requires_name() {
+        // Webhook without `name` → serde parse error
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    task: ci-pipeline
+"#;
+        let result: Result<WorkflowConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name"),
+            "Error should mention missing name field: {err}"
+        );
+    }
+
+    #[test]
+    fn test_webhook_trigger_name_url_safe() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: "invalid name with spaces!"
+    task: ci
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid webhook name"));
+    }
+
+    #[test]
+    fn test_webhook_trigger_valid() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci
+    secret: "whsec_abc123"
+    input:
+      environment: staging
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_webhook_trigger_no_secret_ok() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+        let trigger = config.triggers.get("on-push").unwrap();
+        match trigger {
+            TriggerDef::Webhook { secret, .. } => assert!(secret.is_none()),
+            _ => panic!("Expected Webhook variant"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_trigger_accessors() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    input:
+      env: staging
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        assert_eq!(trigger.trigger_type_str(), "webhook");
+        assert_eq!(trigger.task(), "ci-pipeline");
+        assert!(trigger.enabled());
+        assert_eq!(trigger.input().get("env").unwrap(), "staging");
+    }
+
+    #[test]
+    fn test_webhook_trigger_disabled() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    enabled: false
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        assert!(!trigger.enabled());
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::body::Body;
 use axum::Router;
-use http::Request;
+use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -635,9 +635,8 @@ fn test_workspace() -> WorkspaceConfig {
     // Trigger: nightly (cron trigger targeting hello-world)
     workspace.triggers.insert(
         "nightly".to_string(),
-        TriggerDef {
-            trigger_type: "scheduler".to_string(),
-            cron: Some("0 2 * * *".to_string()),
+        TriggerDef::Scheduler {
+            cron: "0 2 * * *".to_string(),
             task: "hello-world".to_string(),
             input: HashMap::from([("name".to_string(), json!("nightly"))]),
             enabled: true,
@@ -647,11 +646,46 @@ fn test_workspace() -> WorkspaceConfig {
     // Trigger: weekly-backup (cron trigger targeting backup-task, disabled)
     workspace.triggers.insert(
         "weekly-backup".to_string(),
-        TriggerDef {
-            trigger_type: "scheduler".to_string(),
-            cron: Some("0 3 * * 0".to_string()),
+        TriggerDef::Scheduler {
+            cron: "0 3 * * 0".to_string(),
             task: "backup-task".to_string(),
             input: HashMap::from([("host".to_string(), json!("db.prod"))]),
+            enabled: false,
+        },
+    );
+
+    // Webhook: github-push (targets hello-world, with secret)
+    workspace.triggers.insert(
+        "on-push".to_string(),
+        TriggerDef::Webhook {
+            name: "github-push".to_string(),
+            task: "hello-world".to_string(),
+            secret: Some("whsec_test123".to_string()),
+            input: HashMap::from([("environment".to_string(), json!("staging"))]),
+            enabled: true,
+        },
+    );
+
+    // Webhook: public-hook (no secret, targets hello-world)
+    workspace.triggers.insert(
+        "on-deploy".to_string(),
+        TriggerDef::Webhook {
+            name: "public-hook".to_string(),
+            task: "hello-world".to_string(),
+            secret: None,
+            input: HashMap::new(),
+            enabled: true,
+        },
+    );
+
+    // Webhook: disabled-hook (disabled)
+    workspace.triggers.insert(
+        "disabled-wh".to_string(),
+        TriggerDef::Webhook {
+            name: "disabled-hook".to_string(),
+            task: "hello-world".to_string(),
+            secret: None,
+            input: HashMap::new(),
             enabled: false,
         },
     );
@@ -8607,7 +8641,7 @@ async fn test_list_triggers() -> Result<()> {
     let body = body_json(response).await;
 
     let triggers = body.as_array().unwrap();
-    assert_eq!(triggers.len(), 2);
+    assert_eq!(triggers.len(), 5);
 
     let names: Vec<&str> = triggers
         .iter()
@@ -8727,7 +8761,225 @@ async fn test_workspace_info_includes_triggers_count() -> Result<()> {
 
     let workspaces = body.as_array().unwrap();
     let default_ws = workspaces.iter().find(|w| w["name"] == "default").unwrap();
-    assert_eq!(default_ws["triggers_count"].as_u64().unwrap(), 2);
+    assert_eq!(default_ws["triggers_count"].as_u64().unwrap(), 5);
+
+    Ok(())
+}
+
+// ===== Webhook trigger tests =====
+
+#[tokio::test]
+async fn test_webhook_post_json_creates_job() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push?secret=whsec_test123")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"ref":"refs/heads/main","commits":[]}"#))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = body_json(response).await;
+    assert!(body["job_id"].as_str().is_some());
+    assert_eq!(body["trigger"], "github-push");
+    assert_eq!(body["task"], "hello-world");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_post_plaintext_body_as_string() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push?secret=whsec_test123")
+        .header("Content-Type", "text/plain")
+        .body(Body::from("hello world"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_get_creates_job() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/hooks/public-hook?env=production")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = body_json(response).await;
+    assert!(body["job_id"].as_str().is_some());
+    assert_eq!(body["trigger"], "public-hook");
+    assert_eq!(body["task"], "hello-world");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_secret_via_header() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer whsec_test123")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_invalid_secret_401() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push?secret=wrong-secret")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_missing_secret_401() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_no_secret_public() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/public-hook")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_disabled_404() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/disabled-hook")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_nonexistent_404() -> Result<()> {
+    let (router, _pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/does-not-exist")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_source_type_tracking() -> Result<()> {
+    let (router, pool, _temp_dir, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/public-hook")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse().unwrap();
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.source_type, "webhook");
+    assert_eq!(job.source_id.as_deref(), Some("default/on-deploy"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_webhook_input_merging() -> Result<()> {
+    let (router, pool, _temp_dir, _container) = setup().await?;
+
+    // The github-push trigger has default input { environment: "staging" }
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push?secret=whsec_test123")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"ref":"refs/heads/main"}"#))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse().unwrap();
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    let input = job.input.unwrap();
+    // Should have body, headers, method, query from request
+    assert_eq!(input["body"]["ref"], "refs/heads/main");
+    assert_eq!(input["method"], "POST");
+    // Should have environment from trigger defaults
+    assert_eq!(input["environment"], "staging");
 
     Ok(())
 }

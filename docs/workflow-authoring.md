@@ -829,7 +829,7 @@ curl -X POST http://localhost:8080/api/workspaces/default/tasks/deploy-pipeline/
 
 ## Triggers
 
-Triggers define automated task execution. Currently supported: `scheduler` (cron-based).
+Triggers define automated task execution. Two types are supported: `scheduler` (cron-based) and `webhook` (HTTP-triggered).
 
 ### Cron scheduler
 
@@ -862,14 +862,99 @@ Extended cron features (via the `croner` library):
 - `W` — closest weekday to a day (`15W` = closest weekday to the 15th)
 - Text names — `MON`, `TUE`, `JAN`, `FEB`, etc.
 
+### Webhook triggers
+
+Webhook triggers expose an HTTP endpoint that external systems (GitHub, GitLab, monitoring tools) can call to trigger tasks.
+
+```yaml
+triggers:
+  on-push:
+    type: webhook
+    name: github-push          # URL-safe name — endpoint will be POST /hooks/github-push
+    task: ci-pipeline
+    secret: "whsec_abc123"     # Optional — omit for public webhooks
+    input:                     # Optional — default values merged into request input
+      environment: staging
+    enabled: true
+```
+
+#### Calling a webhook
+
+```bash
+# POST with JSON body and secret via query param
+curl -X POST http://localhost:8080/hooks/github-push?secret=whsec_abc123 \
+  -H "Content-Type: application/json" \
+  -d '{"ref": "refs/heads/main", "commits": []}'
+
+# GET with secret via Authorization header
+curl http://localhost:8080/hooks/github-push \
+  -H "Authorization: Bearer whsec_abc123"
+
+# Public webhook (no secret configured) — no auth needed
+curl -X POST http://localhost:8080/hooks/public-hook \
+  -H "Content-Type: application/json" \
+  -d '{"event": "deploy"}'
+```
+
+#### Authentication
+
+- If the trigger has a `secret` field, callers must provide it via `?secret=xxx` query parameter or `Authorization: Bearer xxx` header.
+- If no `secret` is configured, the webhook is public (no authentication required).
+- Invalid or missing secrets return `401 Unauthorized`.
+
+#### Input structure
+
+The webhook handler wraps the entire HTTP request into a structured input map:
+
+```json
+{
+  "body": { "ref": "refs/heads/main", "commits": [] },
+  "headers": { "content-type": "application/json", "x-github-event": "push" },
+  "method": "POST",
+  "query": { "env": "production" },
+  "environment": "staging"
+}
+```
+
+- `body`: JSON-parsed if `Content-Type: application/json`, raw string otherwise, `null` for GET
+- `headers`: lowercase key map of all request headers
+- `method`: `"GET"` or `"POST"`
+- `query`: query parameters (the `secret` param is excluded)
+- Trigger YAML `input` defaults merge at top level (don't overwrite `body`, `headers`, `method`, `query`)
+
+#### Response
+
+```json
+{ "job_id": "...", "trigger": "github-push", "task": "ci-pipeline" }
+```
+
+Status codes: `200` on success, `401` for bad/missing secret, `404` for unknown or disabled webhook.
+
+#### Webhook name uniqueness
+
+Webhook names should be unique across all workspaces. If the same name appears in multiple workspaces, the first match wins at dispatch time.
+
 ### Trigger fields
+
+**Scheduler fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | Yes | Trigger type: `scheduler` or `webhook` |
-| `cron` | For scheduler | Cron expression (5 or 6 fields) |
+| `type` | Yes | `scheduler` |
+| `cron` | Yes | Cron expression (5 or 6 fields) |
 | `task` | Yes | Name of the task to execute |
 | `input` | No | Input values passed to the task |
+| `enabled` | No | Whether the trigger is active (default: `true`) |
+
+**Webhook fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | `webhook` |
+| `name` | Yes | URL-safe name (alphanumeric, hyphens, underscores) — used in the endpoint URL |
+| `task` | Yes | Name of the task to execute |
+| `secret` | No | Secret for authentication — if set, callers must provide it |
+| `input` | No | Default input values merged with request data |
 | `enabled` | No | Whether the trigger is active (default: `true`) |
 
 ### How the scheduler works

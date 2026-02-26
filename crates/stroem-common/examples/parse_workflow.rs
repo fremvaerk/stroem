@@ -88,9 +88,12 @@ triggers:
     for (name, trigger) in &config.triggers {
         println!(
             "  - {} (type: {}, task: {}, enabled: {})",
-            name, trigger.trigger_type, trigger.task, trigger.enabled
+            name,
+            trigger.trigger_type_str(),
+            trigger.task(),
+            trigger.enabled()
         );
-        if let Some(cron) = &trigger.cron {
+        if let stroem_common::models::workflow::TriggerDef::Scheduler { cron, .. } = trigger {
             println!("    Schedule: {}", cron);
         }
     }

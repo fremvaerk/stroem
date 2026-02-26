@@ -1,4 +1,5 @@
 pub mod api;
+pub mod hooks;
 pub mod worker_api;
 
 use crate::state::AppState;
@@ -30,6 +31,7 @@ pub fn build_router(state: AppState) -> Router {
             "/worker",
             worker_api::build_worker_api_routes(state.clone()),
         )
+        .nest("/hooks", hooks::build_hooks_routes(state.clone()))
         .fallback(static_handler)
         .layer(cors)
         .layer(TraceLayer::new_for_http())

@@ -260,9 +260,14 @@ triggers:
 
     // Check trigger
     let trigger = config.triggers.get("nightly").unwrap();
-    assert_eq!(trigger.trigger_type, "scheduler");
-    assert_eq!(trigger.cron.as_ref().unwrap(), "0 0 2 * * *");
-    assert!(trigger.enabled);
+    assert_eq!(trigger.trigger_type_str(), "scheduler");
+    match trigger {
+        stroem_common::models::workflow::TriggerDef::Scheduler { cron, .. } => {
+            assert_eq!(cron, "0 0 2 * * *");
+        }
+        _ => panic!("Expected Scheduler variant"),
+    }
+    assert!(trigger.enabled());
 
     // Validate DAG
     let topo = dag::validate_dag(&task.flow).unwrap();
