@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import { useParams, Link } from "react-router";
-import { ArrowLeft, Clock, Folder, Play } from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useParams, Link, useNavigate } from "react-router";
+import { ArrowLeft, Clock, Folder } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WorkflowDag } from "@/components/workflow-dag";
 import {
@@ -13,10 +13,13 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { StatusBadge } from "@/components/status-badge";
-import { getTask, listJobs } from "@/lib/api";
+import { getTask, listJobs, executeTask } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
-import type { TaskDetail, JobListItem, FlowStep } from "@/lib/types";
+import type { TaskDetail, JobListItem, FlowStep, InputField } from "@/lib/types";
 
 const JOBS_PAGE_SIZE = 20;
 
@@ -103,6 +106,7 @@ function formatRelativeTime(isoStr: string): string {
 
 export function TaskDetailPage() {
   const { workspace, name } = useParams<{ workspace: string; name: string }>();
+  const navigate = useNavigate();
   useTitle(name ? `Task: ${name}` : "Task");
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -111,6 +115,9 @@ export function TaskDetailPage() {
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsOffset, setJobsOffset] = useState(0);
   const [selectedDagStep, setSelectedDagStep] = useState<string | null>(null);
+  const [values, setValues] = useState<Record<string, unknown>>({});
+  const [submitError, setSubmitError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!workspace || !name) return;
@@ -119,7 +126,20 @@ export function TaskDetailPage() {
     async function load() {
       try {
         const data = await getTask(workspace!, name!);
-        if (!cancelled) setTask(data);
+        if (!cancelled) {
+          setTask(data);
+          const defaults: Record<string, unknown> = {};
+          for (const [key, field] of Object.entries(data.input)) {
+            if (field.default !== undefined) {
+              defaults[key] = field.default;
+            } else if (field.type === "boolean") {
+              defaults[key] = false;
+            } else {
+              defaults[key] = "";
+            }
+          }
+          setValues(defaults);
+        }
       } catch (err) {
         if (!cancelled)
           setError(err instanceof Error ? err.message : "Failed to load task");
@@ -153,6 +173,30 @@ export function TaskDetailPage() {
     setJobsLoading(true);
     loadJobs();
   }, [loadJobs]);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!workspace || !task) return;
+    setSubmitError("");
+    setSubmitting(true);
+    try {
+      const input: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(values)) {
+        const field = task.input[key];
+        if (field?.type === "number") {
+          input[key] = Number(val);
+        } else {
+          input[key] = val;
+        }
+      }
+      const res = await executeTask(workspace, task.name, input);
+      navigate(`/jobs/${res.job_id}`);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Failed to execute task");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -208,53 +252,40 @@ export function TaskDetailPage() {
             </span>
           </div>
         </div>
-        <Button asChild>
-          <Link to="run">
-            <Play className="mr-2 h-4 w-4" />
-            Run Task
-          </Link>
-        </Button>
       </div>
 
-      {inputFields.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Input Parameters</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {inputFields.map(([key, field]) => (
-                <div
-                  key={key}
-                  className="flex items-start justify-between rounded-md border px-3 py-2"
-                >
-                  <div>
-                    <span className="font-mono text-sm">{key}</span>
-                    {field.description && (
-                      <p className="text-xs text-muted-foreground">
-                        {field.description}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="secondary" className="font-mono text-xs">
-                      {field.type}
-                    </Badge>
-                    {field.required && (
-                      <Badge
-                        variant="secondary"
-                        className="bg-yellow-100 text-xs text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400"
-                      >
-                        required
-                      </Badge>
-                    )}
-                  </div>
-                </div>
-              ))}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Run Task</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit}>
+            {submitError && (
+              <div className="mb-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {submitError}
+              </div>
+            )}
+            {inputFields.length > 0 && (
+              <div className="space-y-4">
+                {inputFields.map(([key, field]) => (
+                  <InputFieldRow
+                    key={key}
+                    fieldKey={key}
+                    field={field}
+                    value={values[key]}
+                    onChange={(v) => setValues((prev) => ({ ...prev, [key]: v }))}
+                  />
+                ))}
+              </div>
+            )}
+            <div className={inputFields.length > 0 ? "mt-6" : ""}>
+              <Button type="submit" disabled={submitting}>
+                {submitting ? "Running..." : "Run Task"}
+              </Button>
             </div>
-          </CardContent>
-        </Card>
-      )}
+          </form>
+        </CardContent>
+      </Card>
 
       {task.triggers.length > 0 && (
         <Card>
@@ -439,6 +470,61 @@ export function TaskDetailPage() {
           </div>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function InputFieldRow({
+  fieldKey,
+  field,
+  value,
+  onChange,
+}: {
+  fieldKey: string;
+  field: InputField;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const id = `input-${fieldKey}`;
+
+  if (field.type === "boolean") {
+    return (
+      <div className="space-y-2">
+        <Label htmlFor={id}>
+          {fieldKey}
+          {field.required && <span className="ml-1 text-destructive">*</span>}
+        </Label>
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id={id}
+            checked={!!value}
+            onCheckedChange={(checked) => onChange(!!checked)}
+          />
+          <Label htmlFor={id} className="text-sm font-normal text-muted-foreground">
+            {field.description || fieldKey}
+          </Label>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>
+        {fieldKey}
+        {field.required && <span className="ml-1 text-destructive">*</span>}
+      </Label>
+      <Input
+        id={id}
+        type={field.type === "number" ? "number" : "text"}
+        value={String(value ?? "")}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={field.description || fieldKey}
+        required={field.required}
+      />
+      {field.description && (
+        <p className="text-xs text-muted-foreground">{field.description}</p>
+      )}
     </div>
   );
 }

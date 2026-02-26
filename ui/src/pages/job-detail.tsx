@@ -105,7 +105,7 @@ export function JobDetailPage() {
           </p>
         </div>
         <Button variant="outline" asChild>
-          <Link to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}/run`}>
+          <Link to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}>
             Re-run
           </Link>
         </Button>
