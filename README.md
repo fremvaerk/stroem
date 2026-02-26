@@ -193,7 +193,7 @@ Both features can be enabled simultaneously:
 cargo build -p stroem-worker --features docker,kubernetes
 ```
 
-See [docs/workflow-authoring.md](docs/workflow-authoring.md) for how to write workflows using `type: docker` and `type: pod` actions.
+See the [Runners guide](https://fremvaerk.github.io/stroem/guides/runners/) for how to write workflows using `type: docker` and `type: pod` actions.
 
 ## CLI
 
@@ -282,7 +282,7 @@ Secrets (database URL, worker token, JWT secrets) are stored in a Kubernetes Sec
 
 ## Writing Workflows
 
-Workflows are defined in YAML files under `workspace/.workflows/`. See [docs/workflow-authoring.md](docs/workflow-authoring.md) for the full guide.
+Workflows are defined in YAML files under `workspace/.workflows/`. See the [documentation site](https://fremvaerk.github.io/stroem/) for the full guide.
 
 ### Quick Example
 
@@ -360,7 +360,7 @@ Key concepts:
 
 ## API Reference
 
-See [docs/api-reference.md](docs/api-reference.md) for the full API documentation.
+See the [API reference](https://fremvaerk.github.io/stroem/reference/api/) for the full API documentation.
 
 ### Public API
 

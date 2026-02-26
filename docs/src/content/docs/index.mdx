@@ -1,0 +1,36 @@
+---
+title: Strøm
+description: Workflow and task orchestration platform
+template: splash
+hero:
+  tagline: Define workflows as YAML, execute them via API, CLI, or web UI, and monitor results through live log streaming.
+  actions:
+    - text: Get Started
+      link: /getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/fremvaerk/stroem
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+<CardGrid stagger>
+  <Card title="Workflow as Code" icon="document">
+    Define workflows in YAML with actions, tasks, and DAG-based step
+    dependencies. Validate before deploying.
+  </Card>
+  <Card title="Multiple Runners" icon="rocket">
+    Run steps on the host, in Docker containers, or as Kubernetes pods. Mix and
+    match within a single workflow.
+  </Card>
+  <Card title="Live Log Streaming" icon="list-format">
+    Watch job execution in real-time through the web UI or WebSocket API. Logs
+    are structured JSONL with optional S3 archival.
+  </Card>
+  <Card title="Triggers & Hooks" icon="setting">
+    Automate with cron schedules and webhook endpoints. React to job outcomes
+    with on_success and on_error hooks.
+  </Card>
+</CardGrid>

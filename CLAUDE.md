@@ -41,8 +41,8 @@ Every new feature or functionality **must** be accompanied by tests:
 ### Mandatory Documentation Updates
 Every new feature or significant change **must** include documentation updates:
 - Update this `CLAUDE.md` if architecture, conventions, or key patterns change.
-- Update `docs/stroem-v2-plan.md` if the plan status changes.
-- Add/update user-facing docs (README, CLI help text, workflow authoring guides) for anything users interact with.
+- Update `docs/internal/stroem-v2-plan.md` if the plan status changes.
+- Add/update user-facing docs in `docs/src/content/docs/` (Starlight site), README, or CLI help text for anything users interact with.
 - Keep code comments minimal — only where logic isn't self-evident.
 
 ### Tera Templating
@@ -94,17 +94,33 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml \
   up --build --abort-on-container-exit playwright
 ```
 
+### Documentation (docs/)
+
+```bash
+# Install dependencies
+cd docs && bun install
+
+# Dev server
+bun run dev
+
+# Build static site
+bun run build
+
+# Preview built site
+bun run preview
+```
+
 ## Key Patterns
 
 ### Workflow YAML structure
-See `docs/stroem-v2-plan.md` Section 2 for the full YAML format.
+See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Action Types and Runners (Type 1 / Type 2 Split)
 - **Type 1 (Container)**: `type: docker` or `type: pod` — runs user's prepared image as-is, no workspace mounting
 - **Type 2 (Shell)**: `type: shell` + `runner: local|docker|pod` — shell commands in a runner environment with workspace files
 - **Type 3 (Sub-job)**: `type: task` — references another task, server creates a child job (see Task Actions below)
 - `type: shell` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: shell` + `runner: docker` (Type 2) instead.
-- **Pod manifest overrides**: `type: pod` and `type: shell` + `runner: pod` support a `manifest` field — a raw JSON/YAML object deep-merged into the generated pod spec (service accounts, node selectors, tolerations, resource limits, annotations, sidecars, etc.). See `docs/workflow-authoring.md` for details.
+- **Pod manifest overrides**: `type: pod` and `type: shell` + `runner: pod` support a `manifest` field — a raw JSON/YAML object deep-merged into the generated pod spec (service accounts, node selectors, tolerations, resource limits, annotations, sidecars, etc.). See `docs/src/content/docs/guides/action-types.md` for details.
 
 ### Runner Architecture
 - `RunConfig` carries `action_type`, `image`, `runner_mode`, `runner_image`, `entrypoint`, `command`
