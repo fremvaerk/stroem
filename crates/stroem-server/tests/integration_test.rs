@@ -8730,13 +8730,14 @@ async fn test_task_detail_includes_triggers() -> Result<()> {
     let body = body_json(response).await;
 
     let triggers = body["triggers"].as_array().unwrap();
-    assert_eq!(triggers.len(), 1);
-    assert_eq!(triggers[0]["name"], "nightly");
-    assert_eq!(triggers[0]["type"], "scheduler");
-    assert_eq!(triggers[0]["cron"], "0 2 * * *");
-    assert_eq!(triggers[0]["task"], "hello-world");
-    assert_eq!(triggers[0]["enabled"], true);
-    assert_eq!(triggers[0]["next_runs"].as_array().unwrap().len(), 5);
+    // hello-world has 4 triggers: nightly (scheduler) + 3 webhooks
+    assert_eq!(triggers.len(), 4);
+    let nightly = triggers.iter().find(|t| t["name"] == "nightly").unwrap();
+    assert_eq!(nightly["type"], "scheduler");
+    assert_eq!(nightly["cron"], "0 2 * * *");
+    assert_eq!(nightly["task"], "hello-world");
+    assert_eq!(nightly["enabled"], true);
+    assert_eq!(nightly["next_runs"].as_array().unwrap().len(), 5);
 
     // greet-and-shout has no triggers
     let response = router

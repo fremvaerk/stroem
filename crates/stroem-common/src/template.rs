@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use tera::Tera;
 
@@ -182,12 +182,10 @@ pub fn merge_defaults(
                 _ => default_value.clone(),
             };
             result.insert(field_name.clone(), resolved);
-        } else if field_def.required {
-            bail!(
-                "Required input field '{}' is missing and has no default",
-                field_name
-            );
         }
+        // Note: required-field validation is intentionally not done here.
+        // Webhooks and triggers supply different input shapes (body, headers, etc.)
+        // that don't match the task's input schema.
     }
 
     Ok(serde_json::Value::Object(result))
@@ -650,22 +648,19 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_defaults_required_field_missing_errors() {
+    fn test_merge_defaults_required_field_missing_skipped() {
+        // Required fields without defaults are silently skipped (not an error).
+        // Webhooks and triggers pass different input shapes that don't match
+        // the task schema, so strict validation would break those flows.
         let user_input = json!({});
         let mut schema = HashMap::new();
         schema.insert("name".to_string(), field("string", true, None));
 
         let result = merge_defaults(&user_input, &schema, &json!({}));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("name"),
-            "Error should mention field name: {err}"
-        );
-        assert!(
-            err.contains("Required"),
-            "Error should mention required: {err}"
-        );
+        assert!(result.is_ok());
+        // The field is simply absent in the result
+        let obj = result.unwrap();
+        assert!(obj.get("name").is_none());
     }
 
     #[test]
