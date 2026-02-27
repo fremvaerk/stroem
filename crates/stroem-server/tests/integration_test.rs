@@ -663,6 +663,8 @@ fn test_workspace() -> WorkspaceConfig {
             secret: Some("whsec_test123".to_string()),
             input: HashMap::from([("environment".to_string(), json!("staging"))]),
             enabled: true,
+            mode: None,
+            timeout_secs: None,
         },
     );
 
@@ -675,6 +677,8 @@ fn test_workspace() -> WorkspaceConfig {
             secret: None,
             input: HashMap::new(),
             enabled: true,
+            mode: None,
+            timeout_secs: None,
         },
     );
 
@@ -687,6 +691,8 @@ fn test_workspace() -> WorkspaceConfig {
             secret: None,
             input: HashMap::new(),
             enabled: false,
+            mode: None,
+            timeout_secs: None,
         },
     );
 

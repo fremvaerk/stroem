@@ -108,6 +108,8 @@ mod tests {
                 secret: None,
                 input: HashMap::new(),
                 enabled,
+                mode: None,
+                timeout_secs: None,
             },
             _ => panic!("Unknown trigger type: {trigger_type}"),
         }

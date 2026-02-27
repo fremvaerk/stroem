@@ -1,3 +1,4 @@
+use crate::job_completion::JobCompletionEvent;
 use crate::log_storage::JobLogMeta;
 use crate::orchestrator;
 use crate::state::AppState;
@@ -121,6 +122,16 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 }
             }
 
+            // Notify sync webhook waiters
+            state
+                .job_completion
+                .notify(JobCompletionEvent {
+                    job_id,
+                    status: job_after.status.clone(),
+                    output: job_after.output.clone(),
+                })
+                .await;
+
             // S3 upload after hooks so server events are included
             let log_storage = state.log_storage.clone();
             let meta = meta_from_job(&job_after);
@@ -225,6 +236,16 @@ async fn propagate_to_parent(
                         }
                     }
 
+                    // Notify sync webhook waiters for the parent
+                    state
+                        .job_completion
+                        .notify(JobCompletionEvent {
+                            job_id: parent_job_id,
+                            status: parent_after.status.clone(),
+                            output: parent_after.output.clone(),
+                        })
+                        .await;
+
                     // S3 upload for parent after hooks
                     let log_storage = state.log_storage.clone();
                     let pjid = parent_job_id;
@@ -306,6 +327,16 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
             }
         }
     }
+
+    // Notify sync webhook waiters
+    state
+        .job_completion
+        .notify(JobCompletionEvent {
+            job_id,
+            status: job.status.clone(),
+            output: job.output.clone(),
+        })
+        .await;
 
     // S3 upload after hooks so server events are included
     let log_storage = state.log_storage.clone();

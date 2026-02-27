@@ -174,6 +174,9 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Jobs created by webhooks have `source_type = "webhook"`, `source_id = "{workspace}/{trigger_key}"`
 - Webhook name validation: must match `^[a-zA-Z0-9_-]+$` (URL-safe)
 - Duplicate webhook names across workspaces: first match wins at dispatch time (no startup validation)
+- **Sync/async mode**: `mode: "sync"` waits for job completion before responding (default: `"async"`, fire-and-forget)
+- `timeout_secs`: max wait in sync mode (default 30, max 300). On timeout, returns 202 with `"status": "running"`
+- `JobCompletionNotifier` (`crates/stroem-server/src/job_completion.rs`): per-job broadcast channels, notified from `handle_job_terminal()` and `orchestrate_after_step()`
 
 ### Hooks (on_success / on_error)
 - `HookDef` struct in `crates/stroem-common/src/models/workflow.rs` — `action` + `input` map

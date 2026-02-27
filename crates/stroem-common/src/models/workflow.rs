@@ -150,6 +150,12 @@ pub enum TriggerDef {
         input: HashMap<String, serde_json::Value>,
         #[serde(default = "default_true")]
         enabled: bool,
+        /// Webhook response mode: "async" (default, fire-and-forget) or "sync" (wait for completion).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
+        /// Max seconds to wait in sync mode before returning 202 (default 30, max 300).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_secs: Option<u64>,
     },
 }
 
@@ -371,6 +377,61 @@ triggers:
         }
         assert_eq!(trigger.task(), "nightly-backup");
         assert!(trigger.enabled());
+    }
+
+    #[test]
+    fn test_parse_webhook_trigger_with_mode() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    secret: "whsec_abc"
+    mode: sync
+    timeout_secs: 60
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        assert_eq!(trigger.trigger_type_str(), "webhook");
+        assert_eq!(trigger.task(), "ci-pipeline");
+        match trigger {
+            TriggerDef::Webhook {
+                name,
+                secret,
+                mode,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(name, "github-push");
+                assert_eq!(secret.as_deref(), Some("whsec_abc"));
+                assert_eq!(mode.as_deref(), Some("sync"));
+                assert_eq!(*timeout_secs, Some(60));
+            }
+            _ => panic!("Expected Webhook variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_webhook_trigger_mode_defaults_none() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: deploy
+    task: do-deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        match trigger {
+            TriggerDef::Webhook {
+                mode, timeout_secs, ..
+            } => {
+                assert!(mode.is_none());
+                assert!(timeout_secs.is_none());
+            }
+            _ => panic!("Expected Webhook variant"),
+        }
     }
 
     #[test]

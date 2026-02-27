@@ -135,7 +135,12 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                     );
                 }
             }
-            crate::models::workflow::TriggerDef::Webhook { name, .. } => {
+            crate::models::workflow::TriggerDef::Webhook {
+                name,
+                mode,
+                timeout_secs,
+                ..
+            } => {
                 // Validate webhook name is URL-safe
                 if !name
                     .chars()
@@ -149,6 +154,26 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                 }
                 if name.is_empty() {
                     bail!("Trigger '{}' has empty webhook name", trigger_name);
+                }
+                // Validate mode
+                if let Some(m) = mode {
+                    if m != "sync" && m != "async" {
+                        bail!(
+                            "Trigger '{}' has invalid mode '{}' (must be 'sync' or 'async')",
+                            trigger_name,
+                            m
+                        );
+                    }
+                }
+                // Validate timeout_secs
+                if let Some(t) = timeout_secs {
+                    if *t == 0 || *t > 300 {
+                        bail!(
+                            "Trigger '{}' has invalid timeout_secs {} (must be 1..=300)",
+                            trigger_name,
+                            t
+                        );
+                    }
                 }
             }
         }
@@ -1924,6 +1949,168 @@ triggers:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("on-push").unwrap();
         assert!(!trigger.enabled());
+    }
+
+    #[test]
+    fn test_webhook_trigger_sync_mode() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci-pipeline:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    mode: sync
+    timeout_secs: 60
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+        let trigger = config.triggers.get("on-push").unwrap();
+        match trigger {
+            TriggerDef::Webhook {
+                mode, timeout_secs, ..
+            } => {
+                assert_eq!(mode.as_deref(), Some("sync"));
+                assert_eq!(*timeout_secs, Some(60));
+            }
+            _ => panic!("Expected Webhook variant"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_trigger_async_mode() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci-pipeline:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    mode: async
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_webhook_trigger_invalid_mode() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci-pipeline:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    mode: blocking
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid mode"));
+        assert!(err.contains("blocking"));
+    }
+
+    #[test]
+    fn test_webhook_trigger_timeout_zero() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci-pipeline:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    mode: sync
+    timeout_secs: 0
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timeout_secs"));
+    }
+
+    #[test]
+    fn test_webhook_trigger_timeout_too_large() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+tasks:
+  ci-pipeline:
+    flow:
+      step1:
+        action: greet
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+    mode: sync
+    timeout_secs: 500
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timeout_secs"));
+    }
+
+    #[test]
+    fn test_webhook_trigger_no_mode_defaults_none() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: ci-pipeline
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        match trigger {
+            TriggerDef::Webhook {
+                mode, timeout_secs, ..
+            } => {
+                assert!(mode.is_none());
+                assert!(timeout_secs.is_none());
+            }
+            _ => panic!("Expected Webhook variant"),
+        }
     }
 
     // --- workspace-level hook validation tests ---

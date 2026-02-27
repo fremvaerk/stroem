@@ -394,6 +394,8 @@ mod tests {
                 secret: None,
                 input: HashMap::new(),
                 enabled: true,
+                mode: None,
+                timeout_secs: None,
             },
         );
 

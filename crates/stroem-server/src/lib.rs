@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod hooks;
+pub mod job_completion;
 pub mod job_creator;
 pub mod job_recovery;
 pub mod log_broadcast;

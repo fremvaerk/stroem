@@ -70,6 +70,14 @@ triggers:
     input:                     # Optional — default values merged into request input
       environment: staging
     enabled: true
+
+  deploy-sync:
+    type: webhook
+    name: deploy
+    task: do-deploy
+    mode: sync                 # Wait for job completion before responding
+    timeout_secs: 60           # Max wait time (default: 30, max: 300)
+    secret: "whsec_deploy"
 ```
 
 ### Calling a webhook
@@ -126,6 +134,37 @@ The webhook handler wraps the entire HTTP request into a structured input map:
 | `secret` | No | Secret for authentication |
 | `input` | No | Default input values merged with request data |
 | `enabled` | No | Whether the trigger is active (default: `true`) |
+| `mode` | No | `"async"` (default) or `"sync"` — sync waits for job completion |
+| `timeout_secs` | No | Max wait time in sync mode (default: 30, max: 300) |
+
+### Sync vs async mode
+
+By default, webhooks return immediately with a `job_id` (async mode). The caller must poll `GET /api/jobs/{id}` to track completion.
+
+In **sync mode** (`mode: sync`), the webhook handler blocks until the job reaches a terminal state (completed or failed) or the timeout is reached.
+
+**Sync response** (job completed or failed):
+```json
+{
+  "job_id": "...",
+  "trigger": "deploy",
+  "task": "do-deploy",
+  "status": "completed",
+  "output": { "result": "ok" }
+}
+```
+HTTP status: `200 OK`.
+
+**Timeout response** (job still running):
+```json
+{
+  "job_id": "...",
+  "trigger": "deploy",
+  "task": "do-deploy",
+  "status": "running"
+}
+```
+HTTP status: `202 Accepted` — use the `job_id` to poll manually.
 
 ### Webhook name uniqueness
 

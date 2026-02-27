@@ -1,4 +1,5 @@
 use crate::config::ServerConfig;
+use crate::job_completion::JobCompletionNotifier;
 use crate::log_broadcast::LogBroadcast;
 use crate::log_storage::LogStorage;
 use crate::oidc::OidcProvider;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub log_broadcast: Arc<LogBroadcast>,
     pub log_storage: Arc<LogStorage>,
     pub oidc_providers: Arc<HashMap<String, OidcProvider>>,
+    pub job_completion: Arc<JobCompletionNotifier>,
 }
 
 impl AppState {
@@ -36,6 +38,7 @@ impl AppState {
             log_broadcast: Arc::new(LogBroadcast::new()),
             log_storage: Arc::new(log_storage),
             oidc_providers: Arc::new(oidc_providers),
+            job_completion: Arc::new(JobCompletionNotifier::new()),
         }
     }
 

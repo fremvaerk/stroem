@@ -11,8 +11,11 @@ use axum::{
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use stroem_common::models::workflow::TriggerDef;
 use subtle::ConstantTimeEq;
+
+const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 30;
 
 /// Build the webhook routes: GET and POST on /{name}.
 pub fn build_hooks_routes(state: Arc<AppState>) -> Router {
@@ -37,8 +40,7 @@ async fn webhook_handler(
     body: Bytes,
 ) -> impl IntoResponse {
     // 1. Find the first matching enabled webhook trigger across all workspaces
-    let found = find_webhook_trigger(&state, &name).await;
-    let (ws_name, trigger_key, task, secret, default_input) = match found {
+    let wh = match find_webhook_trigger(&state, &name).await {
         Some(f) => f,
         None => {
             return (
@@ -50,7 +52,7 @@ async fn webhook_handler(
     };
 
     // 2. Validate secret (constant-time to prevent timing attacks)
-    if let Some(ref expected_secret) = secret {
+    if let Some(ref expected_secret) = wh.secret {
         let provided = extract_secret(&query, &headers);
         let is_valid = provided
             .as_deref()
@@ -66,13 +68,13 @@ async fn webhook_handler(
     }
 
     // 3. Build input
-    let input = build_webhook_input(&method, &headers, &query, &body, &default_input);
+    let input = build_webhook_input(&method, &headers, &query, &body, &wh.default_input);
 
     let input_value = serde_json::to_value(&input).unwrap_or_default();
-    let source_id = format!("{}/{}", ws_name, trigger_key);
+    let source_id = format!("{}/{}", wh.ws_name, wh.trigger_key);
 
     // 4. Get workspace config and create job
-    let config = match state.get_workspace(&ws_name).await {
+    let config = match state.get_workspace(&wh.ws_name).await {
         Some(c) => c,
         None => {
             return (
@@ -83,11 +85,14 @@ async fn webhook_handler(
         }
     };
 
+    let is_sync = wh.mode.as_deref() == Some("sync");
+    let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
+
     match create_job_for_task(
         &state.pool,
         &config,
-        &ws_name,
-        &task,
+        &wh.ws_name,
+        &wh.task,
         input_value,
         "webhook",
         Some(&source_id),
@@ -99,14 +104,61 @@ async fn webhook_handler(
                 "Webhook '{}' created job {} for task '{}'",
                 name,
                 job_id,
-                task
+                wh.task
             );
-            Json(json!({
-                "job_id": job_id.to_string(),
-                "trigger": name,
-                "task": task,
-            }))
-            .into_response()
+
+            if is_sync {
+                let mut rx = state.job_completion.subscribe(job_id).await;
+
+                // Guard against the (unlikely) race where the job completed
+                // between create_job_for_task and subscribe. If already terminal,
+                // return immediately without waiting.
+                if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+                    if job.status == "completed" || job.status == "failed" {
+                        return Json(json!({
+                            "job_id": job_id.to_string(),
+                            "trigger": name,
+                            "task": wh.task,
+                            "status": job.status,
+                            "output": job.output,
+                        }))
+                        .into_response();
+                    }
+                }
+
+                let timeout = Duration::from_secs(timeout_secs);
+
+                match tokio::time::timeout(timeout, rx.recv()).await {
+                    Ok(Ok(event)) => Json(json!({
+                        "job_id": job_id.to_string(),
+                        "trigger": name,
+                        "task": wh.task,
+                        "status": event.status,
+                        "output": event.output,
+                    }))
+                    .into_response(),
+                    _ => {
+                        // Timeout or channel error — return 202 for manual polling
+                        (
+                            StatusCode::ACCEPTED,
+                            Json(json!({
+                                "job_id": job_id.to_string(),
+                                "trigger": name,
+                                "task": wh.task,
+                                "status": "running",
+                            })),
+                        )
+                            .into_response()
+                    }
+                }
+            } else {
+                Json(json!({
+                    "job_id": job_id.to_string(),
+                    "trigger": name,
+                    "task": wh.task,
+                }))
+                .into_response()
+            }
         }
         Err(e) => {
             tracing::error!("Webhook '{}' failed to create job: {:#}", name, e);
@@ -119,15 +171,16 @@ async fn webhook_handler(
     }
 }
 
-/// Search result from find_webhook_trigger:
-/// (workspace_name, trigger_key, task_name, secret, default_input)
-type WebhookMatch = (
-    String,
-    String,
-    String,
-    Option<String>,
-    HashMap<String, serde_json::Value>,
-);
+/// Search result from find_webhook_trigger.
+struct WebhookMatch {
+    ws_name: String,
+    trigger_key: String,
+    task: String,
+    secret: Option<String>,
+    default_input: HashMap<String, serde_json::Value>,
+    mode: Option<String>,
+    timeout_secs: Option<u64>,
+}
 
 /// Find the first enabled webhook trigger matching the given name.
 async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMatch> {
@@ -143,16 +196,20 @@ async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMat
                 secret,
                 input,
                 enabled,
+                mode,
+                timeout_secs,
             } = trigger_def
             {
                 if wh_name == name && *enabled {
-                    return Some((
-                        ws_name.to_string(),
-                        trigger_key.clone(),
-                        task.clone(),
-                        secret.clone(),
-                        input.clone(),
-                    ));
+                    return Some(WebhookMatch {
+                        ws_name: ws_name.to_string(),
+                        trigger_key: trigger_key.clone(),
+                        task: task.clone(),
+                        secret: secret.clone(),
+                        default_input: input.clone(),
+                        mode: mode.clone(),
+                        timeout_secs: *timeout_secs,
+                    });
                 }
             }
         }
