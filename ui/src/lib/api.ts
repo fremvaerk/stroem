@@ -12,6 +12,8 @@ import type {
   TokenResponse,
   AuthUser,
   ExecuteTaskResponse,
+  ApiKey,
+  CreateApiKeyResponse,
 } from "./types";
 
 let accessToken: string | null = null;
@@ -306,5 +308,30 @@ export async function getStepLogs(
 ): Promise<{ logs: string }> {
   return apiFetch<{ logs: string }>(
     `/api/jobs/${jobId}/steps/${encodeURIComponent(stepName)}/logs`,
+  );
+}
+
+// API Keys
+export async function listApiKeys(): Promise<ApiKey[]> {
+  return apiFetch<ApiKey[]>("/api/auth/api-keys");
+}
+
+export async function createApiKey(
+  name: string,
+  expiresInDays?: number,
+): Promise<CreateApiKeyResponse> {
+  return apiFetch<CreateApiKeyResponse>("/api/auth/api-keys", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      expires_in_days: expiresInDays ?? null,
+    }),
+  });
+}
+
+export async function deleteApiKey(prefix: string): Promise<void> {
+  await apiFetch<{ status: string }>(
+    `/api/auth/api-keys/${encodeURIComponent(prefix)}`,
+    { method: "DELETE" },
   );
 }

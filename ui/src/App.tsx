@@ -14,6 +14,7 @@ import { WorkerDetailPage } from "@/pages/worker-detail";
 import { UsersPage } from "@/pages/users";
 import { UserDetailPage } from "@/pages/user-detail";
 import { LoginCallbackPage } from "@/pages/login-callback";
+import { SettingsPage } from "@/pages/settings";
 
 export default function App() {
   return (
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="workers/:id" element={<WorkerDetailPage />} />
             <Route path="users" element={<UsersPage />} />
             <Route path="users/:id" element={<UserDetailPage />} />
+            <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Route>
       </Routes>

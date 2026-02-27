@@ -149,7 +149,7 @@ pub async fn execute_task(
     // 1. Enforce auth: when auth is enabled, require a valid token
     let (source_type, source_id) = match (state.config.auth.is_some(), auth_user) {
         (false, _) => ("api", None),
-        (true, Some(user)) => ("user", Some(user.0.email)),
+        (true, Some(user)) => ("user", Some(user.claims.email)),
         (true, None) => {
             return (
                 StatusCode::UNAUTHORIZED,

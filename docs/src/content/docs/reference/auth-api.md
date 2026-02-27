@@ -118,6 +118,83 @@ Authorization: Bearer <access_token>
 |--------|-------------|
 | `401` | Missing or invalid access token |
 
+## API Keys
+
+### Create API Key
+
+```
+POST /api/auth/api-keys
+```
+
+Creates a new API key for the authenticated user. Requires JWT authentication (not API key auth).
+
+**Request body:**
+
+```json
+{
+  "name": "CI Pipeline",
+  "expires_in_days": 90
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | A descriptive name for the key |
+| `expires_in_days` | No | Days until the key expires (null = never) |
+
+**Response:**
+
+```json
+{
+  "key": "strm_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "name": "CI Pipeline",
+  "prefix": "strm_a1b",
+  "expires_at": "2026-05-27T12:00:00+00:00"
+}
+```
+
+The `key` field is only returned at creation time. Store it securely.
+
+| Status | Description |
+|--------|-------------|
+| `400` | Empty name |
+| `401` | Not authenticated |
+
+### List API Keys
+
+```
+GET /api/auth/api-keys
+```
+
+Lists the authenticated user's API keys. The raw key is never returned.
+
+**Response:**
+
+```json
+[
+  {
+    "prefix": "strm_a1b",
+    "name": "CI Pipeline",
+    "created_at": "2026-02-26T12:00:00+00:00",
+    "expires_at": "2026-05-27T12:00:00+00:00",
+    "last_used_at": "2026-02-26T14:30:00+00:00"
+  }
+]
+```
+
+### Delete API Key
+
+```
+DELETE /api/auth/api-keys/{prefix}
+```
+
+Revokes an API key by its prefix. Only the key's owner can delete it.
+
+| Status | Description |
+|--------|-------------|
+| `200` | Key revoked |
+| `404` | Key not found |
+
 ## Server Config
 
 ```

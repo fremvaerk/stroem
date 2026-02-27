@@ -271,7 +271,7 @@ pub async fn logout(
 /// GET /api/auth/me
 #[tracing::instrument(skip(state))]
 pub async fn me(State(state): State<Arc<AppState>>, auth: AuthUser) -> impl IntoResponse {
-    let user_id: Uuid = match auth.0.sub.parse() {
+    let user_id: Uuid = match auth.claims.sub.parse() {
         Ok(id) => id,
         Err(_) => {
             return (

@@ -8984,3 +8984,379 @@ async fn test_webhook_input_merging() -> Result<()> {
 
     Ok(())
 }
+
+// ─── API Key Tests ──────────────────────────────────────────────────────
+
+/// Helper: login and return (access_token, user_id)
+async fn login_and_get_token(router: &Router) -> Result<(String, String)> {
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let token = body["access_token"].as_str().unwrap().to_string();
+    // Decode user_id from token
+    let claims = stroem_server::auth::validate_access_token(&token, AUTH_JWT_SECRET)?;
+    Ok((token, claims.sub))
+}
+
+fn authed_get(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn authed_request(method: &str, uri: &str, token: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+fn authed_delete(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_api_key_create_and_list() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    // Create an API key
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "CI Pipeline"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let raw_key = body["key"].as_str().unwrap();
+    assert!(raw_key.starts_with("strm_"));
+    assert_eq!(raw_key.len(), 37);
+    assert_eq!(body["name"], "CI Pipeline");
+    assert!(body["prefix"].as_str().unwrap().starts_with("strm_"));
+
+    // List API keys
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/auth/api-keys", &token))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let keys = body.as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["name"], "CI Pipeline");
+    // Raw key should never be returned in list
+    assert!(keys[0].get("key").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_create_with_expiry() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "Short-lived key", "expires_in_days": 7}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert!(body["expires_at"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_used_as_bearer_token() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    // Create API key
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "Test Key"}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let api_key = body["key"].as_str().unwrap().to_string();
+
+    // Use API key to access a protected endpoint
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", &api_key))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_deleted_returns_401() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    // Create API key
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "Deletable Key"}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let api_key = body["key"].as_str().unwrap().to_string();
+    let prefix = body["prefix"].as_str().unwrap().to_string();
+
+    // Verify the key works
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", &api_key))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Delete the key
+    let response = router
+        .clone()
+        .oneshot(authed_delete(
+            &format!("/api/auth/api-keys/{}", prefix),
+            &token,
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Verify the key no longer works
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", &api_key))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_expired_returns_401() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    // Create API key via the API
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "Expiring Key", "expires_in_days": 1}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+    let api_key = body["key"].as_str().unwrap().to_string();
+
+    // Manually expire it in the DB
+    let key_hash = stroem_server::auth::hash_api_key(&api_key);
+    sqlx::query("UPDATE api_key SET expires_at = NOW() - INTERVAL '1 hour' WHERE key_hash = $1")
+        .bind(&key_hash)
+        .execute(&pool)
+        .await?;
+
+    // Verify the expired key returns 401
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", &api_key))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    // Verify listing still shows the key (expired but not deleted)
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/auth/api-keys", &token))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_invalid_returns_401() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", "strm_not_a_real_key_1234567890ab"))
+        .await?;
+    assert_eq!(response.status(), 401);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_empty_name_rejected() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "  "}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 400);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_jwt_still_works() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    // JWT should still work alongside API keys
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", &token))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_delete_nonexistent_returns_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    let response = router
+        .clone()
+        .oneshot(authed_delete("/api/auth/api-keys/strm_non", &token))
+        .await?;
+    assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_cannot_manage_keys() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    // Create an API key via JWT
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "First Key"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let api_key = body["key"].as_str().unwrap().to_string();
+
+    // Try to create another key using the API key — should be 403
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &api_key,
+            json!({"name": "Second Key"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 403);
+
+    // Try to list keys using the API key — should be 403
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/auth/api-keys", &api_key))
+        .await?;
+    assert_eq!(response.status(), 403);
+
+    // Try to delete using the API key — should be 403
+    let prefix = body["prefix"].as_str().unwrap();
+    let response = router
+        .clone()
+        .oneshot(authed_delete(
+            &format!("/api/auth/api-keys/{}", prefix),
+            &api_key,
+        ))
+        .await?;
+    assert_eq!(response.status(), 403);
+
+    // But the API key can still access regular protected endpoints
+    let response = router
+        .clone()
+        .oneshot(authed_get("/api/jobs", &api_key))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_key_negative_expiry_rejected() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth().await?;
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "Bad Key", "expires_in_days": -5}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 400);
+
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &token,
+            json!({"name": "Bad Key", "expires_in_days": 0}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 400);
+
+    Ok(())
+}

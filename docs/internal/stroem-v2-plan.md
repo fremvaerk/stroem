@@ -804,7 +804,7 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 6. ~~**KubeRunner**~~: **DONE** -- (via kube-rs) Type 1 (pod as-is) and Type 2 (shell in runner with init container + workspace volume).
 7. ~~**OIDC auth provider**~~: **DONE** -- Authorization Code + PKCE flow, JIT user provisioning, state cookie.
 8. ~~**S3 log upload**~~: **DONE** -- Background upload on job completion, read fallback chain (local → S3).
-9. **API keys**: Create, list, revoke, authenticate
+9. ~~**API keys**~~: **DONE** -- Create, list, revoke, authenticate. `strm_` prefixed keys, SHA256 hashed in DB, middleware auto-detects key vs JWT.
 10. ~~**Webhook triggers**~~: **DONE** -- `GET`/`POST /hooks/{name}` endpoint, optional secret auth, input mapping (body, headers, method, query).
 11. ~~**on_error / on_success hooks**~~: **DONE** -- Task-level hooks with Tera-rendered input, recursion guard, supports `type: task` hook actions.
 12. ~~**Sub-task execution (`type: task` action)**~~: **DONE** -- Server-side dispatch, recursive child jobs, depth limit (10), parent propagation.

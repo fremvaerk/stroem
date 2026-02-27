@@ -68,6 +68,27 @@ pub fn hash_refresh_token(raw_token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Generate an API key: returns (raw_key, key_hash)
+///
+/// Format: `strm_` prefix + 32 random hex chars = 37 chars total.
+/// The prefix lets middleware distinguish API keys from JWTs.
+pub fn generate_api_key() -> (String, String) {
+    use argon2::password_hash::rand_core::RngCore;
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let hex_part: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let raw = format!("strm_{}", hex_part);
+    let hash = hash_api_key(&raw);
+    (raw, hash)
+}
+
+/// Hash an API key using SHA256 (same algorithm as refresh tokens)
+pub fn hash_api_key(raw_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw_key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +146,29 @@ mod tests {
         let raw = "fixed-token-value";
         let hash1 = hash_refresh_token(raw);
         let hash2 = hash_refresh_token(raw);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_api_key_format() {
+        let (raw, _hash) = generate_api_key();
+        assert!(raw.starts_with("strm_"), "API key should start with strm_");
+        assert_eq!(raw.len(), 37, "strm_ (5) + 32 hex chars = 37");
+    }
+
+    #[test]
+    fn test_api_key_uniqueness() {
+        let (raw1, hash1) = generate_api_key();
+        let (raw2, hash2) = generate_api_key();
+        assert_ne!(raw1, raw2);
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_api_key_hash_determinism() {
+        let raw = "strm_abcdef1234567890abcdef12345678";
+        let hash1 = hash_api_key(raw);
+        let hash2 = hash_api_key(raw);
         assert_eq!(hash1, hash2);
     }
 }

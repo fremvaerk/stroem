@@ -7,6 +7,7 @@ import {
   Play,
   LogOut,
   Server,
+  Settings,
   Users,
   Zap,
 } from "lucide-react";
@@ -143,6 +144,18 @@ export function AppSidebar() {
               </div>
             </div>
             <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={isActive(pathname, "/settings")}
+                  tooltip="Settings"
+                >
+                  <Link to="/settings">
+                    <Settings />
+                    <span>Settings</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
               <SidebarMenuItem>
                 <SidebarMenuButton onClick={logout} tooltip="Sign out">
                   <LogOut />

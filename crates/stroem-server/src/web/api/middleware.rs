@@ -1,4 +1,4 @@
-use crate::auth::validate_access_token;
+use crate::auth::{hash_api_key, validate_access_token};
 use crate::state::AppState;
 use axum::{
     extract::{FromRequestParts, OptionalFromRequestParts},
@@ -10,13 +10,92 @@ use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
 use stroem_common::models::auth::Claims;
+use stroem_db::{ApiKeyRepo, UserRepo};
 
-/// Extractor that validates a JWT Bearer token and provides the claims.
+/// Extractor that validates a JWT Bearer token or API key and provides the claims.
 /// Use `Option<AuthUser>` for optional auth — returns `None` when auth is
 /// not configured or token is missing/invalid.
 /// Use `AuthUser` directly for required auth (rejects with 401).
 #[derive(Debug)]
-pub struct AuthUser(pub Claims);
+pub struct AuthUser {
+    pub claims: Claims,
+    /// True when the request was authenticated via an API key (not a JWT).
+    pub is_api_key: bool,
+}
+
+/// Validate an API key token and return Claims if valid.
+pub(super) async fn validate_api_key(
+    token: &str,
+    state: &Arc<AppState>,
+) -> Result<Claims, Response> {
+    let key_hash = hash_api_key(token);
+
+    let key_row = match ApiKeyRepo::get_by_hash(&state.pool, &key_hash).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Invalid API key"})),
+            )
+                .into_response())
+        }
+        Err(e) => {
+            tracing::error!("DB error validating API key: {:#}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response());
+        }
+    };
+
+    // Check expiry
+    if let Some(expires_at) = key_row.expires_at {
+        if expires_at < chrono::Utc::now() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "API key expired"})),
+            )
+                .into_response());
+        }
+    }
+
+    // Load the user
+    let user = match UserRepo::get_by_id(&state.pool, key_row.user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "API key user not found"})),
+            )
+                .into_response())
+        }
+        Err(e) => {
+            tracing::error!("DB error loading API key user: {:#}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response());
+        }
+    };
+
+    // Update last_used_at in the background (don't block the request)
+    let pool = state.pool.clone();
+    let hash = key_hash.clone();
+    tokio::spawn(async move {
+        if let Err(e) = ApiKeyRepo::touch_last_used(&pool, &hash).await {
+            tracing::warn!("Failed to update API key last_used_at: {:#}", e);
+        }
+    });
+
+    Ok(Claims {
+        sub: user.user_id.to_string(),
+        email: user.email,
+        iat: chrono::Utc::now().timestamp(),
+        exp: chrono::Utc::now().timestamp() + 3600, // synthetic expiry for Claims struct
+    })
+}
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {
     type Rejection = Response;
@@ -61,8 +140,20 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             }
         };
 
+        // API key path: starts with "strm_"
+        if token.starts_with("strm_") {
+            return validate_api_key(token, state).await.map(|claims| AuthUser {
+                claims,
+                is_api_key: true,
+            });
+        }
+
+        // JWT path
         match validate_access_token(token, &auth_config.jwt_secret) {
-            Ok(claims) => Ok(AuthUser(claims)),
+            Ok(claims) => Ok(AuthUser {
+                claims,
+                is_api_key: false,
+            }),
             Err(_) => Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "Invalid or expired token"})),
@@ -91,8 +182,18 @@ impl OptionalFromRequestParts<Arc<AppState>> for AuthUser {
             .and_then(|v| v.strip_prefix("Bearer "));
 
         match token {
+            Some(t) if t.starts_with("strm_") => match validate_api_key(t, state).await {
+                Ok(claims) => Ok(Some(AuthUser {
+                    claims,
+                    is_api_key: true,
+                })),
+                Err(_) => Ok(None),
+            },
             Some(t) => match validate_access_token(t, &auth_config.jwt_secret) {
-                Ok(claims) => Ok(Some(AuthUser(claims))),
+                Ok(claims) => Ok(Some(AuthUser {
+                    claims,
+                    is_api_key: false,
+                })),
                 Err(_) => Ok(None),
             },
             None => Ok(None),

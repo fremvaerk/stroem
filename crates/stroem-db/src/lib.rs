@@ -3,6 +3,7 @@ pub mod repos;
 
 // Re-export commonly used items
 pub use pool::{create_pool, run_migrations};
+pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
 pub use repos::job::{JobRepo, JobRow};
 pub use repos::job_step::{JobStepRepo, JobStepRow, NewJobStep, StaleStepInfo};
 pub use repos::refresh_token::{RefreshTokenRepo, RefreshTokenRow};

@@ -85,6 +85,55 @@ When a user authenticates via OIDC for the first time:
 2. If a user with the same email exists → create an auth link and return that user
 3. Otherwise → create a new user (no password) + auth link
 
+## API keys
+
+API keys provide long-lived tokens for programmatic and CI/CD access. They are tied to a user account and provide the same access as that user.
+
+### Creating API keys
+
+Use the Settings page in the UI, or the API directly:
+
+```bash
+# Create a key (requires JWT auth)
+curl -X POST https://stroem.example.com/api/auth/api-keys \
+  -H "Authorization: Bearer <jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CI Pipeline", "expires_in_days": 90}'
+```
+
+The response includes the raw key (shown only once):
+
+```json
+{
+  "key": "strm_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "name": "CI Pipeline",
+  "prefix": "strm_a1b",
+  "expires_at": "2026-05-27T12:00:00Z"
+}
+```
+
+### Using API keys
+
+Use the key as a Bearer token in the `Authorization` header, exactly like a JWT:
+
+```bash
+curl https://stroem.example.com/api/jobs \
+  -H "Authorization: Bearer strm_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+```
+
+API keys work with the CLI too — set the token in the CLI config or pass it directly.
+
+### Key format
+
+Keys use the format `strm_` followed by 32 random hex characters (37 characters total). The `strm_` prefix lets the server distinguish API keys from JWT tokens. Only a SHA256 hash of the key is stored in the database.
+
+### Managing keys
+
+- **List**: `GET /api/auth/api-keys` (returns prefix, name, dates — never the raw key)
+- **Revoke**: `DELETE /api/auth/api-keys/{prefix}`
+- Keys can optionally have an expiration date
+- The `last_used_at` timestamp tracks when each key was last used
+
 ## Web UI behavior
 
 The UI automatically detects whether authentication is enabled by calling `GET /api/config`. When auth is enabled, the login page is shown. When disabled, the UI proceeds directly to the dashboard.

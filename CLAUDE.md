@@ -216,6 +216,13 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Handlers use `AuthUser` extractor for protected endpoints; handlers without it remain open
 - Password hashing: argon2id via the `argon2` crate
 - **Worker auth**: Bearer token from config (`worker_token`)
+- **API keys**: Long-lived tokens for programmatic/CI access, tied to a user
+  - Format: `strm_` prefix + 32 random hex chars (37 chars total), SHA256 hash stored in DB
+  - `require_auth` middleware detects `strm_` prefix to distinguish from JWTs
+  - CRUD: `POST/GET /api/auth/api-keys`, `DELETE /api/auth/api-keys/{prefix}` (JWT auth required)
+  - Optional expiry (`expires_in_days`), `last_used_at` updated in background on each use
+  - DB: `api_key` table (migration `008_api_keys.sql`), `ApiKeyRepo` in `stroem-db`
+  - Frontend: Settings page (`/settings`) with create/list/revoke UI
 - **OIDC SSO**: Authorization Code with PKCE flow via `openidconnect` crate
   - Config: add `provider_type: "oidc"` providers with `issuer_url`, `client_id`, `client_secret`, `display_name`
   - Requires `base_url` in auth config for redirect URI construction
@@ -257,7 +264,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Clean shutdown via `CancellationToken` (same pattern as scheduler)
 
 ### React UI
-- Pages: Login, Dashboard, Tasks, Task Detail (with run dialog), Jobs, Job Detail (with live logs)
+- Pages: Login, Dashboard, Tasks, Task Detail (with run dialog), Jobs, Job Detail (with live logs), Settings (API keys)
 - Auth-aware: detects if server has auth enabled, shows login page accordingly
 - SPA routing with react-router, embedded in Rust binary via rust-embed with SPA fallback
 - `ui/src/lib/api.ts` handles token management (access token in memory, refresh in localStorage, auto-refresh on 401)

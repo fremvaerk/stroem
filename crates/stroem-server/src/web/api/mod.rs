@@ -1,3 +1,4 @@
+pub mod api_keys;
 pub mod auth;
 pub mod jobs;
 pub mod middleware;
@@ -13,7 +14,7 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::get, routing::post, Json, Router};
+use axum::{routing::delete, routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -56,6 +57,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// Middleware that rejects unauthenticated requests when auth is enabled.
 /// When auth is not configured, all requests pass through.
+/// Accepts both JWT tokens and API keys (prefixed with `strm_`).
 async fn require_auth(
     State(state): State<Arc<AppState>>,
     req: axum::extract::Request,
@@ -73,6 +75,13 @@ async fn require_auth(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match token {
+        Some(t) if t.starts_with("strm_") => {
+            // API key path: validate via DB lookup
+            match middleware::validate_api_key(t, &state).await {
+                Ok(_) => next.run(req).await,
+                Err(resp) => resp,
+            }
+        }
         Some(t) => match crate::auth::validate_access_token(t, &auth_config.jwt_secret) {
             Ok(_) => next.run(req).await,
             Err(_) => (
@@ -109,6 +118,11 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
         .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
+        .route(
+            "/auth/api-keys",
+            get(api_keys::list_api_keys).post(api_keys::create_api_key),
+        )
+        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,

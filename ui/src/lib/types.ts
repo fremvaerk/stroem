@@ -140,3 +140,18 @@ export interface AuthUser {
 export interface ExecuteTaskResponse {
   job_id: string;
 }
+
+export interface ApiKey {
+  prefix: string;
+  name: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+}
+
+export interface CreateApiKeyResponse {
+  key: string;
+  name: string;
+  prefix: string;
+  expires_at: string | null;
+}

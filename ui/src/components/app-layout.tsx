@@ -19,6 +19,7 @@ const routeLabels: Record<string, string> = {
   "/": "Dashboard",
   "/tasks": "Tasks",
   "/jobs": "Jobs",
+  "/settings": "Settings",
 };
 
 function useBreadcrumbs() {
