@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -10,39 +9,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { listWorkspaces } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
+import { useAsyncData } from "@/hooks/use-async-data";
 import type { WorkspaceInfo } from "@/lib/types";
 
 export function WorkspacesPage() {
   useTitle("Workspaces");
-  const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const data = await listWorkspaces();
-        if (!cancelled) setWorkspaces(data);
-      } catch {
-        // ignore
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { data, loading } = useAsyncData<WorkspaceInfo[]>(listWorkspaces);
+  const workspaces = data ?? [];
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-      </div>
-    );
+    return <LoadingSpinner />;
   }
 
   return (

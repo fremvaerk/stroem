@@ -9,17 +9,9 @@ import {
   Position,
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
-import {
-  CheckCircle2,
-  Circle,
-  Clock,
-  Loader2,
-  Play,
-  Flag,
-  SkipForward,
-  XCircle,
-} from "lucide-react";
+import { Circle, Play, Flag } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { statusIconsSmall } from "@/lib/status-icons";
 import type { JobStep, FlowStep } from "@/lib/types";
 
 const NODE_WIDTH = 200;
@@ -31,15 +23,6 @@ const SENTINEL_HEIGHT = 40;
 const EDGE_COLOR_DEFAULT = "oklch(0.7 0 0)";
 const EDGE_COLOR_COMPLETED = "oklch(0.6 0.15 160)";
 const EDGE_COLOR_RUNNING = "oklch(0.6 0.15 260)";
-
-const statusIcon: Record<string, React.ReactNode> = {
-  pending: <Clock className="h-3.5 w-3.5 text-muted-foreground" />,
-  ready: <Circle className="h-3.5 w-3.5 text-blue-500" />,
-  running: <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />,
-  completed: <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />,
-  failed: <XCircle className="h-3.5 w-3.5 text-red-500" />,
-  skipped: <SkipForward className="h-3.5 w-3.5 text-muted-foreground" />,
-};
 
 const statusBorderColor: Record<string, string> = {
   pending: "border-yellow-400 dark:border-yellow-600",
@@ -78,7 +61,7 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
       />
       <div className="flex items-center gap-1.5">
         {data.status &&
-          (statusIcon[data.status] ?? (
+          (statusIconsSmall[data.status] ?? (
             <Circle className="h-3.5 w-3.5 text-muted-foreground" />
           ))}
         <span className="truncate font-mono text-sm font-medium">

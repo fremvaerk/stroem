@@ -12,6 +12,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::workflow::TriggerDef;
+use subtle::ConstantTimeEq;
 
 /// Build the webhook routes: GET and POST on /{name}.
 pub fn build_hooks_routes(state: Arc<AppState>) -> Router {
@@ -48,18 +49,19 @@ async fn webhook_handler(
         }
     };
 
-    // 2. Validate secret
+    // 2. Validate secret (constant-time to prevent timing attacks)
     if let Some(ref expected_secret) = secret {
         let provided = extract_secret(&query, &headers);
-        match provided {
-            Some(s) if s == *expected_secret => {}
-            _ => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Invalid or missing secret"})),
-                )
-                    .into_response()
-            }
+        let is_valid = provided
+            .as_deref()
+            .map(|s| s.as_bytes().ct_eq(expected_secret.as_bytes()).into())
+            .unwrap_or(false);
+        if !is_valid {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Invalid or missing secret"})),
+            )
+                .into_response();
         }
     }
 

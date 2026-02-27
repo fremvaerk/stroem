@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link } from "react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -15,63 +15,30 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
+import { useAsyncData } from "@/hooks/use-async-data";
 import { listJobs } from "@/lib/api";
+import { formatDuration, formatTime } from "@/lib/formatting";
 import type { JobListItem } from "@/lib/types";
 
 const PAGE_SIZE = 20;
 const STATUSES = ["all", "pending", "running", "completed", "failed"] as const;
 
-function formatDuration(start: string | null, end: string | null): string {
-  if (!start) return "-";
-  const s = new Date(start).getTime();
-  const e = end ? new Date(end).getTime() : Date.now();
-  const diff = Math.max(0, e - s);
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${minutes}m ${secs}s`;
-}
-
-function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function JobsPage() {
   useTitle("Jobs");
   const workerNames = useWorkerNames();
-  const [jobs, setJobs] = useState<JobListItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
-  const load = useCallback(async () => {
-    try {
-      const data = await listJobs(PAGE_SIZE, offset);
-      setJobs(data);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }, [offset]);
-
-  useEffect(() => {
-    setLoading(true);
-    load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
-  }, [load]);
+  const fetcher = useCallback(() => listJobs(PAGE_SIZE, offset), [offset]);
+  const { data: jobs, loading } = useAsyncData(fetcher, {
+    pollInterval: 5000,
+  });
+  const jobList = jobs ?? [];
 
   const filtered =
     statusFilter === "all"
-      ? jobs
-      : jobs.filter((j) => j.status === statusFilter);
+      ? jobList
+      : jobList.filter((j) => j.status === statusFilter);
 
   return (
     <div className="space-y-6">
@@ -121,7 +88,7 @@ export function JobsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((job) => (
+                {filtered.map((job: JobListItem) => (
                   <TableRow key={job.job_id}>
                     <TableCell>
                       <Link
@@ -179,7 +146,7 @@ export function JobsPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={jobs.length < PAGE_SIZE}
+              disabled={jobList.length < PAGE_SIZE}
               onClick={() => setOffset((o) => o + PAGE_SIZE)}
             >
               Next

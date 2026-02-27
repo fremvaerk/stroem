@@ -1,4 +1,6 @@
-use crate::traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner};
+use crate::traits::{
+    parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -70,11 +72,8 @@ impl Runner for ShellRunner {
                         collected.push(line.clone());
 
                         // Check for OUTPUT: prefix
-                        if let Some(json_str) = line.strip_prefix("OUTPUT: ") {
-                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
-                            {
-                                output = Some(parsed);
-                            }
+                        if let Some(parsed) = parse_output_line(&line) {
+                            output = Some(parsed);
                         }
                     }
                     Err(e) => {

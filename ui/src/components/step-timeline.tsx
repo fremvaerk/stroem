@@ -1,38 +1,14 @@
 import { Link } from "react-router";
 import {
   AlertCircle,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Circle,
-  Loader2,
-  SkipForward,
-  XCircle,
-  Clock,
 } from "lucide-react";
 import { StepDetail } from "@/components/step-detail";
+import { formatDuration } from "@/lib/formatting";
+import { statusIcons } from "@/lib/status-icons";
 import type { JobStep } from "@/lib/types";
-
-const statusIcon: Record<string, React.ReactNode> = {
-  pending: <Clock className="h-4 w-4 text-muted-foreground" />,
-  ready: <Circle className="h-4 w-4 text-blue-500" />,
-  running: <Loader2 className="h-4 w-4 animate-spin text-blue-500" />,
-  completed: <CheckCircle2 className="h-4 w-4 text-green-500" />,
-  failed: <XCircle className="h-4 w-4 text-red-500" />,
-  skipped: <SkipForward className="h-4 w-4 text-muted-foreground" />,
-};
-
-function formatDuration(start: string | null, end: string | null): string {
-  if (!start) return "";
-  const s = new Date(start).getTime();
-  const e = end ? new Date(end).getTime() : Date.now();
-  const diff = Math.max(0, e - s);
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${minutes}m ${secs}s`;
-}
 
 interface StepTimelineProps {
   jobId: string;
@@ -71,7 +47,7 @@ export function StepTimeline({
             >
               <div className="flex flex-col items-center">
                 <div className="flex h-6 w-6 items-center justify-center">
-                  {statusIcon[step.status] ?? (
+                  {statusIcons[step.status] ?? (
                     <Circle className="h-4 w-4 text-muted-foreground" />
                   )}
                 </div>

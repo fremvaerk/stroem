@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_db::ApiKeyRepo;
-use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
@@ -81,15 +80,9 @@ pub async fn create_api_key(
         }
     }
 
-    let user_id: Uuid = match auth.claims.sub.parse() {
+    let user_id = match auth.user_id() {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Invalid user ID in token"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     let (raw_key, key_hash) = generate_api_key();
@@ -136,15 +129,9 @@ pub async fn list_api_keys(
         return resp;
     }
 
-    let user_id: Uuid = match auth.claims.sub.parse() {
+    let user_id = match auth.user_id() {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Invalid user ID in token"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     match ApiKeyRepo::list_by_user(&state.pool, user_id).await {
@@ -183,15 +170,9 @@ pub async fn delete_api_key(
         return resp;
     }
 
-    let user_id: Uuid = match auth.claims.sub.parse() {
+    let user_id = match auth.user_id() {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Invalid user ID in token"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     match ApiKeyRepo::delete_by_prefix_and_user(&state.pool, &prefix, user_id).await {

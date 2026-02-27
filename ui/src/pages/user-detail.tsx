@@ -3,19 +3,11 @@ import { useParams, Link } from "react-router";
 import { ArrowLeft } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
 import { getUser } from "@/lib/api";
+import { formatTime } from "@/lib/formatting";
 import type { UserDetail } from "@/lib/types";
-
-function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 export function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -42,11 +34,7 @@ export function UserDetailPage() {
   }, [load]);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-      </div>
-    );
+    return <LoadingSpinner />;
   }
 
   if (error || !user) {

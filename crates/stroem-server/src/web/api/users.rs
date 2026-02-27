@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::web::api::{default_limit, parse_uuid_param};
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
@@ -16,10 +17,6 @@ pub struct ListUsersQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-}
-
-fn default_limit() -> i64 {
-    50
 }
 
 fn auth_method(has_password: bool, providers: &[String]) -> serde_json::Value {
@@ -90,15 +87,9 @@ pub async fn get_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let user_id = match id.parse::<Uuid>() {
+    let user_id = match parse_uuid_param(&id, "user") {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid user ID"})),
-            )
-                .into_response();
-        }
+        Err(resp) => return resp,
     };
 
     let user = match UserRepo::get_by_id(&state.pool, user_id).await {

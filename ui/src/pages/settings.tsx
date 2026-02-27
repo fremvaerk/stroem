@@ -24,16 +24,8 @@ import {
 } from "@/components/ui/dialog";
 import { useTitle } from "@/hooks/use-title";
 import { listApiKeys, createApiKey, deleteApiKey } from "@/lib/api";
+import { formatTime } from "@/lib/formatting";
 import type { ApiKey, CreateApiKeyResponse } from "@/lib/types";
-
-function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function isExpired(expiresAt: string | null): boolean {
   if (!expiresAt) return false;

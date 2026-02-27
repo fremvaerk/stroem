@@ -1,18 +1,18 @@
-use crate::auth::{create_access_token, generate_refresh_token};
 use crate::oidc::{create_state_jwt, provision_user, validate_state_jwt, OidcStateClaims};
 use crate::state::AppState;
+use crate::web::api::auth::issue_token_pair;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient};
 use openidconnect::{
     AuthorizationCode, CsrfToken, Nonce, PkceCodeChallenge, PkceCodeVerifier, Scope, TokenResponse,
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use stroem_db::{RefreshTokenRepo, UserRepo};
+use stroem_db::UserRepo;
 
 const STATE_COOKIE_NAME: &str = "stroem_oidc_state";
 
@@ -252,27 +252,17 @@ pub async fn oidc_callback(
     }
 
     // Issue internal JWT tokens
-    let access_token = match create_access_token(
-        &user.user_id.to_string(),
+    let tokens = match issue_token_pair(
+        &state.pool,
+        user.user_id,
         &user.email,
         &auth_config.jwt_secret,
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to create access token: {:#}", e);
-            return error_redirect("Internal server error");
-        }
-    };
-
-    let (raw_refresh, refresh_hash) = generate_refresh_token();
-    let expires_at = Utc::now() + Duration::days(30);
-
-    if let Err(e) =
-        RefreshTokenRepo::create(&state.pool, &refresh_hash, user.user_id, expires_at).await
+    )
+    .await
     {
-        tracing::error!("Failed to store refresh token: {:#}", e);
-        return error_redirect("Internal server error");
-    }
+        Ok(t) => t,
+        Err(_) => return error_redirect("Internal server error"),
+    };
 
     // Clear state cookie
     let clear_cookie = format!(
@@ -283,8 +273,8 @@ pub async fn oidc_callback(
     // Redirect to frontend callback with tokens in hash fragment
     let redirect_url = format!(
         "/login/callback#access_token={}&refresh_token={}",
-        url::form_urlencoded::byte_serialize(access_token.as_bytes()).collect::<String>(),
-        url::form_urlencoded::byte_serialize(raw_refresh.as_bytes()).collect::<String>()
+        url::form_urlencoded::byte_serialize(tokens.access_token.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(tokens.refresh_token.as_bytes()).collect::<String>()
     );
 
     Response::builder()

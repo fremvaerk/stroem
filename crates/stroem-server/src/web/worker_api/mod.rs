@@ -12,6 +12,7 @@ use axum::{
 };
 use serde_json::json;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// Middleware to check worker authentication token
 async fn auth_middleware(
@@ -45,8 +46,12 @@ async fn auth_middleware(
         }
     };
 
-    // Compare with configured worker token
-    if token != state.config.worker_token {
+    // Compare with configured worker token (constant-time to prevent timing attacks)
+    let token_valid: bool = token
+        .as_bytes()
+        .ct_eq(state.config.worker_token.as_bytes())
+        .into();
+    if !token_valid {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "Invalid worker token"})),

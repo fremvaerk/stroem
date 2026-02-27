@@ -1,12 +1,10 @@
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
+use crate::web::api::parse_uuid_param;
 use axum::{
     extract::{ws::WebSocket, Path, State, WebSocketUpgrade},
-    http::StatusCode,
     response::IntoResponse,
-    Json,
 };
-use serde_json::json;
 use std::sync::Arc;
 use stroem_db::JobRepo;
 use uuid::Uuid;
@@ -17,15 +15,9 @@ pub async fn job_log_stream(
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let job_id = match Uuid::parse_str(&id) {
+    let job_id = match parse_uuid_param(&id, "job") {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid job ID"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     ws.on_upgrade(move |socket| handle_ws(socket, state, job_id))

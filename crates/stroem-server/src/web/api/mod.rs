@@ -19,6 +19,40 @@ use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
+/// Parse a path parameter as a [`uuid::Uuid`], returning a 400 response on failure.
+///
+/// `entity_name` is used in the error message, e.g. `"job"` → `"Invalid job ID"`.
+#[allow(clippy::result_large_err)]
+pub fn parse_uuid_param(id: &str, entity_name: &str) -> Result<uuid::Uuid, Response> {
+    id.parse::<uuid::Uuid>().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid {} ID", entity_name)})),
+        )
+            .into_response()
+    })
+}
+
+/// Default pagination limit used across list endpoints.
+pub fn default_limit() -> i64 {
+    50
+}
+
+/// Resolve a workspace by name from [`AppState`], returning a 404 response when missing.
+#[allow(clippy::result_large_err)]
+pub async fn get_workspace_or_error(
+    state: &std::sync::Arc<AppState>,
+    ws: &str,
+) -> Result<stroem_common::models::workflow::WorkspaceConfig, Response> {
+    state.get_workspace(ws).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("Workspace '{}' not found", ws)})),
+        )
+            .into_response()
+    })
+}
+
 #[derive(Serialize)]
 struct OidcProviderInfo {
     id: String,

@@ -78,6 +78,21 @@ impl ServerClient {
         }
     }
 
+    async fn check_response(
+        response: reqwest::Response,
+        context: &str,
+    ) -> Result<reqwest::Response> {
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read body".to_string());
+            anyhow::bail!("{} failed with status {}: {}", context, status, body);
+        }
+        Ok(response)
+    }
+
     /// Register this worker with the server
     #[tracing::instrument(skip(self))]
     pub async fn register(
@@ -102,14 +117,7 @@ impl ServerClient {
             .await
             .context("Failed to send register request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Register failed with status {}: {}", status, body);
-        }
+        let response = Self::check_response(response, "Register").await?;
 
         let resp: RegisterResponse = response
             .json()
@@ -133,14 +141,7 @@ impl ServerClient {
             .await
             .context("Failed to send heartbeat request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Heartbeat failed with status {}: {}", status, body);
-        }
+        Self::check_response(response, "Heartbeat").await?;
 
         Ok(())
     }
@@ -169,14 +170,7 @@ impl ServerClient {
             .await
             .context("Failed to send claim request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Claim failed with status {}: {}", status, body);
-        }
+        let response = Self::check_response(response, "Claim").await?;
 
         let resp: ClaimResponse = response
             .json()
@@ -234,14 +228,7 @@ impl ServerClient {
             .await
             .context("Failed to send step start request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Step start failed with status {}: {}", status, body);
-        }
+        Self::check_response(response, "Step start").await?;
 
         Ok(())
     }
@@ -275,14 +262,7 @@ impl ServerClient {
             .await
             .context("Failed to send step complete request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Step complete failed with status {}: {}", status, body);
-        }
+        Self::check_response(response, "Step complete").await?;
 
         Ok(())
     }
@@ -316,14 +296,7 @@ impl ServerClient {
             return Ok(None);
         }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Download workspace failed with status {}: {}", status, body);
-        }
+        let response = Self::check_response(response, "Download workspace").await?;
 
         let revision = response
             .headers()
@@ -375,14 +348,7 @@ impl ServerClient {
             .await
             .context("Failed to send logs request")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read body".to_string());
-            anyhow::bail!("Push logs failed with status {}: {}", status, body);
-        }
+        Self::check_response(response, "Push logs").await?;
 
         Ok(())
     }

@@ -9,29 +9,12 @@ import { StepDetail } from "@/components/step-detail";
 import { WorkflowDag } from "@/components/workflow-dag";
 import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { getJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
+import { formatTime, formatDuration } from "@/lib/formatting";
 import type { JobDetail } from "@/lib/types";
-
-function formatTime(dateStr: string | null): string {
-  if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleString();
-}
-
-function formatDuration(start: string | null, end: string | null): string {
-  if (!start) return "-";
-  const s = new Date(start).getTime();
-  const e = end ? new Date(end).getTime() : Date.now();
-  const diff = Math.max(0, e - s);
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  if (minutes < 60) return `${minutes}m ${secs}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -67,11 +50,7 @@ export function JobDetailPage() {
   }, [job, load]);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-      </div>
-    );
+    return <LoadingSpinner />;
   }
 
   if (error || !job) {

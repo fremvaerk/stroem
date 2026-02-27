@@ -23,6 +23,30 @@ pub struct AuthUser {
     pub is_api_key: bool,
 }
 
+impl AuthUser {
+    /// Parse the `sub` claim as a [`uuid::Uuid`].
+    ///
+    /// Returns an `Err` with a pre-built 500 response when the claim is malformed.
+    /// Callers should early-return the error response directly:
+    ///
+    /// ```ignore
+    /// let user_id = match auth.user_id() {
+    ///     Ok(id) => id,
+    ///     Err(resp) => return resp,
+    /// };
+    /// ```
+    #[allow(clippy::result_large_err)]
+    pub fn user_id(&self) -> Result<uuid::Uuid, Response> {
+        self.claims.sub.parse::<uuid::Uuid>().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Invalid user ID in token"})),
+            )
+                .into_response()
+        })
+    }
+}
+
 /// Validate an API key token and return Claims if valid.
 pub(super) async fn validate_api_key(
     token: &str,

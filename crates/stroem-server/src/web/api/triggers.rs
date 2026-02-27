@@ -1,14 +1,13 @@
 use crate::state::AppState;
+use crate::web::api::get_workspace_or_error;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use chrono::{DateTime, Utc};
 use croner::parser::{CronParser, Seconds};
 use serde::Serialize;
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::workflow::TriggerDef;
@@ -75,15 +74,9 @@ pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     Path(ws): Path<String>,
 ) -> impl IntoResponse {
-    let workspace = match state.get_workspace(&ws).await {
-        Some(w) => w,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
-            )
-                .into_response()
-        }
+    let workspace = match get_workspace_or_error(&state, &ws).await {
+        Ok(w) => w,
+        Err(resp) => return resp,
     };
 
     let triggers: Vec<TriggerInfo> = workspace

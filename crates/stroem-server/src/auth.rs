@@ -61,11 +61,29 @@ pub fn generate_refresh_token() -> (String, String) {
     (raw, hash)
 }
 
-/// Hash a refresh token using SHA256
-pub fn hash_refresh_token(raw_token: &str) -> String {
+/// Hash an arbitrary token string using SHA256.
+///
+/// This is the canonical implementation used by all token hashing functions.
+///
+/// # Examples
+///
+/// ```
+/// use stroem_server::auth::hash_token;
+/// let h1 = hash_token("my-token");
+/// let h2 = hash_token("my-token");
+/// assert_eq!(h1, h2);
+/// ```
+pub fn hash_token(raw: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
+    hasher.update(raw.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Hash a refresh token using SHA256.
+///
+/// Thin wrapper around [`hash_token`] kept for backward compatibility.
+pub fn hash_refresh_token(raw_token: &str) -> String {
+    hash_token(raw_token)
 }
 
 /// Generate an API key: returns (raw_key, key_hash)
@@ -82,11 +100,11 @@ pub fn generate_api_key() -> (String, String) {
     (raw, hash)
 }
 
-/// Hash an API key using SHA256 (same algorithm as refresh tokens)
+/// Hash an API key using SHA256.
+///
+/// Thin wrapper around [`hash_token`] kept for backward compatibility.
 pub fn hash_api_key(raw_key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(raw_key.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hash_token(raw_key)
 }
 
 #[cfg(test)]
@@ -139,6 +157,29 @@ mod tests {
         let (raw2, hash2) = generate_refresh_token();
         assert_ne!(raw1, raw2);
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_token_determinism() {
+        let raw = "fixed-token-value";
+        let hash1 = hash_token(raw);
+        let hash2 = hash_token(raw);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_token_different_inputs_differ() {
+        let h1 = hash_token("token-a");
+        let h2 = hash_token("token-b");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_token_wrappers_agree() {
+        let raw = "strm_abc123def456";
+        // hash_refresh_token and hash_api_key must both delegate to hash_token
+        assert_eq!(hash_token(raw), hash_refresh_token(raw));
+        assert_eq!(hash_token(raw), hash_api_key(raw));
     }
 
     #[test]

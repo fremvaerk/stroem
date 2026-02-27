@@ -1,5 +1,6 @@
 use crate::job_creator::create_job_for_task;
 use crate::state::AppState;
+use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::triggers::TriggerInfo;
 use axum::{
@@ -51,15 +52,9 @@ pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Path(ws): Path<String>,
 ) -> impl IntoResponse {
-    let workspace = match state.get_workspace(&ws).await {
-        Some(w) => w,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
-            )
-                .into_response()
-        }
+    let workspace = match get_workspace_or_error(&state, &ws).await {
+        Ok(w) => w,
+        Err(resp) => return resp,
     };
 
     let tasks: Vec<TaskListItem> = workspace
@@ -89,15 +84,9 @@ pub async fn get_task(
     State(state): State<Arc<AppState>>,
     Path((ws, name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let workspace = match state.get_workspace(&ws).await {
-        Some(w) => w,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
-            )
-                .into_response()
-        }
+    let workspace = match get_workspace_or_error(&state, &ws).await {
+        Ok(w) => w,
+        Err(resp) => return resp,
     };
 
     let task = match workspace.tasks.get(&name) {
@@ -159,15 +148,9 @@ pub async fn execute_task(
         }
     };
 
-    let workspace = match state.get_workspace(&ws).await {
-        Some(w) => w,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("Workspace '{}' not found", ws)})),
-            )
-                .into_response()
-        }
+    let workspace = match get_workspace_or_error(&state, &ws).await {
+        Ok(w) => w,
+        Err(resp) => return resp,
     };
 
     // 2. Verify task exists in workspace

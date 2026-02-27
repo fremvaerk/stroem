@@ -1,5 +1,6 @@
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
+use crate::web::api::{default_limit, parse_uuid_param};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -21,10 +22,6 @@ pub struct ListJobsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-}
-
-fn default_limit() -> i64 {
-    50
 }
 
 /// GET /api/jobs - List jobs
@@ -114,15 +111,9 @@ pub async fn get_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let job_id = match Uuid::parse_str(&id) {
+    let job_id = match parse_uuid_param(&id, "job") {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid job ID"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     // Get job
@@ -349,15 +340,9 @@ pub async fn get_step_logs(
     State(state): State<Arc<AppState>>,
     Path((id, step_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let job_id = match Uuid::parse_str(&id) {
+    let job_id = match parse_uuid_param(&id, "job") {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid job ID"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     let job = match JobRepo::get(&state.pool, job_id).await {
@@ -408,15 +393,9 @@ pub async fn get_job_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let job_id = match Uuid::parse_str(&id) {
+    let job_id = match parse_uuid_param(&id, "job") {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid job ID"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     let job = match JobRepo::get(&state.pool, job_id).await {

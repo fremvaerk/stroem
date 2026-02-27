@@ -3,13 +3,17 @@ use crate::auth::{
 };
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_db::{RefreshTokenRepo, UserRepo};
-use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -31,6 +35,47 @@ pub struct RefreshRequest {
 #[derive(Debug, Deserialize)]
 pub struct LogoutRequest {
     pub refresh_token: String,
+}
+
+/// Create an access token + refresh token pair and persist the refresh token.
+///
+/// Returns a ready-to-send [`TokenResponse`] on success, or a pre-built error
+/// [`Response`] on failure so callers can directly `return` it.
+#[allow(clippy::result_large_err)]
+pub async fn issue_token_pair(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    email: &str,
+    jwt_secret: &str,
+) -> Result<TokenResponse, Response> {
+    let access_token = match create_access_token(&user_id.to_string(), email, jwt_secret) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to create access token: {:#}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response());
+        }
+    };
+
+    let (raw_refresh, refresh_hash) = generate_refresh_token();
+    let expires_at = Utc::now() + Duration::days(30);
+
+    if let Err(e) = RefreshTokenRepo::create(pool, &refresh_hash, user_id, expires_at).await {
+        tracing::error!("Failed to store refresh token: {:#}", e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Internal server error"})),
+        )
+            .into_response());
+    }
+
+    Ok(TokenResponse {
+        access_token,
+        refresh_token: raw_refresh,
+    })
 }
 
 /// POST /api/auth/login
@@ -103,41 +148,17 @@ pub async fn login(
         tracing::warn!("Failed to update last_login_at: {:#}", e);
     }
 
-    let access_token = match create_access_token(
-        &user.user_id.to_string(),
+    match issue_token_pair(
+        &state.pool,
+        user.user_id,
         &user.email,
         &auth_config.jwt_secret,
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to create access token: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
-    };
-
-    let (raw_refresh, refresh_hash) = generate_refresh_token();
-    let expires_at = Utc::now() + Duration::days(30);
-
-    if let Err(e) =
-        RefreshTokenRepo::create(&state.pool, &refresh_hash, user.user_id, expires_at).await
+    )
+    .await
     {
-        tracing::error!("Failed to store refresh token: {:#}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Internal server error"})),
-        )
-            .into_response();
+        Ok(tokens) => Json(tokens).into_response(),
+        Err(resp) => resp,
     }
-
-    Json(TokenResponse {
-        access_token,
-        refresh_token: raw_refresh,
-    })
-    .into_response()
 }
 
 /// POST /api/auth/refresh
@@ -211,41 +232,17 @@ pub async fn refresh(
         }
     };
 
-    let access_token = match create_access_token(
-        &user.user_id.to_string(),
+    match issue_token_pair(
+        &state.pool,
+        user.user_id,
         &user.email,
         &auth_config.jwt_secret,
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to create access token: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
-    };
-
-    let (raw_refresh, refresh_hash) = generate_refresh_token();
-    let expires_at = Utc::now() + Duration::days(30);
-
-    if let Err(e) =
-        RefreshTokenRepo::create(&state.pool, &refresh_hash, user.user_id, expires_at).await
+    )
+    .await
     {
-        tracing::error!("Failed to store new refresh token: {:#}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Internal server error"})),
-        )
-            .into_response();
+        Ok(tokens) => Json(tokens).into_response(),
+        Err(resp) => resp,
     }
-
-    Json(TokenResponse {
-        access_token,
-        refresh_token: raw_refresh,
-    })
-    .into_response()
 }
 
 /// POST /api/auth/logout
@@ -271,15 +268,9 @@ pub async fn logout(
 /// GET /api/auth/me
 #[tracing::instrument(skip(state))]
 pub async fn me(State(state): State<Arc<AppState>>, auth: AuthUser) -> impl IntoResponse {
-    let user_id: Uuid = match auth.claims.sub.parse() {
+    let user_id = match auth.user_id() {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Invalid user ID in token"})),
-            )
-                .into_response()
-        }
+        Err(resp) => return resp,
     };
 
     match UserRepo::get_by_id(&state.pool, user_id).await {

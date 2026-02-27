@@ -1,4 +1,6 @@
-use crate::traits::{LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode};
+use crate::traits::{
+    parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::io::AsyncBufReadExt;
@@ -390,10 +392,8 @@ impl Runner for KubeRunner {
                     };
 
                     // Check for OUTPUT: prefix
-                    if let Some(json_str) = line.strip_prefix("OUTPUT: ") {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-                            parsed_output = Some(parsed);
-                        }
+                    if let Some(parsed) = parse_output_line(&line) {
+                        parsed_output = Some(parsed);
                     }
 
                     stdout_lines.push(line.clone());

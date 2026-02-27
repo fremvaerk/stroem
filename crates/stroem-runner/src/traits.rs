@@ -83,3 +83,9 @@ pub trait Runner: Send + Sync {
         log_callback: Option<LogCallback>,
     ) -> Result<RunResult>;
 }
+
+/// Parse an "OUTPUT: {...}" line into a JSON value.
+pub fn parse_output_line(line: &str) -> Option<serde_json::Value> {
+    line.strip_prefix("OUTPUT: ")
+        .and_then(|json_str| serde_json::from_str(json_str).ok())
+}

@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::web::api::{default_limit, parse_uuid_param};
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
@@ -8,7 +9,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use stroem_db::{JobRepo, WorkerRepo};
-use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct ListWorkersQuery {
@@ -16,10 +16,6 @@ pub struct ListWorkersQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-}
-
-fn default_limit() -> i64 {
-    50
 }
 
 /// GET /api/workers - List registered workers
@@ -63,15 +59,9 @@ pub async fn get_worker(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let worker_id = match id.parse::<Uuid>() {
+    let worker_id = match parse_uuid_param(&id, "worker") {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid worker ID"})),
-            )
-                .into_response();
-        }
+        Err(resp) => return resp,
     };
 
     let worker = match WorkerRepo::get(&state.pool, worker_id).await {

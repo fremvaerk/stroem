@@ -11,23 +11,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { listJobs } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
+import { formatRelativeTime } from "@/lib/formatting";
 import type { JobListItem } from "@/lib/types";
-
-function formatRelative(dateStr: string): string {
-  const now = Date.now();
-  const then = new Date(dateStr).getTime();
-  const diff = now - then;
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
 
 export function DashboardPage() {
   useTitle("Dashboard");
@@ -93,11 +81,7 @@ export function DashboardPage() {
   ];
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-      </div>
-    );
+    return <LoadingSpinner />;
   }
 
   return (
@@ -164,7 +148,7 @@ export function DashboardPage() {
                       {job.source_type}
                     </TableCell>
                     <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                      {formatRelative(job.created_at)}
+                      {formatRelativeTime(job.created_at)}
                     </TableCell>
                   </TableRow>
                 ))}

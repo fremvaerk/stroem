@@ -3,6 +3,17 @@ use clap::{Parser, Subcommand};
 use reqwest::Client;
 use serde_json::Value;
 
+fn check_response(status: &reqwest::StatusCode, body: &serde_json::Value) -> anyhow::Result<()> {
+    if !status.is_success() {
+        let err = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        anyhow::bail!("Server returned {}: {}", status, err);
+    }
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(name = "stroem", version, about = "Strøm CLI - workflow orchestration")]
 struct Cli {
@@ -124,13 +135,7 @@ async fn cmd_trigger(
     let status = resp.status();
     let body: Value = resp.json().await.context("Failed to parse response")?;
 
-    if !status.is_success() {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Server returned {}: {}", status, err);
-    }
+    check_response(&status, &body)?;
 
     let job_id = body
         .get("job_id")
@@ -151,13 +156,7 @@ async fn cmd_status(client: &Client, server: &str, job_id: &str) -> Result<()> {
     let status = resp.status();
     let body: Value = resp.json().await.context("Failed to parse response")?;
 
-    if !status.is_success() {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Server returned {}: {}", status, err);
-    }
+    check_response(&status, &body)?;
 
     println!(
         "Job:       {}",
@@ -235,13 +234,7 @@ async fn cmd_logs(client: &Client, server: &str, job_id: &str) -> Result<()> {
     let status = resp.status();
     let body: Value = resp.json().await.context("Failed to parse response")?;
 
-    if !status.is_success() {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Server returned {}: {}", status, err);
-    }
+    check_response(&status, &body)?;
 
     let logs = body.get("logs").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -262,13 +255,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
             let status = resp.status();
             let body: Value = resp.json().await.context("Failed to parse response")?;
 
-            if !status.is_success() {
-                let err = body
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error");
-                anyhow::bail!("Server returned {}: {}", status, err);
-            }
+            check_response(&status, &body)?;
 
             let tasks = body.as_array().context("Expected array response")?;
 
@@ -297,13 +284,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
             let ws_status = ws_resp.status();
             let ws_body: Value = ws_resp.json().await.context("Failed to parse response")?;
 
-            if !ws_status.is_success() {
-                let err = ws_body
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error");
-                anyhow::bail!("Server returned {}: {}", ws_status, err);
-            }
+            check_response(&ws_status, &ws_body)?;
 
             let workspaces = ws_body.as_array().context("Expected array response")?;
 
@@ -353,13 +334,7 @@ async fn cmd_jobs(client: &Client, server: &str, limit: i64) -> Result<()> {
     let status = resp.status();
     let body: Value = resp.json().await.context("Failed to parse response")?;
 
-    if !status.is_success() {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Server returned {}: {}", status, err);
-    }
+    check_response(&status, &body)?;
 
     let jobs = body.as_array().context("Expected array response")?;
 
@@ -398,13 +373,7 @@ async fn cmd_workspaces(client: &Client, server: &str) -> Result<()> {
     let status = resp.status();
     let body: Value = resp.json().await.context("Failed to parse response")?;
 
-    if !status.is_success() {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error");
-        anyhow::bail!("Server returned {}: {}", status, err);
-    }
+    check_response(&status, &body)?;
 
     let workspaces = body.as_array().context("Expected array response")?;
 

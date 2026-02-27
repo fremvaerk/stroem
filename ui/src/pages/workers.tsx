@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link } from "react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -12,56 +12,22 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useTitle } from "@/hooks/use-title";
+import { useAsyncData } from "@/hooks/use-async-data";
 import { listWorkers } from "@/lib/api";
+import { formatRelativeTime, formatTime } from "@/lib/formatting";
 import type { WorkerListItem } from "@/lib/types";
 
 const PAGE_SIZE = 20;
 
-function formatRelativeTime(dateStr: string | null): string {
-  if (!dateStr) return "Never";
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function WorkersPage() {
   useTitle("Workers");
-  const [workers, setWorkers] = useState<WorkerListItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
 
-  const load = useCallback(async () => {
-    try {
-      const data = await listWorkers(PAGE_SIZE, offset);
-      setWorkers(data);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }, [offset]);
-
-  useEffect(() => {
-    setLoading(true);
-    load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
-  }, [load]);
+  const fetcher = useCallback(() => listWorkers(PAGE_SIZE, offset), [offset]);
+  const { data: workers, loading } = useAsyncData(fetcher, {
+    pollInterval: 5000,
+  });
+  const workerList = workers ?? [];
 
   return (
     <div className="space-y-6">
@@ -81,7 +47,7 @@ export function WorkersPage() {
             <div className="flex items-center justify-center py-12">
               <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
             </div>
-          ) : workers.length === 0 ? (
+          ) : workerList.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No workers registered.
             </p>
@@ -97,7 +63,7 @@ export function WorkersPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {workers.map((w) => (
+                {workerList.map((w: WorkerListItem) => (
                   <TableRow key={w.worker_id}>
                     <TableCell>
                       <Link
@@ -162,7 +128,7 @@ export function WorkersPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={workers.length < PAGE_SIZE}
+              disabled={workerList.length < PAGE_SIZE}
               onClick={() => setOffset((o) => o + PAGE_SIZE)}
             >
               Next
