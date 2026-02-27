@@ -300,15 +300,16 @@ impl WorkspaceConfig {
 
     /// Render connection values through Tera templates and apply type defaults.
     ///
-    /// Phase 1: Render template strings in connection values (e.g. `{{ 'ref+...' | vals }}`).
+    /// Phase 1: Render template strings in connection values using secrets as context
+    ///          (e.g. `{{ secret.db_host }}`, `{{ 'ref+...' | vals }}`).
     /// Phase 2: Apply default values from connection type properties for missing fields.
     pub fn render_connections(&mut self) -> anyhow::Result<()> {
-        let empty_context = serde_json::json!({});
+        let context = serde_json::json!({ "secret": &self.secrets });
 
-        // Phase 1: Render template values in connections
+        // Phase 1: Render template values in connections (with secrets available)
         for (conn_name, conn) in &mut self.connections {
             for (key, value) in &mut conn.values {
-                render_secret_value(value, &empty_context).with_context(|| {
+                render_secret_value(value, &context).with_context(|| {
                     format!("Failed to render connection '{conn_name}' field '{key}'")
                 })?;
             }
@@ -1428,6 +1429,38 @@ connections:
 
         let conn = ws.connections.get("api").unwrap();
         assert_eq!(conn.values.get("token").unwrap(), "resolved-token");
+    }
+
+    #[test]
+    fn test_render_connections_secret_references() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert(
+            "clickhouse".to_string(),
+            json!({"host": "ch.example.com", "password": "s3cret"}),
+        );
+        ws.connections.insert(
+            "ch-prod".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("{{ secret.clickhouse.host }}"));
+                    v.insert(
+                        "password".to_string(),
+                        json!("{{ secret.clickhouse.password }}"),
+                    );
+                    v.insert("port".to_string(), json!(8123));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("ch-prod").unwrap();
+        assert_eq!(conn.values.get("host").unwrap(), "ch.example.com");
+        assert_eq!(conn.values.get("password").unwrap(), "s3cret");
+        assert_eq!(conn.values.get("port").unwrap(), &json!(8123));
     }
 
     #[test]
