@@ -1,10 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
+
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -128,7 +130,9 @@ impl JobStepRepo {
                 .bind(binding.9);
         }
 
-        q.execute(pool).await?;
+        q.execute(pool)
+            .await
+            .context("Failed to create job steps")?;
         Ok(())
     }
 
@@ -141,7 +145,7 @@ impl JobStepRepo {
         worker_id: Uuid,
     ) -> Result<Option<JobStepRow>> {
         let worker_tags_json = serde_json::to_value(worker_tags)?;
-        let step = sqlx::query_as::<_, JobStepRow>(
+        let step = sqlx::query_as::<_, JobStepRow>(&format!(
             r#"
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
@@ -151,34 +155,29 @@ impl JobStepRepo {
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
-            RETURNING job_id, step_name, action_name, action_type, action_image, action_spec,
-                      input, output, status, worker_id, started_at, completed_at, error_message,
-                      required_tags, runner
+            RETURNING {}
             "#,
-        )
+            STEP_COLUMNS
+        ))
         .bind(worker_tags_json)
         .bind(worker_id)
         .fetch_optional(pool)
-        .await?;
+        .await
+        .context("Failed to claim ready step")?;
 
         Ok(step)
     }
 
     /// Get all steps for a job
     pub async fn get_steps_for_job(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
-        let steps = sqlx::query_as::<_, JobStepRow>(
-            r#"
-            SELECT job_id, step_name, action_name, action_type, action_image, action_spec,
-                   input, output, status, worker_id, started_at, completed_at, error_message,
-                   required_tags, runner
-            FROM job_step
-            WHERE job_id = $1
-            ORDER BY step_name
-            "#,
-        )
+        let steps = sqlx::query_as::<_, JobStepRow>(&format!(
+            "SELECT {} FROM job_step WHERE job_id = $1 ORDER BY step_name",
+            STEP_COLUMNS
+        ))
         .bind(job_id)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to get steps for job")?;
 
         Ok(steps)
     }
@@ -201,7 +200,8 @@ impl JobStepRepo {
         .bind(job_id)
         .bind(step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark step as running")?;
 
         Ok(())
     }
@@ -218,7 +218,8 @@ impl JobStepRepo {
         .bind(job_id)
         .bind(step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark step as running (server-side)")?;
 
         Ok(())
     }
@@ -241,7 +242,8 @@ impl JobStepRepo {
         .bind(job_id)
         .bind(step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark step as completed")?;
 
         Ok(())
     }
@@ -264,26 +266,22 @@ impl JobStepRepo {
         .bind(job_id)
         .bind(step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark step as failed")?;
 
         Ok(())
     }
 
     /// Get ready steps for a job (for orchestrator to check)
     pub async fn get_ready_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
-        let steps = sqlx::query_as::<_, JobStepRow>(
-            r#"
-            SELECT job_id, step_name, action_name, action_type, action_image, action_spec,
-                   input, output, status, worker_id, started_at, completed_at, error_message,
-                   required_tags, runner
-            FROM job_step
-            WHERE job_id = $1 AND status = 'ready'
-            ORDER BY step_name
-            "#,
-        )
+        let steps = sqlx::query_as::<_, JobStepRow>(&format!(
+            "SELECT {} FROM job_step WHERE job_id = $1 AND status = 'ready' ORDER BY step_name",
+            STEP_COLUMNS
+        ))
         .bind(job_id)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to get ready steps")?;
 
         Ok(steps)
     }
@@ -298,7 +296,8 @@ impl JobStepRepo {
         )
         .bind(job_id)
         .fetch_one(pool)
-        .await?;
+        .await
+        .context("Failed to check if all steps are terminal")?;
 
         Ok(row.0 == 0)
     }
@@ -310,7 +309,8 @@ impl JobStepRepo {
         )
         .bind(job_id)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to get failed step names")?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
@@ -324,7 +324,8 @@ impl JobStepRepo {
         )
         .bind(job_id)
         .fetch_one(pool)
-        .await?;
+        .await
+        .context("Failed to check if any step failed")?;
 
         Ok(row.0 > 0)
     }
@@ -347,7 +348,8 @@ impl JobStepRepo {
         .bind(job_id)
         .bind(step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to update step input")?;
 
         Ok(())
     }
@@ -400,7 +402,8 @@ impl JobStepRepo {
                     .bind(job_id)
                     .bind(&step.step_name)
                     .execute(pool)
-                    .await?;
+                    .await
+                    .context("Failed to promote step to ready")?;
 
                     promoted.push(step.step_name.clone());
                 }
@@ -422,7 +425,8 @@ impl JobStepRepo {
         .bind(job_id)
         .bind(step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark step as skipped")?;
 
         Ok(())
     }
@@ -482,7 +486,8 @@ impl JobStepRepo {
         )
         .bind(worker_ids)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to get running steps for workers")?;
         Ok(rows)
     }
 }

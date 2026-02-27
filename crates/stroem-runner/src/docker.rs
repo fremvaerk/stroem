@@ -11,6 +11,9 @@ use bollard::image::CreateImageOptions;
 use bollard::Docker;
 use futures_util::StreamExt;
 
+/// Default image used when no image is specified for shell-in-container execution.
+const DEFAULT_RUNNER_IMAGE: &str = "alpine:latest";
+
 /// Docker runner that executes commands inside Docker containers
 pub struct DockerRunner {
     docker: Docker,
@@ -41,7 +44,7 @@ impl DockerRunner {
                 let image = config
                     .image
                     .as_deref()
-                    .unwrap_or("alpine:latest")
+                    .unwrap_or(DEFAULT_RUNNER_IMAGE)
                     .to_string();
 
                 let cmd = if let Some(ref command) = config.cmd {
@@ -78,7 +81,7 @@ impl DockerRunner {
                 let image = config
                     .image
                     .as_deref()
-                    .unwrap_or("alpine:latest")
+                    .unwrap_or(DEFAULT_RUNNER_IMAGE)
                     .to_string();
 
                 // Use entrypoint if set, otherwise let Docker image defaults apply
@@ -119,7 +122,7 @@ impl Runner for DockerRunner {
         let image = config
             .image
             .as_deref()
-            .unwrap_or("alpine:latest")
+            .unwrap_or(DEFAULT_RUNNER_IMAGE)
             .to_string();
 
         // Pull image

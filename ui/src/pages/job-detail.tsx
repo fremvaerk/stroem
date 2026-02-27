@@ -4,6 +4,7 @@ import { ArrowLeft, LayoutList, Network, TriangleAlert } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { InfoGrid } from "@/components/info-grid";
 import { StepTimeline } from "@/components/step-timeline";
 import { StepDetail } from "@/components/step-detail";
 import { WorkflowDag } from "@/components/workflow-dag";
@@ -105,30 +106,34 @@ export function JobDetailPage() {
           </div>
         )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
-        {[
+      <InfoGrid
+        columns={6}
+        items={[
           { label: "Workspace", value: job.workspace },
-          { label: "Worker", value: job.worker_id ? (workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)) : "-", linkTo: job.worker_id ? `/workers/${job.worker_id}` : undefined },
-          { label: "Source", value: job.source_id ? `${job.source_type} (${job.source_id})` : job.source_type },
+          {
+            label: "Worker",
+            value: job.worker_id ? (
+              <Link to={`/workers/${job.worker_id}`} className="hover:underline">
+                {workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)}
+              </Link>
+            ) : (
+              "-"
+            ),
+          },
+          {
+            label: "Source",
+            value: job.source_id
+              ? `${job.source_type} (${job.source_id})`
+              : job.source_type,
+          },
           { label: "Created", value: formatTime(job.created_at) },
           { label: "Started", value: formatTime(job.started_at) },
           {
             label: "Duration",
             value: formatDuration(job.started_at, job.completed_at),
           },
-        ].map((item) => (
-          <div key={item.label} className="rounded-lg border px-4 py-3">
-            <p className="text-xs text-muted-foreground">{item.label}</p>
-            {"linkTo" in item && item.linkTo ? (
-              <Link to={item.linkTo} className="mt-0.5 block text-sm font-medium hover:underline">
-                {item.value}
-              </Link>
-            ) : (
-              <p className="mt-0.5 text-sm font-medium">{item.value}</p>
-            )}
-          </div>
-        ))}
-      </div>
+        ]}
+      />
 
       <ServerEvents jobId={job.job_id} jobStatus={job.status} />
 

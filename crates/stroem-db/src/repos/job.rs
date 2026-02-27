@@ -1,8 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name";
 
 /// Job row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -85,25 +87,22 @@ impl JobRepo {
         .bind(parent_job_id)
         .bind(parent_step_name)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to create job")?;
 
         Ok(job_id)
     }
 
     /// Get job by ID
     pub async fn get(pool: &PgPool, job_id: Uuid) -> Result<Option<JobRow>> {
-        let job = sqlx::query_as::<_, JobRow>(
-            r#"
-            SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                   source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
-                   parent_job_id, parent_step_name
-            FROM job
-            WHERE job_id = $1
-            "#,
-        )
+        let job = sqlx::query_as::<_, JobRow>(&format!(
+            "SELECT {} FROM job WHERE job_id = $1",
+            JOB_COLUMNS
+        ))
         .bind(job_id)
         .fetch_optional(pool)
-        .await?;
+        .await
+        .context("Failed to get job by ID")?;
 
         Ok(job)
     }
@@ -116,37 +115,26 @@ impl JobRepo {
         offset: i64,
     ) -> Result<Vec<JobRow>> {
         let jobs = if let Some(ws) = workspace {
-            sqlx::query_as::<_, JobRow>(
-                r#"
-                SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                       source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
-                       parent_job_id, parent_step_name
-                FROM job
-                WHERE workspace = $1
-                ORDER BY created_at DESC
-                LIMIT $2 OFFSET $3
-                "#,
-            )
+            sqlx::query_as::<_, JobRow>(&format!(
+                "SELECT {} FROM job WHERE workspace = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+                JOB_COLUMNS
+            ))
             .bind(ws)
             .bind(limit)
             .bind(offset)
             .fetch_all(pool)
-            .await?
+            .await
+            .context("Failed to list jobs by workspace")?
         } else {
-            sqlx::query_as::<_, JobRow>(
-                r#"
-                SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                       source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
-                       parent_job_id, parent_step_name
-                FROM job
-                ORDER BY created_at DESC
-                LIMIT $1 OFFSET $2
-                "#,
-            )
+            sqlx::query_as::<_, JobRow>(&format!(
+                "SELECT {} FROM job ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                JOB_COLUMNS
+            ))
             .bind(limit)
             .bind(offset)
             .fetch_all(pool)
-            .await?
+            .await
+            .context("Failed to list jobs")?
         };
 
         Ok(jobs)
@@ -164,7 +152,8 @@ impl JobRepo {
         .bind(status)
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to update job status")?;
 
         Ok(())
     }
@@ -181,7 +170,8 @@ impl JobRepo {
         .bind(worker_id)
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark job as running")?;
 
         Ok(())
     }
@@ -202,7 +192,8 @@ impl JobRepo {
         .bind(worker_id)
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark job as running (if pending)")?;
 
         Ok(())
     }
@@ -218,7 +209,8 @@ impl JobRepo {
         )
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark job as running (server-side)")?;
 
         Ok(())
     }
@@ -239,7 +231,8 @@ impl JobRepo {
         .bind(output)
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark job as completed")?;
 
         Ok(())
     }
@@ -255,7 +248,8 @@ impl JobRepo {
         )
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to mark job as failed")?;
 
         Ok(())
     }
@@ -268,23 +262,17 @@ impl JobRepo {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<JobRow>> {
-        let jobs = sqlx::query_as::<_, JobRow>(
-            r#"
-            SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                   source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
-                   parent_job_id, parent_step_name
-            FROM job
-            WHERE workspace = $1 AND task_name = $2
-            ORDER BY created_at DESC
-            LIMIT $3 OFFSET $4
-            "#,
-        )
+        let jobs = sqlx::query_as::<_, JobRow>(&format!(
+            "SELECT {} FROM job WHERE workspace = $1 AND task_name = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+            JOB_COLUMNS
+        ))
         .bind(workspace)
         .bind(task_name)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to list jobs by task")?;
 
         Ok(jobs)
     }
@@ -296,22 +284,16 @@ impl JobRepo {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<JobRow>> {
-        let jobs = sqlx::query_as::<_, JobRow>(
-            r#"
-            SELECT job_id, workspace, task_name, mode, input, output, status, source_type,
-                   source_id, worker_id, revision, created_at, started_at, completed_at, log_path,
-                   parent_job_id, parent_step_name
-            FROM job
-            WHERE worker_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
+        let jobs = sqlx::query_as::<_, JobRow>(&format!(
+            "SELECT {} FROM job WHERE worker_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            JOB_COLUMNS
+        ))
         .bind(worker_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to list jobs by worker")?;
 
         Ok(jobs)
     }
@@ -328,7 +310,8 @@ impl JobRepo {
         .bind(log_path)
         .bind(job_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to set job log path")?;
 
         Ok(())
     }

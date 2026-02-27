@@ -9,7 +9,7 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 
     // Validate each action
     for (action_name, action) in &config.actions {
-        validate_action(action_name, action)?;
+        warnings.extend(validate_action(action_name, action)?);
 
         // For type: task, verify the referenced task exists
         if action.action_type == "task" {
@@ -28,50 +28,25 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
     // pointing back to T
     for (task_name, task) in &config.tasks {
         for (step_name, step) in &task.flow {
-            if let Some(action) = config.actions.get(&step.action) {
-                if action.action_type == "task" {
-                    if let Some(ref task_ref) = action.task {
-                        if task_ref == task_name {
-                            bail!(
-                                "Task '{}' step '{}' uses action '{}' which references back to the same task (self-reference)",
-                                task_name,
-                                step_name,
-                                step.action
-                            );
-                        }
-                    }
-                }
-            }
+            check_task_self_reference(
+                config,
+                task_name,
+                &step.action,
+                &format!("step '{step_name}'"),
+            )?;
         }
 
         // Check hooks for self-references too
         for (i, hook) in task.on_success.iter().enumerate() {
-            if let Some(action) = config.actions.get(&hook.action) {
-                if action.action_type == "task" {
-                    if let Some(ref task_ref) = action.task {
-                        if task_ref == task_name {
-                            bail!(
-                                "Task '{}' on_success[{}] uses action '{}' which references back to the same task (self-reference)",
-                                task_name, i, hook.action
-                            );
-                        }
-                    }
-                }
-            }
+            check_task_self_reference(
+                config,
+                task_name,
+                &hook.action,
+                &format!("on_success[{i}]"),
+            )?;
         }
         for (i, hook) in task.on_error.iter().enumerate() {
-            if let Some(action) = config.actions.get(&hook.action) {
-                if action.action_type == "task" {
-                    if let Some(ref task_ref) = action.task {
-                        if task_ref == task_name {
-                            bail!(
-                                "Task '{}' on_error[{}] uses action '{}' which references back to the same task (self-reference)",
-                                task_name, i, hook.action
-                            );
-                        }
-                    }
-                }
-            }
+            check_task_self_reference(config, task_name, &hook.action, &format!("on_error[{i}]"))?;
         }
     }
 
@@ -305,191 +280,228 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> bool {
     }
 }
 
-/// Validates a single action definition
-fn validate_action(action_name: &str, action: &ActionDef) -> Result<()> {
+/// Checks whether `action_name` is a task action that references back to `task_name` (self-reference).
+/// `context` describes the location being checked, e.g. "step 'build'" or "on_success[0]".
+fn check_task_self_reference(
+    config: &WorkflowConfig,
+    task_name: &str,
+    action_name: &str,
+    context: &str,
+) -> Result<()> {
+    if let Some(action) = config.actions.get(action_name) {
+        if action.action_type == "task" {
+            if let Some(ref task_ref) = action.task {
+                if task_ref == task_name {
+                    bail!(
+                        "Task '{}' {} uses action '{}' which references back to the same task (self-reference)",
+                        task_name,
+                        context,
+                        action_name
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validates a single action definition. Dispatches to a per-type helper.
+fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>> {
     match action.action_type.as_str() {
-        "shell" => {
-            // Shell actions must have either cmd or script
-            if action.cmd.is_none() && action.script.is_none() {
-                bail!(
-                    "Action '{}' is type 'shell' but has neither 'cmd' nor 'script'",
-                    action_name
-                );
-            }
+        "shell" => validate_shell_action(action, action_name),
+        "docker" => validate_docker_action(action, action_name),
+        "pod" => validate_pod_action(action, action_name),
+        "task" => validate_task_action(action, action_name),
+        other => bail!(
+            "Action '{}' has invalid type '{}' (expected: shell, docker, pod, task)",
+            action_name,
+            other
+        ),
+    }
+}
 
-            // Shell actions should not have both cmd and script
-            if action.cmd.is_some() && action.script.is_some() {
-                bail!(
-                    "Action '{}' is type 'shell' but has both 'cmd' and 'script' - use only one",
-                    action_name
-                );
-            }
+fn validate_shell_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    // Shell actions must have either cmd or script
+    if action.cmd.is_none() && action.script.is_none() {
+        bail!(
+            "Action '{}' is type 'shell' but has neither 'cmd' nor 'script'",
+            action_name
+        );
+    }
 
-            // Shell actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
-            if action.image.is_some() {
-                bail!(
-                    "Action '{}' is type 'shell' but has 'image' field. Use type: docker for container images, or runner: docker for shell-in-container",
-                    action_name
-                );
-            }
+    // Shell actions should not have both cmd and script
+    if action.cmd.is_some() && action.script.is_some() {
+        bail!(
+            "Action '{}' is type 'shell' but has both 'cmd' and 'script' - use only one",
+            action_name
+        );
+    }
 
-            // Validate runner if present
-            if let Some(ref runner) = action.runner {
-                match runner.as_str() {
-                    "local" | "docker" | "pod" => {}
-                    other => bail!(
-                        "Action '{}' has invalid runner '{}' (expected: local, docker, pod)",
-                        action_name,
-                        other
-                    ),
-                }
-            }
+    // Shell actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
+    if action.image.is_some() {
+        bail!(
+            "Action '{}' is type 'shell' but has 'image' field. Use type: docker for container images, or runner: docker for shell-in-container",
+            action_name
+        );
+    }
 
-            // Shell actions must not have entrypoint
-            if action.entrypoint.is_some() {
-                bail!(
-                    "Action '{}' is type 'shell' but has 'entrypoint' field (only valid for docker/pod)",
-                    action_name
-                );
-            }
-
-            // Manifest is only valid on shell + runner: pod
-            if let Some(ref manifest) = action.manifest {
-                let runner = action.runner.as_deref().unwrap_or("local");
-                if runner != "pod" {
-                    bail!(
-                        "Action '{}' has 'manifest' field but runner is '{}' (manifest is only valid on pod actions)",
-                        action_name,
-                        runner
-                    );
-                }
-                if !manifest.is_object() {
-                    bail!(
-                        "Action '{}' has 'manifest' field but it is not an object",
-                        action_name
-                    );
-                }
-            }
-        }
-        "docker" => {
-            // Docker actions must have image
-            if action.image.is_none() {
-                bail!(
-                    "Action '{}' is type 'docker' but missing 'image' field",
-                    action_name
-                );
-            }
-
-            // Docker actions must not have runner
-            if action.runner.is_some() {
-                bail!(
-                    "Action '{}' is type 'docker' but has 'runner' field (runner is only for shell actions)",
-                    action_name
-                );
-            }
-
-            // Docker actions must not have script
-            if action.script.is_some() {
-                bail!(
-                    "Action '{}' is type 'docker' but has 'script' field (use cmd or entrypoint instead)",
-                    action_name
-                );
-            }
-
-            // Docker actions must not have manifest (use type: pod for Kubernetes manifest overrides)
-            if action.manifest.is_some() {
-                bail!(
-                    "Action '{}' is type 'docker' but has 'manifest' field (manifest is only valid on pod actions)",
-                    action_name
-                );
-            }
-        }
-        "pod" => {
-            // Pod actions must have image
-            if action.image.is_none() {
-                bail!(
-                    "Action '{}' is type 'pod' but missing 'image' field",
-                    action_name
-                );
-            }
-
-            // Pod actions must not have runner
-            if action.runner.is_some() {
-                bail!(
-                    "Action '{}' is type 'pod' but has 'runner' field (runner is only for shell actions)",
-                    action_name
-                );
-            }
-
-            // Pod actions must not have script
-            if action.script.is_some() {
-                bail!(
-                    "Action '{}' is type 'pod' but has 'script' field (use cmd or entrypoint instead)",
-                    action_name
-                );
-            }
-
-            // Validate manifest if present — must be a JSON object
-            if let Some(ref manifest) = action.manifest {
-                if !manifest.is_object() {
-                    bail!(
-                        "Action '{}' has 'manifest' field but it is not an object",
-                        action_name
-                    );
-                }
-            }
-        }
-        "task" => {
-            // Task actions must have task field
-            if action.task.is_none() {
-                bail!(
-                    "Action '{}' is type 'task' but missing 'task' field",
-                    action_name
-                );
-            }
-
-            // Task actions must not have cmd, script, or image
-            if action.cmd.is_some() {
-                bail!(
-                    "Action '{}' is type 'task' but has 'cmd' field (task actions only reference another task)",
-                    action_name
-                );
-            }
-            if action.script.is_some() {
-                bail!(
-                    "Action '{}' is type 'task' but has 'script' field (task actions only reference another task)",
-                    action_name
-                );
-            }
-            if action.image.is_some() {
-                bail!(
-                    "Action '{}' is type 'task' but has 'image' field (task actions only reference another task)",
-                    action_name
-                );
-            }
-            if action.runner.is_some() {
-                bail!(
-                    "Action '{}' is type 'task' but has 'runner' field (task actions only reference another task)",
-                    action_name
-                );
-            }
-            if action.manifest.is_some() {
-                bail!(
-                    "Action '{}' is type 'task' but has 'manifest' field (task actions only reference another task)",
-                    action_name
-                );
-            }
-        }
-        other => {
-            bail!(
-                "Action '{}' has invalid type '{}' (expected: shell, docker, pod, task)",
+    // Validate runner if present
+    if let Some(ref runner) = action.runner {
+        match runner.as_str() {
+            "local" | "docker" | "pod" => {}
+            other => bail!(
+                "Action '{}' has invalid runner '{}' (expected: local, docker, pod)",
                 action_name,
                 other
+            ),
+        }
+    }
+
+    // Shell actions must not have entrypoint
+    if action.entrypoint.is_some() {
+        bail!(
+            "Action '{}' is type 'shell' but has 'entrypoint' field (only valid for docker/pod)",
+            action_name
+        );
+    }
+
+    // Manifest is only valid on shell + runner: pod
+    if let Some(ref manifest) = action.manifest {
+        let runner = action.runner.as_deref().unwrap_or("local");
+        if runner != "pod" {
+            bail!(
+                "Action '{}' has 'manifest' field but runner is '{}' (manifest is only valid on pod actions)",
+                action_name,
+                runner
+            );
+        }
+        if !manifest.is_object() {
+            bail!(
+                "Action '{}' has 'manifest' field but it is not an object",
+                action_name
             );
         }
     }
 
-    Ok(())
+    Ok(vec![])
+}
+
+fn validate_docker_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    // Docker actions must have image
+    if action.image.is_none() {
+        bail!(
+            "Action '{}' is type 'docker' but missing 'image' field",
+            action_name
+        );
+    }
+
+    // Docker actions must not have runner
+    if action.runner.is_some() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'runner' field (runner is only for shell actions)",
+            action_name
+        );
+    }
+
+    // Docker actions must not have script
+    if action.script.is_some() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'script' field (use cmd or entrypoint instead)",
+            action_name
+        );
+    }
+
+    // Docker actions must not have manifest (use type: pod for Kubernetes manifest overrides)
+    if action.manifest.is_some() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'manifest' field (manifest is only valid on pod actions)",
+            action_name
+        );
+    }
+
+    Ok(vec![])
+}
+
+fn validate_pod_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    // Pod actions must have image
+    if action.image.is_none() {
+        bail!(
+            "Action '{}' is type 'pod' but missing 'image' field",
+            action_name
+        );
+    }
+
+    // Pod actions must not have runner
+    if action.runner.is_some() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'runner' field (runner is only for shell actions)",
+            action_name
+        );
+    }
+
+    // Pod actions must not have script
+    if action.script.is_some() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'script' field (use cmd or entrypoint instead)",
+            action_name
+        );
+    }
+
+    // Validate manifest if present — must be a JSON object
+    if let Some(ref manifest) = action.manifest {
+        if !manifest.is_object() {
+            bail!(
+                "Action '{}' has 'manifest' field but it is not an object",
+                action_name
+            );
+        }
+    }
+
+    Ok(vec![])
+}
+
+fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    // Task actions must have task field
+    if action.task.is_none() {
+        bail!(
+            "Action '{}' is type 'task' but missing 'task' field",
+            action_name
+        );
+    }
+
+    // Task actions must not have cmd, script, image, runner, or manifest
+    if action.cmd.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'cmd' field (task actions only reference another task)",
+            action_name
+        );
+    }
+    if action.script.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'script' field (task actions only reference another task)",
+            action_name
+        );
+    }
+    if action.image.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'image' field (task actions only reference another task)",
+            action_name
+        );
+    }
+    if action.runner.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'runner' field (task actions only reference another task)",
+            action_name
+        );
+    }
+    if action.manifest.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'manifest' field (task actions only reference another task)",
+            action_name
+        );
+    }
+
+    Ok(vec![])
 }
 
 /// Validates that a hook references an existing action (or a library action).

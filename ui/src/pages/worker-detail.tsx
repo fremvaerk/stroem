@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { InfoGrid } from "@/components/info-grid";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
 import { getWorker } from "@/lib/api";
@@ -100,44 +101,40 @@ export function WorkerDetailPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Worker ID</p>
-          <p className="mt-0.5 truncate font-mono text-sm font-medium">
-            {worker.worker_id.substring(0, 8)}...
-          </p>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Status</p>
-          <p className="mt-0.5 text-sm font-medium">{worker.status}</p>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Tags</p>
-          <div className="mt-0.5 flex flex-wrap gap-1">
-            {worker.tags.length > 0 ? (
-              worker.tags.map((tag) => (
-                <Badge key={tag} variant="outline" className="text-xs">
-                  {tag}
-                </Badge>
-              ))
-            ) : (
-              <span className="text-sm text-muted-foreground">-</span>
-            )}
-          </div>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Last Heartbeat</p>
-          <p className="mt-0.5 text-sm font-medium">
-            {formatRelativeTime(worker.last_heartbeat)}
-          </p>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Registered</p>
-          <p className="mt-0.5 text-sm font-medium">
-            {formatTime(worker.registered_at)}
-          </p>
-        </div>
-      </div>
+      <InfoGrid
+        columns={5}
+        items={[
+          {
+            label: "Worker ID",
+            value: (
+              <span className="truncate font-mono">
+                {worker.worker_id.substring(0, 8)}...
+              </span>
+            ),
+          },
+          { label: "Status", value: worker.status },
+          {
+            label: "Tags",
+            value:
+              worker.tags.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {worker.tags.map((tag) => (
+                    <Badge key={tag} variant="outline" className="text-xs">
+                      {tag}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">-</span>
+              ),
+          },
+          {
+            label: "Last Heartbeat",
+            value: formatRelativeTime(worker.last_heartbeat),
+          },
+          { label: "Registered", value: formatTime(worker.registered_at) },
+        ]}
+      />
 
       <Card>
         <CardHeader>

@@ -10,6 +10,12 @@ use kube::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Default image used for shell-in-pod execution when no image is specified.
+const DEFAULT_RUNNER_IMAGE: &str = "alpine:latest";
+
+/// Default init container image used to download workspace tarballs.
+const DEFAULT_INIT_IMAGE: &str = "curlimages/curl:latest";
+
 /// Kubernetes runner that executes commands inside Kubernetes pods
 pub struct KubeRunner {
     namespace: String,
@@ -30,7 +36,7 @@ impl KubeRunner {
             namespace,
             server_url,
             worker_token,
-            init_image: "curlimages/curl:latest".to_string(),
+            init_image: DEFAULT_INIT_IMAGE.to_string(),
             startup_configmap: None,
         }
     }
@@ -47,7 +53,127 @@ impl KubeRunner {
         self
     }
 
-    /// Build a pod spec for executing a step
+    /// Build the pod JSON for `RunnerMode::WithWorkspace` (Type 2: shell in pod with workspace).
+    ///
+    /// Returns raw `serde_json::Value` so the caller can apply the common tail logic
+    /// (startup configmap injection, manifest overrides) before deserialising.
+    fn build_pod_json_with_workspace(
+        &self,
+        pod_name: &str,
+        config: &RunConfig,
+        workspace_name: &str,
+        labels: &HashMap<String, String>,
+        image: &str,
+        env: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let cmd = if let Some(ref command) = config.cmd {
+            vec!["sh".to_string(), "-c".to_string(), command.clone()]
+        } else if let Some(ref script) = config.script {
+            vec!["sh".to_string(), "-c".to_string(), script.clone()]
+        } else {
+            vec!["echo".to_string(), "No command specified".to_string()]
+        };
+
+        let tarball_url = format!(
+            "{}/worker/workspace/{}.tar.gz",
+            self.server_url, workspace_name
+        );
+
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                "labels": labels,
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "initContainers": [{
+                    "name": "workspace-init",
+                    "image": self.init_image,
+                    "command": ["sh", "-c", format!(
+                        "curl -sSf -H 'Authorization: Bearer {}' '{}' | tar xz -C /workspace",
+                        self.worker_token, tarball_url
+                    )],
+                    "volumeMounts": [{
+                        "name": "workspace",
+                        "mountPath": "/workspace",
+                    }],
+                }],
+                "containers": [{
+                    "name": "step",
+                    "image": image,
+                    "command": cmd,
+                    "env": env,
+                    "workingDir": "/workspace",
+                    "volumeMounts": [{
+                        "name": "workspace",
+                        "mountPath": "/workspace",
+                    }],
+                }],
+                "volumes": [{
+                    "name": "workspace",
+                    "emptyDir": {},
+                }],
+            },
+        })
+    }
+
+    /// Build the pod JSON for `RunnerMode::NoWorkspace` (Type 1: user's prepared image, no init
+    /// container, no workspace volume).
+    ///
+    /// Returns raw `serde_json::Value` so the caller can apply the common tail logic
+    /// (startup configmap injection, manifest overrides) before deserialising.
+    fn build_pod_json_no_workspace(
+        pod_name: &str,
+        config: &RunConfig,
+        labels: &HashMap<String, String>,
+        image: &str,
+        env: &[serde_json::Value],
+    ) -> serde_json::Value {
+        let mut container = serde_json::json!({
+            "name": "step",
+            "image": image,
+            "env": env,
+        });
+
+        // Set entrypoint if provided
+        if let Some(ref ep) = config.entrypoint {
+            container["command"] = serde_json::json!(ep);
+        }
+
+        // Set cmd/command args
+        if let Some(ref command) = config.command {
+            container["args"] = serde_json::json!(command);
+        } else if let Some(ref cmd) = config.cmd {
+            // If entrypoint is set, pass cmd as args
+            if config.entrypoint.is_some() {
+                container["args"] = serde_json::json!([cmd]);
+            } else {
+                container["command"] = serde_json::json!(["sh", "-c", cmd]);
+            }
+        }
+        // If nothing is set, image default entrypoint/cmd runs
+
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                "labels": labels,
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [container],
+            },
+        })
+    }
+
+    /// Build a pod spec for executing a step.
+    ///
+    /// Dispatches to [`build_pod_json_with_workspace`] or [`build_pod_json_no_workspace`]
+    /// depending on `config.runner_mode`, then applies startup-script injection and
+    /// pod manifest overrides as shared tail logic.
     fn build_pod_spec(
         &self,
         pod_name: &str,
@@ -58,7 +184,7 @@ impl KubeRunner {
         let image = config
             .image
             .as_deref()
-            .unwrap_or("alpine:latest")
+            .unwrap_or(DEFAULT_RUNNER_IMAGE)
             .to_string();
 
         let env: Vec<serde_json::Value> = config
@@ -73,98 +199,16 @@ impl KubeRunner {
             .collect();
 
         let mut pod_json = match config.runner_mode {
-            RunnerMode::WithWorkspace => {
-                // Type 2: Shell in container with workspace via init container
-                let cmd = if let Some(ref command) = config.cmd {
-                    vec!["sh".to_string(), "-c".to_string(), command.clone()]
-                } else if let Some(ref script) = config.script {
-                    vec!["sh".to_string(), "-c".to_string(), script.clone()]
-                } else {
-                    vec!["echo".to_string(), "No command specified".to_string()]
-                };
-
-                let tarball_url = format!(
-                    "{}/worker/workspace/{}.tar.gz",
-                    self.server_url, workspace_name
-                );
-
-                serde_json::json!({
-                    "apiVersion": "v1",
-                    "kind": "Pod",
-                    "metadata": {
-                        "name": pod_name,
-                        "labels": labels,
-                    },
-                    "spec": {
-                        "restartPolicy": "Never",
-                        "initContainers": [{
-                            "name": "workspace-init",
-                            "image": self.init_image,
-                            "command": ["sh", "-c", format!(
-                                "curl -sSf -H 'Authorization: Bearer {}' '{}' | tar xz -C /workspace",
-                                self.worker_token, tarball_url
-                            )],
-                            "volumeMounts": [{
-                                "name": "workspace",
-                                "mountPath": "/workspace",
-                            }],
-                        }],
-                        "containers": [{
-                            "name": "step",
-                            "image": image,
-                            "command": cmd,
-                            "env": env,
-                            "workingDir": "/workspace",
-                            "volumeMounts": [{
-                                "name": "workspace",
-                                "mountPath": "/workspace",
-                            }],
-                        }],
-                        "volumes": [{
-                            "name": "workspace",
-                            "emptyDir": {},
-                        }],
-                    },
-                })
-            }
+            RunnerMode::WithWorkspace => self.build_pod_json_with_workspace(
+                pod_name,
+                config,
+                workspace_name,
+                &labels,
+                &image,
+                &env,
+            ),
             RunnerMode::NoWorkspace => {
-                // Type 1: Run user's prepared image, no init container, no workspace volume
-                let mut container = serde_json::json!({
-                    "name": "step",
-                    "image": image,
-                    "env": env,
-                });
-
-                // Set entrypoint if provided
-                if let Some(ref ep) = config.entrypoint {
-                    container["command"] = serde_json::json!(ep);
-                }
-
-                // Set cmd/command args
-                if let Some(ref command) = config.command {
-                    container["args"] = serde_json::json!(command);
-                } else if let Some(ref cmd) = config.cmd {
-                    // If entrypoint is set, pass cmd as args
-                    if config.entrypoint.is_some() {
-                        container["args"] = serde_json::json!([cmd]);
-                    } else {
-                        container["command"] = serde_json::json!(["sh", "-c", cmd]);
-                    }
-                }
-                // If nothing is set, image default entrypoint/cmd runs
-
-                serde_json::json!({
-                    "apiVersion": "v1",
-                    "kind": "Pod",
-                    "metadata": {
-                        "name": pod_name,
-                        "labels": labels,
-                    },
-                    "spec": {
-                        "restartPolicy": "Never",
-                        "containers": [container],
-                    },
-                })
+                Self::build_pod_json_no_workspace(pod_name, config, &labels, &image, &env)
             }
         };
 

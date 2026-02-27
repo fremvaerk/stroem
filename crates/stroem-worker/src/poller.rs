@@ -47,13 +47,152 @@ fn drain_log_buffer(buffer: &Mutex<Vec<serde_json::Value>>) -> Vec<serde_json::V
     buf.drain(..).collect()
 }
 
-/// Main worker loop: register, heartbeat, and poll for jobs
+/// Execute a claimed step: download workspace, report start, run with log buffering, report result.
+///
+/// This function owns the claimed step and drives the full execution lifecycle. It is spawned as
+/// a `tokio::spawn` task by [`run_worker`] so each step runs concurrently.
+async fn execute_claimed_step(
+    client: Arc<ServerClient>,
+    executor: Arc<StepExecutor>,
+    ws_cache: Arc<WorkspaceCache>,
+    step: crate::client::ClaimedStep,
+    worker_id: Uuid,
+) {
+    // Ensure workspace is downloaded and up-to-date
+    let ws_dir = match ws_cache.ensure_up_to_date(&client, &step.workspace).await {
+        Ok(dir) => dir,
+        Err(e) => {
+            let err_msg = format!("Failed to download workspace: {:#}", e);
+            tracing::error!("Failed to download workspace '{}': {:#}", step.workspace, e);
+            push_error_log(&client, step.job_id, &step.step_name, &err_msg).await;
+            let _ = client
+                .report_step_complete(step.job_id, &step.step_name, -1, None, Some(err_msg))
+                .await;
+            return;
+        }
+    };
+    let ws_dir_str = ws_dir.to_string_lossy().to_string();
+
+    // Report step start
+    if let Err(e) = client
+        .report_step_start(step.job_id, &step.step_name, worker_id)
+        .await
+    {
+        let err_msg = format!("Failed to report step start: {:#}", e);
+        tracing::error!("{}", err_msg);
+        push_error_log(&client, step.job_id, &step.step_name, &err_msg).await;
+        let _ = client
+            .report_step_complete(step.job_id, &step.step_name, -1, None, Some(err_msg))
+            .await;
+        return;
+    }
+
+    // Execute step with log buffering
+    let log_buffer = Arc::new(Mutex::new(Vec::new()));
+
+    // Spawn log pusher (flushes buffer every 1s)
+    let buffer_clone = log_buffer.clone();
+    let log_client = client.clone();
+    let log_job_id = step.job_id;
+    let log_step_name = step.step_name.clone();
+    let log_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let lines = drain_log_buffer(&buffer_clone);
+            if !lines.is_empty() {
+                if let Err(e) = log_client
+                    .push_logs(log_job_id, &log_step_name, lines)
+                    .await
+                {
+                    tracing::warn!("Failed to push logs: {:#}", e);
+                }
+            }
+        }
+    });
+
+    // Execute the step inside an inner spawn to catch panics
+    let inner_executor = executor.clone();
+    let inner_step = step.clone();
+    let inner_ws = ws_dir_str.clone();
+    let inner_buffer = log_buffer.clone();
+    let exec_handle = tokio::spawn(async move {
+        inner_executor
+            .execute_step(&inner_step, &inner_ws, inner_buffer)
+            .await
+    });
+
+    let result = match exec_handle.await {
+        Ok(inner_result) => inner_result,
+        Err(join_err) => {
+            let msg = extract_panic_message(join_err);
+            Err(anyhow::anyhow!(msg))
+        }
+    };
+
+    // Stop log pusher, flush remaining logs
+    log_handle.abort();
+    let remaining = drain_log_buffer(&log_buffer);
+    if !remaining.is_empty() {
+        if let Err(e) = client
+            .push_logs(step.job_id, &step.step_name, remaining)
+            .await
+        {
+            tracing::warn!("Failed to push final logs: {:#}", e);
+        }
+    }
+
+    // Report result
+    match result {
+        Ok(run_result) => {
+            let error = if run_result.exit_code != 0 {
+                Some(format!(
+                    "Exit code: {}\nStderr: {}",
+                    run_result.exit_code, run_result.stderr
+                ))
+            } else {
+                None
+            };
+            if let Err(e) = client
+                .report_step_complete(
+                    step.job_id,
+                    &step.step_name,
+                    run_result.exit_code,
+                    run_result.output,
+                    error,
+                )
+                .await
+            {
+                tracing::error!("Failed to report step complete: {:#}", e);
+            } else {
+                tracing::info!(
+                    "Successfully completed step '{}' for job {}",
+                    step.step_name,
+                    step.job_id
+                );
+            }
+        }
+        Err(e) => {
+            let err_msg = format!("{:#}", e);
+            tracing::error!("Step execution failed: {}", err_msg);
+            push_error_log(&client, step.job_id, &step.step_name, &err_msg).await;
+            if let Err(e) = client
+                .report_step_complete(step.job_id, &step.step_name, -1, None, Some(err_msg))
+                .await
+            {
+                tracing::error!("Failed to report step error: {:#}", e);
+            }
+        }
+    }
+}
+
+/// Main worker loop: register, heartbeat, and poll for jobs.
 #[tracing::instrument(skip(config, executor))]
 pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<()> {
     tracing::info!("Starting worker '{}'", config.worker_name);
 
     // Create shared clients, executor, and workspace cache
-    let client = ServerClient::new(&config.server_url, &config.worker_token);
+    let client = Arc::new(ServerClient::new(&config.server_url, &config.worker_token));
     let executor = Arc::new(executor);
     let workspace_cache = Arc::new(WorkspaceCache::new(&config.workspace_cache_dir));
 
@@ -136,165 +275,18 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                 let client_clone = client.clone();
                 let executor_clone = executor.clone();
                 let ws_cache_clone = workspace_cache.clone();
-                let step_worker_id = worker_id;
 
-                // Spawn a task to execute the step
+                // Spawn a task to execute the step, releasing the permit when done
                 tokio::spawn(async move {
                     let _permit = permit; // Hold permit until done
-
-                    // Ensure workspace is downloaded and up-to-date
-                    let ws_dir = match ws_cache_clone
-                        .ensure_up_to_date(&client_clone, &step.workspace)
-                        .await
-                    {
-                        Ok(dir) => dir,
-                        Err(e) => {
-                            let err_msg = format!("Failed to download workspace: {:#}", e);
-                            tracing::error!(
-                                "Failed to download workspace '{}': {:#}",
-                                step.workspace,
-                                e
-                            );
-                            push_error_log(&client_clone, step.job_id, &step.step_name, &err_msg)
-                                .await;
-                            let _ = client_clone
-                                .report_step_complete(
-                                    step.job_id,
-                                    &step.step_name,
-                                    -1,
-                                    None,
-                                    Some(err_msg),
-                                )
-                                .await;
-                            return;
-                        }
-                    };
-                    let ws_dir_str = ws_dir.to_string_lossy().to_string();
-
-                    // Report step start
-                    if let Err(e) = client_clone
-                        .report_step_start(step.job_id, &step.step_name, step_worker_id)
-                        .await
-                    {
-                        let err_msg = format!("Failed to report step start: {:#}", e);
-                        tracing::error!("{}", err_msg);
-                        push_error_log(&client_clone, step.job_id, &step.step_name, &err_msg).await;
-                        let _ = client_clone
-                            .report_step_complete(
-                                step.job_id,
-                                &step.step_name,
-                                -1,
-                                None,
-                                Some(err_msg),
-                            )
-                            .await;
-                        return;
-                    }
-
-                    // Execute step with log buffering
-                    let log_buffer = Arc::new(Mutex::new(Vec::new()));
-
-                    // Spawn log pusher (flushes buffer every 1s)
-                    let buffer_clone = log_buffer.clone();
-                    let log_client = client_clone.clone();
-                    let log_job_id = step.job_id;
-                    let log_step_name = step.step_name.clone();
-                    let log_handle = tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(Duration::from_secs(1));
-                        loop {
-                            interval.tick().await;
-                            let lines = drain_log_buffer(&buffer_clone);
-                            if !lines.is_empty() {
-                                if let Err(e) = log_client
-                                    .push_logs(log_job_id, &log_step_name, lines)
-                                    .await
-                                {
-                                    tracing::warn!("Failed to push logs: {:#}", e);
-                                }
-                            }
-                        }
-                    });
-
-                    // Execute the step inside an inner spawn to catch panics
-                    let inner_executor = executor_clone.clone();
-                    let inner_step = step.clone();
-                    let inner_ws = ws_dir_str.clone();
-                    let inner_buffer = log_buffer.clone();
-                    let exec_handle = tokio::spawn(async move {
-                        inner_executor
-                            .execute_step(&inner_step, &inner_ws, inner_buffer)
-                            .await
-                    });
-
-                    let result = match exec_handle.await {
-                        Ok(inner_result) => inner_result,
-                        Err(join_err) => {
-                            let msg = extract_panic_message(join_err);
-                            Err(anyhow::anyhow!(msg))
-                        }
-                    };
-
-                    // Stop log pusher, flush remaining logs
-                    log_handle.abort();
-                    let remaining = drain_log_buffer(&log_buffer);
-                    if !remaining.is_empty() {
-                        if let Err(e) = client_clone
-                            .push_logs(step.job_id, &step.step_name, remaining)
-                            .await
-                        {
-                            tracing::warn!("Failed to push final logs: {:#}", e);
-                        }
-                    }
-
-                    // Report result
-                    match result {
-                        Ok(run_result) => {
-                            let error = if run_result.exit_code != 0 {
-                                Some(format!(
-                                    "Exit code: {}\nStderr: {}",
-                                    run_result.exit_code, run_result.stderr
-                                ))
-                            } else {
-                                None
-                            };
-                            if let Err(e) = client_clone
-                                .report_step_complete(
-                                    step.job_id,
-                                    &step.step_name,
-                                    run_result.exit_code,
-                                    run_result.output,
-                                    error,
-                                )
-                                .await
-                            {
-                                tracing::error!("Failed to report step complete: {:#}", e);
-                            } else {
-                                tracing::info!(
-                                    "Successfully completed step '{}' for job {}",
-                                    step.step_name,
-                                    step.job_id
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let err_msg = format!("{:#}", e);
-                            tracing::error!("Step execution failed: {}", err_msg);
-                            push_error_log(&client_clone, step.job_id, &step.step_name, &err_msg)
-                                .await;
-                            if let Err(e) = client_clone
-                                .report_step_complete(
-                                    step.job_id,
-                                    &step.step_name,
-                                    -1,
-                                    None,
-                                    Some(err_msg),
-                                )
-                                .await
-                            {
-                                tracing::error!("Failed to report step error: {:#}", e);
-                            }
-                        }
-                    }
+                    execute_claimed_step(
+                        client_clone,
+                        executor_clone,
+                        ws_cache_clone,
+                        step,
+                        worker_id,
+                    )
+                    .await;
                 });
             }
             Ok(None) => {

@@ -10,7 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { PaginationControls } from "@/components/pagination-controls";
 import { useTitle } from "@/hooks/use-title";
 import { useAsyncData } from "@/hooks/use-async-data";
 import { listWorkers } from "@/lib/api";
@@ -113,27 +113,13 @@ export function WorkersPage() {
             </Table>
           )}
 
-          <div className="mt-4 flex items-center justify-between">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={offset === 0}
-              onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-            >
-              Previous
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Page {Math.floor(offset / PAGE_SIZE) + 1}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={workerList.length < PAGE_SIZE}
-              onClick={() => setOffset((o) => o + PAGE_SIZE)}
-            >
-              Next
-            </Button>
-          </div>
+          <PaginationControls
+            offset={offset}
+            pageSize={PAGE_SIZE}
+            hasMore={workerList.length >= PAGE_SIZE}
+            onPrevious={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+            onNext={() => setOffset((o) => o + PAGE_SIZE)}
+          />
         </CardContent>
       </Card>
     </div>

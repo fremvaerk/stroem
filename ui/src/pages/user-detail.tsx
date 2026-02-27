@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router";
 import { ArrowLeft } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { InfoGrid } from "@/components/info-grid";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
 import { getUser } from "@/lib/api";
@@ -68,44 +69,43 @@ export function UserDetailPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">User ID</p>
-          <p className="mt-0.5 truncate font-mono text-sm font-medium">
-            {user.user_id.substring(0, 8)}...
-          </p>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Email</p>
-          <p className="mt-0.5 truncate text-sm font-medium">{user.email}</p>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Auth Methods</p>
-          <div className="mt-0.5 flex flex-wrap gap-1">
-            {user.auth_methods.length > 0 ? (
-              user.auth_methods.map((method) => (
-                <Badge key={method} variant="outline" className="text-xs">
-                  {method}
-                </Badge>
-              ))
-            ) : (
-              <span className="text-sm text-muted-foreground">-</span>
-            )}
-          </div>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Last Login</p>
-          <p className="mt-0.5 text-sm font-medium">
-            {user.last_login_at ? formatTime(user.last_login_at) : "-"}
-          </p>
-        </div>
-        <div className="rounded-lg border px-4 py-3">
-          <p className="text-xs text-muted-foreground">Created</p>
-          <p className="mt-0.5 text-sm font-medium">
-            {formatTime(user.created_at)}
-          </p>
-        </div>
-      </div>
+      <InfoGrid
+        columns={4}
+        items={[
+          {
+            label: "User ID",
+            value: (
+              <span className="truncate font-mono">
+                {user.user_id.substring(0, 8)}...
+              </span>
+            ),
+          },
+          {
+            label: "Email",
+            value: <span className="truncate">{user.email}</span>,
+          },
+          {
+            label: "Auth Methods",
+            value:
+              user.auth_methods.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {user.auth_methods.map((method) => (
+                    <Badge key={method} variant="outline" className="text-xs">
+                      {method}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">-</span>
+              ),
+          },
+          {
+            label: "Last Login",
+            value: user.last_login_at ? formatTime(user.last_login_at) : "-",
+          },
+          { label: "Created", value: formatTime(user.created_at) },
+        ]}
+      />
     </div>
   );
 }

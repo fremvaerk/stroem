@@ -1,8 +1,11 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+const WORKER_COLUMNS: &str =
+    "worker_id, name, capabilities, tags, last_heartbeat, registered_at, status";
 
 /// Worker row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -42,7 +45,8 @@ impl WorkerRepo {
         .bind(capabilities_json)
         .bind(tags_json)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to register worker")?;
 
         Ok(())
     }
@@ -58,7 +62,8 @@ impl WorkerRepo {
         )
         .bind(worker_id)
         .execute(pool)
-        .await?;
+        .await
+        .context("Failed to update worker heartbeat")?;
 
         Ok(())
     }
@@ -80,40 +85,36 @@ impl WorkerRepo {
         )
         .bind(heartbeat_timeout_secs as f64)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to mark stale workers inactive")?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
     /// Get worker by ID
     pub async fn get(pool: &PgPool, worker_id: Uuid) -> Result<Option<WorkerRow>> {
-        let worker = sqlx::query_as::<_, WorkerRow>(
-            r#"
-            SELECT worker_id, name, capabilities, tags, last_heartbeat, registered_at, status
-            FROM worker
-            WHERE worker_id = $1
-            "#,
-        )
+        let worker = sqlx::query_as::<_, WorkerRow>(&format!(
+            "SELECT {} FROM worker WHERE worker_id = $1",
+            WORKER_COLUMNS
+        ))
         .bind(worker_id)
         .fetch_optional(pool)
-        .await?;
+        .await
+        .context("Failed to get worker by ID")?;
 
         Ok(worker)
     }
 
     /// List workers ordered by status (active first), then by registered_at descending
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<WorkerRow>> {
-        let workers = sqlx::query_as::<_, WorkerRow>(
-            r#"
-            SELECT worker_id, name, capabilities, tags, last_heartbeat, registered_at, status
-            FROM worker
-            ORDER BY status ASC, registered_at DESC
-            LIMIT $1 OFFSET $2
-            "#,
-        )
+        let workers = sqlx::query_as::<_, WorkerRow>(&format!(
+            "SELECT {} FROM worker ORDER BY status ASC, registered_at DESC LIMIT $1 OFFSET $2",
+            WORKER_COLUMNS
+        ))
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
-        .await?;
+        .await
+        .context("Failed to list workers")?;
 
         Ok(workers)
     }
