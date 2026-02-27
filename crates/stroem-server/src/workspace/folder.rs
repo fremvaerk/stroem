@@ -21,39 +21,39 @@ impl FolderSource {
         }
     }
 
+    /// Compute a content hash over all files in the workspace directory.
+    ///
+    /// Walks the entire workspace tree (up to 10 levels deep, following symlinks)
+    /// and hashes every file's relative path + content. This detects changes to
+    /// scripts, configs, and any other files — not just YAML workflow definitions.
     fn compute_revision(path: &Path) -> Option<String> {
+        if !path.exists() {
+            return None;
+        }
+
         let mut hasher = Blake2s256::new();
-        let scan_dir = {
-            let workflows_dir = path.join(".workflows");
-            if workflows_dir.exists() && workflows_dir.is_dir() {
-                workflows_dir
-            } else {
-                path.to_path_buf()
-            }
-        };
 
-        let entries = match std::fs::read_dir(&scan_dir) {
-            Ok(e) => e,
-            Err(_) => return None,
-        };
-
-        let mut paths: Vec<PathBuf> = entries
+        for entry in walkdir::WalkDir::new(path)
+            .max_depth(10)
+            .follow_links(true)
+            .sort_by_file_name()
+            .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "yaml" || ext == "yml")
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path())
-            .collect();
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
 
-        paths.sort();
+            let relative = entry
+                .path()
+                .strip_prefix(path)
+                .unwrap_or(entry.path())
+                .to_string_lossy();
+            hasher.update(relative.as_bytes());
 
-        for p in &paths {
-            hasher.update(p.to_string_lossy().as_bytes());
-            if let Ok(content) = std::fs::read(p) {
-                hasher.update(&content);
+            match std::fs::read(entry.path()) {
+                Ok(content) => hasher.update(&content),
+                Err(e) => hasher.update(format!("error:{}", e).as_bytes()),
             }
         }
 
@@ -427,7 +427,7 @@ actions:
     }
 
     #[test]
-    fn test_compute_revision_ignores_non_yaml_files() {
+    fn test_compute_revision_includes_non_yaml_files() {
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("test.yaml"),
@@ -436,15 +436,18 @@ actions:
         .unwrap();
         let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
 
-        // Add a non-YAML file — revision should NOT change
-        fs::write(temp_dir.path().join("README.md"), "# Hello").unwrap();
+        // Add a non-YAML file — revision SHOULD change (scripts, configs, etc.)
+        fs::write(temp_dir.path().join("run.sh"), "#!/bin/bash\necho hello").unwrap();
         let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
 
-        assert_eq!(rev1, rev2, "Non-YAML files should not affect revision");
+        assert_ne!(
+            rev1, rev2,
+            "Non-YAML files should affect revision (scripts, configs)"
+        );
     }
 
     #[test]
-    fn test_compute_revision_uses_workflows_subdir() {
+    fn test_compute_revision_includes_all_workspace_files() {
         let temp_dir = TempDir::new().unwrap();
         let workflows_dir = temp_dir.path().join(".workflows");
         fs::create_dir(&workflows_dir).unwrap();
@@ -457,18 +460,32 @@ actions:
         let rev = FolderSource::compute_revision(temp_dir.path());
         assert!(rev.is_some());
 
-        // Revision should be based on .workflows/ content, not root
-        // Add a YAML file in root — revision should NOT change
+        // Adding a script in root should change revision (all files are hashed)
+        fs::write(temp_dir.path().join("deploy.sh"), "#!/bin/bash\ndeploy").unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path());
+        assert_ne!(
+            rev, rev2,
+            "All workspace files should affect revision, not just .workflows/"
+        );
+    }
+
+    #[test]
+    fn test_compute_revision_includes_subdirectory_files() {
+        let temp_dir = TempDir::new().unwrap();
         fs::write(
-            temp_dir.path().join("other.yaml"),
-            "actions:\n  b:\n    type: shell\n    cmd: echo b\n",
+            temp_dir.path().join("test.yaml"),
+            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
         )
         .unwrap();
-        let rev2 = FolderSource::compute_revision(temp_dir.path());
-        assert_eq!(
-            rev, rev2,
-            "Root YAML should be ignored when .workflows/ exists"
-        );
+        let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        // Add a file in a subdirectory — revision should change
+        let sub_dir = temp_dir.path().join("scripts");
+        fs::create_dir(&sub_dir).unwrap();
+        fs::write(sub_dir.join("helper.py"), "print('hello')").unwrap();
+        let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
+
+        assert_ne!(rev1, rev2, "Files in subdirectories should affect revision");
     }
 
     #[test]

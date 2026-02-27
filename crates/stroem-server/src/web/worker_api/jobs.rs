@@ -8,7 +8,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use stroem_common::template::{render_env_map, render_input_map, render_string_opt};
+use stroem_common::template::{
+    merge_action_defaults, render_env_map, render_input_map, render_string_opt,
+};
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
 
@@ -277,6 +279,46 @@ pub async fn claim_job(
             Err(e) => {
                 tracing::warn!("Failed to render step input template: {:#}", e);
                 step.input.clone()
+            }
+        }
+    };
+
+    // Merge action-level input defaults (e.g. object defaults with secret templates)
+    let rendered_input = 'action_defaults: {
+        let workspace = match state.get_workspace(&job.workspace).await {
+            Some(w) => w,
+            None => break 'action_defaults rendered_input,
+        };
+        let task = match workspace.tasks.get(&job.task_name) {
+            Some(t) => t,
+            None => break 'action_defaults rendered_input,
+        };
+        let flow_step = match task.flow.get(&step.step_name) {
+            Some(fs) => fs,
+            None => break 'action_defaults rendered_input,
+        };
+        let action = match workspace.actions.get(&flow_step.action) {
+            Some(a) => a,
+            None => break 'action_defaults rendered_input,
+        };
+        if action.input.is_empty() {
+            break 'action_defaults rendered_input;
+        }
+
+        let input_val = rendered_input.unwrap_or_else(|| serde_json::json!({}));
+        let mut ctx = serde_json::Map::new();
+        if !workspace.secrets.is_empty() {
+            if let Ok(secrets_value) = serde_json::to_value(&workspace.secrets) {
+                ctx.insert("secret".to_string(), secrets_value);
+            }
+        }
+        let context_value = serde_json::Value::Object(ctx);
+
+        match merge_action_defaults(&input_val, &action.input, &context_value) {
+            Ok(merged) => Some(merged),
+            Err(e) => {
+                tracing::warn!("Failed to merge action input defaults: {:#}", e);
+                Some(input_val)
             }
         }
     };

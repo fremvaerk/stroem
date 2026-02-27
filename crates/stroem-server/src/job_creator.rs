@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_common::template::{merge_defaults, render_input_map, resolve_connection_inputs};
+use stroem_common::template::{
+    merge_action_defaults, merge_defaults, render_input_map, resolve_connection_inputs,
+};
 use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
@@ -198,6 +200,19 @@ pub async fn handle_task_steps(
             }
         } else {
             serde_json::json!({})
+        };
+
+        // Merge action-level input defaults (e.g. object defaults with secret templates)
+        let rendered_input = if let Some(action) = workspace_config.actions.get(&step.action_name) {
+            if !action.input.is_empty() {
+                let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
+                merge_action_defaults(&rendered_input, &action.input, &secrets_ctx)
+                    .unwrap_or(rendered_input)
+            } else {
+                rendered_input
+            }
+        } else {
+            rendered_input
         };
 
         // Mark step as running (server-side, so we don't process it again)

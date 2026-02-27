@@ -327,6 +327,66 @@ pub fn resolve_connection_inputs(
     Ok(serde_json::Value::Object(result))
 }
 
+/// Recursively walk a JSON value tree and render all string values containing `{{`
+/// through Tera. Objects and arrays are traversed recursively; other types are cloned as-is.
+pub fn render_value_deep(
+    value: &serde_json::Value,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.contains("{{") {
+                let rendered = render_template(s, context)
+                    .with_context(|| format!("Failed to render template in value: {}", s))?;
+                Ok(serde_json::Value::String(rendered))
+            } else {
+                Ok(value.clone())
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let mut result = serde_json::Map::new();
+            for (k, v) in map {
+                result.insert(k.clone(), render_value_deep(v, context)?);
+            }
+            Ok(serde_json::Value::Object(result))
+        }
+        serde_json::Value::Array(arr) => {
+            let mut result = Vec::new();
+            for v in arr {
+                result.push(render_value_deep(v, context)?);
+            }
+            Ok(serde_json::Value::Array(result))
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
+/// Merge action-level input defaults into already-rendered step input.
+///
+/// 1. Calls `merge_defaults()` to fill missing fields from the action's input schema
+/// 2. Calls `render_value_deep()` on the result to render templates inside object/array defaults
+///
+/// This handles the case where an action defines a default like:
+/// ```yaml
+/// input:
+///   clickhouse:
+///     type: object
+///     default:
+///       host: "{{ secret.clickhouse.host }}"
+///       port: 8443
+/// ```
+/// The object default is inserted by `merge_defaults()` as-is, then `render_value_deep()`
+/// walks it to render the `{{ secret.clickhouse.host }}` template.
+pub fn merge_action_defaults(
+    rendered_input: &serde_json::Value,
+    action_input_schema: &HashMap<String, InputFieldDef>,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let merged = merge_defaults(rendered_input, action_input_schema, context)
+        .context("Failed to merge action input defaults")?;
+    render_value_deep(&merged, context).context("Failed to render templates in action defaults")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,5 +1282,172 @@ mod tests {
         // Untyped connection: no type mismatch check, just resolve
         let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
         assert_eq!(result["api"]["url"], "https://api.example.com");
+    }
+
+    // --- render_value_deep tests ---
+
+    #[test]
+    fn test_render_value_deep_string_with_template() {
+        let value = json!("Hello {{ name }}");
+        let context = json!({"name": "World"});
+        let result = render_value_deep(&value, &context).unwrap();
+        assert_eq!(result, json!("Hello World"));
+    }
+
+    #[test]
+    fn test_render_value_deep_string_without_template() {
+        let value = json!("plain text");
+        let context = json!({});
+        let result = render_value_deep(&value, &context).unwrap();
+        assert_eq!(result, json!("plain text"));
+    }
+
+    #[test]
+    fn test_render_value_deep_object_with_nested_templates() {
+        let value = json!({
+            "host": "{{ secret.db.host }}",
+            "port": 8443,
+            "nested": {
+                "url": "https://{{ secret.db.host }}:8443"
+            }
+        });
+        let context = json!({"secret": {"db": {"host": "clickhouse.example.com"}}});
+        let result = render_value_deep(&value, &context).unwrap();
+        assert_eq!(result["host"], "clickhouse.example.com");
+        assert_eq!(result["port"], 8443);
+        assert_eq!(
+            result["nested"]["url"],
+            "https://clickhouse.example.com:8443"
+        );
+    }
+
+    #[test]
+    fn test_render_value_deep_array_with_templates() {
+        let value = json!(["{{ name }}", "plain", 42]);
+        let context = json!({"name": "alice"});
+        let result = render_value_deep(&value, &context).unwrap();
+        assert_eq!(result, json!(["alice", "plain", 42]));
+    }
+
+    #[test]
+    fn test_render_value_deep_primitives_passthrough() {
+        let context = json!({});
+        assert_eq!(render_value_deep(&json!(42), &context).unwrap(), json!(42));
+        assert_eq!(
+            render_value_deep(&json!(true), &context).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            render_value_deep(&json!(null), &context).unwrap(),
+            json!(null)
+        );
+        assert_eq!(
+            render_value_deep(&json!(3.14), &context).unwrap(),
+            json!(3.14)
+        );
+    }
+
+    #[test]
+    fn test_render_value_deep_error_propagates() {
+        let value = json!({"key": "{{ missing.var }}"});
+        let context = json!({});
+        let result = render_value_deep(&value, &context);
+        assert!(result.is_err());
+    }
+
+    // --- merge_action_defaults tests ---
+
+    #[test]
+    fn test_merge_action_defaults_object_default_with_templates() {
+        let rendered_input = json!({"sql": "SELECT 1"});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "clickhouse".to_string(),
+            field(
+                "object",
+                false,
+                Some(json!({
+                    "host": "{{ secret.clickhouse.host }}",
+                    "port": 8443
+                })),
+            ),
+        );
+        schema.insert("sql".to_string(), field("string", true, None));
+
+        let context = json!({"secret": {"clickhouse": {"host": "ch.example.com"}}});
+        let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+        assert_eq!(result["sql"], "SELECT 1");
+        assert_eq!(result["clickhouse"]["host"], "ch.example.com");
+        assert_eq!(result["clickhouse"]["port"], 8443);
+    }
+
+    #[test]
+    fn test_merge_action_defaults_user_value_takes_precedence() {
+        let rendered_input = json!({"clickhouse": {"host": "custom.host", "port": 9000}});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "clickhouse".to_string(),
+            field(
+                "object",
+                false,
+                Some(json!({
+                    "host": "{{ secret.clickhouse.host }}",
+                    "port": 8443
+                })),
+            ),
+        );
+
+        let context = json!({"secret": {"clickhouse": {"host": "ch.example.com"}}});
+        let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+        // User-provided value should win
+        assert_eq!(result["clickhouse"]["host"], "custom.host");
+        assert_eq!(result["clickhouse"]["port"], 9000);
+    }
+
+    #[test]
+    fn test_merge_action_defaults_plain_string_default() {
+        let rendered_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "env".to_string(),
+            field("string", false, Some(json!("staging"))),
+        );
+
+        let context = json!({});
+        let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+        assert_eq!(result["env"], "staging");
+    }
+
+    #[test]
+    fn test_merge_action_defaults_empty_schema_noop() {
+        let rendered_input = json!({"key": "value"});
+        let schema = HashMap::new();
+        let context = json!({});
+        let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+        assert_eq!(result, json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_merge_action_defaults_deeply_nested_templates() {
+        let rendered_input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "config".to_string(),
+            field(
+                "object",
+                false,
+                Some(json!({
+                    "level1": {
+                        "level2": {
+                            "value": "{{ secret.deep }}"
+                        }
+                    }
+                })),
+            ),
+        );
+
+        let context = json!({"secret": {"deep": "resolved"}});
+        let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+        assert_eq!(result["config"]["level1"]["level2"]["value"], "resolved");
     }
 }

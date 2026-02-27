@@ -257,8 +257,17 @@ impl WorkspaceManager {
             let poll_secs = source.poll_interval_secs();
 
             tokio::spawn(async move {
+                tracing::info!(
+                    "Watcher started for workspace '{}' (poll interval: {}s)",
+                    ws_name,
+                    poll_secs
+                );
+
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
                 let mut last_revision = source.revision();
+                // Skip the first immediate tick — the workspace was just loaded
+                interval.tick().await;
+
                 loop {
                     interval.tick().await;
 
@@ -271,19 +280,21 @@ impl WorkspaceManager {
                         continue;
                     }
 
+                    tracing::info!("Workspace '{}': change detected, reloading...", ws_name);
+
                     // Revision changed (or source doesn't support peek) — do full reload
                     match source.load().await {
                         Ok(new_config) => {
                             let new_revision = source.revision();
-                            if new_revision != last_revision {
-                                let mut config = config_lock.write().await;
-                                *config = new_config;
-                                tracing::info!(
-                                    "Workspace '{}' reloaded (revision changed)",
-                                    ws_name
-                                );
-                                last_revision = new_revision;
-                            }
+                            let mut config = config_lock.write().await;
+                            *config = new_config;
+                            tracing::info!(
+                                "Workspace '{}' reloaded (revision: {:?} -> {:?})",
+                                ws_name,
+                                last_revision.as_deref().map(|s| &s[..8.min(s.len())]),
+                                new_revision.as_deref().map(|s| &s[..8.min(s.len())]),
+                            );
+                            last_revision = new_revision;
                         }
                         Err(e) => {
                             tracing::warn!("Failed to reload workspace '{}': {:#}", ws_name, e);

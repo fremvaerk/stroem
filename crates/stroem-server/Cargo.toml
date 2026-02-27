@@ -43,6 +43,7 @@ openidconnect.workspace = true
 url.workspace = true
 axum-extra = { version = "0.12", features = ["cookie"] }
 subtle = "2"
+walkdir = "2"
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 
