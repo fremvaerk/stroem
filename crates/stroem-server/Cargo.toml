@@ -41,18 +41,18 @@ croner.workspace = true
 tokio-util.workspace = true
 openidconnect.workspace = true
 url.workspace = true
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 subtle = "2"
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
-testcontainers = "0.26"
-testcontainers-modules = { version = "0.14", features = ["postgres", "minio"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres", "minio"] }
 http = "1"
 http-body-util = "0.1"
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.28"
 futures-util = "0.3"
 walkdir = "2"
 aws-sdk-s3 = "1"

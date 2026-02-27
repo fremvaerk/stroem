@@ -15,5 +15,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-testcontainers = "0.26"
-testcontainers-modules = { version = "0.14", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }

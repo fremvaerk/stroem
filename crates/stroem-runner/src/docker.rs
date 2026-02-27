@@ -3,11 +3,12 @@ use crate::traits::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bollard::container::{
-    AttachContainerOptions, Config, CreateContainerOptions, RemoveContainerOptions,
+use bollard::container::LogOutput;
+use bollard::models::{ContainerCreateBody, HostConfig};
+use bollard::query_parameters::{
+    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
     StartContainerOptions, WaitContainerOptions,
 };
-use bollard::image::CreateImageOptions;
 use bollard::Docker;
 use futures_util::StreamExt;
 
@@ -35,7 +36,7 @@ impl DockerRunner {
     }
 
     /// Build container config from RunConfig
-    fn build_container_config(config: &RunConfig) -> Config<String> {
+    fn build_container_config(config: &RunConfig) -> ContainerCreateBody {
         let env: Vec<String> = config.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
         match config.runner_mode {
@@ -62,12 +63,12 @@ impl DockerRunner {
                 // Mount startup scripts (if present on Docker host, otherwise empty dir)
                 binds.push("/etc/stroem/startup.d:/etc/stroem/startup.d:ro".to_string());
 
-                Config {
+                ContainerCreateBody {
                     image: Some(image),
                     cmd: Some(cmd),
                     env: Some(env),
                     working_dir: Some("/workspace".to_string()),
-                    host_config: Some(bollard::models::HostConfig {
+                    host_config: Some(HostConfig {
                         binds: Some(binds),
                         ..Default::default()
                     }),
@@ -97,7 +98,7 @@ impl DockerRunner {
                         .map(|c| vec!["sh".to_string(), "-c".to_string(), c.clone()])
                 };
 
-                Config {
+                ContainerCreateBody {
                     image: Some(image),
                     entrypoint,
                     cmd,
@@ -129,7 +130,7 @@ impl Runner for DockerRunner {
         tracing::info!("Pulling image: {}", image);
         let mut pull_stream = self.docker.create_image(
             Some(CreateImageOptions {
-                from_image: image.clone(),
+                from_image: Some(image.clone()),
                 ..Default::default()
             }),
             None,
@@ -152,7 +153,7 @@ impl Runner for DockerRunner {
         let container_config = Self::build_container_config(&config);
         let container = self
             .docker
-            .create_container(None::<CreateContainerOptions<String>>, container_config)
+            .create_container(None::<CreateContainerOptions>, container_config)
             .await
             .context("Failed to create container")?;
         let container_id = container.id.clone();
@@ -161,16 +162,16 @@ impl Runner for DockerRunner {
 
         // Start container
         self.docker
-            .start_container(&container_id, None::<StartContainerOptions<String>>)
+            .start_container(&container_id, None::<StartContainerOptions>)
             .await
             .context("Failed to start container")?;
 
         // Attach to stdout/stderr
-        let attach_opts = AttachContainerOptions::<String> {
-            stdout: Some(true),
-            stderr: Some(true),
-            stream: Some(true),
-            logs: Some(true),
+        let attach_opts = AttachContainerOptions {
+            stdout: true,
+            stderr: true,
+            stream: true,
+            logs: true,
             ..Default::default()
         };
 
@@ -195,7 +196,7 @@ impl Runner for DockerRunner {
                     }
 
                     let stream = match log_output {
-                        bollard::container::LogOutput::StdErr { .. } => LogStream::Stderr,
+                        LogOutput::StdErr { .. } => LogStream::Stderr,
                         _ => LogStream::Stdout,
                     };
 
@@ -230,7 +231,7 @@ impl Runner for DockerRunner {
         // Wait for container to finish
         let mut wait_stream = self
             .docker
-            .wait_container(&container_id, None::<WaitContainerOptions<String>>);
+            .wait_container(&container_id, None::<WaitContainerOptions>);
 
         let mut exit_code = -1i32;
         while let Some(result) = wait_stream.next().await {
