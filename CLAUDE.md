@@ -103,12 +103,23 @@ cd docs && bun install
 # Dev server
 bun run dev
 
-# Build static site
+# Build static site (also regenerates llms.txt)
 bun run build
+
+# Regenerate llms.txt only
+bun run generate-llms
 
 # Preview built site
 bun run preview
 ```
+
+### LLM Reference (llms.txt)
+
+- `docs/public/llms.txt` is auto-generated from doc sources by `docs/scripts/generate-llms-txt.ts`
+- Runs automatically before every `bun run build` in `docs/`
+- Contains workflow authoring reference (actions, tasks, triggers, hooks, templating, secrets, examples)
+- Served at `/llms.txt` on the docs site — paste into any LLM to generate valid Strøm workflow YAML
+- To add/remove sections, edit the `sections` array in the generator script
 
 ## Key Patterns
 
