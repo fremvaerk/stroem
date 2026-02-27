@@ -46,6 +46,18 @@ pub async fn list_users(
         }
     };
 
+    let total = match UserRepo::count(&state.pool).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to count users: {:#}", e);
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to count users: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
     let user_ids: Vec<Uuid> = users.iter().map(|u| u.user_id).collect();
     let auth_links = match UserAuthLinkRepo::list_by_user_ids(&state.pool, &user_ids).await {
         Ok(links) => links,
@@ -78,7 +90,7 @@ pub async fn list_users(
         })
         .collect();
 
-    Json(users_json).into_response()
+    Json(json!({ "items": users_json, "total": total })).into_response()
 }
 
 /// GET /api/users/:id - Get user detail

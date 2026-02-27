@@ -1671,7 +1671,8 @@ async fn test_list_jobs() -> Result<()> {
     let response = router.clone().oneshot(api_get("/api/jobs")).await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
-    assert_eq!(body.as_array().unwrap().len(), 0);
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+    assert_eq!(body["total"].as_i64().unwrap(), 0);
 
     // Create two jobs
     let response = router
@@ -1698,13 +1699,15 @@ async fn test_list_jobs() -> Result<()> {
     let response = router.clone().oneshot(api_get("/api/jobs")).await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
-    assert_eq!(body.as_array().unwrap().len(), 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"].as_i64().unwrap(), 2);
 
     // List with limit
     let response = router.oneshot(api_get("/api/jobs?limit=1")).await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
-    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["total"].as_i64().unwrap(), 2);
 
     Ok(())
 }
@@ -5476,10 +5479,11 @@ async fn test_list_jobs_with_workspace_filter() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let jobs = body.as_array().unwrap();
+    let jobs = body["items"].as_array().unwrap();
     assert_eq!(jobs.len(), 1, "Should have exactly 1 default job");
     assert_eq!(jobs[0]["workspace"].as_str().unwrap(), "default");
     assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "hello-world");
+    assert_eq!(body["total"].as_i64().unwrap(), 1);
 
     // Filter by "ops" — should only return the ops job
     let resp = router
@@ -5488,17 +5492,19 @@ async fn test_list_jobs_with_workspace_filter() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let jobs = body.as_array().unwrap();
+    let jobs = body["items"].as_array().unwrap();
     assert_eq!(jobs.len(), 1, "Should have exactly 1 ops job");
     assert_eq!(jobs[0]["workspace"].as_str().unwrap(), "ops");
     assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "deploy-app");
+    assert_eq!(body["total"].as_i64().unwrap(), 1);
 
     // No filter — should return both jobs
     let resp = router.oneshot(api_get("/api/jobs")).await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let jobs = body.as_array().unwrap();
+    let jobs = body["items"].as_array().unwrap();
     assert_eq!(jobs.len(), 2, "Should have 2 jobs total");
+    assert_eq!(body["total"].as_i64().unwrap(), 2);
     let workspaces: Vec<&str> = jobs
         .iter()
         .map(|j| j["workspace"].as_str().unwrap())
@@ -5526,17 +5532,18 @@ async fn test_list_jobs_workspace_filter_nonexistent() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), 200);
 
-    // Filter by nonexistent workspace — should return 200 with empty array
+    // Filter by nonexistent workspace — should return 200 with empty items
     let resp = router
         .oneshot(api_get("/api/jobs?workspace=nonexistent"))
         .await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let jobs = body.as_array().unwrap();
+    let jobs = body["items"].as_array().unwrap();
     assert!(
         jobs.is_empty(),
-        "Nonexistent workspace filter should return empty array"
+        "Nonexistent workspace filter should return empty items"
     );
+    assert_eq!(body["total"].as_i64().unwrap(), 0);
 
     Ok(())
 }
@@ -5719,8 +5726,9 @@ async fn test_list_jobs_shows_workspace_field() -> Result<()> {
     let resp = router.oneshot(api_get("/api/jobs")).await?;
     assert_eq!(resp.status(), 200);
     let body = body_json(resp).await;
-    let jobs = body.as_array().unwrap();
+    let jobs = body["items"].as_array().unwrap();
     assert_eq!(jobs.len(), 2);
+    assert_eq!(body["total"].as_i64().unwrap(), 2);
 
     // Verify each job in the list has the correct workspace field
     for job in jobs {
@@ -8497,7 +8505,7 @@ async fn test_worker_id_in_job_list_and_detail() -> Result<()> {
     let response = router.clone().oneshot(api_get("/api/jobs")).await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
-    let jobs = body.as_array().unwrap();
+    let jobs = body["items"].as_array().unwrap();
     assert!(!jobs.is_empty());
     let job = &jobs[0];
     assert!(

@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { StatusBadge } from "@/components/status-badge";
+import { PaginationControls } from "@/components/pagination-controls";
 import { getTask, listJobs, executeTask } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, JobListItem, FlowStep, InputField } from "@/lib/types";
@@ -112,6 +113,7 @@ export function TaskDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [jobs, setJobs] = useState<JobListItem[]>([]);
+  const [jobsTotal, setJobsTotal] = useState(0);
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobsOffset, setJobsOffset] = useState(0);
   const [selectedDagStep, setSelectedDagStep] = useState<string | null>(null);
@@ -161,7 +163,8 @@ export function TaskDetailPage() {
         workspace,
         taskName: name,
       });
-      setJobs(data);
+      setJobs(data.items);
+      setJobsTotal(data.total);
     } catch {
       // ignore
     } finally {
@@ -445,29 +448,15 @@ export function TaskDetailPage() {
             </Table>
           )}
 
-          <div className="mt-4 flex items-center justify-between">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={jobsOffset === 0}
-              onClick={() =>
-                setJobsOffset((o) => Math.max(0, o - JOBS_PAGE_SIZE))
-              }
-            >
-              Previous
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Page {Math.floor(jobsOffset / JOBS_PAGE_SIZE) + 1}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={jobs.length < JOBS_PAGE_SIZE}
-              onClick={() => setJobsOffset((o) => o + JOBS_PAGE_SIZE)}
-            >
-              Next
-            </Button>
-          </div>
+          <PaginationControls
+            offset={jobsOffset}
+            pageSize={JOBS_PAGE_SIZE}
+            total={jobsTotal}
+            onPrevious={() =>
+              setJobsOffset((o) => Math.max(0, o - JOBS_PAGE_SIZE))
+            }
+            onNext={() => setJobsOffset((o) => o + JOBS_PAGE_SIZE)}
+          />
         </CardContent>
       </Card>
     </div>

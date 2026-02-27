@@ -167,20 +167,23 @@ GET /api/jobs
 **Response:**
 
 ```json
-[
-  {
-    "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "workspace": "default",
-    "task_name": "hello-world",
-    "mode": "distributed",
-    "status": "completed",
-    "source_type": "api",
-    "source_id": null,
-    "created_at": "2025-02-10T12:00:00Z",
-    "started_at": "2025-02-10T12:00:01Z",
-    "completed_at": "2025-02-10T12:00:03Z"
-  }
-]
+{
+  "items": [
+    {
+      "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "workspace": "default",
+      "task_name": "hello-world",
+      "mode": "distributed",
+      "status": "completed",
+      "source_type": "api",
+      "source_id": null,
+      "created_at": "2025-02-10T12:00:00Z",
+      "started_at": "2025-02-10T12:00:01Z",
+      "completed_at": "2025-02-10T12:00:03Z"
+    }
+  ],
+  "total": 1
+}
 ```
 
 **Source types:** `"api"`, `"user"`, `"trigger"`, `"webhook"`, `"hook"`, `"task"`
@@ -270,7 +273,7 @@ websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream
 GET /api/users
 ```
 
-Returns all registered users with their authentication methods. Supports `limit` and `offset` query parameters.
+Returns registered users with their authentication methods. Supports `limit` and `offset` query parameters. Response: `{ "items": [...], "total": N }`.
 
 ## Get User Detail
 
@@ -286,7 +289,7 @@ Returns a single user's info including authentication methods.
 GET /api/workers
 ```
 
-Returns all registered workers with status and tags. Supports `limit` and `offset` query parameters.
+Returns registered workers with status and tags. Supports `limit` and `offset` query parameters. Response: `{ "items": [...], "total": N }`.
 
 ## Get Worker Detail
 

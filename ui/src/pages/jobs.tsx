@@ -30,10 +30,11 @@ export function JobsPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
   const fetcher = useCallback(() => listJobs(PAGE_SIZE, offset), [offset]);
-  const { data: jobs, loading } = useAsyncData(fetcher, {
+  const { data, loading } = useAsyncData(fetcher, {
     pollInterval: 5000,
   });
-  const jobList = jobs ?? [];
+  const jobList = data?.items ?? [];
+  const total = data?.total ?? 0;
 
   const filtered =
     statusFilter === "all"
@@ -134,7 +135,7 @@ export function JobsPage() {
           <PaginationControls
             offset={offset}
             pageSize={PAGE_SIZE}
-            hasMore={jobList.length >= PAGE_SIZE}
+            total={total}
             onPrevious={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
             onNext={() => setOffset((o) => o + PAGE_SIZE)}
           />

@@ -9,10 +9,10 @@ export function useWorkerNames(): Map<string, string> {
   useEffect(() => {
     let cancelled = false;
     listWorkers(200, 0)
-      .then((workers) => {
+      .then((data) => {
         if (cancelled) return;
         const map = new Map<string, string>();
-        for (const w of workers) {
+        for (const w of data.items) {
           map.set(w.worker_id, w.name);
         }
         setNames(map);

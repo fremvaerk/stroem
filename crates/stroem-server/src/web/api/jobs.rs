@@ -38,23 +38,23 @@ pub async fn list_jobs(
             .into_response();
     }
 
-    let result = match (query.workspace.as_deref(), query.task_name.as_deref()) {
+    let (result, total) = match (query.workspace.as_deref(), query.task_name.as_deref()) {
         (Some(ws), Some(task)) => {
-            JobRepo::list_by_task(&state.pool, ws, task, query.limit, query.offset).await
+            let jobs =
+                JobRepo::list_by_task(&state.pool, ws, task, query.limit, query.offset).await;
+            let count = JobRepo::count_by_task(&state.pool, ws, task).await;
+            (jobs, count)
         }
         _ => {
-            JobRepo::list(
-                &state.pool,
-                query.workspace.as_deref(),
-                query.limit,
-                query.offset,
-            )
-            .await
+            let ws = query.workspace.as_deref();
+            let jobs = JobRepo::list(&state.pool, ws, query.limit, query.offset).await;
+            let count = JobRepo::count(&state.pool, ws).await;
+            (jobs, count)
         }
     };
 
-    match result {
-        Ok(jobs) => {
+    match (result, total) {
+        (Ok(jobs), Ok(total)) => {
             let jobs_json: Vec<serde_json::Value> = jobs
                 .iter()
                 .map(|job| {
@@ -74,9 +74,9 @@ pub async fn list_jobs(
                 })
                 .collect();
 
-            Json(jobs_json).into_response()
+            Json(json!({ "items": jobs_json, "total": total })).into_response()
         }
-        Err(e) => {
+        (Err(e), _) | (_, Err(e)) => {
             tracing::error!("Failed to list jobs: {:#}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

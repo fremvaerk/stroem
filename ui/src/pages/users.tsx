@@ -10,7 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { PaginationControls } from "@/components/pagination-controls";
 import { useTitle } from "@/hooks/use-title";
 import { listUsers } from "@/lib/api";
 import type { UserListItem } from "@/lib/types";
@@ -29,13 +29,15 @@ function formatTime(dateStr: string): string {
 export function UsersPage() {
   useTitle("Users");
   const [users, setUsers] = useState<UserListItem[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
 
   const load = useCallback(async () => {
     try {
       const data = await listUsers(PAGE_SIZE, offset);
-      setUsers(data);
+      setUsers(data.items);
+      setTotal(data.total);
     } catch {
       // ignore
     } finally {
@@ -120,27 +122,13 @@ export function UsersPage() {
             </Table>
           )}
 
-          <div className="mt-4 flex items-center justify-between">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={offset === 0}
-              onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-            >
-              Previous
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              Page {Math.floor(offset / PAGE_SIZE) + 1}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={users.length < PAGE_SIZE}
-              onClick={() => setOffset((o) => o + PAGE_SIZE)}
-            >
-              Next
-            </Button>
-          </div>
+          <PaginationControls
+            offset={offset}
+            pageSize={PAGE_SIZE}
+            total={total}
+            onPrevious={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+            onNext={() => setOffset((o) => o + PAGE_SIZE)}
+          />
         </CardContent>
       </Card>
     </div>

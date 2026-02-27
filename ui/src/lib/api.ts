@@ -118,6 +118,11 @@ async function apiFetch<T>(
   return res.json();
 }
 
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+}
+
 export class ApiError extends Error {
   status: number;
 
@@ -254,14 +259,14 @@ export async function listJobs(
   limit = 50,
   offset = 0,
   filters?: { workspace?: string; taskName?: string },
-): Promise<JobListItem[]> {
+): Promise<PaginatedResponse<JobListItem>> {
   const params = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
   });
   if (filters?.workspace) params.set("workspace", filters.workspace);
   if (filters?.taskName) params.set("task_name", filters.taskName);
-  return apiFetch<JobListItem[]>(`/api/jobs?${params}`);
+  return apiFetch<PaginatedResponse<JobListItem>>(`/api/jobs?${params}`);
 }
 
 export async function getJob(id: string): Promise<JobDetail> {
@@ -282,8 +287,8 @@ export async function getWorker(id: string): Promise<WorkerDetail> {
 export async function listWorkers(
   limit = 50,
   offset = 0,
-): Promise<WorkerListItem[]> {
-  return apiFetch<WorkerListItem[]>(
+): Promise<PaginatedResponse<WorkerListItem>> {
+  return apiFetch<PaginatedResponse<WorkerListItem>>(
     `/api/workers?limit=${limit}&offset=${offset}`,
   );
 }
@@ -292,8 +297,8 @@ export async function listWorkers(
 export async function listUsers(
   limit = 50,
   offset = 0,
-): Promise<UserListItem[]> {
-  return apiFetch<UserListItem[]>(
+): Promise<PaginatedResponse<UserListItem>> {
+  return apiFetch<PaginatedResponse<UserListItem>>(
     `/api/users?limit=${limit}&offset=${offset}`,
   );
 }

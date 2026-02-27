@@ -104,6 +104,15 @@ impl WorkerRepo {
         Ok(worker)
     }
 
+    /// Count all workers
+    pub async fn count(pool: &PgPool) -> Result<i64> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM worker")
+            .fetch_one(pool)
+            .await
+            .context("Failed to count workers")?;
+        Ok(count.0)
+    }
+
     /// List workers ordered by status (active first), then by registered_at descending
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<WorkerRow>> {
         let workers = sqlx::query_as::<_, WorkerRow>(&format!(

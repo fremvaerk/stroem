@@ -28,7 +28,7 @@ export function DashboardPage() {
     async function load() {
       try {
         const data = await listJobs(100, 0);
-        if (!cancelled) setJobs(data);
+        if (!cancelled) setJobs(data.items);
       } catch {
         // ignore
       } finally {

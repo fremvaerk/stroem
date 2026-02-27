@@ -24,10 +24,11 @@ export function WorkersPage() {
   const [offset, setOffset] = useState(0);
 
   const fetcher = useCallback(() => listWorkers(PAGE_SIZE, offset), [offset]);
-  const { data: workers, loading } = useAsyncData(fetcher, {
+  const { data, loading } = useAsyncData(fetcher, {
     pollInterval: 5000,
   });
-  const workerList = workers ?? [];
+  const workerList = data?.items ?? [];
+  const total = data?.total ?? 0;
 
   return (
     <div className="space-y-6">
@@ -116,7 +117,7 @@ export function WorkersPage() {
           <PaginationControls
             offset={offset}
             pageSize={PAGE_SIZE}
-            hasMore={workerList.length >= PAGE_SIZE}
+            total={total}
             onPrevious={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
             onNext={() => setOffset((o) => o + PAGE_SIZE)}
           />

@@ -254,6 +254,35 @@ impl JobRepo {
         Ok(())
     }
 
+    /// Count jobs with optional workspace filter (mirrors `list()`)
+    pub async fn count(pool: &PgPool, workspace: Option<&str>) -> Result<i64> {
+        let count: (i64,) = if let Some(ws) = workspace {
+            sqlx::query_as("SELECT COUNT(*) FROM job WHERE workspace = $1")
+                .bind(ws)
+                .fetch_one(pool)
+                .await
+                .context("Failed to count jobs by workspace")?
+        } else {
+            sqlx::query_as("SELECT COUNT(*) FROM job")
+                .fetch_one(pool)
+                .await
+                .context("Failed to count jobs")?
+        };
+        Ok(count.0)
+    }
+
+    /// Count jobs by workspace + task name (mirrors `list_by_task()`)
+    pub async fn count_by_task(pool: &PgPool, workspace: &str, task_name: &str) -> Result<i64> {
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM job WHERE workspace = $1 AND task_name = $2")
+                .bind(workspace)
+                .bind(task_name)
+                .fetch_one(pool)
+                .await
+                .context("Failed to count jobs by task")?;
+        Ok(count.0)
+    }
+
     /// List jobs by workspace + task name with pagination
     pub async fn list_by_task(
         pool: &PgPool,

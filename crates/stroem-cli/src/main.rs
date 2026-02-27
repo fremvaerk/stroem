@@ -336,7 +336,9 @@ async fn cmd_jobs(client: &Client, server: &str, limit: i64) -> Result<()> {
 
     check_response(&status, &body)?;
 
-    let jobs = body.as_array().context("Expected array response")?;
+    let jobs = body["items"]
+        .as_array()
+        .context("Expected items array in response")?;
 
     if jobs.is_empty() {
         println!("No jobs found.");

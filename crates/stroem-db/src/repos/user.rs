@@ -67,6 +67,15 @@ impl UserRepo {
         Ok(())
     }
 
+    /// Count all users
+    pub async fn count(pool: &PgPool) -> Result<i64> {
+        let count: (i64,) = sqlx::query_as(r#"SELECT COUNT(*) FROM "user""#)
+            .fetch_one(pool)
+            .await
+            .context("Failed to count users")?;
+        Ok(count.0)
+    }
+
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<UserRow>> {
         let rows = sqlx::query_as::<_, UserRow>(
             r#"SELECT user_id, name, email, password_hash, created_at, last_login_at FROM "user" ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,

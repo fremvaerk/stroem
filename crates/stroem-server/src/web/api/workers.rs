@@ -24,8 +24,11 @@ pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListWorkersQuery>,
 ) -> impl IntoResponse {
-    match WorkerRepo::list(&state.pool, query.limit, query.offset).await {
-        Ok(workers) => {
+    let result = WorkerRepo::list(&state.pool, query.limit, query.offset).await;
+    let total = WorkerRepo::count(&state.pool).await;
+
+    match (result, total) {
+        (Ok(workers), Ok(total)) => {
             let workers_json: Vec<serde_json::Value> = workers
                 .iter()
                 .map(|w| {
@@ -40,9 +43,9 @@ pub async fn list_workers(
                 })
                 .collect();
 
-            Json(workers_json).into_response()
+            Json(json!({ "items": workers_json, "total": total })).into_response()
         }
-        Err(e) => {
+        (Err(e), _) | (_, Err(e)) => {
             tracing::error!("Failed to list workers: {:#}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,

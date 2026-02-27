@@ -3,8 +3,7 @@ import { Button } from "@/components/ui/button";
 interface PaginationControlsProps {
   offset: number;
   pageSize: number;
-  /** Whether there might be more items (typically: items.length >= pageSize) */
-  hasMore: boolean;
+  total: number;
   onPrevious: () => void;
   onNext: () => void;
 }
@@ -12,10 +11,13 @@ interface PaginationControlsProps {
 export function PaginationControls({
   offset,
   pageSize,
-  hasMore,
+  total,
   onPrevious,
   onNext,
 }: PaginationControlsProps) {
+  const currentPage = Math.floor(offset / pageSize) + 1;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
   return (
     <div className="mt-4 flex items-center justify-between">
       <Button
@@ -27,12 +29,13 @@ export function PaginationControls({
         Previous
       </Button>
       <span className="text-xs text-muted-foreground">
-        Page {Math.floor(offset / pageSize) + 1}
+        Page {currentPage} of {totalPages}
+        <span className="ml-2">({total} {total === 1 ? "item" : "items"})</span>
       </span>
       <Button
         variant="outline"
         size="sm"
-        disabled={!hasMore}
+        disabled={currentPage >= totalPages}
         onClick={onNext}
       >
         Next
