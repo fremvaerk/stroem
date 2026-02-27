@@ -84,8 +84,39 @@ pub trait Runner: Send + Sync {
     ) -> Result<RunResult>;
 }
 
-/// Parse an "OUTPUT: {...}" line into a JSON value.
+/// Parse an "OUTPUT:{json}" or "OUTPUT: {json}" line into a JSON value.
 pub fn parse_output_line(line: &str) -> Option<serde_json::Value> {
-    line.strip_prefix("OUTPUT: ")
-        .and_then(|json_str| serde_json::from_str(json_str).ok())
+    let json_str = line
+        .strip_prefix("OUTPUT: ")
+        .or_else(|| line.strip_prefix("OUTPUT:"))?;
+    serde_json::from_str(json_str).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_output_line_with_space() {
+        let result = parse_output_line(r#"OUTPUT: {"key": "value"}"#);
+        assert_eq!(result, Some(json!({"key": "value"})));
+    }
+
+    #[test]
+    fn test_parse_output_line_without_space() {
+        let result = parse_output_line(r#"OUTPUT:{"data": [{"1": 1}]}"#);
+        assert_eq!(result, Some(json!({"data": [{"1": 1}]})));
+    }
+
+    #[test]
+    fn test_parse_output_line_no_match() {
+        assert_eq!(parse_output_line("some random log line"), None);
+    }
+
+    #[test]
+    fn test_parse_output_line_invalid_json() {
+        assert_eq!(parse_output_line("OUTPUT: not json"), None);
+        assert_eq!(parse_output_line("OUTPUT:not json"), None);
+    }
 }
