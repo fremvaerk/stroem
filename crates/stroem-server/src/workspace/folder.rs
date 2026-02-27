@@ -144,12 +144,19 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         .render_secrets()
         .context("Failed to render workspace secrets")?;
 
+    // Render connection values (resolve templates + apply type defaults)
+    workspace
+        .render_connections()
+        .context("Failed to render workspace connections")?;
+
     tracing::debug!(
-        "Loaded workspace: {} actions, {} tasks, {} triggers, {} secrets",
+        "Loaded workspace: {} actions, {} tasks, {} triggers, {} secrets, {} connection_types, {} connections",
         workspace.actions.len(),
         workspace.tasks.len(),
         workspace.triggers.len(),
-        workspace.secrets.len()
+        workspace.secrets.len(),
+        workspace.connection_types.len(),
+        workspace.connections.len()
     );
 
     Ok(workspace)

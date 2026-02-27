@@ -187,6 +187,12 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
         validate_hook_action_exists(&format!("Workspace on_error[{i}]"), &hook.action, config)?;
     }
 
+    // Validate connections
+    warnings.extend(validate_connections(config)?);
+
+    // Validate connection input references in tasks
+    warnings.extend(validate_connection_inputs(config)?);
+
     // Validate secrets
     validate_secrets(
         "",
@@ -211,6 +217,112 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                             action_name, env_key, ref_path
                         ));
                     }
+                }
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
+/// Validates connection types and connections.
+///
+/// - Property types must be `string`, `integer`, `number`, or `boolean`.
+/// - Typed connections must reference an existing connection_type.
+/// - Required fields without defaults must be present.
+/// - Unknown fields produce warnings.
+/// - Empty string values produce errors.
+fn validate_connections(config: &WorkflowConfig) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    let valid_prop_types = ["string", "integer", "number", "boolean"];
+
+    // Validate connection type definitions
+    for (type_name, type_def) in &config.connection_types {
+        for (prop_name, prop_def) in &type_def.properties {
+            if !valid_prop_types.contains(&prop_def.property_type.as_str()) {
+                bail!(
+                    "Connection type '{}' property '{}' has invalid type '{}' (expected: string, integer, number, boolean)",
+                    type_name,
+                    prop_name,
+                    prop_def.property_type
+                );
+            }
+        }
+    }
+
+    // Validate connection instances
+    for (conn_name, conn) in &config.connections {
+        if let Some(ref type_name) = conn.connection_type {
+            if let Some(type_def) = config.connection_types.get(type_name) {
+                // Check required fields without defaults are present
+                for (prop_name, prop_def) in &type_def.properties {
+                    if prop_def.required
+                        && prop_def.default.is_none()
+                        && !conn.values.contains_key(prop_name)
+                    {
+                        bail!(
+                            "Connection '{}' is missing required field '{}' (type '{}')",
+                            conn_name,
+                            prop_name,
+                            type_name
+                        );
+                    }
+                }
+
+                // Warn about unknown fields
+                for key in conn.values.keys() {
+                    if !type_def.properties.contains_key(key) {
+                        warnings.push(format!(
+                            "Connection '{}' has field '{}' not defined in type '{}'",
+                            conn_name, key, type_name
+                        ));
+                    }
+                }
+            } else {
+                bail!(
+                    "Connection '{}' references non-existent connection type '{}'",
+                    conn_name,
+                    type_name
+                );
+            }
+        }
+
+        // Check for empty string values
+        for (key, value) in &conn.values {
+            if let Some(s) = value.as_str() {
+                if s.is_empty() {
+                    bail!(
+                        "Connection '{}' field '{}' has an empty value",
+                        conn_name,
+                        key
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
+/// Validates that task input fields referencing connection types have valid references.
+///
+/// For each task input where `field_type` is not a primitive type (string/integer/number/boolean),
+/// it's treated as a connection type reference and must exist in `connection_types`.
+fn validate_connection_inputs(config: &WorkflowConfig) -> Result<Vec<String>> {
+    let warnings = Vec::new();
+    let primitives = ["string", "integer", "number", "boolean"];
+
+    for (task_name, task) in &config.tasks {
+        for (field_name, field_def) in &task.input {
+            if !primitives.contains(&field_def.field_type.as_str()) {
+                // Non-primitive type — must be a connection type reference
+                if !config.connection_types.contains_key(&field_def.field_type) {
+                    bail!(
+                        "Task '{}' input '{}' references unknown type '{}' (not a primitive or connection type)",
+                        task_name,
+                        field_name,
+                        field_def.field_type
+                    );
                 }
             }
         }
@@ -2180,6 +2292,223 @@ on_error:
         let yaml = r#"
 on_success:
   - action: common/slack-notify
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    // --- connection validation tests ---
+
+    #[test]
+    fn test_validate_connections_valid() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+      port:
+        type: integer
+        default: 5432
+
+connections:
+  prod_db:
+    type: postgres
+    host: "db.example.com"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_connections_invalid_property_type() {
+        let yaml = r#"
+connection_types:
+  custom:
+    properties:
+      data:
+        type: array
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid type"));
+        assert!(err.contains("array"));
+    }
+
+    #[test]
+    fn test_validate_connections_missing_type() {
+        let yaml = r#"
+connections:
+  prod_db:
+    type: nonexistent
+    host: "db.example.com"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("non-existent connection type"));
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_validate_connections_missing_required_field() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+      port:
+        type: integer
+        default: 5432
+
+connections:
+  prod_db:
+    type: postgres
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("missing required field"));
+        assert!(err.contains("host"));
+    }
+
+    #[test]
+    fn test_validate_connections_unknown_field_warning() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+
+connections:
+  prod_db:
+    type: postgres
+    host: "db.example.com"
+    extra_field: "unknown"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert!(warnings.iter().any(|w| w.contains("extra_field")));
+    }
+
+    #[test]
+    fn test_validate_connections_empty_value() {
+        let yaml = r#"
+connections:
+  api:
+    url: ""
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty value"));
+    }
+
+    #[test]
+    fn test_validate_connections_untyped_passthrough() {
+        let yaml = r#"
+connections:
+  custom_api:
+    url: "https://example.com"
+    token: "abc123"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_connection_input_valid() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+
+actions:
+  run-migration:
+    type: shell
+    cmd: "migrate"
+
+tasks:
+  deploy:
+    input:
+      db:
+        type: postgres
+      env:
+        type: string
+    flow:
+      migrate:
+        action: run-migration
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_connection_input_unknown_type() {
+        let yaml = r#"
+actions:
+  run-migration:
+    type: shell
+    cmd: "migrate"
+
+tasks:
+  deploy:
+    input:
+      db:
+        type: nonexistent_type
+    flow:
+      migrate:
+        action: run-migration
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent_type"));
+        assert!(err.contains("not a primitive or connection type"));
+    }
+
+    #[test]
+    fn test_validate_connection_input_primitives_ok() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo hello"
+
+tasks:
+  test:
+    input:
+      name:
+        type: string
+      count:
+        type: integer
+      ratio:
+        type: number
+      enabled:
+        type: boolean
+    flow:
+      step1:
+        action: greet
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);

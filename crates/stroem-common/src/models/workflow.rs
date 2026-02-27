@@ -2,6 +2,36 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Connection type property definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionPropertyDef {
+    #[serde(rename = "type")]
+    pub property_type: String, // "string", "integer", "number", "boolean"
+    #[serde(default)]
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default)]
+    pub secret: bool,
+}
+
+/// Connection type definition — a schema for connections
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionTypeDef {
+    pub properties: HashMap<String, ConnectionPropertyDef>,
+}
+
+/// Connection definition — a named, typed object storing external system config.
+///
+/// Flat syntax: `type` is the connection type reference, all other fields are values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionDef {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub connection_type: Option<String>,
+    #[serde(flatten)]
+    pub values: HashMap<String, serde_json::Value>,
+}
+
 /// Input field definition for actions and tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputFieldDef {
@@ -203,6 +233,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub secrets: HashMap<String, serde_json::Value>,
     #[serde(default)]
+    pub connection_types: HashMap<String, ConnectionTypeDef>,
+    #[serde(default)]
+    pub connections: HashMap<String, ConnectionDef>,
+    #[serde(default)]
     pub actions: HashMap<String, ActionDef>,
     #[serde(default)]
     pub tasks: HashMap<String, TaskDef>,
@@ -218,6 +252,8 @@ pub struct WorkflowConfig {
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceConfig {
     pub secrets: HashMap<String, serde_json::Value>,
+    pub connection_types: HashMap<String, ConnectionTypeDef>,
+    pub connections: HashMap<String, ConnectionDef>,
     pub actions: HashMap<String, ActionDef>,
     pub tasks: HashMap<String, TaskDef>,
     pub triggers: HashMap<String, TriggerDef>,
@@ -234,6 +270,8 @@ impl WorkspaceConfig {
     /// Merge another workflow config into this workspace
     pub fn merge(&mut self, config: WorkflowConfig) {
         self.secrets.extend(config.secrets);
+        self.connection_types.extend(config.connection_types);
+        self.connections.extend(config.connections);
         self.actions.extend(config.actions);
         self.tasks.extend(config.tasks);
         self.triggers.extend(config.triggers);
@@ -257,6 +295,47 @@ impl WorkspaceConfig {
             render_secret_value(value, &empty_context)
                 .with_context(|| format!("Failed to render secret '{key}'"))?;
         }
+        Ok(())
+    }
+
+    /// Render connection values through Tera templates and apply type defaults.
+    ///
+    /// Phase 1: Render template strings in connection values (e.g. `{{ 'ref+...' | vals }}`).
+    /// Phase 2: Apply default values from connection type properties for missing fields.
+    pub fn render_connections(&mut self) -> anyhow::Result<()> {
+        let empty_context = serde_json::json!({});
+
+        // Phase 1: Render template values in connections
+        for (conn_name, conn) in &mut self.connections {
+            for (key, value) in &mut conn.values {
+                render_secret_value(value, &empty_context).with_context(|| {
+                    format!("Failed to render connection '{conn_name}' field '{key}'")
+                })?;
+            }
+        }
+
+        // Phase 2: Apply defaults from type properties (clone types to avoid borrow issues)
+        let types = self.connection_types.clone();
+        for (conn_name, conn) in &mut self.connections {
+            if let Some(ref type_name) = conn.connection_type {
+                if let Some(type_def) = types.get(type_name) {
+                    for (prop_name, prop_def) in &type_def.properties {
+                        if !conn.values.contains_key(prop_name) {
+                            if let Some(ref default_value) = prop_def.default {
+                                conn.values.insert(prop_name.clone(), default_value.clone());
+                            }
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "Connection '{}' references unknown type '{}'",
+                        conn_name,
+                        type_name
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -1099,5 +1178,285 @@ on_error:
         ws.render_secrets().unwrap();
         assert_eq!(ws.secrets["cloud"]["providers"][0]["name"], "aws");
         assert_eq!(ws.secrets["cloud"]["providers"][0]["key"], "resolved");
+    }
+
+    // --- Connection tests ---
+
+    #[test]
+    fn test_parse_connection_types() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+      port:
+        type: integer
+        default: 5432
+      database:
+        type: string
+        required: true
+      user:
+        type: string
+        required: true
+      password:
+        type: string
+        required: true
+        secret: true
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.connection_types.len(), 1);
+
+        let pg = config.connection_types.get("postgres").unwrap();
+        assert_eq!(pg.properties.len(), 5);
+
+        let host = pg.properties.get("host").unwrap();
+        assert_eq!(host.property_type, "string");
+        assert!(host.required);
+        assert!(host.default.is_none());
+        assert!(!host.secret);
+
+        let port = pg.properties.get("port").unwrap();
+        assert_eq!(port.property_type, "integer");
+        assert!(!port.required);
+        assert_eq!(port.default.as_ref().unwrap(), &json!(5432));
+
+        let password = pg.properties.get("password").unwrap();
+        assert!(password.required);
+        assert!(password.secret);
+    }
+
+    #[test]
+    fn test_parse_connections() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+      port:
+        type: integer
+        default: 5432
+
+connections:
+  prod_db:
+    type: postgres
+    host: "db.example.com"
+    port: 5432
+    database: "myapp"
+    user: "admin"
+    password: "secret123"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.connections.len(), 1);
+
+        let conn = config.connections.get("prod_db").unwrap();
+        assert_eq!(conn.connection_type.as_deref(), Some("postgres"));
+        assert_eq!(conn.values.get("host").unwrap(), "db.example.com");
+        assert_eq!(conn.values.get("port").unwrap(), &json!(5432));
+        assert_eq!(conn.values.get("database").unwrap(), "myapp");
+        assert_eq!(conn.values.get("user").unwrap(), "admin");
+        assert_eq!(conn.values.get("password").unwrap(), "secret123");
+    }
+
+    #[test]
+    fn test_parse_untyped_connection() {
+        let yaml = r#"
+connections:
+  custom_api:
+    url: "https://api.example.com"
+    token: "abc123"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let conn = config.connections.get("custom_api").unwrap();
+        assert!(conn.connection_type.is_none());
+        assert_eq!(conn.values.get("url").unwrap(), "https://api.example.com");
+        assert_eq!(conn.values.get("token").unwrap(), "abc123");
+    }
+
+    #[test]
+    fn test_workspace_merge_connections() {
+        let config1: WorkflowConfig = serde_yaml::from_str(
+            r#"
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+connections:
+  db1:
+    type: postgres
+    host: "host1"
+"#,
+        )
+        .unwrap();
+
+        let config2: WorkflowConfig = serde_yaml::from_str(
+            r#"
+connection_types:
+  redis:
+    properties:
+      url:
+        type: string
+connections:
+  cache1:
+    type: redis
+    url: "redis://localhost"
+"#,
+        )
+        .unwrap();
+
+        let mut workspace = WorkspaceConfig::new();
+        workspace.merge(config1);
+        workspace.merge(config2);
+
+        assert_eq!(workspace.connection_types.len(), 2);
+        assert!(workspace.connection_types.contains_key("postgres"));
+        assert!(workspace.connection_types.contains_key("redis"));
+        assert_eq!(workspace.connections.len(), 2);
+        assert!(workspace.connections.contains_key("db1"));
+        assert!(workspace.connections.contains_key("cache1"));
+    }
+
+    #[test]
+    fn test_render_connections_applies_defaults() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connection_types.insert(
+            "postgres".to_string(),
+            ConnectionTypeDef {
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert(
+                        "host".to_string(),
+                        ConnectionPropertyDef {
+                            property_type: "string".to_string(),
+                            required: true,
+                            default: None,
+                            secret: false,
+                        },
+                    );
+                    props.insert(
+                        "port".to_string(),
+                        ConnectionPropertyDef {
+                            property_type: "integer".to_string(),
+                            required: false,
+                            default: Some(json!(5432)),
+                            secret: false,
+                        },
+                    );
+                    props
+                },
+            },
+        );
+        ws.connections.insert(
+            "prod_db".to_string(),
+            ConnectionDef {
+                connection_type: Some("postgres".to_string()),
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("db.example.com"));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("prod_db").unwrap();
+        assert_eq!(conn.values.get("host").unwrap(), "db.example.com");
+        // Port should have default applied
+        assert_eq!(conn.values.get("port").unwrap(), &json!(5432));
+    }
+
+    #[test]
+    fn test_render_connections_user_value_takes_precedence() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connection_types.insert(
+            "postgres".to_string(),
+            ConnectionTypeDef {
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert(
+                        "port".to_string(),
+                        ConnectionPropertyDef {
+                            property_type: "integer".to_string(),
+                            required: false,
+                            default: Some(json!(5432)),
+                            secret: false,
+                        },
+                    );
+                    props
+                },
+            },
+        );
+        ws.connections.insert(
+            "prod_db".to_string(),
+            ConnectionDef {
+                connection_type: Some("postgres".to_string()),
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("port".to_string(), json!(5433));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("prod_db").unwrap();
+        assert_eq!(conn.values.get("port").unwrap(), &json!(5433));
+    }
+
+    #[test]
+    fn test_render_connections_template_values() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "api".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("token".to_string(), json!("{{ 'resolved-token' }}"));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("api").unwrap();
+        assert_eq!(conn.values.get("token").unwrap(), "resolved-token");
+    }
+
+    #[test]
+    fn test_render_connections_untyped_passthrough() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "custom".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("url".to_string(), json!("https://example.com"));
+                    v.insert("count".to_string(), json!(42));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("custom").unwrap();
+        assert_eq!(conn.values.get("url").unwrap(), "https://example.com");
+        assert_eq!(conn.values.get("count").unwrap(), &json!(42));
+    }
+
+    #[test]
+    fn test_render_connections_empty() {
+        let mut ws = WorkspaceConfig::new();
+        ws.render_connections().unwrap();
+        assert!(ws.connections.is_empty());
     }
 }

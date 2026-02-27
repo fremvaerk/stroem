@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_common::template::{merge_defaults, render_input_map};
+use stroem_common::template::{merge_defaults, render_input_map, resolve_connection_inputs};
 use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
@@ -64,13 +64,18 @@ fn create_job_for_task_inner<'a>(
         let merged_input = merge_defaults(&input, &task.input, &secrets_ctx)
             .context("Failed to merge input defaults")?;
 
+        // Resolve connection inputs (replace connection names with full objects)
+        let resolved_input =
+            resolve_connection_inputs(&merged_input, &task.input, workspace_config)
+                .context("Failed to resolve connection inputs")?;
+
         // Create job record
         let job_id = JobRepo::create_with_parent(
             pool,
             workspace_name,
             task_name,
             &task.mode,
-            Some(merged_input),
+            Some(resolved_input),
             source_type,
             source_id,
             parent_job_id,

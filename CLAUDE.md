@@ -200,6 +200,19 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Migration `005_hooks.sql` adds `'hook'` to `source_type` CHECK constraint
 - Hook actions can be `type: task` — creates a full child job instead of a single-step hook job
 
+### Connections
+- Named, typed objects storing external system configs (DB creds, API endpoints)
+- `ConnectionTypeDef` — property schema: `property_type`, `required`, `default`, `secret`
+- `ConnectionDef` — `connection_type: Option<String>` + `#[serde(flatten)] values: HashMap<String, Value>`
+- `WorkflowConfig` and `WorkspaceConfig` have `connection_types` and `connections` fields
+- `render_connections()` on `WorkspaceConfig`: Phase 1 renders template values, Phase 2 applies type defaults
+- Called in `folder.rs` after `render_secrets()` during workspace loading
+- **Connection input resolution**: When `InputFieldDef.field_type` is not a primitive (`string`/`integer`/`number`/`boolean`), it's a connection type reference
+- `resolve_connection_inputs()` in `template.rs`: looks up connection name string → replaces with full values object
+- Called in `job_creator.rs` after `merge_defaults()` before job creation
+- Validation: property types, type references, required fields, unknown field warnings, connection input references
+- Untyped connections (no `type` field) skip type validation but still work as task inputs
+
 ### Task Actions (type: task — Sub-Job Execution)
 - `ActionDef.task: Option<String>` — references another task by name
 - `type: task` actions cannot have `cmd`, `script`, `image`, or `runner`

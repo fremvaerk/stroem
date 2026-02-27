@@ -211,6 +211,7 @@ impl WorkspaceManager {
                 tasks_count: config.tasks.len(),
                 actions_count: config.actions.len(),
                 triggers_count: config.triggers.len(),
+                connections_count: config.connections.len(),
                 revision: entry.source.revision(),
                 error: None,
             });
@@ -221,6 +222,7 @@ impl WorkspaceManager {
                 tasks_count: 0,
                 actions_count: 0,
                 triggers_count: 0,
+                connections_count: 0,
                 revision: None,
                 error: Some(error.clone()),
             });
@@ -300,6 +302,7 @@ pub struct WorkspaceInfo {
     pub tasks_count: usize,
     pub actions_count: usize,
     pub triggers_count: usize,
+    pub connections_count: usize,
     pub revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

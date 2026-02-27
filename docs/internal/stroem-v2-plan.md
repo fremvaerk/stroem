@@ -819,8 +819,35 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 2. ~~**`type: pod` actions**~~: **DONE** -- Pod manifest overrides via `manifest` field, deep-merged into generated pod spec. Supports service accounts, node selectors, tolerations, resource limits, annotations, sidecars.
 3. **RBAC**: Roles, permissions, workspace-scoped access control
 4. ~~**Secret resolution**~~: **DONE** -- Tera `| vals` filter for inline resolution + worker-side `resolve_secrets()` for env vars. Supports all vals backends (AWS SSM, Vault, GCP, Azure, SOPS). Full docs at `docs/src/content/docs/guides/secrets.md`.
-5. **Resource types** (custom resource definitions in YAML)
+5. ~~**Connections**~~: **DONE** -- Named, typed objects for external system configs (DB creds, API endpoints). Connection types define property schemas; connections are named instances. Task inputs reference connection types; at job creation, connection name strings are resolved to full objects. Supports template values (e.g., `{{ 'ref+...' | vals }}`), type defaults, and validation.
 6. ~~**DAG visualization**~~: **DONE** -- React Flow + Dagre in `ui/src/components/workflow-dag.tsx`. Interactive graph on task detail (static preview) and job detail (live status). Auto-layout with virtual start/end sentinel nodes, status-based edge coloring and animation, clickable step selection.
+
+### Phase 5 -- Shared Storage & Worker Affinity
+
+When a task runs in distributed mode, its steps may execute on different workers. This makes it impossible to share files between steps (e.g., build artifacts, Docker images, intermediate state). Three sub-phases address this progressively:
+
+**5a. Job Worker Affinity** — Pin all steps of a job to the first worker that claims a step. Zero infrastructure requirements.
+- Add `affinity: "worker"` field to `TaskDef` (default: `"none"`)
+- DB: `affinity` + `affinity_worker_id` columns on `job` table
+- Modify `claim_ready_step()` SQL to join `job` and filter: `(j.affinity = 'none' OR j.affinity_worker_id IS NULL OR j.affinity_worker_id = $worker)`
+- First claim sets `affinity_worker_id` (atomic `WHERE affinity_worker_id IS NULL`), subsequent steps only claimable by that worker
+- Solves: Docker build→push, any local state sharing between steps
+
+**5b. Shared Storage Coordination** — Workers mount a shared filesystem (NFS, EFS, etc.), Strøm assigns job-scoped paths.
+- Worker config: `shared_storage.path` (e.g., `/mnt/stroem-shared`)
+- Worker creates `{shared_storage.path}/jobs/{job_id}/` before step execution
+- Inject `STROEM_ARTIFACTS_DIR` env var pointing to job-scoped directory
+- Docker/K8s runners: bind-mount artifacts dir into containers
+- Tera template access: `{{ artifacts_dir }}` in workflow YAML
+- Cleanup on job completion (configurable delay)
+- Solves: Large artifact sharing (1GB+) across workers with minimal latency
+
+**5c. Built-in Artifact Storage** — Strøm server provides HTTP-based artifact storage (no external infra).
+- Server endpoints: `PUT/GET/DELETE /api/jobs/{id}/artifacts/{path...}`
+- Server config: `artifacts.path` (local dir) + optional `artifacts.s3` backend
+- Worker: inject `stroem-artifacts` helper CLI (push/pull commands) or use env vars (`STROEM_ARTIFACTS_URL`, `STROEM_ARTIFACTS_TOKEN`)
+- TTL-based cleanup after job completion
+- Solves: Zero-dependency artifact sharing for small-to-medium files
 
 ---
 

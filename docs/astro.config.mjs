@@ -38,6 +38,7 @@ export default defineConfig({
             { label: "Input & Output", slug: "guides/input-and-output" },
             { label: "Triggers", slug: "guides/triggers" },
             { label: "Hooks", slug: "guides/hooks" },
+            { label: "Connections", slug: "guides/connections" },
             {
               label: "Secrets & Encryption",
               slug: "guides/secrets",

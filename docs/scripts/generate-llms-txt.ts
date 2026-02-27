@@ -65,6 +65,12 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`manifest\` field is only valid on \`type: pod\` and \`type: shell\` + \`runner: pod\`.
 - Must be a JSON/YAML object (not array or scalar).
 
+**Connections:**
+- \`connection_types\` define property schemas (\`string\`, \`integer\`, \`number\`, \`boolean\`).
+- \`connections\` are named instances referencing a type. Required fields must be present.
+- Task input \`type\` can reference a connection type — the name is resolved to the full object at job creation.
+- Connection values support Tera templates (e.g., \`{{ 'ref+...' | vals }}\`).
+
 `;
 
 // Files to include, in order. Paths relative to docs/src/content/docs/.
@@ -75,6 +81,7 @@ const sections: { file: string; title: string }[] = [
   { file: "guides/templating.md", title: "Templating" },
   { file: "guides/triggers.md", title: "Triggers" },
   { file: "guides/hooks.md", title: "Hooks" },
+  { file: "guides/connections.md", title: "Connections" },
   { file: "guides/secrets.md", title: "Secrets & Encryption" },
   { file: "examples/hello-world.md", title: "Example: Hello World" },
   { file: "examples/deploy-pipeline.md", title: "Example: Deploy Pipeline" },

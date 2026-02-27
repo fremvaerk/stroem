@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use tera::Tera;
 
-use crate::models::workflow::InputFieldDef;
+use crate::models::workflow::{InputFieldDef, WorkspaceConfig};
 
 /// Tera filter that resolves `ref+` secret references via the vals CLI.
 ///
@@ -119,6 +119,12 @@ pub fn render_string_opt(
 
 /// Renders all string values in an input map, returns a new JSON object.
 /// Non-string values pass through unchanged.
+///
+/// For simple variable references like `{{ input.db }}` where the context value is
+/// a non-string (object, array, number, boolean), the raw value is extracted directly
+/// from the context. This preserves structured data (e.g. connection objects) flowing
+/// through step input templates, so downstream action spec templates can access nested
+/// fields like `{{ input.db.host }}`.
 pub fn render_input_map(
     input_map: &HashMap<String, serde_json::Value>,
     context: &serde_json::Value,
@@ -128,9 +134,35 @@ pub fn render_input_map(
     for (key, value) in input_map {
         let rendered_value = match value {
             serde_json::Value::String(s) => {
-                let rendered = render_template(s, context)
-                    .with_context(|| format!("Failed to render template for key '{}'", key))?;
-                serde_json::Value::String(rendered)
+                // For simple variable references ({{ path.to.value }}), extract the
+                // raw value from context to preserve structured data (objects, arrays).
+                // This is essential for connection objects flowing through step templates.
+                // Only objects and arrays are extracted directly — primitives (strings,
+                // numbers, booleans) continue through Tera to produce string output,
+                // preserving backward compatibility.
+                if let Some(path) = extract_simple_variable_path(s) {
+                    if let Some(raw_value) = resolve_context_path(context, path) {
+                        if raw_value.is_object() || raw_value.is_array() {
+                            raw_value
+                        } else {
+                            // Primitive value — render through Tera for string output
+                            let rendered = render_template(s, context).with_context(|| {
+                                format!("Failed to render template for key '{}'", key)
+                            })?;
+                            serde_json::Value::String(rendered)
+                        }
+                    } else {
+                        // Path not found — fall through to Tera for proper error message
+                        let rendered = render_template(s, context).with_context(|| {
+                            format!("Failed to render template for key '{}'", key)
+                        })?;
+                        serde_json::Value::String(rendered)
+                    }
+                } else {
+                    let rendered = render_template(s, context)
+                        .with_context(|| format!("Failed to render template for key '{}'", key))?;
+                    serde_json::Value::String(rendered)
+                }
             }
             // Pass through non-string values unchanged
             other => other.clone(),
@@ -139,6 +171,34 @@ pub fn render_input_map(
     }
 
     Ok(serde_json::Value::Object(result))
+}
+
+/// Check if a template string is a simple variable reference like `{{ input.db }}`.
+/// Returns the variable path (e.g. "input.db") if it matches, None otherwise.
+/// Does NOT match templates with filters, surrounding text, or multiple expressions.
+fn extract_simple_variable_path(template: &str) -> Option<&str> {
+    let trimmed = template.trim();
+    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    // Must be a simple dot-path: alphanumeric, dots, underscores only
+    if !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+    {
+        Some(inner)
+    } else {
+        None
+    }
+}
+
+/// Resolve a dot-separated path against a JSON context value.
+/// E.g. "input.db.host" resolves through context["input"]["db"]["host"].
+fn resolve_context_path(context: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut current = context;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current.clone())
 }
 
 /// Merge task input defaults into user-provided input.
@@ -186,6 +246,82 @@ pub fn merge_defaults(
         // Note: required-field validation is intentionally not done here.
         // Webhooks and triggers supply different input shapes (body, headers, etc.)
         // that don't match the task's input schema.
+    }
+
+    Ok(serde_json::Value::Object(result))
+}
+
+/// Primitive type names that are NOT connection type references.
+const PRIMITIVE_TYPES: &[&str] = &["string", "integer", "number", "boolean"];
+
+/// Resolve connection inputs: replace connection name strings with the full connection object.
+///
+/// For each field in `input_schema` where `field_type` is not a primitive type,
+/// it's treated as a connection type reference. The corresponding value in `input`
+/// (a string naming a connection) is looked up in `workspace_config.connections`
+/// and replaced with the connection's values object.
+pub fn resolve_connection_inputs(
+    input: &serde_json::Value,
+    input_schema: &HashMap<String, InputFieldDef>,
+    workspace_config: &WorkspaceConfig,
+) -> Result<serde_json::Value> {
+    let empty = serde_json::Map::new();
+    let input_map = input.as_object().unwrap_or(&empty);
+    let mut result = input_map.clone();
+
+    for (field_name, field_def) in input_schema {
+        if PRIMITIVE_TYPES.contains(&field_def.field_type.as_str()) {
+            continue;
+        }
+
+        // This field references a connection type
+        let value = match result.get(field_name) {
+            Some(v) => v.clone(),
+            None => continue, // Field not provided — skip (merge_defaults may have already handled it)
+        };
+
+        let conn_name = match value.as_str() {
+            Some(s) => s,
+            None => {
+                // Already an object (e.g. passed inline) — skip resolution
+                if value.is_object() {
+                    continue;
+                }
+                bail!(
+                    "Input field '{}' expects a connection name (string), got {}",
+                    field_name,
+                    value
+                );
+            }
+        };
+
+        let conn = workspace_config
+            .connections
+            .get(conn_name)
+            .with_context(|| {
+                format!(
+                    "Input field '{}' references connection '{}' which does not exist",
+                    field_name, conn_name
+                )
+            })?;
+
+        // Validate connection type matches the declared input type
+        if let Some(ref conn_type) = conn.connection_type {
+            if conn_type != &field_def.field_type {
+                bail!(
+                    "Input field '{}' expects type '{}' but connection '{}' is type '{}'",
+                    field_name,
+                    field_def.field_type,
+                    conn_name,
+                    conn_type
+                );
+            }
+        }
+
+        // Replace the string with the connection's values object
+        let values_json =
+            serde_json::to_value(&conn.values).context("Failed to serialize connection values")?;
+        result.insert(field_name.clone(), values_json);
     }
 
     Ok(serde_json::Value::Object(result))
@@ -795,5 +931,296 @@ mod tests {
         assert_eq!(result["env"], "production");
         assert_eq!(result["retries"], 3);
         assert_eq!(result["notify"], true);
+    }
+
+    // --- resolve_connection_inputs tests ---
+
+    use crate::models::workflow::{ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef};
+
+    fn make_ws_with_connection() -> WorkspaceConfig {
+        let mut ws = WorkspaceConfig::new();
+        ws.connection_types.insert(
+            "postgres".to_string(),
+            ConnectionTypeDef {
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert(
+                        "host".to_string(),
+                        ConnectionPropertyDef {
+                            property_type: "string".to_string(),
+                            required: true,
+                            default: None,
+                            secret: false,
+                        },
+                    );
+                    props.insert(
+                        "port".to_string(),
+                        ConnectionPropertyDef {
+                            property_type: "integer".to_string(),
+                            required: false,
+                            default: Some(json!(5432)),
+                            secret: false,
+                        },
+                    );
+                    props
+                },
+            },
+        );
+        ws.connections.insert(
+            "prod_db".to_string(),
+            ConnectionDef {
+                connection_type: Some("postgres".to_string()),
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("db.example.com"));
+                    v.insert("port".to_string(), json!(5432));
+                    v.insert("database".to_string(), json!("myapp"));
+                    v
+                },
+            },
+        );
+        ws
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_valid() {
+        let ws = make_ws_with_connection();
+        let input = json!({"db": "prod_db", "env": "production"});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+        schema.insert("env".to_string(), field("string", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        // db should be resolved to the connection's values
+        assert_eq!(result["db"]["host"], "db.example.com");
+        assert_eq!(result["db"]["port"], 5432);
+        assert_eq!(result["db"]["database"], "myapp");
+        // env should pass through unchanged
+        assert_eq!(result["env"], "production");
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_missing_connection() {
+        let ws = make_ws_with_connection();
+        let input = json!({"db": "nonexistent"});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("does not exist"));
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_type_mismatch() {
+        let mut ws = make_ws_with_connection();
+        ws.connection_types.insert(
+            "redis".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        // prod_db is type: postgres, but schema expects redis
+        let input = json!({"cache": "prod_db"});
+        let mut schema = HashMap::new();
+        schema.insert("cache".to_string(), field("redis", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expects type 'redis'"));
+        assert!(err.contains("type 'postgres'"));
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_primitives_passthrough() {
+        let ws = WorkspaceConfig::new();
+        let input = json!({"name": "alice", "count": 5});
+        let mut schema = HashMap::new();
+        schema.insert("name".to_string(), field("string", false, None));
+        schema.insert("count".to_string(), field("integer", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["name"], "alice");
+        assert_eq!(result["count"], 5);
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_empty_input() {
+        let ws = make_ws_with_connection();
+        let input = json!({});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        // Missing field should be skipped (not an error)
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert!(result.get("db").is_none());
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_object_passthrough() {
+        let ws = make_ws_with_connection();
+        // Already an object (inline connection data) — should pass through
+        let input = json!({"db": {"host": "inline.example.com", "port": 5433}});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["db"]["host"], "inline.example.com");
+        assert_eq!(result["db"]["port"], 5433);
+    }
+
+    #[test]
+    fn test_render_input_map_preserves_connection_object() {
+        // When a step input template references a connection object (e.g. {{ input.db }}),
+        // Tera renders it as a JSON string. render_input_map should parse it back to
+        // preserve the structured value, so downstream action spec templates can access
+        // nested fields like {{ input.db.host }}.
+        let mut input_map = HashMap::new();
+        input_map.insert("db".to_string(), json!("{{ input.db }}"));
+        input_map.insert("env".to_string(), json!("{{ input.env }}"));
+
+        let context = json!({
+            "input": {
+                "db": {
+                    "host": "db.example.com",
+                    "port": 5432,
+                    "database": "myapp"
+                },
+                "env": "production"
+            }
+        });
+
+        let result = render_input_map(&input_map, &context).unwrap();
+        // Connection object should be preserved as a structured value
+        assert!(
+            result["db"].is_object(),
+            "db should be an object, got: {}",
+            result["db"]
+        );
+        assert_eq!(result["db"]["host"], "db.example.com");
+        assert_eq!(result["db"]["port"], 5432);
+        assert_eq!(result["db"]["database"], "myapp");
+        // Simple string should stay as string
+        assert!(result["env"].is_string());
+        assert_eq!(result["env"], "production");
+    }
+
+    #[test]
+    fn test_render_input_map_preserves_array() {
+        let mut input_map = HashMap::new();
+        input_map.insert("tags".to_string(), json!("{{ input.tags }}"));
+
+        let context = json!({
+            "input": {
+                "tags": ["web", "backend"]
+            }
+        });
+
+        let result = render_input_map(&input_map, &context).unwrap();
+        assert!(
+            result["tags"].is_array(),
+            "tags should be an array, got: {}",
+            result["tags"]
+        );
+    }
+
+    #[test]
+    fn test_render_input_map_string_starting_with_brace_stays_string() {
+        // A rendered string that starts with '{' but isn't valid JSON should stay as string
+        let mut input_map = HashMap::new();
+        input_map.insert("msg".to_string(), json!("{prefix} {{ input.name }}"));
+
+        let context = json!({
+            "input": {
+                "name": "alice"
+            }
+        });
+
+        let result = render_input_map(&input_map, &context).unwrap();
+        assert!(result["msg"].is_string());
+        assert_eq!(result["msg"], "{prefix} alice");
+    }
+
+    #[test]
+    fn test_render_input_map_connection_then_action_spec() {
+        // Full chain: resolved connection in job input → step input template → action spec context
+        // Step 1: Simulate job input with resolved connection
+        let job_input = json!({
+            "db": {
+                "host": "db.example.com",
+                "port": 5432,
+                "database": "myapp"
+            },
+            "env": "production"
+        });
+
+        // Step 2: Render step input template (flow_step.input)
+        let mut step_input = HashMap::new();
+        step_input.insert("db".to_string(), json!("{{ input.db }}"));
+        step_input.insert("env".to_string(), json!("{{ input.env }}"));
+
+        let step_context = json!({ "input": job_input });
+        let rendered_step_input = render_input_map(&step_input, &step_context).unwrap();
+
+        // Step 3: Build action spec context from rendered step input
+        let spec_context = json!({ "input": rendered_step_input });
+
+        // Step 4: Action cmd template can access nested fields
+        let cmd = render_template(
+            "migrate --host {{ input.db.host }} --port {{ input.db.port }} --env {{ input.env }}",
+            &spec_context,
+        )
+        .unwrap();
+        assert_eq!(
+            cmd,
+            "migrate --host db.example.com --port 5432 --env production"
+        );
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_non_string_non_object_value() {
+        // Passing a number/boolean/array as connection input should error
+        let ws = make_ws_with_connection();
+        let input = json!({"db": 42});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expects a connection name"));
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_untyped_connection() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connection_types.insert(
+            "custom".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        ws.connections.insert(
+            "my_api".to_string(),
+            ConnectionDef {
+                connection_type: None, // untyped
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("url".to_string(), json!("https://api.example.com"));
+                    v
+                },
+            },
+        );
+
+        let input = json!({"api": "my_api"});
+        let mut schema = HashMap::new();
+        schema.insert("api".to_string(), field("custom", false, None));
+
+        // Untyped connection: no type mismatch check, just resolve
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["api"]["url"], "https://api.example.com");
     }
 }
