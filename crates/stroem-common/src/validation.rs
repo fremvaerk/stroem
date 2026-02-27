@@ -234,7 +234,7 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 /// - Empty string values produce errors.
 fn validate_connections(config: &WorkflowConfig) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
-    let valid_prop_types = ["string", "integer", "number", "boolean"];
+    let valid_prop_types = ["string", "text", "integer", "number", "boolean"];
 
     // Validate connection type definitions
     for (type_name, type_def) in &config.connection_types {
@@ -310,7 +310,7 @@ fn validate_connections(config: &WorkflowConfig) -> Result<Vec<String>> {
 /// it's treated as a connection type reference and must exist in `connection_types`.
 fn validate_connection_inputs(config: &WorkflowConfig) -> Result<Vec<String>> {
     let warnings = Vec::new();
-    let primitives = ["string", "integer", "number", "boolean"];
+    let primitives = ["string", "text", "integer", "number", "boolean"];
 
     for (task_name, task) in &config.tasks {
         for (field_name, field_def) in &task.input {
@@ -2509,6 +2509,33 @@ tasks:
     flow:
       step1:
         action: greet
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_text_input_type_ok() {
+        let yaml = r#"
+actions:
+  run-query:
+    type: shell
+    cmd: "echo hello"
+    input:
+      query:
+        type: text
+
+tasks:
+  test:
+    input:
+      sql:
+        type: text
+    flow:
+      step1:
+        action: run-query
+        input:
+          query: "{{ input.sql }}"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);

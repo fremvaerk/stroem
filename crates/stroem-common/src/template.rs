@@ -252,7 +252,7 @@ pub fn merge_defaults(
 }
 
 /// Primitive type names that are NOT connection type references.
-const PRIMITIVE_TYPES: &[&str] = &["string", "integer", "number", "boolean"];
+const PRIMITIVE_TYPES: &[&str] = &["string", "text", "integer", "number", "boolean"];
 
 /// Resolve connection inputs: replace connection name strings with the full connection object.
 ///
@@ -1105,6 +1105,17 @@ mod tests {
         let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
         assert_eq!(result["name"], "alice");
         assert_eq!(result["count"], 5);
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_text_type_is_primitive() {
+        let ws = WorkspaceConfig::new();
+        let input = json!({"query": "SELECT *\nFROM users\nWHERE active = true"});
+        let mut schema = HashMap::new();
+        schema.insert("query".to_string(), field("text", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["query"], "SELECT *\nFROM users\nWHERE active = true");
     }
 
     #[test]

@@ -104,7 +104,7 @@ The system resolves `"prod_db"` to `{ "host": "db.example.com", "port": 5432, "d
 
 1. `merge_defaults()` runs as normal (fills missing fields, applies defaults)
 2. `resolve_connection_inputs()` scans each task input field:
-   - If the field type is a connection type (not `string`/`integer`/`number`/`boolean`), the provided string value is looked up in workspace connections
+   - If the field type is a connection type (not `string`/`text`/`integer`/`number`/`boolean`), the provided string value is looked up in workspace connections
    - The string is replaced with the connection's values object
 3. The resolved input is stored in the job — available in all templates
 
@@ -112,7 +112,7 @@ The system resolves `"prod_db"` to `{ "host": "db.example.com", "port": 5432, "d
 
 At YAML parse time (`stroem validate`):
 
-- Connection type property types must be `string`, `integer`, `number`, or `boolean`
+- Connection type property types must be `string`, `text`, `integer`, `number`, or `boolean`
 - Typed connections must reference an existing `connection_type`
 - Required fields without defaults must be present in the connection
 - Unknown fields produce warnings

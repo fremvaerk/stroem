@@ -10,12 +10,26 @@ Both actions and tasks can declare input parameters.
 ```yaml
 input:
   name:
-    type: string          # parameter type (string for now)
+    type: string          # single-line text
     required: true         # fails if not provided
   env:
     type: string
     default: "staging"     # used when not provided
+  query:
+    type: text            # multiline text (textarea in UI)
 ```
+
+### Supported types
+
+| Type      | Description                                           |
+|-----------|-------------------------------------------------------|
+| `string`  | Single-line text. Renders as an input field in the UI |
+| `text`    | Multiline text. Renders as a textarea in the UI       |
+| `integer` | Whole number                                          |
+| `number`  | Numeric value (integer or decimal)                    |
+| `boolean` | True/false. Renders as a checkbox in the UI           |
+
+Both `string` and `text` are treated identically at runtime — the difference is only in how the UI renders the input field. Use `text` for values that benefit from multiline editing such as SQL queries, scripts, or markdown content.
 
 ### Task-level input
 

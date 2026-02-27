@@ -14,6 +14,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { StatusBadge } from "@/components/status-badge";
@@ -493,6 +494,28 @@ function InputFieldRow({
             {field.description || fieldKey}
           </Label>
         </div>
+      </div>
+    );
+  }
+
+  if (field.type === "text") {
+    return (
+      <div className="space-y-2">
+        <Label htmlFor={id}>
+          {fieldKey}
+          {field.required && <span className="ml-1 text-destructive">*</span>}
+        </Label>
+        <Textarea
+          id={id}
+          rows={4}
+          value={String(value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.description || fieldKey}
+          required={field.required}
+        />
+        {field.description && (
+          <p className="text-xs text-muted-foreground">{field.description}</p>
+        )}
       </div>
     );
   }
