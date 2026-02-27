@@ -24,6 +24,47 @@ const HEADER = `# Strøm — Workflow YAML Reference
 >
 > Site: https://fremvaerk.github.io/stroem
 
+## Quick Reference — Validation Rules
+
+When generating Strøm workflow YAML, these constraints are enforced at parse time:
+
+**Action types:**
+- \`type: shell\` — requires \`cmd\` or \`script\`. Cannot have \`image\`.
+- \`type: docker\` — requires \`image\`. Runs container as-is (no workspace mount).
+- \`type: pod\` — requires \`image\`. Runs as Kubernetes pod (no workspace mount).
+- \`type: shell\` + \`runner: docker\` — shell commands inside a Docker container with workspace at \`/workspace\`.
+- \`type: shell\` + \`runner: pod\` — shell commands inside a Kubernetes pod with workspace.
+- \`type: task\` — requires \`task\` field. Cannot have \`cmd\`, \`script\`, \`image\`, or \`runner\`.
+- \`type: shell\` + \`image\` is **rejected** — use \`type: docker\` or \`runner: docker\` instead.
+
+**Task actions:**
+- \`task\` field must reference an existing task in the same workspace.
+- Self-referencing tasks (direct or via hooks) are rejected.
+- Maximum nesting depth: 10 levels.
+
+**Flow steps:**
+- \`action\` must reference an existing action.
+- \`depends_on\` must reference existing steps within the same flow.
+- No cycles allowed in the dependency graph.
+
+**Triggers:**
+- \`type: scheduler\` — \`cron\` must be a valid 5-field or 6-field cron expression.
+- \`type: webhook\` — \`name\` must match \`^[a-zA-Z0-9_-]+$\` (URL-safe).
+- \`mode\` must be \`"sync"\` or \`"async"\` (default: \`"async"\`).
+- \`timeout_secs\` must be 1–300 (default: 30). Only meaningful in sync mode.
+
+**Hooks:**
+- \`on_success\` / \`on_error\` hook action references must exist.
+- Hook actions can be \`type: task\` (creates a child job).
+
+**Templates:**
+- Step names with hyphens (e.g., \`say-hello\`) become underscores in templates: \`{{ say_hello.output.* }}\`.
+- Template context: \`input.*\`, \`<step_name>.output.*\`, \`secret.*\`.
+
+**Pod manifest overrides:**
+- \`manifest\` field is only valid on \`type: pod\` and \`type: shell\` + \`runner: pod\`.
+- Must be a JSON/YAML object (not array or scalar).
+
 `;
 
 // Files to include, in order. Paths relative to docs/src/content/docs/.
