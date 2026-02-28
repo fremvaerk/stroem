@@ -462,6 +462,8 @@ async fn test_promote_ready_steps() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "action1".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -472,6 +474,8 @@ async fn test_promote_ready_steps() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "action2".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -482,6 +486,8 @@ async fn test_promote_ready_steps() -> Result<()> {
         "step3".to_string(),
         FlowStep {
             action: "action3".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step2".to_string(), "step4".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -492,6 +498,8 @@ async fn test_promote_ready_steps() -> Result<()> {
         "step4".to_string(),
         FlowStep {
             action: "action4".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,

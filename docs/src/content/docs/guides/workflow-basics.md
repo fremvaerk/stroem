@@ -18,14 +18,21 @@ For the default folder workspace, files are at `workspace/.workflows/`. For git-
 ```yaml
 actions:
   <action-name>:
+    name: Human-Readable Name    # optional display name
+    description: What it does    # optional description
     type: shell
     cmd: "..."
     input:
-      <param-name>: { type: string, required: true }
+      <param-name>:
+        type: string
+        description: What this parameter is for  # optional
+        required: true
       <param-name>: { type: string, default: "value" }
 
 tasks:
   <task-name>:
+    name: Human-Readable Name    # optional display name
+    description: What this task does  # optional description
     mode: distributed
     folder: <optional-folder-path>
     input:
@@ -34,6 +41,8 @@ tasks:
       # Reference a named action:
       <step-name>:
         action: <action-name>
+        name: Human-Readable Step Name  # optional display name
+        description: What this step does  # optional description
         depends_on: [<other-step>]
         input:
           <param>: "{{ input.param }}"
@@ -41,6 +50,7 @@ tasks:
       <step-name>:
         type: shell
         cmd: "..."
+        name: Human-Readable Step Name  # optional
         depends_on: [<other-step>]
 ```
 
@@ -48,24 +58,48 @@ tasks:
 
 Actions are the smallest execution unit. Each action defines a command or script that runs on a worker. See [Action Types](/guides/action-types/) for all supported types.
 
+Actions support optional `name` and `description` fields for human-readable labeling:
+
+```yaml
+actions:
+  greet:
+    name: Greet User
+    description: Sends a greeting message to the specified user
+    type: shell
+    cmd: "echo Hello {{ input.name }}"
+    input:
+      name:
+        type: string
+        description: The user's name
+        required: true
+```
+
 ## Tasks
 
 Tasks compose actions into a DAG (directed acyclic graph) of steps.
 
 ### Basic task
 
+Tasks support optional `name` and `description` fields, and flow steps can also have their own `name` and `description`:
+
 ```yaml
 tasks:
   hello-world:
+    name: Hello World
+    description: A simple greeting task
     mode: distributed
     input:
       name: { type: string, default: "World" }
     flow:
       say-hello:
         action: greet
+        name: Say Hello
+        description: Greet the user by name
         input:
           name: "{{ input.name }}"
 ```
+
+The `name` and `description` are displayed in the web UI. When omitted, the YAML key (e.g. `hello-world`, `say-hello`) is used as the display label.
 
 ### Inline actions
 

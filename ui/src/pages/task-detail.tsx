@@ -198,7 +198,7 @@ export function TaskDetailPage() {
           input[key] = val;
         }
       }
-      const res = await executeTask(workspace, task.name, input);
+      const res = await executeTask(workspace, task.id, input);
       navigate(`/jobs/${res.job_id}`);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to execute task");
@@ -239,9 +239,19 @@ export function TaskDetailPage() {
         </Button>
         <div className="flex-1">
           <h1 className="text-2xl font-semibold tracking-tight">
-            {task.name}
+            {task.name ?? task.id}
           </h1>
+          {task.description && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {task.description}
+            </p>
+          )}
           <div className="mt-1 flex items-center gap-2">
+            {task.name && (
+              <Badge variant="secondary" className="font-mono text-xs">
+                {task.id}
+              </Badge>
+            )}
             <Badge variant="outline" className="font-mono text-xs">
               {task.mode}
             </Badge>
@@ -382,7 +392,21 @@ export function TaskDetailPage() {
                   {index + 1}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <span className="font-mono text-sm">{stepName}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-sm">
+                      {step.name ?? stepName}
+                    </span>
+                    {step.name && (
+                      <span className="text-xs text-muted-foreground font-mono">
+                        {stepName}
+                      </span>
+                    )}
+                  </div>
+                  {step.description && (
+                    <p className="text-xs text-muted-foreground">
+                      {step.description}
+                    </p>
+                  )}
                   <p className="text-xs text-muted-foreground">
                     action: {formatActionName(step.action)}
                     {step.depends_on && step.depends_on.length > 0 && (
@@ -482,11 +506,13 @@ function InputFieldRow({
 }) {
   const id = `input-${fieldKey}`;
 
+  const displayLabel = field.name ?? fieldKey;
+
   if (field.secret) {
     return (
       <div className="space-y-2">
         <Label htmlFor={id}>
-          {fieldKey}
+          {displayLabel}
           {field.required && !field.default && (
             <span className="ml-1 text-destructive">*</span>
           )}
@@ -510,7 +536,7 @@ function InputFieldRow({
     return (
       <div className="space-y-2">
         <Label htmlFor={id}>
-          {fieldKey}
+          {displayLabel}
           {field.required && <span className="ml-1 text-destructive">*</span>}
         </Label>
         <div className="flex items-center gap-2">
@@ -520,7 +546,7 @@ function InputFieldRow({
             onCheckedChange={(checked) => onChange(!!checked)}
           />
           <Label htmlFor={id} className="text-sm font-normal text-muted-foreground">
-            {field.description || fieldKey}
+            {field.description || displayLabel}
           </Label>
         </div>
       </div>
@@ -531,7 +557,7 @@ function InputFieldRow({
     return (
       <div className="space-y-2">
         <Label htmlFor={id}>
-          {fieldKey}
+          {displayLabel}
           {field.required && <span className="ml-1 text-destructive">*</span>}
         </Label>
         <Textarea
@@ -552,7 +578,7 @@ function InputFieldRow({
   return (
     <div className="space-y-2">
       <Label htmlFor={id}>
-        {fieldKey}
+        {displayLabel}
         {field.required && <span className="ml-1 text-destructive">*</span>}
       </Label>
       <Input

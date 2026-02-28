@@ -95,6 +95,8 @@ mod tests {
     fn make_step(action: &str, depends_on: Vec<&str>) -> FlowStep {
         FlowStep {
             action: action.to_string(),
+            name: None,
+            description: None,
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             input: HashMap::new(),
             continue_on_failure: false,

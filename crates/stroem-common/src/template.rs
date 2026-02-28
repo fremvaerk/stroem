@@ -810,6 +810,8 @@ mod tests {
     ) -> InputFieldDef {
         InputFieldDef {
             field_type: field_type.to_string(),
+            name: None,
+            description: None,
             required,
             secret: false,
             default,
@@ -1020,6 +1022,8 @@ mod tests {
             "api_key".to_string(),
             InputFieldDef {
                 field_type: "string".to_string(),
+                name: None,
+                description: None,
                 required: false,
                 secret: true,
                 default: Some(json!("the-secret-value")),
@@ -1029,6 +1033,8 @@ mod tests {
             "env".to_string(),
             InputFieldDef {
                 field_type: "string".to_string(),
+                name: None,
+                description: None,
                 required: false,
                 secret: false,
                 default: Some(json!("staging")),

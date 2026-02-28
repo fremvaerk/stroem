@@ -9,15 +9,24 @@ Both actions and tasks can declare input parameters.
 
 ```yaml
 input:
-  name:
+  user_name:
     type: string          # single-line text
+    name: User name       # optional, human-readable label in UI
+    description: The user's full name  # optional, shown as helper text
     required: true         # fails if not provided
   env:
     type: string
+    name: Environment
+    description: Target deployment environment
     default: "staging"     # used when not provided
   query:
     type: text            # multiline text (textarea in UI)
+    description: SQL query to execute
 ```
+
+The optional `name` field provides a human-readable label for the input field in the web UI. When not set, the YAML key (e.g. `user_name`) is used as the label.
+
+The optional `description` field is displayed in the web UI as placeholder text and helper text below the input field.
 
 ### Supported types
 

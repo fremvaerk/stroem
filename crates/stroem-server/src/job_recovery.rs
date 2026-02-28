@@ -359,6 +359,8 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
             step.step_name.clone(),
             FlowStep {
                 action: step.action_name.clone(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -367,6 +369,8 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
         );
     }
     Ok(TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),

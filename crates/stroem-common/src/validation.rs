@@ -897,6 +897,8 @@ triggers:
         config.tasks.insert(
             "test".to_string(),
             TaskDef {
+                name: None,
+                description: None,
                 mode: "distributed".to_string(),
                 folder: None,
                 input: HashMap::new(),
@@ -929,6 +931,8 @@ triggers:
         config.tasks.insert(
             "test".to_string(),
             TaskDef {
+                name: None,
+                description: None,
                 mode: "distributed".to_string(),
                 folder: None,
                 input: HashMap::new(),

@@ -463,6 +463,8 @@ tasks:
             "test-action".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                name: None,
+                description: None,
                 task: None,
                 cmd: Some("echo test".to_string()),
                 script: None,
@@ -485,6 +487,8 @@ tasks:
             "step1".to_string(),
             FlowStep {
                 action: "test-action".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -495,6 +499,8 @@ tasks:
         config.tasks.insert(
             "test-task".to_string(),
             TaskDef {
+                name: None,
+                description: None,
                 mode: "distributed".to_string(),
                 folder: None,
                 input: HashMap::new(),
@@ -524,6 +530,8 @@ tasks:
             "action1".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                name: None,
+                description: None,
                 task: None,
                 cmd: Some("echo 1".to_string()),
                 script: None,
@@ -546,6 +554,8 @@ tasks:
             "step1".to_string(),
             FlowStep {
                 action: "action1".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -555,6 +565,8 @@ tasks:
         config1.tasks.insert(
             "task1".to_string(),
             TaskDef {
+                name: None,
+                description: None,
                 mode: "distributed".to_string(),
                 folder: None,
                 input: HashMap::new(),
@@ -569,6 +581,8 @@ tasks:
             "action2".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                name: None,
+                description: None,
                 task: None,
                 cmd: Some("echo 2".to_string()),
                 script: None,
@@ -591,6 +605,8 @@ tasks:
             "step1".to_string(),
             FlowStep {
                 action: "action2".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -600,6 +616,8 @@ tasks:
         config2.tasks.insert(
             "task2".to_string(),
             TaskDef {
+                name: None,
+                description: None,
                 mode: "distributed".to_string(),
                 folder: None,
                 input: HashMap::new(),

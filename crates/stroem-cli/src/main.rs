@@ -267,7 +267,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
             println!("{:30} {:15} {:20} MODE", "NAME", "WORKSPACE", "FOLDER");
             println!("{}", "-".repeat(75));
             for task in tasks {
-                let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                let name = task.get("id").and_then(|v| v.as_str()).unwrap_or("-");
                 let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
                 let folder = task.get("folder").and_then(|v| v.as_str()).unwrap_or("-");
                 println!("{:30} {:15} {:20} {}", name, ws, folder, mode);
@@ -305,7 +305,7 @@ async fn cmd_tasks(client: &Client, server: &str, workspace: Option<&str>) -> Re
                     let body: Value = resp.json().await.context("Failed to parse response")?;
                     if let Some(tasks) = body.as_array() {
                         for task in tasks {
-                            let name = task.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                            let name = task.get("id").and_then(|v| v.as_str()).unwrap_or("-");
                             let mode = task.get("mode").and_then(|v| v.as_str()).unwrap_or("-");
                             let folder = task.get("folder").and_then(|v| v.as_str()).unwrap_or("-");
                             println!("{:30} {:15} {:20} {}", name, ws_name, folder, mode);

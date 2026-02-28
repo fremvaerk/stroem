@@ -300,6 +300,8 @@ mod tests {
             "greet".to_string(),
             ActionDef {
                 action_type: "shell".to_string(),
+                name: None,
+                description: None,
                 task: None,
                 cmd: Some("echo hello".to_string()),
                 script: None,
@@ -322,6 +324,8 @@ mod tests {
             "step1".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -331,6 +335,8 @@ mod tests {
         config.tasks.insert(
             "hello".to_string(),
             TaskDef {
+                name: None,
+                description: None,
                 mode: "distributed".to_string(),
                 folder: None,
                 input: HashMap::new(),

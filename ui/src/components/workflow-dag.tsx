@@ -279,7 +279,7 @@ export function WorkflowDag({
           type: "step",
           position: { x: 0, y: 0 },
           data: {
-            label: name,
+            label: flowStep.name ?? name,
             action: flowStep.action,
             selected: selectedStep === name,
           } satisfies StepNodeData,

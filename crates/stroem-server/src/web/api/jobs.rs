@@ -590,6 +590,8 @@ mod tests {
             "build".to_string(),
             FlowStep {
                 action: "shell/bash".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -600,6 +602,8 @@ mod tests {
             "test".to_string(),
             FlowStep {
                 action: "shell/bash".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["build".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -610,6 +614,8 @@ mod tests {
             "deploy".to_string(),
             FlowStep {
                 action: "shell/bash".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["build".to_string(), "test".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,

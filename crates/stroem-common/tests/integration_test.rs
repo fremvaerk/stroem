@@ -342,6 +342,8 @@ fn test_dag_fan_out_fan_in() {
         "step1".to_string(),
         FlowStep {
             action: "a".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -352,6 +354,8 @@ fn test_dag_fan_out_fan_in() {
         "step2".to_string(),
         FlowStep {
             action: "a".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -362,6 +366,8 @@ fn test_dag_fan_out_fan_in() {
         "step3".to_string(),
         FlowStep {
             action: "a".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -372,6 +378,8 @@ fn test_dag_fan_out_fan_in() {
         "step4".to_string(),
         FlowStep {
             action: "a".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step2".to_string(), "step3".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,

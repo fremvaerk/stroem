@@ -40,6 +40,8 @@ fn test_workspace() -> WorkspaceConfig {
         "name".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -49,6 +51,8 @@ fn test_workspace() -> WorkspaceConfig {
         "greet".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("echo Hello $NAME".to_string()),
             script: None,
@@ -71,6 +75,8 @@ fn test_workspace() -> WorkspaceConfig {
         "shout".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("echo $MSG | tr a-z A-Z".to_string()),
             script: None,
@@ -93,6 +99,8 @@ fn test_workspace() -> WorkspaceConfig {
         "docker-build".to_string(),
         ActionDef {
             action_type: "docker".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: None,
             script: None,
@@ -122,6 +130,8 @@ fn test_workspace() -> WorkspaceConfig {
         "greet".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: hello_input,
             continue_on_failure: false,
@@ -133,6 +143,8 @@ fn test_workspace() -> WorkspaceConfig {
         "name".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -141,6 +153,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "hello-world".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: task_input,
@@ -158,6 +172,8 @@ fn test_workspace() -> WorkspaceConfig {
         "greet".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: greet_step_input,
             continue_on_failure: false,
@@ -170,6 +186,8 @@ fn test_workspace() -> WorkspaceConfig {
         "shout".to_string(),
         FlowStep {
             action: "shout".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["greet".to_string()],
             input: shout_step_input,
             continue_on_failure: false,
@@ -181,6 +199,8 @@ fn test_workspace() -> WorkspaceConfig {
         "name".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -189,6 +209,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "greet-and-shout".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: gs_task_input,
@@ -204,6 +226,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -214,6 +238,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -224,6 +250,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step3".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -233,6 +261,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "linear-3".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -248,6 +278,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -258,6 +290,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -268,6 +302,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step3".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -278,6 +314,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step4".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step2".to_string(), "step3".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -287,6 +325,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "diamond".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -302,6 +342,8 @@ fn test_workspace() -> WorkspaceConfig {
         "build".to_string(),
         FlowStep {
             action: "docker-build".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -311,6 +353,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "docker-build-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -328,6 +372,8 @@ fn test_workspace() -> WorkspaceConfig {
         "greet".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: mi_greet_input,
             continue_on_failure: false,
@@ -342,6 +388,8 @@ fn test_workspace() -> WorkspaceConfig {
         "process".to_string(),
         FlowStep {
             action: "shout".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["greet".to_string()],
             input: mi_process_input,
             continue_on_failure: false,
@@ -353,6 +401,8 @@ fn test_workspace() -> WorkspaceConfig {
         "name".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -361,6 +411,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "mixed-input".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: mi_task_input,
@@ -376,6 +428,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -386,6 +440,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -396,6 +452,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step3".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -406,6 +464,8 @@ fn test_workspace() -> WorkspaceConfig {
         "step4".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![
                 "step1".to_string(),
                 "step2".to_string(),
@@ -419,6 +479,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "wide-fan-in".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -434,6 +496,8 @@ fn test_workspace() -> WorkspaceConfig {
         "host".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -455,6 +519,8 @@ fn test_workspace() -> WorkspaceConfig {
         "db-backup".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("pg_dump -h {{ input.host }}".to_string()),
             script: None,
@@ -480,6 +546,8 @@ fn test_workspace() -> WorkspaceConfig {
         "backup".to_string(),
         FlowStep {
             action: "db-backup".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: bt_input,
             continue_on_failure: false,
@@ -491,6 +559,8 @@ fn test_workspace() -> WorkspaceConfig {
         "host".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -499,6 +569,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "backup-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: bt_task_input,
@@ -526,6 +598,8 @@ fn test_workspace() -> WorkspaceConfig {
         "data".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -535,6 +609,8 @@ fn test_workspace() -> WorkspaceConfig {
         "transform".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some(
                 "echo Processing $DATA && echo 'OUTPUT: {\"result\": \"processed-'$DATA'\"}'"
@@ -561,6 +637,8 @@ fn test_workspace() -> WorkspaceConfig {
         "value".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -570,6 +648,8 @@ fn test_workspace() -> WorkspaceConfig {
         "summarize".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some(
                 "echo Summarizing $VALUE && echo 'OUTPUT: {\"summary\": \"'$VALUE' done\"}'"
@@ -598,6 +678,8 @@ fn test_workspace() -> WorkspaceConfig {
         "transform".to_string(),
         FlowStep {
             action: "transform".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: dp_transform_input,
             continue_on_failure: false,
@@ -610,6 +692,8 @@ fn test_workspace() -> WorkspaceConfig {
         "summarize".to_string(),
         FlowStep {
             action: "summarize".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["transform".to_string()],
             input: dp_summarize_input,
             continue_on_failure: false,
@@ -621,6 +705,8 @@ fn test_workspace() -> WorkspaceConfig {
         "data".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: Some(json!("test")),
@@ -629,6 +715,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "data-pipeline".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: dp_task_input,
@@ -644,6 +732,8 @@ fn test_workspace() -> WorkspaceConfig {
         "run".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -653,6 +743,8 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "deploy-staging".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: Some("deploy/staging".to_string()),
             input: HashMap::new(),
@@ -1411,11 +1503,11 @@ async fn test_list_tasks_from_workspace() -> Result<()> {
     let body = body_json(response).await;
 
     let tasks = body.as_array().unwrap();
-    let task_names: Vec<&str> = tasks.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(task_names.contains(&"hello-world"));
-    assert!(task_names.contains(&"greet-and-shout"));
-    assert!(task_names.contains(&"linear-3"));
-    assert!(task_names.contains(&"diamond"));
+    let task_ids: Vec<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert!(task_ids.contains(&"hello-world"));
+    assert!(task_ids.contains(&"greet-and-shout"));
+    assert!(task_ids.contains(&"linear-3"));
+    assert!(task_ids.contains(&"diamond"));
 
     Ok(())
 }
@@ -1473,6 +1565,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -1481,6 +1575,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
     );
 
     let task = TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),
@@ -1534,6 +1630,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -1544,6 +1642,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -1554,6 +1654,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         "step3".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -1562,6 +1664,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
     );
 
     let task = TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),
@@ -1679,7 +1783,7 @@ async fn test_get_task_detail() -> Result<()> {
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
 
-    assert_eq!(body["name"], "hello-world");
+    assert_eq!(body["id"], "hello-world");
     assert_eq!(body["mode"], "distributed");
     assert!(body["input"].is_object());
     assert!(body["input"]["name"].is_object());
@@ -3433,6 +3537,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3443,6 +3549,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3451,6 +3559,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
     );
 
     let task = TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),
@@ -3526,6 +3636,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3536,6 +3648,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3544,6 +3658,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
     );
 
     let task = TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),
@@ -3620,6 +3736,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3630,6 +3748,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3640,6 +3760,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         "step3".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -3648,6 +3770,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
     );
 
     let task = TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),
@@ -3903,6 +4027,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             "step-ok".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -3913,6 +4039,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             "step-fail".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["step-ok".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -3920,6 +4048,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             },
         );
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4019,6 +4149,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             "step1".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4029,6 +4161,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             "step2".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4036,6 +4170,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             },
         );
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4114,6 +4250,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             "step1".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4124,6 +4262,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             "step2".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: true,
@@ -4131,6 +4271,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             },
         );
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4216,6 +4358,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             "step1".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: true,
@@ -4226,6 +4370,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             "step2".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4233,6 +4379,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             },
         );
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4317,6 +4465,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             "step1".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: true,
@@ -4327,6 +4477,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             "step2".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4334,6 +4486,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             },
         );
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4412,6 +4566,8 @@ async fn test_cascading_skip() -> Result<()> {
             "step1".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4422,6 +4578,8 @@ async fn test_cascading_skip() -> Result<()> {
             "step2".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4432,6 +4590,8 @@ async fn test_cascading_skip() -> Result<()> {
             "step3".to_string(),
             FlowStep {
                 action: "greet".to_string(),
+                name: None,
+                description: None,
                 depends_on: vec!["step2".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -4439,6 +4599,8 @@ async fn test_cascading_skip() -> Result<()> {
             },
         );
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4528,6 +4690,8 @@ fn test_workspace_ops() -> WorkspaceConfig {
         "deploy".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("echo deploying...".to_string()),
             script: None,
@@ -4550,6 +4714,8 @@ fn test_workspace_ops() -> WorkspaceConfig {
         "run-deploy".to_string(),
         FlowStep {
             action: "deploy".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -4559,6 +4725,8 @@ fn test_workspace_ops() -> WorkspaceConfig {
     workspace.tasks.insert(
         "deploy-app".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -4721,7 +4889,7 @@ async fn test_workspace_task_isolation() -> Result<()> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["name"].as_str().unwrap())
+        .map(|t| t["id"].as_str().unwrap())
         .collect();
     assert!(default_tasks.contains(&"hello-world"));
     assert!(!default_tasks.contains(&"deploy-app"));
@@ -4737,7 +4905,7 @@ async fn test_workspace_task_isolation() -> Result<()> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["name"].as_str().unwrap())
+        .map(|t| t["id"].as_str().unwrap())
         .collect();
     assert!(ops_tasks.contains(&"deploy-app"));
     assert!(!ops_tasks.contains(&"hello-world"));
@@ -5075,7 +5243,7 @@ async fn test_get_task_detail_workspace_scoped() -> Result<()> {
         .await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
-    assert_eq!(body["name"].as_str().unwrap(), "deploy-app");
+    assert_eq!(body["id"].as_str().unwrap(), "deploy-app");
 
     // Same task name doesn't exist in "default"
     let response = router
@@ -5818,14 +5986,14 @@ async fn test_list_tasks_includes_folder() -> Result<()> {
     // Find task with folder
     let deploy_staging = tasks
         .iter()
-        .find(|t| t["name"].as_str().unwrap() == "deploy-staging")
+        .find(|t| t["id"].as_str().unwrap() == "deploy-staging")
         .expect("deploy-staging task should exist");
     assert_eq!(deploy_staging["folder"].as_str().unwrap(), "deploy/staging");
 
     // Find task without folder — folder field should be absent (skip_serializing_if)
     let hello_world = tasks
         .iter()
-        .find(|t| t["name"].as_str().unwrap() == "hello-world")
+        .find(|t| t["id"].as_str().unwrap() == "hello-world")
         .expect("hello-world task should exist");
     assert!(hello_world.get("folder").is_none() || hello_world["folder"].is_null());
 
@@ -5948,6 +6116,8 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "action-does-not-exist".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -5957,6 +6127,8 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
     workspace.tasks.insert(
         "broken-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -6362,6 +6534,8 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "deploy".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("echo deploying".to_string()),
             script: None,
@@ -6384,6 +6558,8 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "crash".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("exit 1".to_string()),
             script: None,
@@ -6407,6 +6583,8 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "message".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: false,
             secret: false,
             default: None,
@@ -6416,6 +6594,8 @@ fn hook_test_workspace() -> WorkspaceConfig {
         "notify".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("echo {{ input.message }}".to_string()),
             script: None,
@@ -6476,6 +6656,8 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "deploy".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -6490,6 +6672,8 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
     workspace.tasks.insert(
         "deploy-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -6579,6 +6763,8 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "crash".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -6593,6 +6779,8 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
     workspace.tasks.insert(
         "crash-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -6665,6 +6853,8 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "deploy".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -6674,6 +6864,8 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
     workspace.tasks.insert(
         "deploy-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -6732,6 +6924,8 @@ async fn test_hook_input_contains_context() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "deploy".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -6746,6 +6940,8 @@ async fn test_hook_input_contains_context() -> Result<()> {
     workspace.tasks.insert(
         "deploy-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -6815,6 +7011,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "crash".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
@@ -6825,6 +7023,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "crash".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -6836,6 +7036,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     workspace.tasks.insert(
         "multi-fail".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -6933,6 +7135,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "crash".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
@@ -6943,6 +7147,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         "step2".to_string(),
         FlowStep {
             action: "deploy".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
@@ -6956,6 +7162,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     workspace.tasks.insert(
         "tolerant".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7047,6 +7255,8 @@ async fn test_hook_multiline_error_message() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "crash".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7059,6 +7269,8 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     workspace.tasks.insert(
         "py-crash".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7153,6 +7365,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "crash".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7164,6 +7378,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     workspace.tasks.insert(
         "with-hook".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7253,6 +7469,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             step.step_name.clone(),
             FlowStep {
                 action: step.action_name.clone(),
+                name: None,
+                description: None,
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
@@ -7261,6 +7479,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         );
     }
     let hook_task_def = TaskDef {
+        name: None,
+        description: None,
         mode: "distributed".to_string(),
         folder: None,
         input: HashMap::new(),
@@ -7305,6 +7525,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
         "greet".to_string(),
         ActionDef {
             action_type: "shell".to_string(),
+            name: None,
+            description: None,
             task: None,
             cmd: Some("echo hello".to_string()),
             script: None,
@@ -7327,6 +7549,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
         "run-cleanup".to_string(),
         ActionDef {
             action_type: "task".to_string(),
+            name: None,
+            description: None,
             task: Some("cleanup".to_string()),
             cmd: None,
             script: None,
@@ -7350,6 +7574,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
         "clean".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7359,6 +7585,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "cleanup".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7374,6 +7602,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
         "build".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7384,6 +7614,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
         "cleanup".to_string(),
         FlowStep {
             action: "run-cleanup".to_string(),
+            name: None,
+            description: None,
             depends_on: vec!["build".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7393,6 +7625,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
     workspace.tasks.insert(
         "deploy".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7423,6 +7657,8 @@ async fn test_task_action_creates_child_job() -> Result<()> {
         "run".to_string(),
         FlowStep {
             action: "run-cleanup".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7432,6 +7668,8 @@ async fn test_task_action_creates_child_job() -> Result<()> {
     ws.tasks.insert(
         "run-task-action".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7656,6 +7894,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
         "run-with-input".to_string(),
         ActionDef {
             action_type: "task".to_string(),
+            name: None,
+            description: None,
             task: Some("cleanup".to_string()),
             cmd: None,
             script: None,
@@ -7681,6 +7921,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
         "run".to_string(),
         FlowStep {
             action: "run-with-input".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: step_input,
             continue_on_failure: false,
@@ -7692,6 +7934,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
         "environment".to_string(),
         InputFieldDef {
             field_type: "string".to_string(),
+            name: None,
+            description: None,
             required: true,
             secret: false,
             default: None,
@@ -7700,6 +7944,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
     workspace.tasks.insert(
         "deploy-with-input".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: task_input,
@@ -7750,6 +7996,8 @@ async fn test_task_action_in_hook() -> Result<()> {
         "step1".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7759,6 +8007,8 @@ async fn test_task_action_in_hook() -> Result<()> {
     workspace.tasks.insert(
         "deploy-with-hook".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7869,6 +8119,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         "crash".to_string(),
         FlowStep {
             action: "greet".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7878,6 +8130,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     workspace.tasks.insert(
         "failing-task".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -7892,6 +8146,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         "run-failing".to_string(),
         ActionDef {
             action_type: "task".to_string(),
+            name: None,
+            description: None,
             task: Some("failing-task".to_string()),
             cmd: None,
             script: None,
@@ -7915,6 +8171,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         "run".to_string(),
         FlowStep {
             action: "run-failing".to_string(),
+            name: None,
+            description: None,
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
@@ -7924,6 +8182,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     workspace.tasks.insert(
         "parent-of-fail".to_string(),
         TaskDef {
+            name: None,
+            description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
@@ -8791,18 +9051,15 @@ async fn test_task_list_has_triggers_field() -> Result<()> {
     let tasks = body.as_array().unwrap();
 
     // hello-world has an enabled trigger (nightly) → has_triggers = true
-    let hello_world = tasks.iter().find(|t| t["name"] == "hello-world").unwrap();
+    let hello_world = tasks.iter().find(|t| t["id"] == "hello-world").unwrap();
     assert_eq!(hello_world["has_triggers"], true);
 
     // backup-task has only a disabled trigger → has_triggers = false
-    let backup_task = tasks.iter().find(|t| t["name"] == "backup-task").unwrap();
+    let backup_task = tasks.iter().find(|t| t["id"] == "backup-task").unwrap();
     assert_eq!(backup_task["has_triggers"], false);
 
     // greet-and-shout has no triggers → has_triggers = false
-    let greet_and_shout = tasks
-        .iter()
-        .find(|t| t["name"] == "greet-and-shout")
-        .unwrap();
+    let greet_and_shout = tasks.iter().find(|t| t["id"] == "greet-and-shout").unwrap();
     assert_eq!(greet_and_shout["has_triggers"], false);
 
     Ok(())

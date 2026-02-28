@@ -241,22 +241,28 @@ export function TasksPage() {
 
                   const { task, depth } = row;
                   return (
-                    <TableRow key={`task:${task.workspace}/${task.name}`}>
+                    <TableRow key={`task:${task.workspace}/${task.id}`}>
                       <TableCell>
                         <div
-                          className="flex items-center gap-1.5"
                           style={{ paddingLeft: `${depth * 1.25 + 2.75}rem` }}
                         >
-                          <Link
-                            to={`/workspaces/${encodeURIComponent(task.workspace)}/tasks/${encodeURIComponent(task.name)}`}
-                            className="font-medium hover:underline"
-                          >
-                            {task.name}
-                          </Link>
-                          {task.has_triggers && (
-                            <span title="Has scheduled triggers">
-                              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                            </span>
+                          <div className="flex items-center gap-1.5">
+                            <Link
+                              to={`/workspaces/${encodeURIComponent(task.workspace)}/tasks/${encodeURIComponent(task.id)}`}
+                              className="font-medium hover:underline"
+                            >
+                              {task.name ?? task.id}
+                            </Link>
+                            {task.has_triggers && (
+                              <span title="Has scheduled triggers">
+                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                              </span>
+                            )}
+                          </div>
+                          {task.description && (
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              {task.description}
+                            </p>
                           )}
                         </div>
                       </TableCell>

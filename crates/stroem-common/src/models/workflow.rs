@@ -37,6 +37,11 @@ pub struct ConnectionDef {
 pub struct InputFieldDef {
     #[serde(rename = "type")]
     pub field_type: String, // "string", "number", "boolean"
+    /// Human-readable display name for this input field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
@@ -72,6 +77,13 @@ pub struct ResourceDef {
 pub struct ActionDef {
     #[serde(rename = "type")]
     pub action_type: String, // "shell", "docker", "pod", "task"
+
+    /// Human-readable display name for this action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Description of what this action does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 
     /// For type: task — the name of the task to execute as a sub-job
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +150,12 @@ pub struct HookDef {
 #[derive(Debug, Clone, Serialize)]
 pub struct FlowStep {
     pub action: String, // action name or library/action
+    /// Human-readable display name for this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Description of what this step does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     #[serde(default)]
@@ -178,6 +196,10 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
             struct RefStep {
                 action: String,
                 #[serde(default)]
+                name: Option<String>,
+                #[serde(default)]
+                description: Option<String>,
+                #[serde(default)]
                 depends_on: Vec<String>,
                 #[serde(default)]
                 input: HashMap<String, serde_json::Value>,
@@ -189,6 +211,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                     .map_err(D::Error::custom)?;
             Ok(FlowStep {
                 action: ref_step.action,
+                name: ref_step.name,
+                description: ref_step.description,
                 depends_on: ref_step.depends_on,
                 input: ref_step.input,
                 continue_on_failure: ref_step.continue_on_failure,
@@ -196,7 +220,13 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
             })
         } else if has_type {
             // Inline step — separate step fields from action fields
-            let step_field_keys: &[&str] = &["depends_on", "input", "continue_on_failure"];
+            let step_field_keys: &[&str] = &[
+                "name",
+                "description",
+                "depends_on",
+                "input",
+                "continue_on_failure",
+            ];
 
             let mut step_map = serde_yaml::Mapping::new();
             let mut action_map = serde_yaml::Mapping::new();
@@ -236,8 +266,18 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
                 .unwrap_or(false);
 
+            let name: Option<String> = step_map
+                .get(serde_yaml::Value::String("name".into()))
+                .and_then(|v| serde_yaml::from_value(v.clone()).ok());
+
+            let description: Option<String> = step_map
+                .get(serde_yaml::Value::String("description".into()))
+                .and_then(|v| serde_yaml::from_value(v.clone()).ok());
+
             Ok(FlowStep {
                 action: String::new(), // placeholder — set by hoist_inline_actions()
+                name,
+                description,
                 depends_on,
                 input,
                 continue_on_failure,
@@ -254,6 +294,12 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
 /// Task definition - represents a workflow with multiple steps
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDef {
+    /// Human-readable display name for this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Description of what this task does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default = "default_mode")]
     pub mode: String, // "distributed" or "local"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2014,5 +2060,182 @@ tasks:
             result.is_err(),
             "Shell action without cmd/script should fail validation"
         );
+    }
+
+    #[test]
+    fn test_parse_action_with_name_and_description() {
+        let yaml = r#"
+actions:
+  greet:
+    name: Greet User
+    description: Sends a greeting message to the user
+    type: shell
+    cmd: "echo Hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("greet").unwrap();
+        assert_eq!(action.name.as_deref(), Some("Greet User"));
+        assert_eq!(
+            action.description.as_deref(),
+            Some("Sends a greeting message to the user")
+        );
+    }
+
+    #[test]
+    fn test_parse_task_with_name_and_description() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+tasks:
+  hello:
+    name: Hello World
+    description: A simple hello world task
+    flow:
+      step1:
+        action: greet
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("hello").unwrap();
+        assert_eq!(task.name.as_deref(), Some("Hello World"));
+        assert_eq!(
+            task.description.as_deref(),
+            Some("A simple hello world task")
+        );
+    }
+
+    #[test]
+    fn test_parse_input_field_with_description() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+    input:
+      name:
+        type: string
+        description: The user's name
+        required: true
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("greet").unwrap();
+        let field = action.input.get("name").unwrap();
+        assert_eq!(field.description.as_deref(), Some("The user's name"));
+        assert!(field.required);
+    }
+
+    #[test]
+    fn test_parse_input_field_with_name_and_description() {
+        let yaml = r#"
+tasks:
+  report:
+    input:
+      start_date:
+        type: string
+        name: Start date
+        description: Should be within current year
+        required: true
+      end_date:
+        type: string
+        name: End date
+    flow:
+      run:
+        action: generate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("report").unwrap();
+
+        let start = task.input.get("start_date").unwrap();
+        assert_eq!(start.name.as_deref(), Some("Start date"));
+        assert_eq!(
+            start.description.as_deref(),
+            Some("Should be within current year")
+        );
+        assert!(start.required);
+
+        let end = task.input.get("end_date").unwrap();
+        assert_eq!(end.name.as_deref(), Some("End date"));
+        assert!(end.description.is_none());
+        assert!(!end.required);
+    }
+
+    #[test]
+    fn test_parse_flow_step_ref_with_description() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+tasks:
+  hello:
+    flow:
+      say-hi:
+        action: greet
+        name: Say Hello
+        description: Greet the user by name
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("hello").unwrap();
+        let step = task.flow.get("say-hi").unwrap();
+        assert_eq!(step.name.as_deref(), Some("Say Hello"));
+        assert_eq!(step.description.as_deref(), Some("Greet the user by name"));
+    }
+
+    #[test]
+    fn test_inline_step_description_is_step_level() {
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      say-hi:
+        type: shell
+        cmd: "echo Hello"
+        name: Say Hello
+        description: Greet the user
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("hello").unwrap();
+        let step = task.flow.get("say-hi").unwrap();
+        // name/description go to the step, not the hoisted action
+        assert_eq!(step.name.as_deref(), Some("Say Hello"));
+        assert_eq!(step.description.as_deref(), Some("Greet the user"));
+        let action = config.actions.get(&step.action).unwrap();
+        assert!(action.name.is_none());
+        assert!(action.description.is_none());
+    }
+
+    #[test]
+    fn test_description_fields_default_none() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+    input:
+      name:
+        type: string
+tasks:
+  hello:
+    flow:
+      step1:
+        action: greet
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let action = config.actions.get("greet").unwrap();
+        assert!(action.name.is_none());
+        assert!(action.description.is_none());
+
+        let field = action.input.get("name").unwrap();
+        assert!(field.description.is_none());
+
+        let task = config.tasks.get("hello").unwrap();
+        assert!(task.name.is_none());
+        assert!(task.description.is_none());
+
+        let step = task.flow.get("step1").unwrap();
+        assert!(step.name.is_none());
+        assert!(step.description.is_none());
     }
 }

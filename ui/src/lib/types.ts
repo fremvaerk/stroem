@@ -7,7 +7,9 @@ export interface WorkspaceInfo {
 }
 
 export interface TaskListItem {
-  name: string;
+  id: string;
+  name?: string;
+  description?: string;
   mode: string;
   workspace: string;
   folder?: string;
@@ -16,6 +18,7 @@ export interface TaskListItem {
 
 export interface InputField {
   type: string;
+  name?: string;
   description?: string;
   default?: unknown;
   required?: boolean;
@@ -24,6 +27,8 @@ export interface InputField {
 
 export interface FlowStep {
   action: string;
+  name?: string;
+  description?: string;
   input?: Record<string, unknown>;
   depends_on?: string[];
   continue_on_failure?: boolean;
@@ -40,7 +45,9 @@ export interface TriggerInfo {
 }
 
 export interface TaskDetail {
-  name: string;
+  id: string;
+  name?: string;
+  description?: string;
   mode: string;
   folder?: string;
   input: Record<string, InputField>;

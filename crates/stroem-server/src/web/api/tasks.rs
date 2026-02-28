@@ -16,7 +16,11 @@ use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub struct TaskListItem {
-    pub name: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub mode: String,
     pub workspace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,7 +30,11 @@ pub struct TaskListItem {
 
 #[derive(Debug, Serialize)]
 pub struct TaskDetail {
-    pub name: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
@@ -66,7 +74,9 @@ pub async fn list_tasks(
                 .values()
                 .any(|t| t.enabled() && t.task() == *name);
             TaskListItem {
-                name: name.clone(),
+                id: name.clone(),
+                name: task.name.clone(),
+                description: task.description.clone(),
                 mode: task.mode.clone(),
                 workspace: ws.clone(),
                 folder: task.folder.clone(),
@@ -108,7 +118,9 @@ pub async fn get_task(
         .collect();
 
     let detail = TaskDetail {
-        name: name.clone(),
+        id: name.clone(),
+        name: task.name.clone(),
+        description: task.description.clone(),
         mode: task.mode.clone(),
         folder: task.folder.clone(),
         input: task
