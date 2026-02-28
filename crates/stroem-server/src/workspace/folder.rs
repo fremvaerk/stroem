@@ -618,4 +618,93 @@ actions:
         assert_eq!(workspace.actions.len(), 1);
         assert!(workspace.actions.contains_key("greet"));
     }
+
+    #[tokio::test]
+    async fn test_load_inline_actions() {
+        let temp_dir = TempDir::new().unwrap();
+        let workflow_path = temp_dir.path().join("test.yaml");
+
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      say-hi:
+        type: shell
+        cmd: "echo Hello"
+      say-bye:
+        type: docker
+        image: alpine:latest
+        command: ["echo", "bye"]
+        depends_on: [say-hi]
+"#;
+        fs::write(&workflow_path, yaml).unwrap();
+
+        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        // Inline actions should have been hoisted
+        assert_eq!(workspace.actions.len(), 2);
+        assert!(workspace.actions.contains_key("_inline:hello:say-hi"));
+        assert!(workspace.actions.contains_key("_inline:hello:say-bye"));
+
+        // Steps should reference the hoisted actions
+        let task = workspace.tasks.get("hello").unwrap();
+        assert_eq!(
+            task.flow.get("say-hi").unwrap().action,
+            "_inline:hello:say-hi"
+        );
+        assert_eq!(
+            task.flow.get("say-bye").unwrap().action,
+            "_inline:hello:say-bye"
+        );
+
+        // Action content should be correct
+        let hi = workspace.actions.get("_inline:hello:say-hi").unwrap();
+        assert_eq!(hi.action_type, "shell");
+        assert_eq!(hi.cmd.as_deref(), Some("echo Hello"));
+
+        let bye = workspace.actions.get("_inline:hello:say-bye").unwrap();
+        assert_eq!(bye.action_type, "docker");
+        assert_eq!(bye.image.as_deref(), Some("alpine:latest"));
+    }
+
+    #[tokio::test]
+    async fn test_load_mixed_inline_and_reference() {
+        let temp_dir = TempDir::new().unwrap();
+        let workflow_path = temp_dir.path().join("test.yaml");
+
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+
+tasks:
+  mixed:
+    flow:
+      ref-step:
+        action: greet
+      inline-step:
+        type: shell
+        cmd: "echo Inline"
+"#;
+        fs::write(&workflow_path, yaml).unwrap();
+
+        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        // Named action + hoisted inline action
+        assert_eq!(workspace.actions.len(), 2);
+        assert!(workspace.actions.contains_key("greet"));
+        assert!(workspace.actions.contains_key("_inline:mixed:inline-step"));
+
+        let task = workspace.tasks.get("mixed").unwrap();
+        assert_eq!(task.flow.get("ref-step").unwrap().action, "greet");
+        assert_eq!(
+            task.flow.get("inline-step").unwrap().action,
+            "_inline:mixed:inline-step"
+        );
+    }
 }

@@ -31,11 +31,17 @@ tasks:
     input:
       <param-name>: { type: string, default: "value" }
     flow:
+      # Reference a named action:
       <step-name>:
         action: <action-name>
         depends_on: [<other-step>]
         input:
           <param>: "{{ input.param }}"
+      # Or define the action inline:
+      <step-name>:
+        type: shell
+        cmd: "..."
+        depends_on: [<other-step>]
 ```
 
 ## Actions
@@ -60,6 +66,62 @@ tasks:
         input:
           name: "{{ input.name }}"
 ```
+
+### Inline actions
+
+For simple, one-off steps you can define the action inline instead of referencing a named action:
+
+```yaml
+tasks:
+  hello:
+    flow:
+      say-hi:
+        type: shell
+        cmd: "echo Hello, World!"
+```
+
+This is equivalent to defining a separate action and referencing it:
+
+```yaml
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello, World!"
+
+tasks:
+  hello:
+    flow:
+      say-hi:
+        action: greet
+```
+
+Inline steps support all action fields (`type`, `cmd`, `script`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`):
+
+```yaml
+tasks:
+  deploy:
+    input:
+      env: { type: string, default: "staging" }
+    flow:
+      build:
+        type: docker
+        image: node:20
+        command: ["npm", "run", "build"]
+      deploy:
+        type: shell
+        runner: docker
+        cmd: "deploy.sh {{ input.env }}"
+        depends_on: [build]
+        input:
+          env: "{{ input.env }}"
+      notify:
+        type: shell
+        cmd: "echo Done"
+        depends_on: [deploy]
+        continue_on_failure: true
+```
+
+Use inline actions for steps that are unique to a single task. Use named actions when the same action is shared across multiple tasks or steps.
 
 ### Step dependencies
 

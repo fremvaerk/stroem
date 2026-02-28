@@ -465,6 +465,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -474,6 +475,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -483,6 +485,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             depends_on: vec!["step2".to_string(), "step4".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -492,6 +495,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 

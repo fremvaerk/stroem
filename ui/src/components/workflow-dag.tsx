@@ -10,7 +10,7 @@ import {
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
 import { Circle, Play, Flag } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatActionName } from "@/lib/utils";
 import { statusIconsSmall } from "@/lib/status-icons";
 import type { JobStep, FlowStep } from "@/lib/types";
 
@@ -70,7 +70,7 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
       </div>
       {data.action && (
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
-          {data.action}
+          {formatActionName(data.action)}
         </p>
       )}
       {data.status && (

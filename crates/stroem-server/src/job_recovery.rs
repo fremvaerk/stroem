@@ -362,6 +362,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
     }

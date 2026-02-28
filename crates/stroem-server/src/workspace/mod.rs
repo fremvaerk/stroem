@@ -488,6 +488,7 @@ tasks:
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
 
@@ -548,6 +549,7 @@ tasks:
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         config1.tasks.insert(
@@ -592,6 +594,7 @@ tasks:
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         config2.tasks.insert(

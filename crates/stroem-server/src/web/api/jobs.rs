@@ -593,6 +593,7 @@ mod tests {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -602,6 +603,7 @@ mod tests {
                 depends_on: vec!["build".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -611,6 +613,7 @@ mod tests {
                 depends_on: vec!["build".to_string(), "test".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
 

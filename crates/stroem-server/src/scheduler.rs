@@ -325,6 +325,7 @@ mod tests {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         config.tasks.insert(

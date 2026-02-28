@@ -22,6 +22,7 @@ import { PaginationControls } from "@/components/pagination-controls";
 import { getTask, listJobs, executeTask } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, JobListItem, FlowStep, InputField } from "@/lib/types";
+import { formatActionName } from "@/lib/utils";
 
 const JOBS_PAGE_SIZE = 20;
 const SECRET_SENTINEL = "********";
@@ -383,7 +384,7 @@ export function TaskDetailPage() {
                 <div className="min-w-0 flex-1">
                   <span className="font-mono text-sm">{stepName}</span>
                   <p className="text-xs text-muted-foreground">
-                    action: {step.action}
+                    action: {formatActionName(step.action)}
                     {step.depends_on && step.depends_on.length > 0 && (
                       <> &middot; depends on: {step.depends_on.join(", ")}</>
                     )}

@@ -9,6 +9,7 @@ import { StepDetail } from "@/components/step-detail";
 import { formatDuration } from "@/lib/formatting";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep } from "@/lib/types";
+import { formatActionName } from "@/lib/utils";
 
 interface StepTimelineProps {
   jobId: string;
@@ -66,7 +67,7 @@ export function StepTimeline({
                     {step.step_name}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    {step.action_name}
+                    {formatActionName(step.action_name)}
                   </span>
                   {step.worker_id && workerNames && (
                     <Link

@@ -127,8 +127,15 @@ pub struct HookDef {
     pub input: HashMap<String, serde_json::Value>,
 }
 
-/// A single step in a task flow
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A single step in a task flow.
+///
+/// Supports two forms:
+/// - **Reference**: `action: <name>` — references a named action
+/// - **Inline**: `type: shell`, `cmd: ...` etc. — defines the action inline
+///
+/// Inline actions are automatically hoisted to the config's actions map during
+/// `WorkflowConfig` deserialization.
+#[derive(Debug, Clone, Serialize)]
 pub struct FlowStep {
     pub action: String, // action name or library/action
     #[serde(default)]
@@ -137,6 +144,111 @@ pub struct FlowStep {
     pub input: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub continue_on_failure: bool,
+    /// Temporary storage for inline action definitions during deserialization.
+    /// Automatically moved to `config.actions` during `WorkflowConfig` deserialization.
+    #[serde(skip)]
+    pub inline_action: Option<ActionDef>,
+}
+
+impl<'de> serde::Deserialize<'de> for FlowStep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let mut map: serde_yaml::Value = serde::Deserialize::deserialize(deserializer)?;
+
+        let mapping = map
+            .as_mapping_mut()
+            .ok_or_else(|| D::Error::custom("flow step must be a mapping"))?;
+
+        let has_action = mapping.contains_key(serde_yaml::Value::String("action".into()));
+        let has_type = mapping.contains_key(serde_yaml::Value::String("type".into()));
+
+        if has_action && has_type {
+            return Err(D::Error::custom(
+                "flow step cannot have both 'action' and 'type' — use one or the other",
+            ));
+        }
+
+        if has_action {
+            // Reference step — deserialize normally
+            #[derive(Deserialize)]
+            struct RefStep {
+                action: String,
+                #[serde(default)]
+                depends_on: Vec<String>,
+                #[serde(default)]
+                input: HashMap<String, serde_json::Value>,
+                #[serde(default)]
+                continue_on_failure: bool,
+            }
+            let ref_step: RefStep =
+                serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
+                    .map_err(D::Error::custom)?;
+            Ok(FlowStep {
+                action: ref_step.action,
+                depends_on: ref_step.depends_on,
+                input: ref_step.input,
+                continue_on_failure: ref_step.continue_on_failure,
+                inline_action: None,
+            })
+        } else if has_type {
+            // Inline step — separate step fields from action fields
+            let step_field_keys: &[&str] = &["depends_on", "input", "continue_on_failure"];
+
+            let mut step_map = serde_yaml::Mapping::new();
+            let mut action_map = serde_yaml::Mapping::new();
+
+            for (k, v) in mapping.iter() {
+                let key_str = k.as_str().unwrap_or("");
+                if step_field_keys.contains(&key_str) {
+                    step_map.insert(k.clone(), v.clone());
+                } else {
+                    action_map.insert(k.clone(), v.clone());
+                }
+            }
+
+            // `input` in inline context is step-level input values, not action input schema.
+            // The hoisted action gets an empty input schema.
+            // Remove `input` from action map if present (it was already put in step_map).
+            action_map.remove(serde_yaml::Value::String("input".into()));
+
+            // Parse the action definition
+            let action_def: ActionDef =
+                serde_yaml::from_value(serde_yaml::Value::Mapping(action_map))
+                    .map_err(D::Error::custom)?;
+
+            // Parse step-level fields
+            let depends_on: Vec<String> = step_map
+                .get(serde_yaml::Value::String("depends_on".into()))
+                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
+                .unwrap_or_default();
+
+            let input: HashMap<String, serde_json::Value> = step_map
+                .get(serde_yaml::Value::String("input".into()))
+                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
+                .unwrap_or_default();
+
+            let continue_on_failure: bool = step_map
+                .get(serde_yaml::Value::String("continue_on_failure".into()))
+                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
+                .unwrap_or(false);
+
+            Ok(FlowStep {
+                action: String::new(), // placeholder — set by hoist_inline_actions()
+                depends_on,
+                input,
+                continue_on_failure,
+                inline_action: Some(action_def),
+            })
+        } else {
+            Err(D::Error::custom(
+                "flow step must have either 'action' (reference) or 'type' (inline action)",
+            ))
+        }
+    }
 }
 
 /// Task definition - represents a workflow with multiple steps
@@ -229,8 +341,11 @@ fn default_true() -> bool {
     true
 }
 
-/// Top-level workflow config - represents one YAML file
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Top-level workflow config - represents one YAML file.
+///
+/// Inline actions in flow steps are automatically hoisted to the `actions` map
+/// during deserialization. Callers never need to call a separate hoist step.
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct WorkflowConfig {
     #[serde(default)]
     pub secrets: HashMap<String, serde_json::Value>,
@@ -248,6 +363,76 @@ pub struct WorkflowConfig {
     pub on_success: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_error: Vec<HookDef>,
+}
+
+/// Raw deserialization target for WorkflowConfig — converted via `From` to auto-hoist
+/// inline actions. This is an internal type; callers use `WorkflowConfig` directly.
+#[derive(Deserialize)]
+struct WorkflowConfigRaw {
+    #[serde(default)]
+    secrets: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    connection_types: HashMap<String, ConnectionTypeDef>,
+    #[serde(default)]
+    connections: HashMap<String, ConnectionDef>,
+    #[serde(default)]
+    actions: HashMap<String, ActionDef>,
+    #[serde(default)]
+    tasks: HashMap<String, TaskDef>,
+    #[serde(default)]
+    triggers: HashMap<String, TriggerDef>,
+    #[serde(default)]
+    on_success: Vec<HookDef>,
+    #[serde(default)]
+    on_error: Vec<HookDef>,
+}
+
+impl From<WorkflowConfigRaw> for WorkflowConfig {
+    fn from(raw: WorkflowConfigRaw) -> Self {
+        let mut config = WorkflowConfig {
+            secrets: raw.secrets,
+            connection_types: raw.connection_types,
+            connections: raw.connections,
+            actions: raw.actions,
+            tasks: raw.tasks,
+            triggers: raw.triggers,
+            on_success: raw.on_success,
+            on_error: raw.on_error,
+        };
+        config.hoist_inline_actions();
+        config
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkflowConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        WorkflowConfigRaw::deserialize(deserializer).map(WorkflowConfig::from)
+    }
+}
+
+impl WorkflowConfig {
+    /// Move inline action definitions from flow steps into the config's `actions` map.
+    ///
+    /// For each step with an `inline_action`, this generates a synthetic action name
+    /// (`_inline:{task}:{step}`), inserts the action, and sets `step.action` to that name.
+    /// After hoisting, everything downstream sees normal action references.
+    ///
+    /// This is called automatically during deserialization. It is idempotent —
+    /// calling it again on an already-hoisted config is a safe no-op.
+    fn hoist_inline_actions(&mut self) {
+        for (task_name, task) in &mut self.tasks {
+            for (step_name, step) in &mut task.flow {
+                if let Some(action_def) = step.inline_action.take() {
+                    let name = format!("_inline:{}:{}", task_name, step_name);
+                    step.action = name.clone();
+                    self.actions.insert(name, action_def);
+                }
+            }
+        }
+    }
 }
 
 /// Merged workspace - all YAML files combined
@@ -1544,5 +1729,290 @@ connections:
         let mut ws = WorkspaceConfig::new();
         ws.render_connections().unwrap();
         assert!(ws.connections.is_empty());
+    }
+
+    // --- Inline action tests ---
+    //
+    // Inline actions are automatically hoisted during deserialization (via the
+    // custom Deserialize impl on WorkflowConfig). After parse, inline actions
+    // are already in config.actions with synthetic `_inline:{task}:{step}` names,
+    // and the step's `action` field references that name.
+
+    #[test]
+    fn test_inline_shell_step_auto_hoisted() {
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      say-hi:
+        type: shell
+        cmd: "echo Hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // Action should be auto-hoisted during parse
+        assert_eq!(config.actions.len(), 1);
+        let action = config.actions.get("_inline:hello:say-hi").unwrap();
+        assert_eq!(action.action_type, "shell");
+        assert_eq!(action.cmd.as_deref(), Some("echo Hello"));
+
+        // Step should reference the synthetic name
+        let step = config
+            .tasks
+            .get("hello")
+            .unwrap()
+            .flow
+            .get("say-hi")
+            .unwrap();
+        assert_eq!(step.action, "_inline:hello:say-hi");
+        assert!(step.inline_action.is_none());
+    }
+
+    #[test]
+    fn test_inline_mixed_with_reference() {
+        let yaml = r#"
+actions:
+  greet:
+    type: shell
+    cmd: "echo Hello"
+
+tasks:
+  mixed:
+    flow:
+      ref-step:
+        action: greet
+      inline-step:
+        type: shell
+        cmd: "echo Inline"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // Original action + hoisted inline
+        assert_eq!(config.actions.len(), 2);
+        assert!(config.actions.contains_key("greet"));
+        assert!(config.actions.contains_key("_inline:mixed:inline-step"));
+
+        let task = config.tasks.get("mixed").unwrap();
+        assert_eq!(task.flow.get("ref-step").unwrap().action, "greet");
+        assert_eq!(
+            task.flow.get("inline-step").unwrap().action,
+            "_inline:mixed:inline-step"
+        );
+    }
+
+    #[test]
+    fn test_inline_with_depends_on_and_input() {
+        let yaml = r#"
+tasks:
+  pipeline:
+    flow:
+      first:
+        type: shell
+        cmd: "echo first"
+      second:
+        type: shell
+        cmd: "echo {{ input.msg }}"
+        depends_on: [first]
+        input:
+          msg: "hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let task = config.tasks.get("pipeline").unwrap();
+        let second = task.flow.get("second").unwrap();
+        assert_eq!(second.depends_on, vec!["first"]);
+        assert_eq!(second.input.get("msg").unwrap(), "hello");
+
+        // Action should have empty input schema (not step-level input values)
+        let action = config.actions.get("_inline:pipeline:second").unwrap();
+        assert!(action.input.is_empty());
+        assert_eq!(action.cmd.as_deref(), Some("echo {{ input.msg }}"));
+    }
+
+    #[test]
+    fn test_inline_docker_action() {
+        let yaml = r#"
+tasks:
+  build:
+    flow:
+      compile:
+        type: docker
+        image: node:20
+        command: ["npm", "run", "build"]
+        env:
+          NODE_ENV: production
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let action = config.actions.get("_inline:build:compile").unwrap();
+        assert_eq!(action.action_type, "docker");
+        assert_eq!(action.image.as_deref(), Some("node:20"));
+        assert_eq!(
+            action.command.as_ref().unwrap(),
+            &vec!["npm".to_string(), "run".to_string(), "build".to_string()]
+        );
+        assert_eq!(
+            action.env.as_ref().unwrap().get("NODE_ENV").unwrap(),
+            "production"
+        );
+    }
+
+    #[test]
+    fn test_inline_with_continue_on_failure() {
+        let yaml = r#"
+tasks:
+  deploy:
+    flow:
+      cleanup:
+        type: shell
+        cmd: "rm -rf tmp"
+        continue_on_failure: true
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let step = config
+            .tasks
+            .get("deploy")
+            .unwrap()
+            .flow
+            .get("cleanup")
+            .unwrap();
+        assert!(step.continue_on_failure);
+        // Inline action auto-hoisted — step references synthetic name
+        assert_eq!(step.action, "_inline:deploy:cleanup");
+    }
+
+    #[test]
+    fn test_inline_step_neither_action_nor_type_fails() {
+        let yaml = r#"
+tasks:
+  bad:
+    flow:
+      oops:
+        cmd: "echo oops"
+"#;
+        let result = serde_yaml::from_str::<WorkflowConfig>(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("action") || err.contains("type"),
+            "Error should mention missing action/type: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_inline_step_both_action_and_type_fails() {
+        let yaml = r#"
+tasks:
+  bad:
+    flow:
+      oops:
+        action: greet
+        type: shell
+        cmd: "echo oops"
+"#;
+        let result = serde_yaml::from_str::<WorkflowConfig>(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("both"), "Error should mention 'both': {}", err);
+    }
+
+    #[test]
+    fn test_inline_task_action() {
+        let yaml = r#"
+tasks:
+  parent:
+    flow:
+      run-child:
+        type: task
+        task: child-task
+  child-task:
+    flow:
+      step1:
+        type: shell
+        cmd: "echo child"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let action = config.actions.get("_inline:parent:run-child").unwrap();
+        assert_eq!(action.action_type, "task");
+        assert_eq!(action.task.as_deref(), Some("child-task"));
+    }
+
+    #[test]
+    fn test_inline_shell_with_runner() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      run-tests:
+        type: shell
+        runner: docker
+        cmd: "npm test"
+        tags: ["node-20"]
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let action = config.actions.get("_inline:test:run-tests").unwrap();
+        assert_eq!(action.action_type, "shell");
+        assert_eq!(action.runner.as_deref(), Some("docker"));
+        assert_eq!(action.tags, vec!["node-20"]);
+    }
+
+    #[test]
+    fn test_inline_config_passes_validation() {
+        use crate::validation::validate_workflow_config;
+
+        let yaml = r#"
+tasks:
+  deploy:
+    input:
+      env: { type: string, default: "staging" }
+    flow:
+      build:
+        type: shell
+        cmd: "make build"
+      test:
+        type: docker
+        image: node:20
+        command: ["npm", "test"]
+        depends_on: [build]
+      deploy:
+        type: shell
+        runner: docker
+        cmd: "deploy.sh {{ input.env }}"
+        depends_on: [test]
+        input:
+          env: "{{ input.env }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Inline config should validate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_inline_invalid_action_caught_by_validation() {
+        use crate::validation::validate_workflow_config;
+
+        // type: shell without cmd or script parses OK but fails validation
+        let yaml = r#"
+tasks:
+  bad:
+    flow:
+      oops:
+        type: shell
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "Shell action without cmd/script should fail validation"
+        );
     }
 }

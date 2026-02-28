@@ -125,6 +125,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: hello_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut task_input = HashMap::new();
@@ -160,6 +161,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: greet_step_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut shout_step_input = HashMap::new();
@@ -171,6 +173,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["greet".to_string()],
             input: shout_step_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut gs_task_input = HashMap::new();
@@ -204,6 +207,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     l3_flow.insert(
@@ -213,6 +217,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     l3_flow.insert(
@@ -222,6 +227,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -245,6 +251,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     d_flow.insert(
@@ -254,6 +261,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     d_flow.insert(
@@ -263,6 +271,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     d_flow.insert(
@@ -272,6 +281,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step2".to_string(), "step3".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -295,6 +305,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -320,6 +331,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: mi_greet_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut mi_process_input = HashMap::new();
@@ -333,6 +345,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["greet".to_string()],
             input: mi_process_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut mi_task_input = HashMap::new();
@@ -366,6 +379,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     wfi_flow.insert(
@@ -375,6 +389,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     wfi_flow.insert(
@@ -384,6 +399,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     wfi_flow.insert(
@@ -397,6 +413,7 @@ fn test_workspace() -> WorkspaceConfig {
             ],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -466,6 +483,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: bt_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut bt_task_input = HashMap::new();
@@ -583,6 +601,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: dp_transform_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut dp_summarize_input = HashMap::new();
@@ -594,6 +613,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["transform".to_string()],
             input: dp_summarize_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut dp_task_input = HashMap::new();
@@ -627,6 +647,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -1455,6 +1476,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 
@@ -1515,6 +1537,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -1524,6 +1547,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -1533,6 +1557,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 
@@ -3411,6 +3436,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -3420,6 +3446,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 
@@ -3502,6 +3529,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -3511,6 +3539,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 
@@ -3594,6 +3623,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -3603,6 +3633,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -3612,6 +3643,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 
@@ -3874,6 +3906,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -3883,6 +3916,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 depends_on: vec!["step-ok".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         TaskDef {
@@ -3988,6 +4022,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -3997,6 +4032,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         TaskDef {
@@ -4081,6 +4117,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -4090,6 +4127,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: true,
+                inline_action: None,
             },
         );
         TaskDef {
@@ -4181,6 +4219,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: true,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -4190,6 +4229,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         TaskDef {
@@ -4280,6 +4320,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: true,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -4289,6 +4330,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         TaskDef {
@@ -4373,6 +4415,7 @@ async fn test_cascading_skip() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -4382,6 +4425,7 @@ async fn test_cascading_skip() -> Result<()> {
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         flow.insert(
@@ -4391,6 +4435,7 @@ async fn test_cascading_skip() -> Result<()> {
                 depends_on: vec!["step2".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
         TaskDef {
@@ -4508,6 +4553,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -5905,6 +5951,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -6432,6 +6479,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut hook_input = HashMap::new();
@@ -6534,6 +6582,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut hook_input = HashMap::new();
@@ -6619,6 +6668,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -6685,6 +6735,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut hook_input = HashMap::new();
@@ -6767,6 +6818,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -6776,6 +6828,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut hook_input = HashMap::new();
@@ -6883,6 +6936,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
+            inline_action: None,
         },
     );
     flow.insert(
@@ -6892,6 +6946,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
+            inline_action: None,
         },
     );
 
@@ -6995,6 +7050,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
 
@@ -7100,6 +7156,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut hook_input = HashMap::new();
@@ -7199,6 +7256,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                inline_action: None,
             },
         );
     }
@@ -7295,6 +7353,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -7318,6 +7377,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     deploy_flow.insert(
@@ -7327,6 +7387,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             depends_on: vec!["build".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -7365,6 +7426,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     ws.tasks.insert(
@@ -7622,6 +7684,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             depends_on: vec![],
             input: step_input,
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     let mut task_input = HashMap::new();
@@ -7690,6 +7753,7 @@ async fn test_task_action_in_hook() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -7808,6 +7872,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
@@ -7853,6 +7918,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            inline_action: None,
         },
     );
     workspace.tasks.insert(
