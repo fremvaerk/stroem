@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_common::template::{
-    merge_action_defaults, render_env_map, render_input_map, render_string_opt,
-    resolve_connection_inputs,
+    prepare_action_input, render_env_map, render_input_map, render_string_opt,
 };
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
@@ -307,28 +306,12 @@ pub async fn claim_job(
         }
 
         let input_val = rendered_input.unwrap_or_else(|| serde_json::json!({}));
-        let mut ctx = serde_json::Map::new();
-        if !workspace.secrets.is_empty() {
-            if let Ok(secrets_value) = serde_json::to_value(&workspace.secrets) {
-                ctx.insert("secret".to_string(), secrets_value);
-            }
-        }
-        let context_value = serde_json::Value::Object(ctx);
 
-        let merged = match merge_action_defaults(&input_val, &action.input, &context_value) {
-            Ok(merged) => merged,
+        match prepare_action_input(&input_val, &action.input, &workspace) {
+            Ok(prepared) => Some(prepared),
             Err(e) => {
-                tracing::warn!("Failed to merge action input defaults: {:#}", e);
-                input_val
-            }
-        };
-
-        // Resolve connection-type inputs (replace name strings with full objects)
-        match resolve_connection_inputs(&merged, &action.input, &workspace) {
-            Ok(resolved) => Some(resolved),
-            Err(e) => {
-                tracing::warn!("Failed to resolve action connection inputs: {:#}", e);
-                Some(merged)
+                tracing::warn!("Failed to prepare action input: {:#}", e);
+                Some(input_val)
             }
         }
     };

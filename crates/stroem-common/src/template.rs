@@ -387,6 +387,23 @@ pub fn merge_action_defaults(
     render_value_deep(&merged, context).context("Failed to render templates in action defaults")
 }
 
+/// Prepare action input: merge defaults, resolve connection references.
+///
+/// Combines `merge_action_defaults` and `resolve_connection_inputs` into a single
+/// operation. This is the canonical way to prepare action-level input before
+/// rendering the action's cmd/script templates.
+pub fn prepare_action_input(
+    rendered_input: &serde_json::Value,
+    action_input_schema: &HashMap<String, InputFieldDef>,
+    workspace_config: &WorkspaceConfig,
+) -> Result<serde_json::Value> {
+    let secrets_ctx = serde_json::json!({ "secret": &workspace_config.secrets });
+    let merged = merge_action_defaults(rendered_input, action_input_schema, &secrets_ctx)
+        .context("Failed to merge action input defaults")?;
+    resolve_connection_inputs(&merged, action_input_schema, workspace_config)
+        .context("Failed to resolve action connection inputs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1460,5 +1477,87 @@ mod tests {
         let context = json!({"secret": {"deep": "resolved"}});
         let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
         assert_eq!(result["config"]["level1"]["level2"]["value"], "resolved");
+    }
+
+    #[test]
+    fn test_prepare_action_input_merges_defaults_and_resolves_connections() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert(
+            "ch".to_string(),
+            json!({"host": "ch.example.com", "pass": "s3cret"}),
+        );
+        ws.connections.insert(
+            "ch-prod".to_string(),
+            crate::models::workflow::ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("ch.example.com"));
+                    v.insert("port".to_string(), json!(8123));
+                    v.insert("password".to_string(), json!("s3cret"));
+                    v
+                },
+            },
+        );
+
+        // Action input: connection type with default, plus a plain string
+        let mut schema = HashMap::new();
+        schema.insert(
+            "db".to_string(),
+            field("clickhouse", false, Some(json!("ch-prod"))),
+        );
+        schema.insert("query".to_string(), field("string", true, None));
+
+        // User provides query but not db — default "ch-prod" should be filled and resolved
+        let input = json!({"query": "SELECT 1"});
+        let result = prepare_action_input(&input, &schema, &ws).unwrap();
+
+        assert_eq!(result["query"], "SELECT 1");
+        assert_eq!(result["db"]["host"], "ch.example.com");
+        assert_eq!(result["db"]["port"], 8123);
+        assert_eq!(result["db"]["password"], "s3cret");
+    }
+
+    #[test]
+    fn test_prepare_action_input_user_provided_connection_name() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "my-conn".to_string(),
+            crate::models::workflow::ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("url".to_string(), json!("https://example.com"));
+                    v
+                },
+            },
+        );
+
+        let mut schema = HashMap::new();
+        schema.insert("api".to_string(), field("custom_api", false, None));
+
+        // User explicitly provides the connection name
+        let input = json!({"api": "my-conn"});
+        let result = prepare_action_input(&input, &schema, &ws).unwrap();
+
+        assert_eq!(result["api"]["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_prepare_action_input_secret_in_default() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("api_key".to_string(), json!("secret-key-123"));
+
+        let mut schema = HashMap::new();
+        schema.insert(
+            "token".to_string(),
+            field("string", false, Some(json!("{{ secret.api_key }}"))),
+        );
+
+        let input = json!({});
+        let result = prepare_action_input(&input, &schema, &ws).unwrap();
+
+        assert_eq!(result["token"], "secret-key-123");
     }
 }

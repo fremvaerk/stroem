@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::template::{
-    merge_action_defaults, merge_defaults, render_input_map, resolve_connection_inputs,
+    merge_defaults, prepare_action_input, render_input_map, resolve_connection_inputs,
 };
 use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
@@ -205,12 +205,13 @@ pub async fn handle_task_steps(
         // Merge action-level input defaults and resolve connection inputs
         let rendered_input = if let Some(action) = workspace_config.actions.get(&step.action_name) {
             if !action.input.is_empty() {
-                let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
-                let merged = merge_action_defaults(&rendered_input, &action.input, &secrets_ctx)
-                    .unwrap_or(rendered_input);
-                // Resolve connection-type inputs (replace name strings with full objects)
-                resolve_connection_inputs(&merged, &action.input, workspace_config)
-                    .unwrap_or(merged)
+                match prepare_action_input(&rendered_input, &action.input, workspace_config) {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        tracing::warn!("Failed to prepare action input: {:#}", e);
+                        rendered_input
+                    }
+                }
             } else {
                 rendered_input
             }
