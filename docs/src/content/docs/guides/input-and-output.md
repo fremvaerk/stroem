@@ -75,6 +75,28 @@ When triggered without specifying `env` or `api_key`, the defaults are applied a
 
 Fields marked `required: true` without a default will produce an error if not provided.
 
+### Secret inputs
+
+Mark an input as `secret: true` to indicate it contains sensitive data:
+
+```yaml
+tasks:
+  deploy:
+    input:
+      api_key:
+        type: string
+        secret: true
+        default: "{{ secret.DEPLOY_API_KEY }}"
+```
+
+When `secret: true` is set and the field has a default value:
+
+- The UI renders a password field with a masked placeholder (`********`)
+- If the user submits without changing the value, the field is omitted from the input payload
+- The server fills in the default value and Tera renders the secret reference at execution time
+
+This prevents the raw template string (e.g. `{{ secret.DEPLOY_API_KEY }}`) from appearing in the UI while ensuring the real secret value is used at runtime.
+
 ### Action-level input
 
 Action input is provided by the step definition in the task flow. Values support [Tera templates](/guides/templating/):

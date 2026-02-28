@@ -811,6 +811,7 @@ mod tests {
         InputFieldDef {
             field_type: field_type.to_string(),
             required,
+            secret: false,
             default,
         }
     }
@@ -1008,6 +1009,39 @@ mod tests {
         assert_eq!(result["env"], "production");
         assert_eq!(result["retries"], 3);
         assert_eq!(result["notify"], true);
+    }
+
+    #[test]
+    fn test_merge_defaults_secret_field_omitted_uses_default() {
+        // Simulates the UI omitting a secret field (user didn't change the sentinel).
+        // merge_defaults should fill in the default and render the template.
+        let mut schema = HashMap::new();
+        schema.insert(
+            "api_key".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                required: false,
+                secret: true,
+                default: Some(json!("the-secret-value")),
+            },
+        );
+        schema.insert(
+            "env".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                required: false,
+                secret: false,
+                default: Some(json!("staging")),
+            },
+        );
+
+        // User provides env but omits api_key (secret sentinel was unchanged)
+        let user_input = json!({"env": "production"});
+        let context = json!({});
+        let result = merge_defaults(&user_input, &schema, &context).unwrap();
+
+        assert_eq!(result["env"], "production");
+        assert_eq!(result["api_key"], "the-secret-value");
     }
 
     // --- resolve_connection_inputs tests ---

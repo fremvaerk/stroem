@@ -24,6 +24,7 @@ import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, JobListItem, FlowStep, InputField } from "@/lib/types";
 
 const JOBS_PAGE_SIZE = 20;
+const SECRET_SENTINEL = "********";
 
 /** Topological sort of flow steps (Kahn's algorithm).
  *  Steps with no unmet dependencies come first; ties broken alphabetically. */
@@ -133,7 +134,9 @@ export function TaskDetailPage() {
           setTask(data);
           const defaults: Record<string, unknown> = {};
           for (const [key, field] of Object.entries(data.input)) {
-            if (field.default !== undefined) {
+            if (field.secret && field.default !== undefined) {
+              defaults[key] = SECRET_SENTINEL;
+            } else if (field.default !== undefined) {
               defaults[key] = field.default;
             } else if (field.type === "boolean") {
               defaults[key] = false;
@@ -187,6 +190,7 @@ export function TaskDetailPage() {
       const input: Record<string, unknown> = {};
       for (const [key, val] of Object.entries(values)) {
         const field = task.input[key];
+        if (field?.secret && val === SECRET_SENTINEL) continue;
         if (field?.type === "number") {
           input[key] = Number(val);
         } else {
@@ -476,6 +480,30 @@ function InputFieldRow({
   onChange: (v: unknown) => void;
 }) {
   const id = `input-${fieldKey}`;
+
+  if (field.secret) {
+    return (
+      <div className="space-y-2">
+        <Label htmlFor={id}>
+          {fieldKey}
+          {field.required && !field.default && (
+            <span className="ml-1 text-destructive">*</span>
+          )}
+        </Label>
+        <Input
+          id={id}
+          type="password"
+          value={String(value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={field.description || fieldKey}
+          required={field.required && !field.default}
+        />
+        {field.description && (
+          <p className="text-xs text-muted-foreground">{field.description}</p>
+        )}
+      </div>
+    );
+  }
 
   if (field.type === "boolean") {
     return (

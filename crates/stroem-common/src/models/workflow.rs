@@ -39,6 +39,8 @@ pub struct InputFieldDef {
     pub field_type: String, // "string", "number", "boolean"
     #[serde(default)]
     pub required: bool,
+    #[serde(default)]
+    pub secret: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 }
@@ -1179,6 +1181,57 @@ on_error:
         ws.render_secrets().unwrap();
         assert_eq!(ws.secrets["cloud"]["providers"][0]["name"], "aws");
         assert_eq!(ws.secrets["cloud"]["providers"][0]["key"], "resolved");
+    }
+
+    #[test]
+    fn test_input_field_secret_defaults_false() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+    input:
+      env:
+        type: string
+        required: true
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("deploy").unwrap();
+        let env_field = action.input.get("env").unwrap();
+        assert!(!env_field.secret);
+    }
+
+    #[test]
+    fn test_input_field_secret_roundtrip() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+    input:
+      api_key:
+        type: string
+        secret: true
+        default: "{{ secret.DEPLOY_KEY }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("deploy").unwrap();
+        let key_field = action.input.get("api_key").unwrap();
+        assert!(key_field.secret);
+        assert_eq!(
+            key_field.default.as_ref().unwrap(),
+            &json!("{{ secret.DEPLOY_KEY }}")
+        );
+
+        // Round-trip through JSON
+        let json_str = serde_json::to_string(&key_field).unwrap();
+        let deserialized: super::InputFieldDef = serde_json::from_str(&json_str).unwrap();
+        assert!(deserialized.secret);
+        assert_eq!(deserialized.field_type, "string");
+        assert_eq!(
+            deserialized.default.as_ref().unwrap(),
+            &json!("{{ secret.DEPLOY_KEY }}")
+        );
     }
 
     // --- Connection tests ---

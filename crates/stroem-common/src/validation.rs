@@ -2541,4 +2541,66 @@ tasks:
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_secret_input_with_default_is_valid() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+    input:
+      api_key:
+        type: string
+        secret: true
+        default: "{{ secret.DEPLOY_KEY }}"
+
+tasks:
+  release:
+    input:
+      token:
+        type: string
+        secret: true
+        default: "{{ secret.TOKEN }}"
+    flow:
+      step1:
+        action: deploy
+        input:
+          api_key: "{{ input.token }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_secret_input_without_default_is_valid() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+    input:
+      password:
+        type: string
+        secret: true
+        required: true
+
+tasks:
+  release:
+    input:
+      password:
+        type: string
+        secret: true
+        required: true
+    flow:
+      step1:
+        action: deploy
+        input:
+          password: "{{ input.password }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
 }

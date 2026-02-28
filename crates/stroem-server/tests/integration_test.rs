@@ -41,6 +41,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -132,6 +133,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -177,6 +179,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -338,6 +341,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -414,6 +418,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -469,6 +474,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -503,6 +509,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -537,6 +544,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
@@ -594,6 +602,7 @@ fn test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: Some(json!("test")),
         },
     );
@@ -6352,6 +6361,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
         InputFieldDef {
             field_type: "string".to_string(),
             required: false,
+            secret: false,
             default: None,
         },
     );
@@ -7620,6 +7630,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
         InputFieldDef {
             field_type: "string".to_string(),
             required: true,
+            secret: false,
             default: None,
         },
     );
