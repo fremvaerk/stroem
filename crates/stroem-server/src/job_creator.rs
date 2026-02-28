@@ -202,12 +202,15 @@ pub async fn handle_task_steps(
             serde_json::json!({})
         };
 
-        // Merge action-level input defaults (e.g. object defaults with secret templates)
+        // Merge action-level input defaults and resolve connection inputs
         let rendered_input = if let Some(action) = workspace_config.actions.get(&step.action_name) {
             if !action.input.is_empty() {
                 let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
-                merge_action_defaults(&rendered_input, &action.input, &secrets_ctx)
-                    .unwrap_or(rendered_input)
+                let merged = merge_action_defaults(&rendered_input, &action.input, &secrets_ctx)
+                    .unwrap_or(rendered_input);
+                // Resolve connection-type inputs (replace name strings with full objects)
+                resolve_connection_inputs(&merged, &action.input, workspace_config)
+                    .unwrap_or(merged)
             } else {
                 rendered_input
             }

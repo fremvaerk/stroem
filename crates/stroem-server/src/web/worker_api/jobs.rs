@@ -10,6 +10,7 @@ use serde_json::json;
 use std::sync::Arc;
 use stroem_common::template::{
     merge_action_defaults, render_env_map, render_input_map, render_string_opt,
+    resolve_connection_inputs,
 };
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
@@ -314,11 +315,20 @@ pub async fn claim_job(
         }
         let context_value = serde_json::Value::Object(ctx);
 
-        match merge_action_defaults(&input_val, &action.input, &context_value) {
-            Ok(merged) => Some(merged),
+        let merged = match merge_action_defaults(&input_val, &action.input, &context_value) {
+            Ok(merged) => merged,
             Err(e) => {
                 tracing::warn!("Failed to merge action input defaults: {:#}", e);
-                Some(input_val)
+                input_val
+            }
+        };
+
+        // Resolve connection-type inputs (replace name strings with full objects)
+        match resolve_connection_inputs(&merged, &action.input, &workspace) {
+            Ok(resolved) => Some(resolved),
+            Err(e) => {
+                tracing::warn!("Failed to resolve action connection inputs: {:#}", e);
+                Some(merged)
             }
         }
     };
