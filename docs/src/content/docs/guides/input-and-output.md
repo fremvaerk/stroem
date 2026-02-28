@@ -30,15 +30,19 @@ The optional `description` field is displayed in the web UI as placeholder text 
 
 ### Supported types
 
-| Type      | Description                                           |
-|-----------|-------------------------------------------------------|
-| `string`  | Single-line text. Renders as an input field in the UI |
-| `text`    | Multiline text. Renders as a textarea in the UI       |
-| `integer` | Whole number                                          |
-| `number`  | Numeric value (integer or decimal)                    |
-| `boolean` | True/false. Renders as a checkbox in the UI           |
+| Type       | Description                                                    |
+|------------|----------------------------------------------------------------|
+| `string`   | Single-line text. Renders as an input field in the UI          |
+| `text`     | Multiline text. Renders as a textarea in the UI                |
+| `integer`  | Whole number                                                   |
+| `number`   | Numeric value (integer or decimal)                             |
+| `boolean`  | True/false. Renders as a checkbox in the UI                    |
+| `date`     | Date value (`YYYY-MM-DD`). Renders as a date picker in the UI |
+| `datetime` | Date and time. Renders as a datetime picker in the UI          |
 
 Both `string` and `text` are treated identically at runtime — the difference is only in how the UI renders the input field. Use `text` for values that benefit from multiline editing such as SQL queries, scripts, or markdown content.
+
+Both `date` and `datetime` are treated as strings at runtime. The `date` type produces values like `2026-01-15`, while `datetime` produces values like `2026-01-15T14:30`.
 
 ### Task-level input
 
@@ -105,6 +109,32 @@ When `secret: true` is set and the field has a default value:
 - The server fills in the default value and Tera renders the secret reference at execution time
 
 This prevents the raw template string (e.g. `{{ secret.DEPLOY_API_KEY }}`) from appearing in the UI while ensuring the real secret value is used at runtime.
+
+### Dropdown options
+
+Add `options` to any input field to render it as a dropdown in the UI:
+
+```yaml
+tasks:
+  deploy:
+    input:
+      env:
+        type: string
+        options: [staging, production, dev]
+        default: staging
+      region:
+        type: string
+        name: AWS Region
+        options:
+          - us-east-1
+          - eu-west-1
+          - ap-southeast-1
+        allow_custom: true
+```
+
+When `options` is set, the UI renders a select dropdown instead of a text input. The value submitted is always a string from the list.
+
+Set `allow_custom: true` to let users type a custom value in addition to the predefined options. The UI renders a text input with autocomplete suggestions.
 
 ### Action-level input
 

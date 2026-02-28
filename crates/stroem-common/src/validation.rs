@@ -193,6 +193,9 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
     // Validate connection input references in tasks
     warnings.extend(validate_connection_inputs(config)?);
 
+    // Validate input field options
+    warnings.extend(validate_input_options(config));
+
     // Validate secrets
     validate_secrets(
         "",
@@ -234,14 +237,16 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 /// - Empty string values produce errors.
 fn validate_connections(config: &WorkflowConfig) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
-    let valid_prop_types = ["string", "text", "integer", "number", "boolean"];
+    let valid_prop_types = [
+        "string", "text", "integer", "number", "boolean", "date", "datetime",
+    ];
 
     // Validate connection type definitions
     for (type_name, type_def) in &config.connection_types {
         for (prop_name, prop_def) in &type_def.properties {
             if !valid_prop_types.contains(&prop_def.property_type.as_str()) {
                 bail!(
-                    "Connection type '{}' property '{}' has invalid type '{}' (expected: string, integer, number, boolean)",
+                    "Connection type '{}' property '{}' has invalid type '{}' (expected: string, text, integer, number, boolean, date, datetime)",
                     type_name,
                     prop_name,
                     prop_def.property_type
@@ -304,13 +309,82 @@ fn validate_connections(config: &WorkflowConfig) -> Result<Vec<String>> {
     Ok(warnings)
 }
 
+/// Validates input field options across all actions and tasks.
+fn validate_input_options(config: &WorkflowConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Check action-level inputs
+    for (action_name, action) in &config.actions {
+        for (field_name, field) in &action.input {
+            check_input_field_options(
+                &format!("Action '{action_name}' input '{field_name}'"),
+                field,
+                &mut warnings,
+            );
+        }
+    }
+
+    // Check task-level inputs
+    for (task_name, task) in &config.tasks {
+        for (field_name, field) in &task.input {
+            check_input_field_options(
+                &format!("Task '{task_name}' input '{field_name}'"),
+                field,
+                &mut warnings,
+            );
+        }
+    }
+
+    warnings
+}
+
+fn check_input_field_options(
+    context: &str,
+    field: &crate::models::workflow::InputFieldDef,
+    warnings: &mut Vec<String>,
+) {
+    if let Some(ref options) = field.options {
+        if options.is_empty() {
+            warnings.push(format!("{context}: options list is empty"));
+        }
+        if options.iter().any(|o| o.is_empty()) {
+            warnings.push(format!("{context}: options list contains empty string"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for opt in options {
+            if !seen.insert(opt) {
+                warnings.push(format!("{context}: duplicate option '{opt}'"));
+            }
+        }
+        // Warn if default value is not in options (strict mode only)
+        if !field.allow_custom {
+            if let Some(ref default) = field.default {
+                if let Some(default_str) = default.as_str() {
+                    if !options.iter().any(|o| o == default_str) {
+                        warnings.push(format!(
+                            "{context}: default value '{}' is not in options list",
+                            default_str
+                        ));
+                    }
+                }
+            }
+        }
+    } else if field.allow_custom {
+        warnings.push(format!(
+            "{context}: allow_custom has no effect without options"
+        ));
+    }
+}
+
 /// Validates that task input fields referencing connection types have valid references.
 ///
 /// For each task input where `field_type` is not a primitive type (string/integer/number/boolean),
 /// it's treated as a connection type reference and must exist in `connection_types`.
 fn validate_connection_inputs(config: &WorkflowConfig) -> Result<Vec<String>> {
     let warnings = Vec::new();
-    let primitives = ["string", "text", "integer", "number", "boolean"];
+    let primitives = [
+        "string", "text", "integer", "number", "boolean", "date", "datetime",
+    ];
 
     for (task_name, task) in &config.tasks {
         for (field_name, field_def) in &task.input {
@@ -2510,6 +2584,10 @@ tasks:
         type: number
       enabled:
         type: boolean
+      start_date:
+        type: date
+      scheduled_at:
+        type: datetime
     flow:
       step1:
         action: greet
@@ -2544,6 +2622,41 @@ tasks:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_date_and_datetime_input_types_ok() {
+        let yaml = r#"
+actions:
+  generate:
+    type: shell
+    cmd: "echo report"
+tasks:
+  report:
+    input:
+      start_date:
+        type: date
+        default: "2026-01-01"
+      scheduled_at:
+        type: datetime
+    flow:
+      step1:
+        action: generate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "date/datetime should be valid primitive types: {:?}",
+            result
+        );
+        let warnings = result.unwrap();
+        assert_eq!(
+            warnings.len(),
+            0,
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
     }
 
     #[test]
@@ -2606,5 +2719,256 @@ tasks:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_input_field_options_valid() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        options: [staging, production]
+        default: staging
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert_eq!(
+            warnings.len(),
+            0,
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_options_valid_action_level() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+    input:
+      env:
+        type: string
+        options: [staging, production]
+        default: staging
+tasks:
+  test:
+    flow:
+      step1:
+        action: deploy
+        input:
+          env: "{{ input.env }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert_eq!(
+            warnings.len(),
+            0,
+            "Expected no warnings for action-level options, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_empty_options_warning_action_level() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+    input:
+      env:
+        type: string
+        options: []
+tasks:
+  test:
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Action") && w.contains("options list is empty")),
+            "Expected action-level empty options warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_empty_options_warning() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        options: []
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("options list is empty")),
+            "Expected empty options warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_allow_custom_without_options_warning() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        allow_custom: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("allow_custom has no effect")),
+            "Expected allow_custom warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_default_not_in_options_warning() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        options: [staging, production]
+        default: development
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("not in options list")),
+            "Expected default-not-in-options warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_default_not_in_options_ok_with_allow_custom() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        options: [staging, production]
+        default: development
+        allow_custom: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert_eq!(
+            warnings.len(),
+            0,
+            "Expected no warnings with allow_custom, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_duplicate_options_warning() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        options: [staging, production, staging]
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("duplicate option")),
+            "Expected duplicate option warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_empty_string_option_warning() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  test:
+    input:
+      env:
+        type: string
+        options:
+          - ""
+          - staging
+          - production
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("contains empty string")),
+            "Expected empty string option warning, got: {:?}",
+            warnings
+        );
     }
 }

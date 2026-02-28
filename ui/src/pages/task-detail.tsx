@@ -17,6 +17,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { StatusBadge } from "@/components/status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { getTask, listJobs, executeTask } from "@/lib/api";
@@ -508,6 +515,65 @@ function InputFieldRow({
 
   const displayLabel = field.name ?? fieldKey;
 
+  if (field.options && field.options.length > 0) {
+    if (field.allow_custom) {
+      // Combobox: input with datalist for autocomplete suggestions
+      const listId = `${id}-options`;
+      return (
+        <div className="space-y-2">
+          <Label htmlFor={id}>
+            {displayLabel}
+            {field.required && <span className="ml-1 text-destructive">*</span>}
+          </Label>
+          <Input
+            id={id}
+            list={listId}
+            value={String(value ?? "")}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={field.description || fieldKey}
+            required={field.required}
+          />
+          <datalist id={listId}>
+            {field.options.map((opt) => (
+              <option key={opt} value={opt} />
+            ))}
+          </datalist>
+          {field.description && (
+            <p className="text-xs text-muted-foreground">{field.description}</p>
+          )}
+        </div>
+      );
+    }
+
+    // Strict select dropdown
+    return (
+      <div className="space-y-2">
+        <Label htmlFor={id}>
+          {displayLabel}
+          {field.required && <span className="ml-1 text-destructive">*</span>}
+        </Label>
+        <Select
+          value={String(value ?? "")}
+          onValueChange={(v) => onChange(v)}
+        >
+          <SelectTrigger id={id}>
+            <SelectValue placeholder={field.description || `Select ${displayLabel.toLowerCase()}`} />
+          </SelectTrigger>
+          <SelectContent>
+            {field.options.map((opt) => (
+              <SelectItem key={opt} value={opt}>
+                {opt}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {field.description && (
+          <p className="text-xs text-muted-foreground">{field.description}</p>
+        )}
+      </div>
+    );
+  }
+
   if (field.secret) {
     return (
       <div className="space-y-2">
@@ -566,6 +632,28 @@ function InputFieldRow({
           value={String(value ?? "")}
           onChange={(e) => onChange(e.target.value)}
           placeholder={field.description || fieldKey}
+          required={field.required}
+        />
+        {field.description && (
+          <p className="text-xs text-muted-foreground">{field.description}</p>
+        )}
+      </div>
+    );
+  }
+
+  if (field.type === "date" || field.type === "datetime") {
+    const inputType = field.type === "datetime" ? "datetime-local" : "date";
+    return (
+      <div className="space-y-2">
+        <Label htmlFor={id}>
+          {displayLabel}
+          {field.required && <span className="ml-1 text-destructive">*</span>}
+        </Label>
+        <Input
+          id={id}
+          type={inputType}
+          value={String(value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
           required={field.required}
         />
         {field.description && (

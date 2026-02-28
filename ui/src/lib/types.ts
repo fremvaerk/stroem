@@ -23,6 +23,8 @@ export interface InputField {
   default?: unknown;
   required?: boolean;
   secret?: boolean;
+  options?: string[];
+  allow_custom?: boolean;
 }
 
 export interface FlowStep {

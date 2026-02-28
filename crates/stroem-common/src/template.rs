@@ -252,7 +252,9 @@ pub fn merge_defaults(
 }
 
 /// Primitive type names that are NOT connection type references.
-const PRIMITIVE_TYPES: &[&str] = &["string", "text", "integer", "number", "boolean"];
+const PRIMITIVE_TYPES: &[&str] = &[
+    "string", "text", "integer", "number", "boolean", "date", "datetime",
+];
 
 /// Resolve connection inputs: replace connection name strings with the full connection object.
 ///
@@ -815,6 +817,8 @@ mod tests {
             required,
             secret: false,
             default,
+            options: None,
+            allow_custom: false,
         }
     }
 
@@ -1027,6 +1031,8 @@ mod tests {
                 required: false,
                 secret: true,
                 default: Some(json!("the-secret-value")),
+                options: None,
+                allow_custom: false,
             },
         );
         schema.insert(
@@ -1038,6 +1044,8 @@ mod tests {
                 required: false,
                 secret: false,
                 default: Some(json!("staging")),
+                options: None,
+                allow_custom: false,
             },
         );
 

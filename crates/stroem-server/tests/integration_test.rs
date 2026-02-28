@@ -45,6 +45,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.actions.insert(
@@ -148,6 +150,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.tasks.insert(
@@ -204,6 +208,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.tasks.insert(
@@ -406,6 +412,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.tasks.insert(
@@ -501,6 +509,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     let mut db_env = HashMap::new();
@@ -564,6 +574,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.tasks.insert(
@@ -603,6 +615,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.actions.insert(
@@ -642,6 +656,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.actions.insert(
@@ -710,6 +726,8 @@ fn test_workspace() -> WorkspaceConfig {
             required: true,
             secret: false,
             default: Some(json!("test")),
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.tasks.insert(
@@ -6588,6 +6606,8 @@ fn hook_test_workspace() -> WorkspaceConfig {
             required: false,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.actions.insert(
@@ -7939,6 +7959,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
             required: true,
             secret: false,
             default: None,
+            options: None,
+            allow_custom: false,
         },
     );
     workspace.tasks.insert(

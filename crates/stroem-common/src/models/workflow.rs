@@ -36,7 +36,7 @@ pub struct ConnectionDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputFieldDef {
     #[serde(rename = "type")]
-    pub field_type: String, // "string", "number", "boolean"
+    pub field_type: String, // "string", "text", "integer", "number", "boolean", "date", "datetime", or connection type
     /// Human-readable display name for this input field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -48,6 +48,12 @@ pub struct InputFieldDef {
     pub secret: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
+    /// Predefined options for this input field (renders as dropdown in UI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+    /// When true and options are set, allows entering custom values not in the list.
+    #[serde(default)]
+    pub allow_custom: bool,
 }
 
 /// Output field definition
@@ -2229,6 +2235,8 @@ tasks:
 
         let field = action.input.get("name").unwrap();
         assert!(field.description.is_none());
+        assert!(field.options.is_none());
+        assert!(!field.allow_custom);
 
         let task = config.tasks.get("hello").unwrap();
         assert!(task.name.is_none());
@@ -2237,5 +2245,105 @@ tasks:
         let step = task.flow.get("step1").unwrap();
         assert!(step.name.is_none());
         assert!(step.description.is_none());
+    }
+
+    #[test]
+    fn test_parse_input_field_with_options() {
+        let yaml = r#"
+tasks:
+  deploy:
+    input:
+      env:
+        type: string
+        options: [staging, production, dev]
+        default: staging
+    flow:
+      run:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("deploy").unwrap();
+        let field = task.input.get("env").unwrap();
+
+        assert_eq!(
+            field.options.as_ref().unwrap(),
+            &["staging", "production", "dev"]
+        );
+        assert!(!field.allow_custom);
+        assert_eq!(field.default.as_ref().unwrap(), "staging");
+    }
+
+    #[test]
+    fn test_parse_input_field_with_options_allow_custom() {
+        let yaml = r#"
+tasks:
+  deploy:
+    input:
+      region:
+        type: string
+        options:
+          - us-east-1
+          - eu-west-1
+        allow_custom: true
+    flow:
+      run:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("deploy").unwrap();
+        let field = task.input.get("region").unwrap();
+
+        assert_eq!(field.options.as_ref().unwrap(), &["us-east-1", "eu-west-1"]);
+        assert!(field.allow_custom);
+    }
+
+    #[test]
+    fn test_input_field_options_default_none() {
+        let yaml = r#"
+tasks:
+  deploy:
+    input:
+      env:
+        type: string
+    flow:
+      run:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("deploy").unwrap();
+        let field = task.input.get("env").unwrap();
+
+        assert!(field.options.is_none());
+        assert!(!field.allow_custom);
+    }
+
+    #[test]
+    fn test_parse_input_field_date_and_datetime() {
+        let yaml = r#"
+tasks:
+  report:
+    input:
+      start_date:
+        type: date
+        name: Start date
+        default: "2026-01-01"
+      scheduled_at:
+        type: datetime
+        description: When to run
+    flow:
+      run:
+        action: generate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("report").unwrap();
+
+        let date_field = task.input.get("start_date").unwrap();
+        assert_eq!(date_field.field_type, "date");
+        assert_eq!(date_field.name.as_deref(), Some("Start date"));
+        assert_eq!(date_field.default.as_ref().unwrap(), "2026-01-01");
+
+        let datetime_field = task.input.get("scheduled_at").unwrap();
+        assert_eq!(datetime_field.field_type, "datetime");
+        assert_eq!(datetime_field.description.as_deref(), Some("When to run"));
     }
 }
