@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 /// HTTP client for communicating with the Strøm server
@@ -9,6 +10,8 @@ pub struct ServerClient {
     client: reqwest::Client,
     base_url: Arc<str>,
     token: Arc<str>,
+    /// Longer timeout for tarball downloads (default: 10 minutes)
+    download_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,11 +73,22 @@ struct StepCompleteRequest {
 }
 
 impl ServerClient {
-    pub fn new(base_url: &str, token: &str) -> Self {
+    pub fn new(
+        base_url: &str,
+        token: &str,
+        connect_timeout_secs: Option<u64>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(connect_timeout_secs.unwrap_or(10)))
+            .timeout(Duration::from_secs(request_timeout_secs.unwrap_or(30)))
+            .build()
+            .expect("Failed to build HTTP client");
         Self {
-            client: reqwest::Client::new(),
+            client,
             base_url: Arc::from(base_url),
             token: Arc::from(token),
+            download_timeout: Duration::from_secs(600),
         }
     }
 
@@ -281,7 +295,9 @@ impl ServerClient {
         let mut req = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.token));
+            .header("Authorization", format!("Bearer {}", self.token))
+            // Override the default request timeout — tarball downloads can be large
+            .timeout(self.download_timeout);
 
         if let Some(rev) = cached_revision {
             req = req.header("If-None-Match", format!("\"{}\"", rev));
@@ -351,5 +367,32 @@ impl ServerClient {
         Self::check_response(response, "Push logs").await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_with_default_timeouts() {
+        let client = ServerClient::new("http://localhost:8080", "token", None, None);
+        assert_eq!(&*client.base_url, "http://localhost:8080");
+        assert_eq!(&*client.token, "token");
+        assert_eq!(client.download_timeout, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn test_new_with_custom_timeouts() {
+        let client = ServerClient::new("http://localhost:8080", "token", Some(5), Some(60));
+        assert_eq!(&*client.base_url, "http://localhost:8080");
+        assert_eq!(&*client.token, "token");
+    }
+
+    #[test]
+    fn test_client_is_clone() {
+        let client = ServerClient::new("http://localhost:8080", "token", None, None);
+        let cloned = client.clone();
+        assert_eq!(&*cloned.base_url, "http://localhost:8080");
     }
 }

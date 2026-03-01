@@ -207,13 +207,6 @@ impl WorkspaceManager {
 
     /// Get the workspace config for a given name
     pub async fn get_config(&self, name: &str) -> Option<WorkspaceConfig> {
-        self.entries
-            .get(name)
-            .map(|e| e.config.blocking_read().clone())
-    }
-
-    /// Get the workspace config (async-friendly)
-    pub async fn get_config_async(&self, name: &str) -> Option<WorkspaceConfig> {
         match self.entries.get(name) {
             Some(entry) => Some(entry.config.read().await.clone()),
             None => None,
@@ -418,7 +411,7 @@ tasks:
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         assert_eq!(mgr.names().len(), 1);
 
-        let config = mgr.get_config_async("default").await.unwrap();
+        let config = mgr.get_config("default").await.unwrap();
         assert_eq!(config.tasks.len(), 1);
         assert!(config.tasks.contains_key("hello"));
     }
@@ -460,10 +453,10 @@ tasks:
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         assert_eq!(mgr.names().len(), 2);
 
-        let default_config = mgr.get_config_async("default").await.unwrap();
+        let default_config = mgr.get_config("default").await.unwrap();
         assert!(default_config.tasks.contains_key("hello"));
 
-        let ops_config = mgr.get_config_async("ops").await.unwrap();
+        let ops_config = mgr.get_config("ops").await.unwrap();
         assert!(ops_config.tasks.contains_key("deploy"));
     }
 
@@ -479,7 +472,7 @@ tasks:
         );
 
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
-        assert!(mgr.get_config_async("nonexistent").await.is_none());
+        assert!(mgr.get_config("nonexistent").await.is_none());
         assert!(mgr.get_path("nonexistent").is_none());
     }
 
@@ -571,7 +564,7 @@ tasks:
         assert_eq!(mgr.names().len(), 1);
         assert!(mgr.names().contains(&"test"));
 
-        let loaded_config = mgr.get_config_async("test").await.unwrap();
+        let loaded_config = mgr.get_config("test").await.unwrap();
         assert_eq!(loaded_config.actions.len(), 1);
         assert_eq!(loaded_config.tasks.len(), 1);
         assert!(loaded_config.actions.contains_key("test-action"));
@@ -690,13 +683,13 @@ tasks:
         // Verify they're independent
         assert_eq!(mgr1.names().len(), 1);
         assert_eq!(mgr2.names().len(), 1);
-        assert!(mgr1.get_config_async("ws1").await.is_some());
-        assert!(mgr1.get_config_async("ws2").await.is_none());
-        assert!(mgr2.get_config_async("ws2").await.is_some());
-        assert!(mgr2.get_config_async("ws1").await.is_none());
+        assert!(mgr1.get_config("ws1").await.is_some());
+        assert!(mgr1.get_config("ws2").await.is_none());
+        assert!(mgr2.get_config("ws2").await.is_some());
+        assert!(mgr2.get_config("ws1").await.is_none());
 
-        let config1_loaded = mgr1.get_config_async("ws1").await.unwrap();
-        let config2_loaded = mgr2.get_config_async("ws2").await.unwrap();
+        let config1_loaded = mgr1.get_config("ws1").await.unwrap();
+        let config2_loaded = mgr2.get_config("ws2").await.unwrap();
         assert!(config1_loaded.actions.contains_key("action1"));
         assert!(!config1_loaded.actions.contains_key("action2"));
         assert!(config2_loaded.actions.contains_key("action2"));
@@ -801,7 +794,7 @@ tasks:
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         // Workspace should not be in entries
         assert_eq!(mgr.names().len(), 0);
-        assert!(mgr.get_config_async("nonexistent").await.is_none());
+        assert!(mgr.get_config("nonexistent").await.is_none());
         // But should appear in list_workspace_info with error
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
@@ -969,7 +962,7 @@ tasks:
         );
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
 
-        let config1 = mgr.get_config_async("default").await.unwrap();
+        let config1 = mgr.get_config("default").await.unwrap();
         assert_eq!(config1.actions.len(), 1);
 
         // Add a second action to the YAML
@@ -993,12 +986,12 @@ tasks:
         .unwrap();
 
         // Before reload, config should still be stale
-        let config_before = mgr.get_config_async("default").await.unwrap();
+        let config_before = mgr.get_config("default").await.unwrap();
         assert_eq!(config_before.actions.len(), 1);
 
         // Reload should update config
         mgr.reload("default").await.unwrap();
-        let config2 = mgr.get_config_async("default").await.unwrap();
+        let config2 = mgr.get_config("default").await.unwrap();
         assert_eq!(config2.actions.len(), 2);
         assert!(config2.actions.contains_key("build"));
     }
@@ -1127,10 +1120,10 @@ tasks:
 
         // Good workspace loaded
         assert_eq!(mgr.names().len(), 1);
-        assert!(mgr.get_config_async("good").await.is_some());
+        assert!(mgr.get_config("good").await.is_some());
 
         // Bad workspace not in entries
-        assert!(mgr.get_config_async("bad").await.is_none());
+        assert!(mgr.get_config("bad").await.is_none());
 
         // Both appear in workspace info
         let infos = mgr.list_workspace_info().await;

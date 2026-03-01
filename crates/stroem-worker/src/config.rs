@@ -22,12 +22,27 @@ pub struct WorkerConfig {
     pub docker: Option<DockerRunnerConfig>,
     /// Kubernetes runner configuration (requires `kubernetes` feature)
     pub kubernetes: Option<KubeRunnerConfig>,
+    /// HTTP request timeout in seconds (default: 30)
+    pub request_timeout_secs: Option<u64>,
+    /// HTTP connect timeout in seconds (default: 10)
+    pub connect_timeout_secs: Option<u64>,
 }
 
 impl WorkerConfig {
     /// Returns tags if set, otherwise falls back to capabilities
     pub fn effective_tags(&self) -> &[String] {
         self.tags.as_deref().unwrap_or(&self.capabilities)
+    }
+
+    /// Validate config values after deserialization
+    pub fn validate(&self) -> Result<()> {
+        if self.request_timeout_secs == Some(0) {
+            anyhow::bail!("request_timeout_secs must be greater than 0");
+        }
+        if self.connect_timeout_secs == Some(0) {
+            anyhow::bail!("connect_timeout_secs must be greater than 0");
+        }
+        Ok(())
     }
 }
 
@@ -65,6 +80,7 @@ pub fn load_config(path: &str) -> Result<WorkerConfig> {
         .context(format!("Failed to build config from: {}", path))?
         .try_deserialize()
         .context("Failed to deserialize worker config")?;
+    config.validate()?;
     Ok(config)
 }
 
@@ -332,5 +348,113 @@ workspace_cache_dir: "/tmp/stroem-workspace"
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.docker.is_none());
         assert!(config.kubernetes.is_none());
+    }
+
+    #[test]
+    fn test_config_with_timeouts() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+connect_timeout_secs: 5
+request_timeout_secs: 60
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.connect_timeout_secs, Some(5));
+        assert_eq!(config.request_timeout_secs, Some(60));
+    }
+
+    #[test]
+    fn test_config_default_timeouts() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.connect_timeout_secs.is_none());
+        assert!(config.request_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn test_validate_zero_request_timeout_rejected() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+request_timeout_secs: 0
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("request_timeout_secs"),
+            "Error should mention request_timeout_secs: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_zero_connect_timeout_rejected() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+connect_timeout_secs: 0
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("connect_timeout_secs"),
+            "Error should mention connect_timeout_secs: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_valid_timeouts_pass() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+connect_timeout_secs: 5
+request_timeout_secs: 60
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_timeouts_pass() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validate().is_ok());
     }
 }

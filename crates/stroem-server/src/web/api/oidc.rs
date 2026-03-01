@@ -1,3 +1,4 @@
+use crate::config::AuthConfig;
 use crate::oidc::{create_state_jwt, provision_user, validate_state_jwt, OidcStateClaims};
 use crate::state::AppState;
 use crate::web::api::auth::issue_token_pair;
@@ -15,6 +16,19 @@ use std::sync::Arc;
 use stroem_db::UserRepo;
 
 const STATE_COOKIE_NAME: &str = "stroem_oidc_state";
+
+/// Returns "; Secure" if the auth config's base_url is HTTPS, empty string otherwise.
+fn cookie_secure_flag(auth_config: &AuthConfig) -> &'static str {
+    if auth_config
+        .base_url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("https://"))
+    {
+        "; Secure"
+    } else {
+        ""
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
@@ -94,10 +108,12 @@ pub async fn oidc_start(
         }
     };
 
-    // Set state cookie (HttpOnly, SameSite=Lax, 10min)
+    // Set state cookie (HttpOnly, SameSite=Lax, 10min, Secure if HTTPS)
     let cookie = format!(
-        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600",
-        STATE_COOKIE_NAME, state_jwt
+        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600{}",
+        STATE_COOKIE_NAME,
+        state_jwt,
+        cookie_secure_flag(auth_config)
     );
 
     let jar = jar.add(axum_extra::extract::cookie::Cookie::parse(cookie).unwrap());
@@ -264,10 +280,11 @@ pub async fn oidc_callback(
         Err(_) => return error_redirect("Internal server error"),
     };
 
-    // Clear state cookie
+    // Clear state cookie (Secure flag must match the original cookie)
     let clear_cookie = format!(
-        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-        STATE_COOKIE_NAME
+        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
+        STATE_COOKIE_NAME,
+        cookie_secure_flag(auth_config)
     );
 
     // Redirect to frontend callback with tokens in hash fragment
@@ -294,4 +311,51 @@ fn error_redirect(message: &str) -> Response {
     );
 
     Redirect::to(&redirect_url).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_auth_config(base_url: Option<&str>) -> AuthConfig {
+        AuthConfig {
+            jwt_secret: "test-secret".to_string(),
+            refresh_secret: "test-refresh".to_string(),
+            base_url: base_url.map(|s| s.to_string()),
+            providers: HashMap::new(),
+            initial_user: None,
+        }
+    }
+
+    #[test]
+    fn test_secure_flag_https() {
+        let config = make_auth_config(Some("https://app.example.com"));
+        assert_eq!(cookie_secure_flag(&config), "; Secure");
+    }
+
+    #[test]
+    fn test_secure_flag_http() {
+        let config = make_auth_config(Some("http://localhost:8080"));
+        assert_eq!(cookie_secure_flag(&config), "");
+    }
+
+    #[test]
+    fn test_secure_flag_no_base_url() {
+        let config = make_auth_config(None);
+        assert_eq!(cookie_secure_flag(&config), "");
+    }
+
+    #[test]
+    fn test_secure_flag_https_with_port() {
+        let config = make_auth_config(Some("https://app.example.com:8443"));
+        assert_eq!(cookie_secure_flag(&config), "; Secure");
+    }
+
+    #[test]
+    fn test_secure_flag_uppercase_not_matched() {
+        // Scheme should be lowercase per RFC — uppercase is not recognized as HTTPS
+        let config = make_auth_config(Some("HTTPS://app.example.com"));
+        assert_eq!(cookie_secure_flag(&config), "");
+    }
 }

@@ -185,7 +185,7 @@ struct WebhookMatch {
 /// Find the first enabled webhook trigger matching the given name.
 async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMatch> {
     for ws_name in state.workspaces.names() {
-        let config = match state.workspaces.get_config_async(ws_name).await {
+        let config = match state.workspaces.get_config(ws_name).await {
             Some(c) => c,
             None => continue,
         };

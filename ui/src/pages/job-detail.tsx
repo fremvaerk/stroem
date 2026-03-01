@@ -8,6 +8,7 @@ import { InfoGrid } from "@/components/info-grid";
 import { StepTimeline } from "@/components/step-timeline";
 import { StepDetail } from "@/components/step-detail";
 import { WorkflowDag } from "@/components/workflow-dag";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
@@ -199,11 +200,19 @@ export function JobDetailPage() {
             />
           ) : (
             <>
-              <WorkflowDag
-                steps={job.steps}
-                selectedStep={selectedStep}
-                onSelectStep={setSelectedStep}
-              />
+              <ErrorBoundary
+                fallback={
+                  <p className="py-8 text-center text-sm text-muted-foreground">
+                    DAG visualization failed to render.
+                  </p>
+                }
+              >
+                <WorkflowDag
+                  steps={job.steps}
+                  selectedStep={selectedStep}
+                  onSelectStep={setSelectedStep}
+                />
+              </ErrorBoundary>
               {selectedStep &&
                 job.steps.find((s) => s.step_name === selectedStep) && (
                   <div className="mt-4 border-t pt-4">

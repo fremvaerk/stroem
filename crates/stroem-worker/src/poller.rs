@@ -192,7 +192,12 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
     tracing::info!("Starting worker '{}'", config.worker_name);
 
     // Create shared clients, executor, and workspace cache
-    let client = Arc::new(ServerClient::new(&config.server_url, &config.worker_token));
+    let client = Arc::new(ServerClient::new(
+        &config.server_url,
+        &config.worker_token,
+        config.connect_timeout_secs,
+        config.request_timeout_secs,
+    ));
     let executor = Arc::new(executor);
     let workspace_cache = Arc::new(WorkspaceCache::new(&config.workspace_cache_dir));
 

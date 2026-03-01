@@ -44,7 +44,7 @@ impl AppState {
 
     /// Get the workspace config for a given workspace name
     pub async fn get_workspace(&self, name: &str) -> Option<WorkspaceConfig> {
-        self.workspaces.get_config_async(name).await
+        self.workspaces.get_config(name).await
     }
 
     /// Append a server-side log entry to a job's log stream.

@@ -1,5 +1,6 @@
 import { Routes, Route } from "react-router";
 import { AuthProvider } from "@/context/auth-context";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { ProtectedRoute } from "@/components/protected-route";
 import { AppLayout } from "@/components/app-layout";
 import { LoginPage } from "@/pages/login";
@@ -19,28 +20,30 @@ import { SettingsPage } from "@/pages/settings";
 export default function App() {
   return (
     <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/login/callback" element={<LoginCallbackPage />} />
-        <Route element={<ProtectedRoute />}>
-          <Route element={<AppLayout />}>
-            <Route index element={<DashboardPage />} />
-            <Route path="workspaces" element={<WorkspacesPage />} />
-            <Route path="tasks" element={<TasksPage />} />
-            <Route
-              path="workspaces/:workspace/tasks/:name"
-              element={<TaskDetailPage />}
-            />
-            <Route path="jobs" element={<JobsPage />} />
-            <Route path="jobs/:id" element={<JobDetailPage />} />
-            <Route path="workers" element={<WorkersPage />} />
-            <Route path="workers/:id" element={<WorkerDetailPage />} />
-            <Route path="users" element={<UsersPage />} />
-            <Route path="users/:id" element={<UserDetailPage />} />
-            <Route path="settings" element={<SettingsPage />} />
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/login/callback" element={<LoginCallbackPage />} />
+          <Route element={<ProtectedRoute />}>
+            <Route element={<AppLayout />}>
+              <Route index element={<DashboardPage />} />
+              <Route path="workspaces" element={<WorkspacesPage />} />
+              <Route path="tasks" element={<TasksPage />} />
+              <Route
+                path="workspaces/:workspace/tasks/:name"
+                element={<TaskDetailPage />}
+              />
+              <Route path="jobs" element={<JobsPage />} />
+              <Route path="jobs/:id" element={<JobDetailPage />} />
+              <Route path="workers" element={<WorkersPage />} />
+              <Route path="workers/:id" element={<WorkerDetailPage />} />
+              <Route path="users" element={<UsersPage />} />
+              <Route path="users/:id" element={<UserDetailPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
+        </Routes>
+      </ErrorBoundary>
     </AuthProvider>
   );
 }

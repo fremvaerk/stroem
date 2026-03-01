@@ -111,7 +111,7 @@ async fn load_triggers(
     let mut triggers = HashMap::new();
 
     for ws_name in workspaces.names() {
-        let config = match workspaces.get_config_async(ws_name).await {
+        let config = match workspaces.get_config(ws_name).await {
             Some(c) => c,
             None => continue,
         };
@@ -208,7 +208,7 @@ async fn fire_trigger(pool: &PgPool, workspaces: &WorkspaceManager, state: &Trig
         state.task
     );
 
-    let config = match workspaces.get_config_async(&state.workspace).await {
+    let config = match workspaces.get_config(&state.workspace).await {
         Some(c) => c,
         None => {
             tracing::error!(
