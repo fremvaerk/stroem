@@ -4,7 +4,7 @@ pub mod worker_api;
 
 use crate::state::AppState;
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use rust_embed::Embed;
@@ -19,11 +19,43 @@ struct StaticFiles;
 pub fn build_router(state: AppState) -> Router {
     let state = Arc::new(state);
 
-    // Build CORS layer
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Build CORS layer: restrict to base_url origin when auth is configured,
+    // otherwise allow any origin (dev mode / embedded UI).
+    let cors = match state
+        .config
+        .auth
+        .as_ref()
+        .and_then(|a| a.base_url.as_deref())
+    {
+        Some(url) => match url.parse::<header::HeaderValue>() {
+            Ok(origin) => CorsLayer::new()
+                .allow_origin(origin)
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+                .allow_credentials(true),
+            Err(e) => {
+                tracing::warn!(
+                    base_url = url,
+                    error = %e,
+                    "auth.base_url could not be parsed as a valid CORS origin, falling back to allow-any"
+                );
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+            }
+        },
+        None => CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    };
 
     Router::new()
         .nest("/api", api::build_api_routes(state.clone()))

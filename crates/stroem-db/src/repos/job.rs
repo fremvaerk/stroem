@@ -69,8 +69,72 @@ impl JobRepo {
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
     ) -> Result<Uuid> {
-        let job_id = Uuid::new_v4();
+        Self::create_with_parent_tx(
+            pool,
+            workspace,
+            task_name,
+            mode,
+            input,
+            source_type,
+            source_id,
+            parent_job_id,
+            parent_step_name,
+        )
+        .await
+    }
 
+    /// Create a new job with optional parent tracking, accepting a generic executor.
+    ///
+    /// Use this variant inside transactions. The `pool`-based [`create_with_parent`]
+    /// delegates here. Generates a new UUID internally; use [`create_with_parent_tx_id`]
+    /// when the caller needs the job ID before commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_parent_tx<'e, E>(
+        executor: E,
+        workspace: &str,
+        task_name: &str,
+        mode: &str,
+        input: Option<JsonValue>,
+        source_type: &str,
+        source_id: Option<&str>,
+        parent_job_id: Option<Uuid>,
+        parent_step_name: Option<&str>,
+    ) -> Result<Uuid>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        Self::create_with_parent_tx_id(
+            executor,
+            Uuid::new_v4(),
+            workspace,
+            task_name,
+            mode,
+            input,
+            source_type,
+            source_id,
+            parent_job_id,
+            parent_step_name,
+        )
+        .await
+    }
+
+    /// Like [`create_with_parent_tx`] but uses a caller-provided job ID.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_parent_tx_id<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        workspace: &str,
+        task_name: &str,
+        mode: &str,
+        input: Option<JsonValue>,
+        source_type: &str,
+        source_id: Option<&str>,
+        parent_job_id: Option<Uuid>,
+        parent_step_name: Option<&str>,
+    ) -> Result<Uuid>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         sqlx::query(
             r#"
             INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name)
@@ -86,7 +150,7 @@ impl JobRepo {
         .bind(source_id)
         .bind(parent_job_id)
         .bind(parent_step_name)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to create job")?;
 
@@ -107,35 +171,50 @@ impl JobRepo {
         Ok(job)
     }
 
-    /// List jobs with pagination and optional workspace filter
+    /// List jobs with pagination and optional workspace/status filters
     pub async fn list(
         pool: &PgPool,
         workspace: Option<&str>,
+        status: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<JobRow>> {
-        let jobs = if let Some(ws) = workspace {
-            sqlx::query_as::<_, JobRow>(&format!(
-                "SELECT {} FROM job WHERE workspace = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-                JOB_COLUMNS
-            ))
-            .bind(ws)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await
-            .context("Failed to list jobs by workspace")?
+        let mut conditions = Vec::new();
+        let mut param_idx = 1u32;
+
+        if workspace.is_some() {
+            conditions.push(format!("workspace = ${param_idx}"));
+            param_idx += 1;
+        }
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
         } else {
-            sqlx::query_as::<_, JobRow>(&format!(
-                "SELECT {} FROM job ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-                JOB_COLUMNS
-            ))
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(pool)
-            .await
-            .context("Failed to list jobs")?
+            format!(" WHERE {}", conditions.join(" AND "))
         };
+
+        let limit_idx = param_idx;
+        let offset_idx = param_idx + 1;
+
+        let sql = format!(
+            "SELECT {} FROM job{} ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}",
+            JOB_COLUMNS, where_clause
+        );
+
+        let mut query = sqlx::query_as::<_, JobRow>(&sql);
+        if let Some(ws) = workspace {
+            query = query.bind(ws);
+        }
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+        query = query.bind(limit).bind(offset);
+
+        let jobs = query.fetch_all(pool).await.context("Failed to list jobs")?;
 
         Ok(jobs)
     }
@@ -254,54 +333,103 @@ impl JobRepo {
         Ok(())
     }
 
-    /// Count jobs with optional workspace filter (mirrors `list()`)
-    pub async fn count(pool: &PgPool, workspace: Option<&str>) -> Result<i64> {
-        let count: (i64,) = if let Some(ws) = workspace {
-            sqlx::query_as("SELECT COUNT(*) FROM job WHERE workspace = $1")
-                .bind(ws)
-                .fetch_one(pool)
-                .await
-                .context("Failed to count jobs by workspace")?
+    /// Count jobs with optional workspace/status filters (mirrors `list()`)
+    pub async fn count(
+        pool: &PgPool,
+        workspace: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<i64> {
+        let mut conditions = Vec::new();
+        let mut param_idx = 1u32;
+
+        if workspace.is_some() {
+            conditions.push(format!("workspace = ${param_idx}"));
+            param_idx += 1;
+        }
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
         } else {
-            sqlx::query_as("SELECT COUNT(*) FROM job")
-                .fetch_one(pool)
-                .await
-                .context("Failed to count jobs")?
+            format!(" WHERE {}", conditions.join(" AND "))
         };
+
+        let sql = format!("SELECT COUNT(*) FROM job{where_clause}");
+
+        let mut query = sqlx::query_as::<_, (i64,)>(&sql);
+        if let Some(ws) = workspace {
+            query = query.bind(ws);
+        }
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+
+        let count = query
+            .fetch_one(pool)
+            .await
+            .context("Failed to count jobs")?;
         Ok(count.0)
     }
 
-    /// Count jobs by workspace + task name (mirrors `list_by_task()`)
-    pub async fn count_by_task(pool: &PgPool, workspace: &str, task_name: &str) -> Result<i64> {
-        let count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM job WHERE workspace = $1 AND task_name = $2")
-                .bind(workspace)
-                .bind(task_name)
-                .fetch_one(pool)
-                .await
-                .context("Failed to count jobs by task")?;
+    /// Count jobs by workspace + task name with optional status filter (mirrors `list_by_task()`)
+    pub async fn count_by_task(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        status: Option<&str>,
+    ) -> Result<i64> {
+        let sql = if status.is_some() {
+            "SELECT COUNT(*) FROM job WHERE workspace = $1 AND task_name = $2 AND status = $3"
+        } else {
+            "SELECT COUNT(*) FROM job WHERE workspace = $1 AND task_name = $2"
+        };
+        let mut query = sqlx::query_as::<_, (i64,)>(sql)
+            .bind(workspace)
+            .bind(task_name);
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+        let count = query
+            .fetch_one(pool)
+            .await
+            .context("Failed to count jobs by task")?;
         Ok(count.0)
     }
 
-    /// List jobs by workspace + task name with pagination
+    /// List jobs by workspace + task name with pagination and optional status filter
     pub async fn list_by_task(
         pool: &PgPool,
         workspace: &str,
         task_name: &str,
+        status: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<JobRow>> {
-        let jobs = sqlx::query_as::<_, JobRow>(&format!(
-            "SELECT {} FROM job WHERE workspace = $1 AND task_name = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
-            JOB_COLUMNS
-        ))
-        .bind(workspace)
-        .bind(task_name)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
-        .context("Failed to list jobs by task")?;
+        let sql = if status.is_some() {
+            format!(
+                "SELECT {} FROM job WHERE workspace = $1 AND task_name = $2 AND status = $3 ORDER BY created_at DESC LIMIT $4 OFFSET $5",
+                JOB_COLUMNS
+            )
+        } else {
+            format!(
+                "SELECT {} FROM job WHERE workspace = $1 AND task_name = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+                JOB_COLUMNS
+            )
+        };
+        let mut query = sqlx::query_as::<_, JobRow>(&sql)
+            .bind(workspace)
+            .bind(task_name);
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+        let jobs = query
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+            .context("Failed to list jobs by task")?;
 
         Ok(jobs)
     }

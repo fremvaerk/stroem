@@ -92,9 +92,13 @@ impl KubeRunner {
                     "name": "workspace-init",
                     "image": self.init_image,
                     "command": ["sh", "-c", format!(
-                        "curl -sSf -H 'Authorization: Bearer {}' '{}' | tar xz -C /workspace",
-                        self.worker_token, tarball_url
+                        "curl -sSf -H \"Authorization: Bearer $STROEM_WORKER_TOKEN\" '{}' | tar xz -C /workspace",
+                        tarball_url
                     )],
+                    "env": [{
+                        "name": "STROEM_WORKER_TOKEN",
+                        "value": self.worker_token,
+                    }],
                     "volumeMounts": [{
                         "name": "workspace",
                         "mountPath": "/workspace",
@@ -685,6 +689,63 @@ mod tests {
         let result = runner.execute(config, None).await.unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello-from-kube"));
+    }
+
+    #[test]
+    fn test_worker_token_in_env_not_command() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "super-secret-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let pod_json = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "default",
+            &HashMap::new(),
+            "alpine:latest",
+            &[],
+        );
+
+        let init_container = &pod_json["spec"]["initContainers"][0];
+
+        // Token must NOT appear in the command string
+        let command = init_container["command"].to_string();
+        assert!(
+            !command.contains("super-secret-token"),
+            "Worker token should not be embedded in command string, got: {}",
+            command
+        );
+        // Command should reference the env var
+        assert!(
+            command.contains("$STROEM_WORKER_TOKEN"),
+            "Command should reference $STROEM_WORKER_TOKEN env var"
+        );
+
+        // Token must be in the env array
+        let env = init_container["env"]
+            .as_array()
+            .expect("env should be an array");
+        let token_env = env
+            .iter()
+            .find(|e| e["name"] == "STROEM_WORKER_TOKEN")
+            .expect("STROEM_WORKER_TOKEN env var should exist");
+        assert_eq!(token_env["value"], "super-secret-token");
     }
 
     // --- merge_json tests ---

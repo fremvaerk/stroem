@@ -48,7 +48,7 @@ impl AuthUser {
 }
 
 /// Validate an API key token and return Claims if valid.
-pub(super) async fn validate_api_key(
+pub(crate) async fn validate_api_key(
     token: &str,
     state: &Arc<AppState>,
 ) -> Result<Claims, Response> {

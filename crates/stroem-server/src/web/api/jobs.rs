@@ -18,11 +18,14 @@ use uuid::Uuid;
 pub struct ListJobsQuery {
     pub workspace: Option<String>,
     pub task_name: Option<String>,
+    pub status: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
 }
+
+const VALID_STATUSES: &[&str] = &["pending", "running", "completed", "failed"];
 
 /// GET /api/jobs - List jobs
 #[tracing::instrument(skip(state))]
@@ -38,17 +41,29 @@ pub async fn list_jobs(
             .into_response();
     }
 
+    if let Some(ref s) = query.status {
+        if !VALID_STATUSES.contains(&s.as_str()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("Invalid status filter '{}'. Must be one of: {}", s, VALID_STATUSES.join(", "))})),
+            )
+                .into_response();
+        }
+    }
+
+    let status = query.status.as_deref();
     let (result, total) = match (query.workspace.as_deref(), query.task_name.as_deref()) {
         (Some(ws), Some(task)) => {
             let jobs =
-                JobRepo::list_by_task(&state.pool, ws, task, query.limit, query.offset).await;
-            let count = JobRepo::count_by_task(&state.pool, ws, task).await;
+                JobRepo::list_by_task(&state.pool, ws, task, status, query.limit, query.offset)
+                    .await;
+            let count = JobRepo::count_by_task(&state.pool, ws, task, status).await;
             (jobs, count)
         }
         _ => {
             let ws = query.workspace.as_deref();
-            let jobs = JobRepo::list(&state.pool, ws, query.limit, query.offset).await;
-            let count = JobRepo::count(&state.pool, ws).await;
+            let jobs = JobRepo::list(&state.pool, ws, status, query.limit, query.offset).await;
+            let count = JobRepo::count(&state.pool, ws, status).await;
             (jobs, count)
         }
     };

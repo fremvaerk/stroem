@@ -29,17 +29,18 @@ export function JobsPage() {
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
-  const fetcher = useCallback(() => listJobs(PAGE_SIZE, offset), [offset]);
+  const fetcher = useCallback(
+    () =>
+      listJobs(PAGE_SIZE, offset, {
+        status: statusFilter === "all" ? undefined : statusFilter,
+      }),
+    [offset, statusFilter],
+  );
   const { data, loading } = useAsyncData(fetcher, {
     pollInterval: 5000,
   });
-  const jobList = data?.items ?? [];
+  const filtered = data?.items ?? [];
   const total = data?.total ?? 0;
-
-  const filtered =
-    statusFilter === "all"
-      ? jobList
-      : jobList.filter((j) => j.status === statusFilter);
 
   return (
     <div className="space-y-6">
@@ -55,7 +56,10 @@ export function JobsPage() {
           <CardTitle className="text-base">All Jobs</CardTitle>
           <Tabs
             value={statusFilter}
-            onValueChange={setStatusFilter}
+            onValueChange={(v) => {
+              setStatusFilter(v);
+              setOffset(0);
+            }}
           >
             <TabsList>
               {STATUSES.map((s) => (

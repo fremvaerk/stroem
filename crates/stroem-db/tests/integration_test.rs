@@ -71,35 +71,35 @@ async fn test_list_jobs() -> Result<()> {
     }
 
     // List with pagination
-    let jobs = JobRepo::list(&pool, None, 3, 0).await?;
+    let jobs = JobRepo::list(&pool, None, None, 3, 0).await?;
     assert_eq!(jobs.len(), 3);
 
     // List with offset
-    let jobs = JobRepo::list(&pool, None, 3, 3).await?;
+    let jobs = JobRepo::list(&pool, None, None, 3, 3).await?;
     assert_eq!(jobs.len(), 2);
 
     // List with workspace filter
-    let jobs = JobRepo::list(&pool, Some("default"), 10, 0).await?;
+    let jobs = JobRepo::list(&pool, Some("default"), None, 10, 0).await?;
     assert_eq!(jobs.len(), 5);
 
     // List by task name — single match
-    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].task_name, "task-0");
 
     // List by task name — nonexistent task
-    let jobs = JobRepo::list_by_task(&pool, "default", "nope", 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "nope", None, 10, 0).await?;
     assert!(jobs.is_empty());
 
     // List by task name — wrong workspace
-    let jobs = JobRepo::list_by_task(&pool, "other", "task-0", 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "other", "task-0", None, 10, 0).await?;
     assert!(jobs.is_empty());
 
     // List by task name — multiple jobs for same task, newest first
     for _ in 0..3 {
         JobRepo::create(&pool, "default", "task-0", "distributed", None, "api", None).await?;
     }
-    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, 10, 0).await?;
     assert_eq!(jobs.len(), 4); // 1 original + 3 new
                                // Verify newest-first ordering
     for pair in jobs.windows(2) {
@@ -107,11 +107,11 @@ async fn test_list_jobs() -> Result<()> {
     }
 
     // Pagination on list_by_task
-    let page1 = JobRepo::list_by_task(&pool, "default", "task-0", 2, 0).await?;
+    let page1 = JobRepo::list_by_task(&pool, "default", "task-0", None, 2, 0).await?;
     assert_eq!(page1.len(), 2);
-    let page2 = JobRepo::list_by_task(&pool, "default", "task-0", 2, 2).await?;
+    let page2 = JobRepo::list_by_task(&pool, "default", "task-0", None, 2, 2).await?;
     assert_eq!(page2.len(), 2);
-    let page3 = JobRepo::list_by_task(&pool, "default", "task-0", 2, 4).await?;
+    let page3 = JobRepo::list_by_task(&pool, "default", "task-0", None, 2, 4).await?;
     assert!(page3.is_empty());
 
     Ok(())

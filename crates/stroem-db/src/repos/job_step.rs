@@ -57,6 +57,17 @@ pub struct JobStepRepo;
 impl JobStepRepo {
     /// Create steps for a job (batch insert)
     pub async fn create_steps(pool: &PgPool, steps: &[NewJobStep]) -> Result<()> {
+        Self::create_steps_tx(pool, steps).await
+    }
+
+    /// Create steps for a job, accepting a generic executor.
+    ///
+    /// Use this variant inside transactions. The `pool`-based [`create_steps`]
+    /// delegates here.
+    pub async fn create_steps_tx<'e, E>(executor: E, steps: &[NewJobStep]) -> Result<()>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         if steps.is_empty() {
             return Ok(());
         }
@@ -130,7 +141,7 @@ impl JobStepRepo {
                 .bind(binding.9);
         }
 
-        q.execute(pool)
+        q.execute(executor)
             .await
             .context("Failed to create job steps")?;
         Ok(())

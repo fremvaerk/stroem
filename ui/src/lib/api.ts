@@ -258,7 +258,7 @@ export async function listTriggers(
 export async function listJobs(
   limit = 50,
   offset = 0,
-  filters?: { workspace?: string; taskName?: string },
+  filters?: { workspace?: string; taskName?: string; status?: string },
 ): Promise<PaginatedResponse<JobListItem>> {
   const params = new URLSearchParams({
     limit: String(limit),
@@ -266,6 +266,7 @@ export async function listJobs(
   });
   if (filters?.workspace) params.set("workspace", filters.workspace);
   if (filters?.taskName) params.set("task_name", filters.taskName);
+  if (filters?.status) params.set("status", filters.status);
   return apiFetch<PaginatedResponse<JobListItem>>(`/api/jobs?${params}`);
 }
 

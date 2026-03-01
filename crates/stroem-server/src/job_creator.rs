@@ -71,23 +71,10 @@ fn create_job_for_task_inner<'a>(
             resolve_connection_inputs(&merged_input, &task.input, workspace_config)
                 .context("Failed to resolve connection inputs")?;
 
-        // Create job record
-        let job_id = JobRepo::create_with_parent(
-            pool,
-            workspace_name,
-            task_name,
-            &task.mode,
-            Some(resolved_input),
-            source_type,
-            source_id,
-            parent_job_id,
-            parent_step_name,
-        )
-        .await
-        .context("Failed to create job")?;
-
         // Build job steps from the task flow
         let mut new_steps = Vec::new();
+        // Generate job_id upfront so steps can reference it
+        let job_id = Uuid::new_v4();
 
         for (step_name, flow_step) in &task.flow {
             let action = match workspace_config.actions.get(&flow_step.action) {
@@ -125,9 +112,29 @@ fn create_job_for_task_inner<'a>(
             });
         }
 
-        JobStepRepo::create_steps(pool, &new_steps)
+        // Create job and steps atomically in a transaction
+        let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+        JobRepo::create_with_parent_tx_id(
+            &mut *tx,
+            job_id,
+            workspace_name,
+            task_name,
+            &task.mode,
+            Some(resolved_input),
+            source_type,
+            source_id,
+            parent_job_id,
+            parent_step_name,
+        )
+        .await
+        .context("Failed to create job")?;
+
+        JobStepRepo::create_steps_tx(&mut *tx, &new_steps)
             .await
             .context("Failed to create job steps")?;
+
+        tx.commit().await.context("Failed to commit job creation")?;
 
         tracing::info!("Created job {} with {} steps", job_id, new_steps.len());
 

@@ -151,7 +151,6 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
-        .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
         .route(
             "/auth/api-keys",
             get(api_keys::list_api_keys).post(api_keys::create_api_key),
@@ -162,9 +161,10 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             require_auth,
         ));
 
-    // Public routes (no auth required)
+    // Public routes (no auth required — includes WS which handles auth internally)
     let public = Router::new()
         .route("/config", get(get_config))
+        .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
         .route("/auth/login", post(auth::login))
         .route("/auth/refresh", post(auth::refresh))
         .route("/auth/logout", post(auth::logout))
