@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useParams, Link, useNavigate } from "react-router";
-import { ArrowLeft, Clock, Folder } from "lucide-react";
+import { ArrowLeft, Check, ChevronsUpDown, Clock, Folder } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WorkflowDag } from "@/components/workflow-dag";
 import {
@@ -18,18 +18,24 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { StatusBadge } from "@/components/status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { getTask, listJobs, executeTask } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, JobListItem, FlowStep, InputField } from "@/lib/types";
-import { formatActionName } from "@/lib/utils";
+import { cn, formatActionName } from "@/lib/utils";
 
 const JOBS_PAGE_SIZE = 20;
 const SECRET_SENTINEL = "********";
@@ -502,6 +508,114 @@ export function TaskDetailPage() {
   );
 }
 
+function ComboboxField({
+  id,
+  label,
+  options,
+  value,
+  onChange,
+  placeholder,
+  required,
+  description,
+  allowCustom,
+}: {
+  id: string;
+  label: string;
+  options: string[];
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  required?: boolean;
+  description?: string;
+  allowCustom?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+
+  // Filter options by search term, and include custom value if typed
+  const filtered = options.filter((opt) =>
+    opt.toLowerCase().includes(search.toLowerCase()),
+  );
+  const showCustom =
+    allowCustom &&
+    search.length > 0 &&
+    !options.some((opt) => opt.toLowerCase() === search.toLowerCase());
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>
+        {label}
+        {required && <span className="ml-1 text-destructive">*</span>}
+      </Label>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            id={id}
+            variant="outline"
+            role="combobox"
+            aria-expanded={open}
+            className="w-full justify-between font-normal"
+          >
+            {value || (
+              <span className="text-muted-foreground">{placeholder}</span>
+            )}
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[--radix-popover-trigger-width] p-0">
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder={`Search or type a value...`}
+              value={search}
+              onValueChange={setSearch}
+            />
+            <CommandList>
+              <CommandEmpty>No options found.</CommandEmpty>
+              <CommandGroup>
+                {filtered.map((opt) => (
+                  <CommandItem
+                    key={opt}
+                    value={opt}
+                    onSelect={() => {
+                      onChange(opt);
+                      setOpen(false);
+                      setSearch("");
+                    }}
+                  >
+                    <Check
+                      className={cn(
+                        "mr-2 h-4 w-4",
+                        value === opt ? "opacity-100" : "opacity-0",
+                      )}
+                    />
+                    {opt}
+                  </CommandItem>
+                ))}
+                {showCustom && (
+                  <CommandItem
+                    value={search}
+                    onSelect={() => {
+                      onChange(search);
+                      setOpen(false);
+                      setSearch("");
+                    }}
+                  >
+                    <Check className="mr-2 h-4 w-4 opacity-0" />
+                    Use &ldquo;{search}&rdquo;
+                  </CommandItem>
+                )}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+      {description && (
+        <p className="text-xs text-muted-foreground">{description}</p>
+      )}
+    </div>
+  );
+}
+
 function InputFieldRow({
   fieldKey,
   field,
@@ -518,61 +632,18 @@ function InputFieldRow({
   const displayLabel = field.name ?? fieldKey;
 
   if (field.options && field.options.length > 0) {
-    if (field.allow_custom) {
-      // Combobox: input with datalist for autocomplete suggestions
-      const listId = `${id}-options`;
-      return (
-        <div className="space-y-2">
-          <Label htmlFor={id}>
-            {displayLabel}
-            {field.required && <span className="ml-1 text-destructive">*</span>}
-          </Label>
-          <Input
-            id={id}
-            list={listId}
-            value={String(value ?? "")}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={field.description || fieldKey}
-            required={field.required}
-          />
-          <datalist id={listId}>
-            {field.options.map((opt) => (
-              <option key={opt} value={opt} />
-            ))}
-          </datalist>
-          {field.description && (
-            <p className="text-xs text-muted-foreground">{field.description}</p>
-          )}
-        </div>
-      );
-    }
-
-    // Strict select dropdown
     return (
-      <div className="space-y-2">
-        <Label htmlFor={id}>
-          {displayLabel}
-          {field.required && <span className="ml-1 text-destructive">*</span>}
-        </Label>
-        <Select
-          value={String(value ?? "")}
-          onValueChange={(v) => onChange(v)}
-        >
-          <SelectTrigger id={id}>
-            <SelectValue placeholder={field.description || `Select ${displayLabel.toLowerCase()}`} />
-          </SelectTrigger>
-          <SelectContent>
-            {field.options.map((opt) => (
-              <SelectItem key={opt} value={opt}>
-                {opt}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {field.description && (
-          <p className="text-xs text-muted-foreground">{field.description}</p>
-        )}
-      </div>
+      <ComboboxField
+        id={id}
+        label={displayLabel}
+        options={field.options}
+        value={String(value ?? "")}
+        onChange={onChange}
+        placeholder={field.description || `Select ${displayLabel.toLowerCase()}`}
+        required={field.required}
+        description={field.description}
+        allowCustom={field.allow_custom}
+      />
     );
   }
 
