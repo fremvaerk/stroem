@@ -40,6 +40,8 @@ The optional `description` field is displayed in the web UI as placeholder text 
 | `date`     | Date value (`YYYY-MM-DD`). Renders as a date picker in the UI |
 | `datetime` | Date and time. Renders as a datetime picker in the UI          |
 
+If the `type` is not one of the primitives above, it is treated as a [connection type](/guides/connections/) reference. The UI renders a searchable dropdown of matching connections in the workspace.
+
 Both `string` and `text` are treated identically at runtime — the difference is only in how the UI renders the input field. Use `text` for values that benefit from multiline editing such as SQL queries, scripts, or markdown content.
 
 Both `date` and `datetime` are treated as strings at runtime. The `date` type produces values like `2026-01-15`, while `datetime` produces values like `2026-01-15T14:30`.

@@ -48,6 +48,16 @@ import { cn, formatActionName } from "@/lib/utils";
 
 const JOBS_PAGE_SIZE = 20;
 const SECRET_SENTINEL = "********";
+// Must match PRIMITIVE_TYPES in crates/stroem-common/src/template.rs
+const PRIMITIVE_TYPES = new Set([
+  "string",
+  "text",
+  "integer",
+  "number",
+  "boolean",
+  "date",
+  "datetime",
+]);
 
 /** Topological sort of flow steps (Kahn's algorithm).
  *  Steps with no unmet dependencies come first; ties broken alphabetically. */
@@ -317,6 +327,7 @@ export function TaskDetailPage() {
                     field={field}
                     value={values[key]}
                     onChange={(v) => setValues((prev) => ({ ...prev, [key]: v }))}
+                    connections={task.connections}
                   />
                 ))}
               </div>
@@ -630,15 +641,34 @@ function InputFieldRow({
   field,
   value,
   onChange,
+  connections,
 }: {
   fieldKey: string;
   field: InputField;
   value: unknown;
   onChange: (v: unknown) => void;
+  connections?: Record<string, string[]>;
 }) {
   const id = `input-${fieldKey}`;
 
   const displayLabel = field.name ?? fieldKey;
+
+  // Connection type input: render dropdown of available connections
+  const connectionOptions = !PRIMITIVE_TYPES.has(field.type) ? connections?.[field.type] : undefined;
+  if (connectionOptions && connectionOptions.length > 0) {
+    return (
+      <ComboboxField
+        id={id}
+        label={displayLabel}
+        options={connectionOptions}
+        value={String(value ?? "")}
+        onChange={onChange}
+        placeholder={field.description || `Select ${displayLabel.toLowerCase()}`}
+        required={field.required}
+        description={field.description || `Connection type: ${field.type}`}
+      />
+    );
+  }
 
   if (field.options && field.options.length > 0) {
     return (

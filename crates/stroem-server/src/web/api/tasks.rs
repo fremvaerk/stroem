@@ -11,8 +11,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use stroem_common::template::PRIMITIVE_TYPES;
 
 #[derive(Debug, Serialize)]
 pub struct TaskListItem {
@@ -41,6 +42,8 @@ pub struct TaskDetail {
     pub input: HashMap<String, serde_json::Value>,
     pub flow: HashMap<String, serde_json::Value>,
     pub triggers: Vec<TriggerInfo>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub connections: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +120,28 @@ pub async fn get_task(
         .map(|(trig_name, trigger)| TriggerInfo::from_def(trig_name, trigger, 5))
         .collect();
 
+    // Build connections map: for each non-primitive input type, collect matching connection names
+    let mut connections: HashMap<String, Vec<String>> = HashMap::new();
+    let connection_types_needed: BTreeSet<&str> = task
+        .input
+        .values()
+        .map(|f| f.field_type.as_str())
+        .filter(|t| !PRIMITIVE_TYPES.contains(t))
+        .collect();
+
+    for conn_type in connection_types_needed {
+        let mut names: Vec<String> = workspace
+            .connections
+            .iter()
+            .filter(|(_, conn)| conn.connection_type.as_deref() == Some(conn_type))
+            .map(|(conn_name, _)| conn_name.clone())
+            .collect();
+        if !names.is_empty() {
+            names.sort();
+            connections.insert(conn_type.to_string(), names);
+        }
+    }
+
     let detail = TaskDetail {
         id: name.clone(),
         name: task.name.clone(),
@@ -134,6 +159,7 @@ pub async fn get_task(
             .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or_default()))
             .collect(),
         triggers,
+        connections,
     };
 
     Json(detail).into_response()

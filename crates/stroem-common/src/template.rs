@@ -252,7 +252,7 @@ pub fn merge_defaults(
 }
 
 /// Primitive type names that are NOT connection type references.
-const PRIMITIVE_TYPES: &[&str] = &[
+pub const PRIMITIVE_TYPES: &[&str] = &[
     "string", "text", "integer", "number", "boolean", "date", "datetime",
 ];
 

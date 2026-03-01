@@ -100,6 +100,8 @@ When triggering the task, pass the connection name as the input value:
 
 The system resolves `"prod_db"` to `{ "host": "db.example.com", "port": 5432, "database": "myapp", ... }`, making the full connection object available in templates as `{{ input.db.host }}`, `{{ input.db.port }}`, etc.
 
+In the web UI, connection-type inputs render as a searchable dropdown listing all connections of that type in the workspace — no manual typing required.
+
 ## Resolution Flow
 
 1. `merge_defaults()` runs as normal (fills missing fields, applies defaults)

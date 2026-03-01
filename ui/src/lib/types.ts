@@ -56,6 +56,7 @@ export interface TaskDetail {
   input: Record<string, InputField>;
   flow: Record<string, FlowStep>;
   triggers: TriggerInfo[];
+  connections?: Record<string, string[]>;
 }
 
 export interface JobListItem {

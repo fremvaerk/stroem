@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
+    ActionDef, ConnectionDef, FlowStep, HookDef, InputFieldDef, TaskDef, TriggerDef,
+    WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -1822,6 +1823,309 @@ async fn test_get_task_detail() -> Result<()> {
         .oneshot(api_get("/api/workspaces/default/tasks/nonexistent-task"))
         .await?;
     assert_eq!(response.status(), 404);
+
+    Ok(())
+}
+
+// ─── Test 16b: Task detail includes connections for connection-type inputs ──
+
+#[tokio::test]
+async fn test_task_detail_connections() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+
+    // Build a workspace with connections
+    let mut workspace = WorkspaceConfig::default();
+
+    // Add connections
+    workspace.connections.insert(
+        "prod_db".to_string(),
+        ConnectionDef {
+            connection_type: Some("postgres".to_string()),
+            values: HashMap::from([
+                ("host".to_string(), json!("prod.example.com")),
+                ("port".to_string(), json!(5432)),
+            ]),
+        },
+    );
+    workspace.connections.insert(
+        "staging_db".to_string(),
+        ConnectionDef {
+            connection_type: Some("postgres".to_string()),
+            values: HashMap::from([
+                ("host".to_string(), json!("staging.example.com")),
+                ("port".to_string(), json!(5432)),
+            ]),
+        },
+    );
+    workspace.connections.insert(
+        "redis_cache".to_string(),
+        ConnectionDef {
+            connection_type: Some("redis".to_string()),
+            values: HashMap::from([("host".to_string(), json!("redis.example.com"))]),
+        },
+    );
+    // Untyped connection — should never appear in typed buckets
+    workspace.connections.insert(
+        "misc_config".to_string(),
+        ConnectionDef {
+            connection_type: None,
+            values: HashMap::from([("url".to_string(), json!("https://misc.example.com"))]),
+        },
+    );
+
+    // Action: run-query (shell)
+    workspace.actions.insert(
+        "run-query".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("echo querying".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    // Task with connection-type input
+    let mut conn_task_input = HashMap::new();
+    conn_task_input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "postgres".to_string(),
+            name: Some("Database".to_string()),
+            description: Some("Target database connection".to_string()),
+            required: true,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    conn_task_input.insert(
+        "cache".to_string(),
+        InputFieldDef {
+            field_type: "redis".to_string(),
+            name: Some("Cache".to_string()),
+            description: None,
+            required: false,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    conn_task_input.insert(
+        "legacy".to_string(),
+        InputFieldDef {
+            field_type: "mysql".to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    conn_task_input.insert(
+        "name".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    let mut conn_flow = HashMap::new();
+    conn_flow.insert(
+        "query".to_string(),
+        FlowStep {
+            action: "run-query".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "db-query".to_string(),
+        TaskDef {
+            name: Some("Database Query".to_string()),
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: conn_task_input,
+            flow: conn_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    // Task with only primitive inputs (no connections field expected)
+    let mut prim_task_input = HashMap::new();
+    prim_task_input.insert(
+        "message".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            name: None,
+            description: None,
+            required: true,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    let mut prim_flow = HashMap::new();
+    prim_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "run-query".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "simple-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: prim_task_input,
+            flow: prim_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = build_router(state);
+
+    // Test 1: Task with connection-type input includes connections field
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/workspaces/default/tasks/db-query"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    assert_eq!(body["id"], "db-query");
+    assert_eq!(body["name"], "Database Query");
+    // Should have connections map with postgres type
+    let connections = body["connections"]
+        .as_object()
+        .expect("connections should be an object");
+    assert!(connections.contains_key("postgres"));
+    let pg_conns = connections["postgres"]
+        .as_array()
+        .expect("postgres should be an array");
+    assert_eq!(pg_conns.len(), 2);
+    // Should be sorted alphabetically
+    assert_eq!(pg_conns[0], "prod_db");
+    assert_eq!(pg_conns[1], "staging_db");
+
+    // Multiple connection types: redis input should also be present
+    assert!(connections.contains_key("redis"));
+    let redis_conns = connections["redis"]
+        .as_array()
+        .expect("redis should be an array");
+    assert_eq!(redis_conns.len(), 1);
+    assert_eq!(redis_conns[0], "redis_cache");
+
+    // Connection type with no matching connections (mysql) should be omitted, not empty array
+    assert!(
+        !connections.contains_key("mysql"),
+        "connection types with no matches should be omitted"
+    );
+
+    // Untyped connections should never appear in any typed bucket
+    for (_type_name, names) in connections {
+        let names_arr = names.as_array().unwrap();
+        for n in names_arr {
+            assert_ne!(n.as_str().unwrap(), "misc_config");
+        }
+    }
+
+    // Security: connection VALUES (host, port) must NOT appear in the response
+    let raw_body = serde_json::to_string(&body).unwrap();
+    assert!(
+        !raw_body.contains("prod.example.com"),
+        "connection values must not be exposed"
+    );
+    assert!(
+        !raw_body.contains("staging.example.com"),
+        "connection values must not be exposed"
+    );
+    assert!(
+        !raw_body.contains("redis.example.com"),
+        "connection values must not be exposed"
+    );
+
+    // Test 2: Task with only primitive inputs omits connections field
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks/simple-task"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    assert_eq!(body["id"], "simple-task");
+    // connections field should be absent (skip_serializing_if = "HashMap::is_empty")
+    assert!(body.get("connections").is_none());
 
     Ok(())
 }
