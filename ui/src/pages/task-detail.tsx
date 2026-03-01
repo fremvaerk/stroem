@@ -744,7 +744,7 @@ function InputFieldRow({
               )}
             >
               <CalendarIcon className="mr-2 h-4 w-4" />
-              {validDate ? format(validDate, "PPP") : <span>{field.description || "Pick a date"}</span>}
+              {validDate ? validDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : <span>{field.description || "Pick a date"}</span>}
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-auto p-0">
@@ -798,7 +798,7 @@ function InputFieldRow({
                 )}
               >
                 <CalendarIcon className="mr-2 h-4 w-4" />
-                {validDate ? format(validDate, "PPP") : <span>{field.description || "Pick a date"}</span>}
+                {validDate ? validDate.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : <span>{field.description || "Pick a date"}</span>}
               </Button>
             </PopoverTrigger>
             <PopoverContent align="start" className="w-auto p-0">
