@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useParams, Link, useNavigate } from "react-router";
-import { ArrowLeft, Check, ChevronsUpDown, Clock, Folder } from "lucide-react";
+import { format, parse } from "date-fns";
+import {
+  ArrowLeft,
+  CalendarIcon,
+  Check,
+  ChevronsUpDown,
+  Clock,
+  Folder,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WorkflowDag } from "@/components/workflow-dag";
 import {
@@ -30,6 +38,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
 import { StatusBadge } from "@/components/status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { getTask, listJobs, executeTask } from "@/lib/api";
@@ -714,21 +723,101 @@ function InputFieldRow({
     );
   }
 
-  if (field.type === "date" || field.type === "datetime") {
-    const inputType = field.type === "datetime" ? "datetime-local" : "date";
+  if (field.type === "date") {
+    const strVal = String(value ?? "");
+    const dateObj = strVal
+      ? parse(strVal, "yyyy-MM-dd", new Date())
+      : undefined;
+    const validDate =
+      dateObj && !isNaN(dateObj.getTime()) ? dateObj : undefined;
+
     return (
       <div className="space-y-2">
-        <Label htmlFor={id}>
-          {displayLabel}
-          {field.required && <span className="ml-1 text-destructive">*</span>}
-        </Label>
-        <Input
-          id={id}
-          type={inputType}
-          value={String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
-          required={field.required}
-        />
+        <Label>{displayLabel}{field.required && <span className="ml-1 text-destructive">*</span>}</Label>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              variant="outline"
+              className={cn(
+                "w-full justify-start font-normal",
+                !validDate && "text-muted-foreground",
+              )}
+            >
+              <CalendarIcon className="mr-2 h-4 w-4" />
+              {validDate ? format(validDate, "PPP") : <span>{field.description || "Pick a date"}</span>}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-auto p-0">
+            <Calendar
+              mode="single"
+              weekStartsOn={1}
+              selected={validDate}
+              onSelect={(d) => onChange(d ? format(d, "yyyy-MM-dd") : "")}
+              initialFocus
+            />
+          </PopoverContent>
+        </Popover>
+        {field.description && (
+          <p className="text-xs text-muted-foreground">{field.description}</p>
+        )}
+      </div>
+    );
+  }
+
+  if (field.type === "datetime") {
+    // value format: "YYYY-MM-DDTHH:MM"
+    const strVal = String(value ?? "");
+    const [datePart, timePart] = strVal.split("T");
+    const dateObj = datePart
+      ? parse(datePart, "yyyy-MM-dd", new Date())
+      : undefined;
+    const validDate =
+      dateObj && !isNaN(dateObj.getTime()) ? dateObj : undefined;
+    const timeVal = timePart ?? "";
+
+    const updateDate = (d: Date | undefined) => {
+      const newDate = d ? format(d, "yyyy-MM-dd") : "";
+      onChange(newDate && timeVal ? `${newDate}T${timeVal}` : newDate);
+    };
+    const updateTime = (t: string) => {
+      const dp = validDate ? format(validDate, "yyyy-MM-dd") : "";
+      onChange(dp && t ? `${dp}T${t}` : dp);
+    };
+
+    return (
+      <div className="space-y-2">
+        <Label>{displayLabel}{field.required && <span className="ml-1 text-destructive">*</span>}</Label>
+        <div className="flex gap-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  "flex-1 justify-start font-normal",
+                  !validDate && "text-muted-foreground",
+                )}
+              >
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {validDate ? format(validDate, "PPP") : <span>{field.description || "Pick a date"}</span>}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-auto p-0">
+              <Calendar
+                mode="single"
+                weekStartsOn={1}
+                selected={validDate}
+                onSelect={updateDate}
+                initialFocus
+              />
+            </PopoverContent>
+          </Popover>
+          <Input
+            type="time"
+            value={timeVal}
+            onChange={(e) => updateTime(e.target.value)}
+            className="w-auto"
+          />
+        </div>
         {field.description && (
           <p className="text-xs text-muted-foreground">{field.description}</p>
         )}
