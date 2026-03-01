@@ -47,6 +47,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.actions.insert(
@@ -152,6 +153,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.tasks.insert(
@@ -210,6 +212,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.tasks.insert(
@@ -414,6 +417,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.tasks.insert(
@@ -511,6 +515,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     let mut db_env = HashMap::new();
@@ -576,6 +581,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.tasks.insert(
@@ -617,6 +623,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.actions.insert(
@@ -658,6 +665,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.actions.insert(
@@ -728,6 +736,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: Some(json!("test")),
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.tasks.insert(
@@ -6608,6 +6617,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.actions.insert(
@@ -7961,6 +7971,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            order: None,
         },
     );
     workspace.tasks.insert(

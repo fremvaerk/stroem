@@ -54,6 +54,9 @@ pub struct InputFieldDef {
     /// When true and options are set, allows entering custom values not in the list.
     #[serde(default)]
     pub allow_custom: bool,
+    /// Display order in the UI (lower numbers appear first). Fields without order appear last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 /// Output field definition
@@ -2237,6 +2240,7 @@ tasks:
         assert!(field.description.is_none());
         assert!(field.options.is_none());
         assert!(!field.allow_custom);
+        assert!(field.order.is_none());
 
         let task = config.tasks.get("hello").unwrap();
         assert!(task.name.is_none());
@@ -2315,6 +2319,7 @@ tasks:
 
         assert!(field.options.is_none());
         assert!(!field.allow_custom);
+        assert!(field.order.is_none());
     }
 
     #[test]
@@ -2345,5 +2350,31 @@ tasks:
         let datetime_field = task.input.get("scheduled_at").unwrap();
         assert_eq!(datetime_field.field_type, "datetime");
         assert_eq!(datetime_field.description.as_deref(), Some("When to run"));
+    }
+
+    #[test]
+    fn test_parse_input_field_with_order() {
+        let yaml = r#"
+tasks:
+  report:
+    input:
+      start_date:
+        type: date
+        order: 1
+      end_date:
+        type: date
+        order: 2
+      name:
+        type: string
+    flow:
+      run:
+        action: generate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("report").unwrap();
+
+        assert_eq!(task.input.get("start_date").unwrap().order, Some(1));
+        assert_eq!(task.input.get("end_date").unwrap().order, Some(2));
+        assert!(task.input.get("name").unwrap().order.is_none());
     }
 }

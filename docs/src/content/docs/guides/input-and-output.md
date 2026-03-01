@@ -136,6 +136,29 @@ When `options` is set, the UI renders a select dropdown instead of a text input.
 
 Set `allow_custom: true` to let users type a custom value in addition to the predefined options. The UI renders a text input with autocomplete suggestions.
 
+### Display order
+
+By default, input fields appear in YAML key order (which may vary since YAML maps are unordered). Use `order` to control the display order in the UI:
+
+```yaml
+tasks:
+  report:
+    input:
+      end_date:
+        type: date
+        name: End date
+        order: 2
+      start_date:
+        type: date
+        name: Start date
+        order: 1
+      format:
+        type: string
+        default: csv
+```
+
+Fields with lower `order` values appear first. Fields without `order` appear after all ordered fields, in their original key order.
+
 ### Action-level input
 
 Action input is provided by the step definition in the task flow. Values support [Tera templates](/guides/templating/):

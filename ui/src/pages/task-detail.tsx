@@ -234,7 +234,9 @@ export function TaskDetailPage() {
   }
 
   const flowSteps = topoSortFlow(task.flow);
-  const inputFields = Object.entries(task.input);
+  const inputFields = Object.entries(task.input).sort(
+    ([, a], [, b]) => (a.order ?? Infinity) - (b.order ?? Infinity),
+  );
 
   return (
     <div className="space-y-6">

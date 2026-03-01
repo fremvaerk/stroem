@@ -819,6 +819,7 @@ mod tests {
             default,
             options: None,
             allow_custom: false,
+            order: None,
         }
     }
 
@@ -1033,6 +1034,7 @@ mod tests {
                 default: Some(json!("the-secret-value")),
                 options: None,
                 allow_custom: false,
+                order: None,
             },
         );
         schema.insert(
@@ -1046,6 +1048,7 @@ mod tests {
                 default: Some(json!("staging")),
                 options: None,
                 allow_custom: false,
+                order: None,
             },
         );
 

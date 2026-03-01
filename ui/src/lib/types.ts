@@ -25,6 +25,7 @@ export interface InputField {
   secret?: boolean;
   options?: string[];
   allow_custom?: boolean;
+  order?: number;
 }
 
 export interface FlowStep {
