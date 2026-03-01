@@ -1297,3 +1297,235 @@ async fn test_expired_token_still_retrievable() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Status filter tests ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_jobs_with_status_filter() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create 3 jobs, transition them to different statuses
+    let job1 =
+        JobRepo::create(&pool, "default", "task-a", "distributed", None, "api", None).await?;
+    let job2 =
+        JobRepo::create(&pool, "default", "task-b", "distributed", None, "api", None).await?;
+    let _job3 =
+        JobRepo::create(&pool, "default", "task-c", "distributed", None, "api", None).await?;
+
+    // job1 → completed, job2 → failed, job3 stays pending
+    JobRepo::mark_completed(&pool, job1, None).await?;
+    JobRepo::mark_failed(&pool, job2).await?;
+
+    // Filter by completed
+    let jobs = JobRepo::list(&pool, None, Some("completed"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, "completed");
+
+    // Filter by failed
+    let jobs = JobRepo::list(&pool, None, Some("failed"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, "failed");
+
+    // Filter by pending
+    let jobs = JobRepo::list(&pool, None, Some("pending"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, "pending");
+
+    // No filter — all 3
+    let jobs = JobRepo::list(&pool, None, None, 10, 0).await?;
+    assert_eq!(jobs.len(), 3);
+
+    // Count with status filter
+    assert_eq!(JobRepo::count(&pool, None, Some("completed")).await?, 1);
+    assert_eq!(JobRepo::count(&pool, None, Some("failed")).await?, 1);
+    assert_eq!(JobRepo::count(&pool, None, Some("pending")).await?, 1);
+    assert_eq!(JobRepo::count(&pool, None, None).await?, 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create jobs in two workspaces
+    let j1 = JobRepo::create(&pool, "ws-a", "task", "distributed", None, "api", None).await?;
+    let _j2 = JobRepo::create(&pool, "ws-a", "task", "distributed", None, "api", None).await?;
+    let j3 = JobRepo::create(&pool, "ws-b", "task", "distributed", None, "api", None).await?;
+
+    // j1 → completed, j2 stays pending, j3 → completed
+    JobRepo::mark_completed(&pool, j1, None).await?;
+    JobRepo::mark_completed(&pool, j3, None).await?;
+
+    // ws-a + completed = 1
+    let jobs = JobRepo::list(&pool, Some("ws-a"), Some("completed"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].workspace, "ws-a");
+    assert_eq!(jobs[0].status, "completed");
+
+    // ws-a + pending = 1
+    let jobs = JobRepo::list(&pool, Some("ws-a"), Some("pending"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+
+    // ws-b + completed = 1
+    let jobs = JobRepo::list(&pool, Some("ws-b"), Some("completed"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+
+    // Count matches
+    assert_eq!(
+        JobRepo::count(&pool, Some("ws-a"), Some("completed")).await?,
+        1
+    );
+    assert_eq!(JobRepo::count(&pool, Some("ws-a"), None).await?, 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_by_task_with_status_filter() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let j1 = JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
+    let _j2 = JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
+    let _j3 = JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
+
+    // j1 → completed, j2/j3 stay pending
+    JobRepo::mark_completed(&pool, j1, None).await?;
+
+    // list_by_task with status filter
+    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", Some("completed"), 10, 0).await?;
+    assert_eq!(jobs.len(), 1);
+
+    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", Some("pending"), 10, 0).await?;
+    assert_eq!(jobs.len(), 2);
+
+    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", None, 10, 0).await?;
+    assert_eq!(jobs.len(), 3);
+
+    // count_by_task with status filter
+    assert_eq!(
+        JobRepo::count_by_task(&pool, "default", "deploy", Some("completed")).await?,
+        1
+    );
+    assert_eq!(
+        JobRepo::count_by_task(&pool, "default", "deploy", Some("pending")).await?,
+        2
+    );
+    assert_eq!(
+        JobRepo::count_by_task(&pool, "default", "deploy", None).await?,
+        3
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_status_filter_returns_empty_for_nonexistent_status() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    JobRepo::create(&pool, "default", "task", "distributed", None, "api", None).await?;
+
+    // No jobs with "running" status
+    let jobs = JobRepo::list(&pool, None, Some("running"), 10, 0).await?;
+    assert!(jobs.is_empty());
+    assert_eq!(JobRepo::count(&pool, None, Some("running")).await?, 0);
+
+    Ok(())
+}
+
+// ─── Transaction rollback test ───────────────────────────────────────
+
+#[tokio::test]
+async fn test_transaction_rollback_on_step_failure() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = Uuid::new_v4();
+
+    // Start a transaction, create job, then force step creation to fail
+    let mut tx = pool.begin().await?;
+
+    JobRepo::create_with_parent_tx_id(
+        &mut *tx,
+        job_id,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Verify job exists within the transaction
+    let row = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM job WHERE job_id = $1")
+        .bind(job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(row.0, 1, "Job should exist within transaction");
+
+    // Now explicitly roll back (simulating a step creation failure)
+    tx.rollback().await?;
+
+    // Verify job does NOT exist after rollback
+    let row = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM job WHERE job_id = $1")
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(row.0, 0, "Job should not exist after rollback");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = Uuid::new_v4();
+
+    let mut tx = pool.begin().await?;
+
+    JobRepo::create_with_parent_tx_id(
+        &mut *tx,
+        job_id,
+        "default",
+        "test-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "build".to_string(),
+        action_name: "greet".to_string(),
+        action_type: "shell".to_string(),
+        action_image: None,
+        action_spec: None,
+        input: None,
+        status: "ready".to_string(),
+        required_tags: vec!["shell".to_string()],
+        runner: "local".to_string(),
+    }];
+
+    JobStepRepo::create_steps_tx(&mut *tx, &steps).await?;
+
+    tx.commit().await?;
+
+    // Both job and step should exist after commit
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist after commit");
+    assert_eq!(job.task_name, "test-task");
+
+    let job_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(job_steps.len(), 1);
+    assert_eq!(job_steps[0].step_name, "build");
+
+    Ok(())
+}

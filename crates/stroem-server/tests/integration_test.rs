@@ -10095,3 +10095,480 @@ async fn test_api_key_negative_expiry_rejected() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Status filter integration tests ─────────────────────────────────
+
+#[tokio::test]
+async fn test_list_jobs_with_status_filter() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Create 3 jobs
+    for _ in 0..3 {
+        router
+            .clone()
+            .oneshot(api_request(
+                "POST",
+                "/api/workspaces/default/tasks/hello-world/execute",
+                json!({"input": {"name": "test"}}),
+            ))
+            .await?;
+    }
+
+    // All 3 should be pending
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/jobs?status=pending"))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 3);
+    assert_eq!(body["total"].as_i64().unwrap(), 3);
+
+    // Complete one job
+    let jobs = JobRepo::list(&pool, None, None, 10, 0).await?;
+    let job_id = jobs[0].job_id;
+    JobRepo::mark_completed(&pool, job_id, None).await?;
+
+    // status=completed → 1
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/jobs?status=completed"))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["total"].as_i64().unwrap(), 1);
+
+    // status=pending → 2
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/jobs?status=pending"))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(body["total"].as_i64().unwrap(), 2);
+
+    // no filter → 3
+    let response = router.clone().oneshot(api_get("/api/jobs")).await?;
+    let body = body_json(response).await;
+    assert_eq!(body["total"].as_i64().unwrap(), 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_jobs_invalid_status_returns_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.oneshot(api_get("/api/jobs?status=bogus")).await?;
+    assert_eq!(response.status(), 400);
+    let body = body_json(response).await;
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("Invalid status filter"));
+    assert!(error.contains("bogus"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_jobs_status_with_workspace_filter() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create job in "default" workspace
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "test"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Create job in "ops" workspace (deploy-app task, no required input)
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/ops/tasks/deploy-app/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Complete the ops job
+    let ops_jobs = JobRepo::list(&pool, Some("ops"), None, 10, 0).await?;
+    JobRepo::mark_completed(&pool, ops_jobs[0].job_id, None).await?;
+
+    // workspace=default&status=pending → 1
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/jobs?workspace=default&status=pending"))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+    // workspace=ops&status=completed → 1
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/jobs?workspace=ops&status=completed"))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+    // workspace=ops&status=pending → 0
+    let response = router
+        .clone()
+        .oneshot(api_get("/api/jobs?workspace=ops&status=pending"))
+        .await?;
+    let body = body_json(response).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
+
+    Ok(())
+}
+
+// ─── WebSocket auth integration tests ────────────────────────────────
+
+#[tokio::test]
+async fn test_ws_auth_rejects_without_token() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Start server on real port (WebSocket requires real TCP)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Try to connect without any token — should get rejected
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    // Server should reject the upgrade with a non-101 status
+    assert!(
+        result.is_err(),
+        "WebSocket should be rejected without auth token"
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_auth_accepts_jwt_via_query_param() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Login to get a JWT
+    let (token, _user_id) = login_and_get_token(&router).await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect with token in query param — should succeed
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream?token={}",
+        addr.port(),
+        job_id,
+        token
+    );
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket should connect with valid JWT in query param");
+
+    drop(ws_stream);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_auth_accepts_api_key_via_query_param() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Login and create an API key
+    let (jwt_token, _user_id) = login_and_get_token(&router).await?;
+    let response = router
+        .clone()
+        .oneshot(authed_request(
+            "POST",
+            "/api/auth/api-keys",
+            &jwt_token,
+            json!({"name": "WS Test Key"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let api_key = body["key"].as_str().unwrap().to_string();
+    assert!(api_key.starts_with("strm_"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect with API key in query param
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream?token={}",
+        addr.port(),
+        job_id,
+        api_key
+    );
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket should connect with valid API key in query param");
+
+    drop(ws_stream);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_auth_rejects_invalid_token() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect with an invalid JWT token
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream?token=invalid-jwt-garbage",
+        addr.port(),
+        job_id
+    );
+    let result = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        result.is_err(),
+        "WebSocket should be rejected with invalid token"
+    );
+
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_no_auth_allows_without_token() -> Result<()> {
+    // When auth is NOT configured, WebSocket should work without any token
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WebSocket should connect without token when auth is disabled");
+
+    drop(ws_stream);
+    server.abort();
+    Ok(())
+}
+
+// ─── skip_backfill WebSocket test ────────────────────────────────────
+
+#[tokio::test]
+async fn test_ws_skip_backfill_suppresses_existing_logs() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Append some existing logs
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            log_lines_body(
+                "build",
+                &[("stdout", "existing line 1"), ("stdout", "existing line 2")],
+            ),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let router_for_push = router.clone();
+
+    // Start server
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect WITH skip_backfill=true
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream?skip_backfill=true",
+        addr.port(),
+        job_id
+    );
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("Failed to connect");
+
+    use futures_util::StreamExt;
+
+    // Push a live log line
+    let response = router_for_push
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            log_lines_body("build", &[("stdout", "live after skip")]),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // The first message should be the live line, NOT the backfill
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await?
+        .unwrap()?;
+    let text = msg.into_text()?;
+    assert!(
+        text.contains("live after skip"),
+        "First WS message should be the live line, not backfill"
+    );
+    assert!(
+        !text.contains("existing line"),
+        "Backfill should be suppressed with skip_backfill=true"
+    );
+
+    drop(ws_stream);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ws_without_skip_backfill_sends_existing_logs() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Append existing logs
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/logs", job_id),
+            log_lines_body("build", &[("stdout", "backfill content here")]),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    // Connect WITHOUT skip_backfill (default behavior)
+    let url = format!(
+        "ws://127.0.0.1:{}/api/jobs/{}/logs/stream",
+        addr.port(),
+        job_id
+    );
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("Failed to connect");
+
+    use futures_util::StreamExt;
+
+    // First message should contain the backfill
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await?
+        .unwrap()?;
+    let text = msg.into_text()?;
+    assert!(
+        text.contains("backfill content here"),
+        "Should receive backfill when skip_backfill is not set"
+    );
+
+    drop(ws_stream);
+    server.abort();
+    Ok(())
+}
