@@ -86,6 +86,8 @@ mod tests {
                 s3: None,
             },
             workspaces: HashMap::new(),
+            libraries: HashMap::new(),
+            git_auth: HashMap::new(),
             worker_token: "test".to_string(),
             auth: None,
             recovery: RecoveryConfig {

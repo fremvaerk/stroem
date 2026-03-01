@@ -4,7 +4,25 @@ use anyhow::{bail, Result};
 
 /// Validates a workflow config and returns list of warnings.
 /// Errors are returned as Err.
+///
+/// When `libraries_resolved` is true, library references (names containing `.`)
+/// are validated against the config (they should already be merged in).
+/// When false (CLI validation without server context), library references
+/// are skipped with a warning.
 pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> {
+    validate_workflow_config_inner(config, false)
+}
+
+/// Validates a workflow config with full library validation.
+/// Use this after libraries have been resolved and merged into the config.
+pub fn validate_workflow_config_with_libraries(config: &WorkflowConfig) -> Result<Vec<String>> {
+    validate_workflow_config_inner(config, true)
+}
+
+fn validate_workflow_config_inner(
+    config: &WorkflowConfig,
+    libraries_resolved: bool,
+) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
     // Validate each action
@@ -14,7 +32,9 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
         // For type: task, verify the referenced task exists
         if action.action_type == "task" {
             let task_ref = action.task.as_ref().unwrap(); // validated above
-            if !config.tasks.contains_key(task_ref) {
+            if !libraries_resolved && task_ref.contains('.') {
+                // Library task — skip when libraries not resolved
+            } else if !config.tasks.contains_key(task_ref) {
                 bail!(
                     "Action '{}' references non-existent task '{}'",
                     action_name,
@@ -56,15 +76,15 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
         for (step_name, step) in &task.flow {
             let action_ref = &step.action;
 
-            // Check if it's a library action (contains /)
-            if action_ref.contains('/') {
-                // Library actions can't be validated here (would need library context)
+            // Check if it's a library action (contains .)
+            if !libraries_resolved && action_ref.contains('.') {
+                // Library actions can't be validated without server context
                 warnings.push(format!(
                     "Task '{}' step '{}' references library action '{}' - validation skipped",
                     task_name, step_name, action_ref
                 ));
             } else {
-                // Local action - must exist in this config
+                // Local action (or resolved library action) - must exist in this config
                 if !config.actions.contains_key(action_ref) {
                     bail!(
                         "Task '{}' step '{}' references non-existent action '{}'",
@@ -98,6 +118,7 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                 &format!("Task '{task_name}' on_success[{i}]"),
                 &hook.action,
                 config,
+                libraries_resolved,
             )?;
         }
         for (i, hook) in task.on_error.iter().enumerate() {
@@ -105,6 +126,7 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
                 &format!("Task '{task_name}' on_error[{i}]"),
                 &hook.action,
                 config,
+                libraries_resolved,
             )?;
         }
     }
@@ -181,10 +203,20 @@ pub fn validate_workflow_config(config: &WorkflowConfig) -> Result<Vec<String>> 
 
     // Validate workspace-level hooks reference existing actions
     for (i, hook) in config.on_success.iter().enumerate() {
-        validate_hook_action_exists(&format!("Workspace on_success[{i}]"), &hook.action, config)?;
+        validate_hook_action_exists(
+            &format!("Workspace on_success[{i}]"),
+            &hook.action,
+            config,
+            libraries_resolved,
+        )?;
     }
     for (i, hook) in config.on_error.iter().enumerate() {
-        validate_hook_action_exists(&format!("Workspace on_error[{i}]"), &hook.action, config)?;
+        validate_hook_action_exists(
+            &format!("Workspace on_error[{i}]"),
+            &hook.action,
+            config,
+            libraries_resolved,
+        )?;
     }
 
     // Validate connections
@@ -716,9 +748,14 @@ fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<Str
 }
 
 /// Validates that a hook references an existing action (or a library action).
-fn validate_hook_action_exists(label: &str, action: &str, config: &WorkflowConfig) -> Result<()> {
-    if action.contains('/') {
-        return Ok(()); // library action — skip
+fn validate_hook_action_exists(
+    label: &str,
+    action: &str,
+    config: &WorkflowConfig,
+    libraries_resolved: bool,
+) -> Result<()> {
+    if !libraries_resolved && action.contains('.') {
+        return Ok(()); // library action — skip when libraries not resolved
     }
     if !config.actions.contains_key(action) {
         bail!("{} references non-existent action '{}'", label, action);
@@ -1055,7 +1092,7 @@ tasks:
   test:
     flow:
       step1:
-        action: common/slack-notify
+        action: common.slack-notify
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1063,7 +1100,7 @@ tasks:
         let warnings = result.unwrap();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("library action"));
-        assert!(warnings[0].contains("common/slack-notify"));
+        assert!(warnings[0].contains("common.slack-notify"));
     }
 
     #[test]
@@ -1691,7 +1728,7 @@ tasks:
       step1:
         action: deploy
     on_success:
-      - action: common/slack-notify
+      - action: common.slack-notify
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -2369,7 +2406,7 @@ on_error:
     fn test_validate_workspace_hook_library_action() {
         let yaml = r#"
 on_success:
-  - action: common/slack-notify
+  - action: common.slack-notify
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);

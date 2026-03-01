@@ -878,6 +878,8 @@ async fn setup() -> Result<(
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
@@ -1854,6 +1856,8 @@ async fn test_task_detail_connections() -> Result<()> {
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
@@ -3379,6 +3383,8 @@ async fn setup_with_auth() -> Result<(
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: Some(AuthConfig {
             jwt_secret: AUTH_JWT_SECRET.to_string(),
@@ -5108,6 +5114,8 @@ async fn setup_multi_workspace() -> Result<(
                 },
             ),
         ]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
@@ -5482,17 +5490,23 @@ async fn test_workspace_tarball_download() -> Result<()> {
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
     };
 
-    let mgr = WorkspaceManager::new(HashMap::from([(
-        "default".to_string(),
-        WorkspaceSourceDef::Folder {
-            path: ws_dir.path().to_string_lossy().to_string(),
-        },
-    )]))
+    let mgr = WorkspaceManager::new(
+        HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        HashMap::new(),
+        HashMap::new(),
+    )
     .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -5639,17 +5653,23 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
     };
 
-    let mgr = WorkspaceManager::new(HashMap::from([(
-        "default".to_string(),
-        WorkspaceSourceDef::Folder {
-            path: ws_dir.path().to_string_lossy().to_string(),
-        },
-    )]))
+    let mgr = WorkspaceManager::new(
+        HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        HashMap::new(),
+        HashMap::new(),
+    )
     .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -5714,17 +5734,23 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
     };
 
-    let mgr = WorkspaceManager::new(HashMap::from([(
-        "default".to_string(),
-        WorkspaceSourceDef::Folder {
-            path: ws_dir.path().to_string_lossy().to_string(),
-        },
-    )]))
+    let mgr = WorkspaceManager::new(
+        HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        HashMap::new(),
+        HashMap::new(),
+    )
     .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -5805,17 +5831,23 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
                 path: ws_path_str.clone(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
     };
 
-    let mgr = WorkspaceManager::new(HashMap::from([(
-        "default".to_string(),
-        WorkspaceSourceDef::Folder {
-            path: ws_path_str.clone(),
-        },
-    )]))
+    let mgr = WorkspaceManager::new(
+        HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_path_str.clone(),
+            },
+        )]),
+        HashMap::new(),
+        HashMap::new(),
+    )
     .await;
 
     // AppState is Clone and shares Arc<WorkspaceManager> across clones
@@ -5931,17 +5963,23 @@ async fn test_tarball_etag_header_format() -> Result<()> {
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
     };
 
-    let mgr = WorkspaceManager::new(HashMap::from([(
-        "default".to_string(),
-        WorkspaceSourceDef::Folder {
-            path: ws_dir.path().to_string_lossy().to_string(),
-        },
-    )]))
+    let mgr = WorkspaceManager::new(
+        HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        HashMap::new(),
+        HashMap::new(),
+    )
     .await;
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -6686,6 +6724,8 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: Some(AuthConfig {
             jwt_secret: "secret".to_string(),
@@ -6755,6 +6795,8 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: Some(AuthConfig {
             jwt_secret: "secret".to_string(),
@@ -6817,6 +6859,8 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: Some(AuthConfig {
             jwt_secret: "secret".to_string(),
@@ -6962,6 +7006,8 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             s3: None,
         },
         workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test".to_string(),
         auth: None,
         recovery: stroem_server::config::RecoveryConfig {
@@ -8619,6 +8665,8 @@ async fn setup_recovery() -> Result<(
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: stroem_server::config::RecoveryConfig {
@@ -8855,6 +8903,8 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: stroem_server::config::RecoveryConfig {

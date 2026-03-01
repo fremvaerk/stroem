@@ -6,7 +6,11 @@ Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in R
 Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
 Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
-Phase 3: Multi-workspace support, tarball distribution, Docker and Kubernetes runners.
+Phase 3 complete: Multi-workspace support, tarball distribution, Docker and Kubernetes runners, libraries.
+Phase 4 (mostly complete): Advanced features (pod actions, secrets, connections, DAG visualization). Remaining: RBAC.
+Phase 5: Advanced flow control (conditionals, loops, approval gates).
+Phase 6: Shared storage & worker affinity.
+Phase 7: AI agent actions & MCP integration.
 
 ## Architecture
 
@@ -164,6 +168,20 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - API routes are workspace-scoped: `/api/workspaces/{ws}/tasks/{name}/execute`
 - Workers download workspace tarballs via `GET /worker/workspace/{ws}.tar.gz` with ETag caching
 - `WorkspaceCache` in worker manages per-workspace tarball extraction and revision tracking
+
+### Libraries (Actions, Tasks, Connection Types)
+- Libraries import shared actions, tasks, and connection types from Git repos or local folders
+- Defined centrally in `server-config.yaml` (`libraries:` + `git_auth:` sections), shared across all workspaces
+- Namespace separator: `.` (dot) — e.g. `common.slack-notify`. Avoids URL routing conflicts.
+- `LibraryDef` enum: `Folder { path }` or `Git { url, git_ref, auth }` in `config.rs`
+- `LibraryResolver` in `crates/stroem-server/src/workspace/library.rs` — clones/loads, prefixes items, rewrites internal references
+- During import: actions, tasks, connection types are prefixed; triggers, secrets, connections are ignored
+- Internal reference rewriting: action refs in flow steps, `type: task` refs, hook actions, connection-type input field types
+- `WorkspaceManager` resolves libraries once at startup, merges into every workspace config after loading
+- Tarballs include library source files under `_libraries/{lib_name}/`
+- Worker resolves library action scripts against `_libraries/{lib_name}/` (in `executor.rs`)
+- CLI `stroem validate` skips `.`-containing names with a warning; server validates fully after resolution
+- `validate_workflow_config_with_libraries()` for server-side validation (all refs must exist)
 
 ### Scheduler (Cron Triggers)
 - `crates/stroem-server/src/scheduler.rs` — background task that fires cron triggers

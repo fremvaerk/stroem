@@ -268,62 +268,62 @@ A single workflow can mix all action types. The server dispatches each step only
 └─────────────────────────┴──────────────────────┴────────────────────────────┘
 ```
 
-### Action libraries (external Git repos)
+### Libraries (actions, tasks, connection types) ✅
 
-Libraries are **action-only** toolboxes. They provide reusable action definitions and scripts, but NOT tasks or triggers. Each workspace declares its own libraries in `.stroem.yaml`:
+Libraries import shared **actions**, **tasks**, and **connection types** from external Git repos or local folders. Defined centrally in server config (`libraries:` section), shared across all workspaces. Uses `.` as namespace separator (`common.slack-notify`) to avoid URL routing conflicts.
 
 ```yaml
-# .stroem.yaml
+# server-config.yaml
 libraries:
   common:
-    git: https://github.com/org/stroem-action-library.git
-    ref: v1.2.0          # tag, branch, or commit SHA (branches float to latest)
-  internal:
-    git: git@github.com:org/internal-actions.git
-    ref: main            # branch ref allowed, logged with warning
+    type: git
+    url: https://github.com/org/stroem-common-library.git
+    ref: v1.2.0
+    auth: my-git-token
+  local-lib:
+    type: folder
+    path: /shared/stroem-libraries/notifications
+
+git_auth:
+  my-git-token:
+    type: token
+    token: "${GITHUB_TOKEN}"
 ```
 
-Library repo layout:
+Library repo layout (same structure as workspace):
 
 ```
-stroem-action-library/
-├── .workflows/            # ONLY action definitions (tasks and triggers are IGNORED)
-│   └── actions.yaml       # action defs: slack-notify, pagerduty-alert, etc.
-└── actions/               # scripts referenced by action definitions
+stroem-common-library/
+├── .workflows/
+│   ├── actions.yaml           # action defs
+│   ├── tasks.yaml             # task defs
+│   └── connection-types.yaml  # connection type defs
+└── scripts/
     ├── slack-notify.sh
-    └── pagerduty.py
+    └── canary-deploy.sh
 ```
 
-Library actions are referenced with a `library_name/action_name` prefix:
+Library items are referenced with `library_name.item_name` prefix:
 
 ```yaml
 tasks:
   deploy:
     flow:
       notify:
-        action: common/slack-notify   # from "common" library
+        action: common.slack-notify   # from "common" library
       deploy:
         action: deploy                # local action (no prefix)
 ```
 
-No implicit resolution -- unprefixed names always resolve to the local workspace. Name collisions between libraries are impossible because the prefix is mandatory.
+During import: all items are prefixed, internal references are rewritten (`action: slack-notify` → `action: common.slack-notify`). Triggers, secrets, and connections are ignored (workspace-local only).
 
 ### Library sync & caching
 
-1. Server reads `.stroem.yaml` from each workspace
-2. Server clones/fetches libraries to a managed cache dir (`/var/stroem/libraries/{name}/{ref}/`)
-3. **Pinned refs** (tags, SHAs): clone once, never update
-4. **Branch refs**: pull on workspace reload, log a warning ("floating ref")
-5. Server parses library `.workflows/` files, loads **only action definitions**, ignores tasks/triggers
-6. Libraries are shared across workspaces -- if `platform` and `data-team` both reference `common@v1.2.0`, it's cloned once
-
-### Path resolution at runtime
-
-1. Server builds a workspace tarball per workspace, including libraries under `_libraries/{name}/`
-2. Worker extracts tarball to `/tmp/stroem/{workspace}/{job_id}/`
-3. Runner sets working directory to workspace root
-4. `cmd` paths are relative to workspace root
-5. `script` paths are resolved relative to workspace root (local) or `_libraries/{name}/` (library)
+1. Server resolves all libraries at startup (and on config reload)
+2. Git libraries are cloned to a cache dir; **pinned refs** (tags, SHAs) clone once, **branch refs** fetch on reload with a warning
+3. Library items are merged into every workspace config after loading
+4. Tarballs include library source files under `_libraries/{name}/`
+5. Workers resolve library action scripts against `_libraries/{name}/` instead of workspace root
 
 ---
 
@@ -815,25 +815,33 @@ Deliverable: `docker-compose up` -> curl to trigger a multi-step workflow -> ste
 
 ### Phase 4 -- Advanced Features
 
-1. **Local mode** execution (Worker-side DAG walker, shared workspace)
-2. ~~**`type: pod` actions**~~: **DONE** -- Pod manifest overrides via `manifest` field, deep-merged into generated pod spec. Supports service accounts, node selectors, tolerations, resource limits, annotations, sidecars.
-3. **RBAC**: Roles, permissions, workspace-scoped access control
+1. ~~**`type: pod` actions**~~: **DONE** -- Pod manifest overrides via `manifest` field, deep-merged into generated pod spec. Supports service accounts, node selectors, tolerations, resource limits, annotations, sidecars.
+2. **RBAC**: Roles, permissions, workspace-scoped access control
 4. ~~**Secret resolution**~~: **DONE** -- Tera `| vals` filter for inline resolution + worker-side `resolve_secrets()` for env vars. Supports all vals backends (AWS SSM, Vault, GCP, Azure, SOPS). Full docs at `docs/src/content/docs/guides/secrets.md`.
 5. ~~**Connections**~~: **DONE** -- Named, typed objects for external system configs (DB creds, API endpoints). Connection types define property schemas; connections are named instances. Task inputs reference connection types; at job creation, connection name strings are resolved to full objects. Supports template values (e.g., `{{ 'ref+...' | vals }}`), type defaults, and validation.
 6. ~~**DAG visualization**~~: **DONE** -- React Flow + Dagre in `ui/src/components/workflow-dag.tsx`. Interactive graph on task detail (static preview) and job detail (live status). Auto-layout with virtual start/end sentinel nodes, status-based edge coloring and animation, clickable step selection.
 
-### Phase 5 -- Shared Storage & Worker Affinity
+### Phase 5 -- Advanced Flow Control
+
+Adds flow control building blocks: conditionals, loops, and human-in-the-loop approval gates. Detailed spec in `docs/internal/phase5-advanced-flow-control.md`.
+
+1. **Conditionals (`when`)** — Tera expression on flow steps, evaluated at orchestration time. False → step skipped and cascaded. `continue_on_failure` extended to accept skipped deps for convergence.
+2. **For-each loops (fan-out/fan-in)** — `for_each` on flow steps, dynamic step creation at orchestration time (N instances per item).
+3. **While loops** — Repeat a step until condition is false. `while`, `max_iterations`, `delay_seconds` fields.
+4. **Suspend/Resume + Approval gates** — Built-in `_approval` action type, `"suspended"` status, approval token, notification channels (email/Slack/webhook), programmatic approval API.
+
+### Phase 6 -- Shared Storage & Worker Affinity
 
 When a task runs in distributed mode, its steps may execute on different workers. This makes it impossible to share files between steps (e.g., build artifacts, Docker images, intermediate state). Three sub-phases address this progressively:
 
-**5a. Job Worker Affinity** — Pin all steps of a job to the first worker that claims a step. Zero infrastructure requirements.
+**6a. Job Worker Affinity** — Pin all steps of a job to the first worker that claims a step. Zero infrastructure requirements.
 - Add `affinity: "worker"` field to `TaskDef` (default: `"none"`)
 - DB: `affinity` + `affinity_worker_id` columns on `job` table
 - Modify `claim_ready_step()` SQL to join `job` and filter: `(j.affinity = 'none' OR j.affinity_worker_id IS NULL OR j.affinity_worker_id = $worker)`
 - First claim sets `affinity_worker_id` (atomic `WHERE affinity_worker_id IS NULL`), subsequent steps only claimable by that worker
 - Solves: Docker build→push, any local state sharing between steps
 
-**5b. Shared Storage Coordination** — Workers mount a shared filesystem (NFS, EFS, etc.), Strøm assigns job-scoped paths.
+**6b. Shared Storage Coordination** — Workers mount a shared filesystem (NFS, EFS, etc.), Strøm assigns job-scoped paths.
 - Worker config: `shared_storage.path` (e.g., `/mnt/stroem-shared`)
 - Worker creates `{shared_storage.path}/jobs/{job_id}/` before step execution
 - Inject `STROEM_ARTIFACTS_DIR` env var pointing to job-scoped directory
@@ -842,7 +850,7 @@ When a task runs in distributed mode, its steps may execute on different workers
 - Cleanup on job completion (configurable delay)
 - Solves: Large artifact sharing (1GB+) across workers with minimal latency
 
-**5c. Built-in Artifact Storage** — Strøm server provides HTTP-based artifact storage (no external infra).
+**6c. Built-in Artifact Storage** — Strøm server provides HTTP-based artifact storage (no external infra).
 - Server endpoints: `PUT/GET/DELETE /api/jobs/{id}/artifacts/{path...}`
 - Server config: `artifacts.path` (local dir) + optional `artifacts.s3` backend
 - Worker: inject `stroem-artifacts` helper CLI (push/pull commands) or use env vars (`STROEM_ARTIFACTS_URL`, `STROEM_ARTIFACTS_TOKEN`)

@@ -43,26 +43,32 @@ pub async fn download_workspace(
         }
     }
 
+    // Collect library source paths for tarball overlay
+    let library_paths = state.workspaces.get_library_paths();
+
     // Build tarball in a blocking task
-    let tarball = match tokio::task::spawn_blocking(move || build_tarball(&workspace_path)).await {
-        Ok(Ok(data)) => data,
-        Ok(Err(e)) => {
-            tracing::error!("Failed to build workspace tarball: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({"error": "Failed to build tarball"})),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Tarball task panicked: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(json!({"error": "Internal error"})),
-            )
-                .into_response();
-        }
-    };
+    let tarball =
+        match tokio::task::spawn_blocking(move || build_tarball(&workspace_path, &library_paths))
+            .await
+        {
+            Ok(Ok(data)) => data,
+            Ok(Err(e)) => {
+                tracing::error!("Failed to build workspace tarball: {:#}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({"error": "Failed to build tarball"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Tarball task panicked: {:#}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({"error": "Internal error"})),
+                )
+                    .into_response();
+            }
+        };
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(header::CONTENT_TYPE, "application/gzip".parse().unwrap());
@@ -74,14 +80,28 @@ pub async fn download_workspace(
     (StatusCode::OK, response_headers, tarball).into_response()
 }
 
-/// Build a gzipped tar archive of a workspace directory
-fn build_tarball(workspace_path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+/// Build a gzipped tar archive of a workspace directory with library overlays
+fn build_tarball(
+    workspace_path: &std::path::Path,
+    library_paths: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> anyhow::Result<Vec<u8>> {
     let buf = Vec::new();
     let encoder = GzEncoder::new(buf, Compression::default());
     let mut archive = tar::Builder::new(encoder);
 
+    // Do not follow symlinks — prevents a malicious library from exfiltrating
+    // server-side files via symlinks pointing outside the library directory.
+    archive.follow_symlinks(false);
+
     // Walk all files in the workspace directory
     archive.append_dir_all(".", workspace_path)?;
+
+    // Overlay library source directories under _libraries/{lib_name}/
+    for (lib_name, lib_path) in library_paths {
+        if lib_path.exists() {
+            archive.append_dir_all(format!("_libraries/{}", lib_name), lib_path)?;
+        }
+    }
 
     let encoder = archive.into_inner()?;
     let compressed = encoder.finish()?;
@@ -93,7 +113,9 @@ fn build_tarball(workspace_path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use super::*;
     use flate2::read::GzDecoder;
+    use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use walkdir::WalkDir;
 
@@ -142,7 +164,7 @@ mod tests {
         fs::write(workspace_path.join("file2.txt"), "content2").unwrap();
 
         // Build tarball
-        let tarball = build_tarball(workspace_path).unwrap();
+        let tarball = build_tarball(workspace_path, &HashMap::new()).unwrap();
         assert!(!tarball.is_empty(), "Tarball should not be empty");
 
         // Extract and verify
@@ -159,7 +181,7 @@ mod tests {
         let workspace_path = temp_dir.path();
 
         // Build tarball of empty directory
-        let tarball = build_tarball(workspace_path).unwrap();
+        let tarball = build_tarball(workspace_path, &HashMap::new()).unwrap();
 
         // Should produce a valid tarball, even if small
         assert!(
@@ -189,7 +211,7 @@ mod tests {
         fs::write(workspace_path.join("test.txt"), test_content).unwrap();
 
         // Build tarball
-        let tarball = build_tarball(workspace_path).unwrap();
+        let tarball = build_tarball(workspace_path, &HashMap::new()).unwrap();
 
         // Extract and verify content is preserved exactly
         let files = extract_tarball(&tarball).unwrap();
@@ -215,7 +237,7 @@ mod tests {
         fs::write(nested.join("nested.txt"), "nested content").unwrap();
 
         // Build tarball
-        let tarball = build_tarball(workspace_path).unwrap();
+        let tarball = build_tarball(workspace_path, &HashMap::new()).unwrap();
 
         // Extract and verify all files are present
         let files = extract_tarball(&tarball).unwrap();
@@ -241,7 +263,82 @@ mod tests {
     fn test_build_tarball_nonexistent_path_fails() {
         let nonexistent_path = std::path::Path::new("/this/path/does/not/exist/12345");
 
-        let result = build_tarball(nonexistent_path);
+        let result = build_tarball(nonexistent_path, &HashMap::new());
         assert!(result.is_err(), "Should fail for nonexistent path");
+    }
+
+    #[test]
+    fn test_build_tarball_with_library_overlay() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_path = temp_dir.path();
+
+        // Create workspace file
+        fs::write(workspace_path.join("task.yaml"), "name: deploy").unwrap();
+
+        // Create library directory
+        let lib_dir = TempDir::new().unwrap();
+        let scripts_dir = lib_dir.path().join("scripts");
+        fs::create_dir_all(&scripts_dir).unwrap();
+        fs::write(scripts_dir.join("notify.sh"), "#!/bin/bash\necho notify").unwrap();
+
+        let mut library_paths = HashMap::new();
+        library_paths.insert("common".to_string(), lib_dir.path().to_path_buf());
+
+        let tarball = build_tarball(workspace_path, &library_paths).unwrap();
+        let files = extract_tarball(&tarball).unwrap();
+
+        assert!(
+            files.contains_key("task.yaml"),
+            "Should contain workspace files"
+        );
+        assert!(
+            files.contains_key("_libraries/common/scripts/notify.sh"),
+            "Should contain library scripts under _libraries/common/"
+        );
+        assert_eq!(
+            files.get("_libraries/common/scripts/notify.sh").unwrap(),
+            "#!/bin/bash\necho notify"
+        );
+    }
+
+    #[test]
+    fn test_build_tarball_with_multiple_libraries() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_path = temp_dir.path();
+        fs::write(workspace_path.join("root.txt"), "root").unwrap();
+
+        // Library 1
+        let lib1_dir = TempDir::new().unwrap();
+        fs::write(lib1_dir.path().join("lib1.sh"), "echo lib1").unwrap();
+
+        // Library 2
+        let lib2_dir = TempDir::new().unwrap();
+        fs::write(lib2_dir.path().join("lib2.sh"), "echo lib2").unwrap();
+
+        let mut library_paths = HashMap::new();
+        library_paths.insert("lib1".to_string(), lib1_dir.path().to_path_buf());
+        library_paths.insert("lib2".to_string(), lib2_dir.path().to_path_buf());
+
+        let tarball = build_tarball(workspace_path, &library_paths).unwrap();
+        let files = extract_tarball(&tarball).unwrap();
+
+        assert!(files.contains_key("root.txt"));
+        assert!(files.contains_key("_libraries/lib1/lib1.sh"));
+        assert!(files.contains_key("_libraries/lib2/lib2.sh"));
+    }
+
+    #[test]
+    fn test_build_tarball_skips_nonexistent_library() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace_path = temp_dir.path();
+        fs::write(workspace_path.join("root.txt"), "root").unwrap();
+
+        let mut library_paths = HashMap::new();
+        library_paths.insert("missing".to_string(), PathBuf::from("/this/does/not/exist"));
+
+        // Should succeed — nonexistent library paths are skipped
+        let tarball = build_tarball(workspace_path, &library_paths).unwrap();
+        let files = extract_tarball(&tarball).unwrap();
+        assert!(files.contains_key("root.txt"));
     }
 }

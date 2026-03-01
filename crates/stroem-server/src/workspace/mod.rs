@@ -1,7 +1,9 @@
 pub mod folder;
 pub mod git;
+pub mod library;
 
 pub use folder::load_folder_workspace;
+pub use library::{merge_library_into_workspace, LibraryResolver, ResolvedLibrary};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,7 +13,7 @@ use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use tokio::sync::RwLock;
 
-use crate::config::WorkspaceSourceDef;
+use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
 /// Trait for workspace sources (folder, git, etc.)
 #[async_trait]
@@ -81,15 +83,40 @@ impl WorkspaceSource for InMemorySource {
 pub struct WorkspaceManager {
     entries: HashMap<String, WorkspaceEntry>,
     load_errors: HashMap<String, String>,
+    /// Resolved libraries — shared across all workspaces
+    resolved_libraries: HashMap<String, ResolvedLibrary>,
 }
 
 impl WorkspaceManager {
     /// Create a new WorkspaceManager from config definitions.
     /// Individual workspace failures are captured in `load_errors` rather than
     /// failing the entire server — other workspaces continue to load normally.
-    pub async fn new(defs: HashMap<String, WorkspaceSourceDef>) -> Self {
+    /// Libraries are resolved first and merged into every workspace config.
+    pub async fn new(
+        defs: HashMap<String, WorkspaceSourceDef>,
+        library_defs: HashMap<String, LibraryDef>,
+        git_auth: HashMap<String, GitAuthConfig>,
+    ) -> Self {
         let mut entries = HashMap::new();
         let mut load_errors = HashMap::new();
+
+        // Resolve libraries (git clones are blocking I/O — use block_in_place)
+        let resolved_libraries = if !library_defs.is_empty() {
+            let cache_dir = std::env::temp_dir().join("stroem").join("libraries");
+            let resolver = LibraryResolver::new(cache_dir, git_auth);
+            tokio::task::block_in_place(|| match resolver.resolve_all(&library_defs) {
+                Ok(libs) => {
+                    tracing::info!("Resolved {} library/libraries", libs.len());
+                    libs
+                }
+                Err(e) => {
+                    tracing::error!("Failed to resolve libraries: {:#}", e);
+                    HashMap::new()
+                }
+            })
+        } else {
+            HashMap::new()
+        };
 
         for (name, def) in defs {
             let source: Arc<dyn WorkspaceSource> = match def {
@@ -115,7 +142,12 @@ impl WorkspaceManager {
             };
 
             match source.load().await {
-                Ok(config) => {
+                Ok(mut config) => {
+                    // Merge library items into workspace config
+                    for lib in resolved_libraries.values() {
+                        merge_library_into_workspace(&mut config, lib);
+                    }
+
                     let source_path = source.path().to_path_buf();
                     entries.insert(
                         name.clone(),
@@ -137,6 +169,7 @@ impl WorkspaceManager {
         Self {
             entries,
             load_errors,
+            resolved_libraries,
         }
     }
 
@@ -145,6 +178,7 @@ impl WorkspaceManager {
         Self {
             entries,
             load_errors: HashMap::new(),
+            resolved_libraries: HashMap::new(),
         }
     }
 
@@ -167,6 +201,7 @@ impl WorkspaceManager {
         Self {
             entries,
             load_errors: HashMap::new(),
+            resolved_libraries: HashMap::new(),
         }
     }
 
@@ -230,20 +265,36 @@ impl WorkspaceManager {
         infos
     }
 
-    /// Reload a specific workspace from its source, updating config and revision
+    /// Reload a specific workspace from its source, updating config and revision.
+    /// Library items are re-merged into the workspace config.
     pub async fn reload(&self, name: &str) -> Result<()> {
         let entry = self
             .entries
             .get(name)
             .with_context(|| format!("Workspace '{}' not found", name))?;
-        let new_config = entry
+        let mut new_config = entry
             .source
             .load()
             .await
             .with_context(|| format!("Failed to reload workspace '{}'", name))?;
+
+        // Re-merge library items
+        for lib in self.resolved_libraries.values() {
+            merge_library_into_workspace(&mut new_config, lib);
+        }
+
         let mut config = entry.config.write().await;
         *config = new_config;
         Ok(())
+    }
+
+    /// Get library source paths for tarball building.
+    /// Returns map of library name → source path.
+    pub fn get_library_paths(&self) -> HashMap<String, PathBuf> {
+        self.resolved_libraries
+            .iter()
+            .map(|(name, lib)| (name.clone(), lib.path.clone()))
+            .collect()
     }
 
     /// Start background watchers for hot-reload (folder watchers + git pollers).
@@ -255,6 +306,7 @@ impl WorkspaceManager {
             let source = entry.source.clone();
             let ws_name = name.clone();
             let poll_secs = source.poll_interval_secs();
+            let libs = self.resolved_libraries.clone();
 
             tokio::spawn(async move {
                 tracing::info!(
@@ -284,7 +336,12 @@ impl WorkspaceManager {
 
                     // Revision changed (or source doesn't support peek) — do full reload
                     match source.load().await {
-                        Ok(new_config) => {
+                        Ok(mut new_config) => {
+                            // Re-merge library items
+                            for lib in libs.values() {
+                                merge_library_into_workspace(&mut new_config, lib);
+                            }
+
                             let new_revision = source.revision();
                             let mut config = config_lock.write().await;
                             *config = new_config;
@@ -358,7 +415,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         assert_eq!(mgr.names().len(), 1);
 
         let config = mgr.get_config_async("default").await.unwrap();
@@ -400,7 +457,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         assert_eq!(mgr.names().len(), 2);
 
         let default_config = mgr.get_config_async("default").await.unwrap();
@@ -421,7 +478,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         assert!(mgr.get_config_async("nonexistent").await.is_none());
         assert!(mgr.get_path("nonexistent").is_none());
     }
@@ -437,7 +494,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "default");
@@ -448,7 +505,7 @@ tasks:
 
     #[tokio::test]
     async fn test_workspace_manager_empty() {
-        let mgr = WorkspaceManager::new(HashMap::new()).await;
+        let mgr = WorkspaceManager::new(HashMap::new(), HashMap::new(), HashMap::new()).await;
         assert_eq!(mgr.names().len(), 0);
         assert!(mgr.get_config("anything").await.is_none());
         assert!(mgr.get_path("anything").is_none());
@@ -659,7 +716,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let path = mgr.get_path("default").unwrap();
         assert_eq!(path.to_str().unwrap(), temp_path);
     }
@@ -675,7 +732,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let revision = mgr.get_revision("default");
         assert!(revision.is_some());
         // Verify it's a valid hex string (blake2 hash)
@@ -697,7 +754,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let revision1 = mgr.get_revision("default").unwrap();
 
         // Modify the file content
@@ -724,7 +781,7 @@ tasks:
             "default".to_string(),
             WorkspaceSourceDef::Folder { path: temp_path },
         );
-        let mgr2 = WorkspaceManager::new(defs2).await;
+        let mgr2 = WorkspaceManager::new(defs2, HashMap::new(), HashMap::new()).await;
         let revision2 = mgr2.get_revision("default").unwrap();
 
         // Revision should have changed
@@ -741,7 +798,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         // Workspace should not be in entries
         assert_eq!(mgr.names().len(), 0);
         assert!(mgr.get_config_async("nonexistent").await.is_none());
@@ -797,7 +854,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let infos = mgr.list_workspace_info().await;
 
         assert_eq!(infos.len(), 2);
@@ -839,7 +896,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let names = mgr.names();
 
         assert_eq!(names.len(), 3);
@@ -873,7 +930,7 @@ actions:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         // Should not crash, but record the error
         assert_eq!(mgr.names().len(), 0);
         let infos = mgr.list_workspace_info().await;
@@ -910,7 +967,7 @@ tasks:
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
 
         let config1 = mgr.get_config_async("default").await.unwrap();
         assert_eq!(config1.actions.len(), 1);
@@ -964,7 +1021,7 @@ tasks:
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let rev1 = mgr.get_revision("default").unwrap();
 
         // Modify content
@@ -990,7 +1047,7 @@ tasks:
                 path: temp.path().to_str().unwrap().to_string(),
             },
         );
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
 
         let result = mgr.reload("nonexistent").await;
         assert!(result.is_err());
@@ -1066,7 +1123,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
 
         // Good workspace loaded
         assert_eq!(mgr.names().len(), 1);
@@ -1104,7 +1161,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         assert_eq!(mgr.names().len(), 0);
 
         let infos = mgr.list_workspace_info().await;
@@ -1122,7 +1179,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
         let error = infos[0].error.as_ref().unwrap();
@@ -1147,7 +1204,7 @@ tasks:
             },
         );
 
-        let mgr = WorkspaceManager::new(defs).await;
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
 

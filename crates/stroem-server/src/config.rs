@@ -39,6 +39,23 @@ fn default_git_ref() -> String {
     "main".to_string()
 }
 
+/// Library source definition — shared action/task/connection-type libraries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum LibraryDef {
+    #[serde(rename = "folder")]
+    Folder { path: String },
+    #[serde(rename = "git")]
+    Git {
+        url: String,
+        #[serde(rename = "ref", default = "default_git_ref")]
+        git_ref: String,
+        /// References a named entry in `git_auth` (server config level)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<String>,
+    },
+}
+
 fn default_poll_interval() -> u64 {
     60
 }
@@ -123,6 +140,12 @@ pub struct ServerConfig {
     pub log_storage: LogStorageConfig,
     #[serde(default)]
     pub workspaces: HashMap<String, WorkspaceSourceDef>,
+    /// Shared action/task/connection-type libraries available to all workspaces
+    #[serde(default)]
+    pub libraries: HashMap<String, LibraryDef>,
+    /// Named git auth configs referenced by library `auth` field
+    #[serde(default)]
+    pub git_auth: HashMap<String, GitAuthConfig>,
     pub worker_token: String, // shared secret for worker auth
     pub auth: Option<AuthConfig>,
     #[serde(default)]
@@ -922,5 +945,158 @@ worker_token: "token"
         }
 
         assert_eq!(config.listen, "0.0.0.0:9090");
+    }
+
+    #[test]
+    fn test_parse_config_with_folder_library() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+libraries:
+  local-lib:
+    type: folder
+    path: "/shared/stroem-libraries/notifications"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.libraries.len(), 1);
+        match &config.libraries["local-lib"] {
+            LibraryDef::Folder { path } => {
+                assert_eq!(path, "/shared/stroem-libraries/notifications");
+            }
+            _ => panic!("Expected folder library"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_with_git_library() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+libraries:
+  common:
+    type: git
+    url: https://github.com/org/stroem-common-library.git
+    ref: v1.2.0
+    auth: my-git-token
+git_auth:
+  my-git-token:
+    type: token
+    token: "ghp_xxxx"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.libraries.len(), 1);
+        match &config.libraries["common"] {
+            LibraryDef::Git { url, git_ref, auth } => {
+                assert_eq!(url, "https://github.com/org/stroem-common-library.git");
+                assert_eq!(git_ref, "v1.2.0");
+                assert_eq!(auth.as_deref(), Some("my-git-token"));
+            }
+            _ => panic!("Expected git library"),
+        }
+        assert_eq!(config.git_auth.len(), 1);
+        let auth = &config.git_auth["my-git-token"];
+        assert_eq!(auth.auth_type, "token");
+        assert_eq!(auth.token.as_deref(), Some("ghp_xxxx"));
+    }
+
+    #[test]
+    fn test_parse_config_git_library_defaults() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+libraries:
+  common:
+    type: git
+    url: https://github.com/org/lib.git
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        match &config.libraries["common"] {
+            LibraryDef::Git { url, git_ref, auth } => {
+                assert_eq!(url, "https://github.com/org/lib.git");
+                assert_eq!(git_ref, "main"); // default
+                assert!(auth.is_none());
+            }
+            _ => panic!("Expected git library"),
+        }
+    }
+
+    #[test]
+    fn test_parse_config_no_libraries_defaults_empty() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.libraries.is_empty());
+        assert!(config.git_auth.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_multiple_libraries() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+libraries:
+  common:
+    type: git
+    url: https://github.com/org/common.git
+    ref: v1.0.0
+  local-lib:
+    type: folder
+    path: /shared/libs
+  infra:
+    type: git
+    url: https://github.com/org/infra.git
+    ref: main
+    auth: gh-token
+git_auth:
+  gh-token:
+    type: token
+    token: "ghp_xxxx"
+    username: "x-access-token"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.libraries.len(), 3);
+        assert!(matches!(
+            &config.libraries["common"],
+            LibraryDef::Git { .. }
+        ));
+        assert!(matches!(
+            &config.libraries["local-lib"],
+            LibraryDef::Folder { .. }
+        ));
+        assert!(matches!(&config.libraries["infra"], LibraryDef::Git { .. }));
+        assert_eq!(config.git_auth.len(), 1);
     }
 }

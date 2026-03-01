@@ -88,7 +88,12 @@ async fn main() -> Result<()> {
 
     // Load workspaces (individual failures are logged but don't crash the server)
     tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
-    let workspace_manager = WorkspaceManager::new(config.workspaces.clone()).await;
+    let workspace_manager = WorkspaceManager::new(
+        config.workspaces.clone(),
+        config.libraries.clone(),
+        config.git_auth.clone(),
+    )
+    .await;
 
     for info in workspace_manager.list_workspace_info().await {
         if let Some(ref error) = info.error {

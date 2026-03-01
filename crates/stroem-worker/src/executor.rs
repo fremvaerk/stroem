@@ -167,10 +167,18 @@ impl StepExecutor {
         let script = action_spec.get("script").and_then(|v| v.as_str()).map(|s| {
             let p = std::path::Path::new(s);
             if p.is_relative() {
-                std::path::Path::new(workspace_dir)
-                    .join(s)
-                    .to_string_lossy()
-                    .to_string()
+                // For library actions (name contains '.'), resolve scripts against
+                // _libraries/{lib_name}/ instead of the workspace root.
+                // Library names cannot contain dots, so split_once('.') cleanly
+                // separates "lib_name.action_name".
+                let base = if let Some((lib_name, _action)) = step.action_name.split_once('.') {
+                    std::path::Path::new(workspace_dir)
+                        .join("_libraries")
+                        .join(lib_name)
+                } else {
+                    std::path::Path::new(workspace_dir).to_path_buf()
+                };
+                base.join(s).to_string_lossy().to_string()
             } else {
                 s.to_string()
             }
@@ -804,5 +812,50 @@ mod tests {
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert!(config.pod_manifest_overrides.is_none());
+    }
+
+    #[test]
+    fn test_build_run_config_library_action_script_path() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({
+            "script": "scripts/notify.sh"
+        })));
+        step.action_name = "common.slack-notify".to_string();
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        // Library action scripts resolve against _libraries/{lib_name}/
+        assert_eq!(
+            config.script,
+            Some("/workspace/_libraries/common/scripts/notify.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_library_action_absolute_script() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({
+            "script": "/absolute/path/script.sh"
+        })));
+        step.action_name = "common.slack-notify".to_string();
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        // Absolute paths are kept as-is regardless of library prefix
+        assert_eq!(config.script, Some("/absolute/path/script.sh".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_local_action_script_unchanged() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({
+            "script": "scripts/deploy.sh"
+        })));
+        step.action_name = "local-action".to_string();
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        // Local actions resolve against workspace root (no _libraries/)
+        assert_eq!(
+            config.script,
+            Some("/workspace/scripts/deploy.sh".to_string())
+        );
     }
 }

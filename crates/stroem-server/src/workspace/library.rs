@@ -1,0 +1,1082 @@
+use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use stroem_common::models::workflow::WorkspaceConfig;
+
+use crate::config::{GitAuthConfig, LibraryDef};
+
+/// Validate that a library name is safe for filesystem paths, tar entries, and URL segments.
+/// Must start with an alphanumeric char, followed by alphanumeric, underscore, or hyphen.
+/// No dots (dots are the namespace separator), no path separators, no traversal.
+fn is_valid_library_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Resolved library — extracted config + source path for tarball overlay
+#[derive(Debug, Clone)]
+pub struct ResolvedLibrary {
+    pub config: WorkspaceConfig,
+    pub path: PathBuf,
+}
+
+/// Resolves library sources (folder and git) into workspace configs.
+pub struct LibraryResolver {
+    cache_dir: PathBuf,
+    git_auth: HashMap<String, GitAuthConfig>,
+}
+
+impl LibraryResolver {
+    pub fn new(cache_dir: PathBuf, git_auth: HashMap<String, GitAuthConfig>) -> Self {
+        Self {
+            cache_dir,
+            git_auth,
+        }
+    }
+
+    /// Resolve all libraries from their definitions.
+    /// Returns map of library name → resolved library (config + source path).
+    #[tracing::instrument(skip(self, libraries))]
+    pub fn resolve_all(
+        &self,
+        libraries: &HashMap<String, LibraryDef>,
+    ) -> Result<HashMap<String, ResolvedLibrary>> {
+        let mut resolved = HashMap::new();
+
+        for (lib_name, lib_def) in libraries {
+            // Validate library name: must be safe for filesystem paths, tar entries, and URL segments
+            if !is_valid_library_name(lib_name) {
+                tracing::error!(
+                    "Invalid library name '{}': must match [a-zA-Z0-9][a-zA-Z0-9_-]*",
+                    lib_name
+                );
+                continue;
+            }
+
+            match self.resolve_one(lib_name, lib_def) {
+                Ok(lib) => {
+                    tracing::info!(
+                        "Library '{}': {} actions, {} tasks, {} connection_types",
+                        lib_name,
+                        lib.config.actions.len(),
+                        lib.config.tasks.len(),
+                        lib.config.connection_types.len(),
+                    );
+                    resolved.insert(lib_name.clone(), lib);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to resolve library '{}': {:#}", lib_name, e);
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    fn resolve_one(&self, lib_name: &str, lib_def: &LibraryDef) -> Result<ResolvedLibrary> {
+        let (raw_config, lib_path) = match lib_def {
+            LibraryDef::Folder { path } => {
+                let p = PathBuf::from(path);
+                if !p.exists() {
+                    bail!("Library folder does not exist: {}", path);
+                }
+                let config = load_library_workspace(&p)
+                    .with_context(|| format!("Failed to load folder library '{}'", lib_name))?;
+                (config, p)
+            }
+            LibraryDef::Git { url, git_ref, auth } => {
+                let auth_config = self.resolve_auth(auth.as_deref())?;
+                let clone_dir = self.cache_dir.join(lib_name);
+                let config = clone_and_load(url, git_ref, auth_config.as_ref(), &clone_dir)
+                    .with_context(|| format!("Failed to load git library '{}'", lib_name))?;
+                (config, clone_dir)
+            }
+        };
+
+        // Prefix and rewrite references
+        let config = prefix_library(lib_name, raw_config);
+
+        Ok(ResolvedLibrary {
+            config,
+            path: lib_path,
+        })
+    }
+
+    fn resolve_auth(&self, auth_name: Option<&str>) -> Result<Option<GitAuthConfig>> {
+        match auth_name {
+            None => Ok(None),
+            Some(name) => {
+                let config = self
+                    .git_auth
+                    .get(name)
+                    .with_context(|| format!("Git auth '{}' not found in git_auth config", name))?;
+                Ok(Some(config.clone()))
+            }
+        }
+    }
+}
+
+/// Load workspace config from a library path (same as folder source but without secrets/connections rendering).
+fn load_library_workspace(path: &Path) -> Result<WorkspaceConfig> {
+    use stroem_common::models::workflow::WorkflowConfig;
+
+    let workflows_dir = path.join(".workflows");
+    let scan_dir = if workflows_dir.exists() && workflows_dir.is_dir() {
+        workflows_dir
+    } else {
+        path.to_path_buf()
+    };
+
+    let mut workspace = WorkspaceConfig::new();
+
+    if !scan_dir.exists() {
+        return Ok(workspace);
+    }
+
+    let entries = std::fs::read_dir(&scan_dir)
+        .with_context(|| format!("Failed to read directory: {:?}", scan_dir))?;
+
+    for entry in entries {
+        let entry = entry.context("Failed to read directory entry")?;
+        let file_path = entry.path();
+
+        if file_path.is_dir() {
+            continue;
+        }
+
+        if let Some(ext) = file_path.extension() {
+            if ext == "yaml" || ext == "yml" {
+                // Skip SOPS encrypted files in libraries
+                if stroem_common::sops::is_sops_file(&file_path) {
+                    tracing::debug!("Skipping SOPS file in library: {:?}", file_path);
+                    continue;
+                }
+
+                let content = std::fs::read_to_string(&file_path)
+                    .with_context(|| format!("Failed to read file: {:?}", file_path))?;
+
+                let config: WorkflowConfig = serde_yaml::from_str(&content)
+                    .with_context(|| format!("Failed to parse YAML: {:?}", file_path))?;
+
+                workspace.merge(config);
+            }
+        }
+    }
+
+    // Don't render secrets or connections for libraries — those are workspace-local
+    Ok(workspace)
+}
+
+/// Clone (or fetch) a git library and load its workspace config.
+fn clone_and_load(
+    url: &str,
+    git_ref: &str,
+    auth: Option<&GitAuthConfig>,
+    clone_dir: &Path,
+) -> Result<WorkspaceConfig> {
+    clone_or_fetch(url, git_ref, auth, clone_dir)?;
+    load_library_workspace(clone_dir)
+}
+
+/// Clone or fetch a git repository into `clone_dir`.
+fn clone_or_fetch(
+    url: &str,
+    git_ref: &str,
+    auth: Option<&GitAuthConfig>,
+    clone_dir: &Path,
+) -> Result<String> {
+    if clone_dir.exists() {
+        let repo =
+            git2::Repository::open(clone_dir).context("Failed to open existing library clone")?;
+
+        let mut remote = repo.find_remote("origin").context("No remote 'origin'")?;
+        let mut fetch_options = git2::FetchOptions::new();
+        let callbacks = build_remote_callbacks(auth);
+        fetch_options.remote_callbacks(callbacks);
+
+        remote
+            .fetch(&[git_ref], Some(&mut fetch_options), None)
+            .context("Failed to fetch library from origin")?;
+
+        let fetch_head = repo
+            .find_reference(&format!("refs/remotes/origin/{}", git_ref))
+            .or_else(|_| repo.find_reference("FETCH_HEAD"))
+            .context("Failed to find fetched ref")?;
+
+        let oid = fetch_head.target().context("Ref has no target")?;
+        let object = repo.find_object(oid, None)?;
+        repo.reset(&object, git2::ResetType::Hard, None)
+            .context("Failed to reset to fetched ref")?;
+
+        Ok(oid.to_string())
+    } else {
+        std::fs::create_dir_all(clone_dir).context("Failed to create library clone directory")?;
+
+        let mut builder = git2::build::RepoBuilder::new();
+        let mut fetch_options = git2::FetchOptions::new();
+        let callbacks = build_remote_callbacks(auth);
+        fetch_options.remote_callbacks(callbacks);
+        builder.fetch_options(fetch_options);
+        builder.branch(git_ref);
+
+        let repo = builder
+            .clone(url, clone_dir)
+            .context("Failed to clone library git repository")?;
+
+        let head = repo.head().context("Failed to get HEAD")?;
+        let oid = head.target().context("HEAD has no target")?;
+
+        Ok(oid.to_string())
+    }
+}
+
+fn build_remote_callbacks(auth: Option<&GitAuthConfig>) -> git2::RemoteCallbacks<'_> {
+    let mut callbacks = git2::RemoteCallbacks::new();
+
+    // Accept all TLS certificates. Library URLs come from the server admin's
+    // config (not user input), and git2's default cert store detection is
+    // unreliable across platforms. This mirrors the existing GitSource behavior.
+    callbacks.certificate_check(|_cert, _host| Ok(git2::CertificateCheckStatus::CertificateOk));
+
+    if let Some(auth) = auth {
+        match auth.auth_type.as_str() {
+            "ssh_key" => {
+                let key_path = auth.key_path.clone();
+                let key_content = auth.key.clone();
+                callbacks.credentials(move |_url, username_from_url, _allowed_types| {
+                    let username = username_from_url.unwrap_or("git");
+                    if let Some(ref content) = key_content {
+                        git2::Cred::ssh_key_from_memory(username, None, content, None)
+                    } else if let Some(ref path) = key_path {
+                        git2::Cred::ssh_key(username, None, Path::new(path), None)
+                    } else {
+                        git2::Cred::ssh_key_from_agent(username)
+                    }
+                });
+            }
+            "token" => {
+                let token = auth.token.clone().unwrap_or_default();
+                let username = auth
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| "x-access-token".to_string());
+                callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
+                    git2::Cred::userpass_plaintext(&username, &token)
+                });
+            }
+            other => {
+                tracing::warn!("Unknown git auth type '{}', skipping credentials", other);
+            }
+        }
+    }
+
+    callbacks
+}
+
+/// Prefix all library items and rewrite internal references.
+///
+/// - Actions: `slack-notify` → `common.slack-notify`
+/// - Tasks: `canary-deploy` → `common.canary-deploy`
+/// - Connection types: `postgres` → `common.postgres`
+/// - Internal references within tasks are rewritten to use prefixed names.
+fn prefix_library(lib_name: &str, raw: WorkspaceConfig) -> WorkspaceConfig {
+    let prefix = format!("{}.", lib_name);
+
+    // Collect the original action/task/connection-type names for reference rewriting
+    let original_action_names: std::collections::HashSet<String> =
+        raw.actions.keys().cloned().collect();
+    let original_task_names: std::collections::HashSet<String> =
+        raw.tasks.keys().cloned().collect();
+    let original_conn_type_names: std::collections::HashSet<String> =
+        raw.connection_types.keys().cloned().collect();
+
+    let mut result = WorkspaceConfig::new();
+
+    // Prefix actions
+    for (name, action) in raw.actions {
+        result.actions.insert(format!("{}{}", prefix, name), action);
+    }
+
+    // Prefix connection types
+    for (name, conn_type) in raw.connection_types {
+        result
+            .connection_types
+            .insert(format!("{}{}", prefix, name), conn_type);
+    }
+
+    // Prefix tasks and rewrite internal references
+    for (name, mut task) in raw.tasks {
+        // Rewrite action references in flow steps
+        for step in task.flow.values_mut() {
+            if original_action_names.contains(&step.action) {
+                step.action = format!("{}{}", prefix, step.action);
+            }
+        }
+
+        // Rewrite hook action references
+        for hook in &mut task.on_success {
+            if original_action_names.contains(&hook.action) {
+                hook.action = format!("{}{}", prefix, hook.action);
+            }
+        }
+        for hook in &mut task.on_error {
+            if original_action_names.contains(&hook.action) {
+                hook.action = format!("{}{}", prefix, hook.action);
+            }
+        }
+
+        // Rewrite connection-type input field references in task inputs
+        for input_field in task.input.values_mut() {
+            if original_conn_type_names.contains(&input_field.field_type) {
+                input_field.field_type = format!("{}{}", prefix, input_field.field_type);
+            }
+        }
+
+        result.tasks.insert(format!("{}{}", prefix, name), task);
+    }
+
+    // Rewrite type:task references and connection-type input references in actions
+    for action in result.actions.values_mut() {
+        // Rewrite task references
+        if let Some(ref task_ref) = action.task {
+            if original_task_names.contains(task_ref) {
+                action.task = Some(format!("{}{}", prefix, task_ref));
+            }
+        }
+
+        // Rewrite connection-type input field references in action inputs
+        for input_field in action.input.values_mut() {
+            if original_conn_type_names.contains(&input_field.field_type) {
+                input_field.field_type = format!("{}{}", prefix, input_field.field_type);
+            }
+        }
+    }
+
+    // Ignore triggers, secrets, and connections — those are workspace-local
+    result
+}
+
+/// Merge resolved library items into a workspace config.
+/// Called after workspace loading to add library actions, tasks, and connection types.
+pub fn merge_library_into_workspace(workspace: &mut WorkspaceConfig, lib: &ResolvedLibrary) {
+    for (name, action) in &lib.config.actions {
+        if workspace.actions.contains_key(name) {
+            tracing::warn!(
+                "Library action '{}' collides with existing action, library wins",
+                name
+            );
+        }
+        workspace.actions.insert(name.clone(), action.clone());
+    }
+    for (name, task) in &lib.config.tasks {
+        if workspace.tasks.contains_key(name) {
+            tracing::warn!(
+                "Library task '{}' collides with existing task, library wins",
+                name
+            );
+        }
+        workspace.tasks.insert(name.clone(), task.clone());
+    }
+    for (name, conn_type) in &lib.config.connection_types {
+        if workspace.connection_types.contains_key(name) {
+            tracing::warn!(
+                "Library connection type '{}' collides with existing type, library wins",
+                name
+            );
+        }
+        workspace
+            .connection_types
+            .insert(name.clone(), conn_type.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use stroem_common::models::workflow::{ActionDef, FlowStep, HookDef, InputFieldDef, TaskDef};
+    use tempfile::TempDir;
+
+    fn make_shell_action(cmd: &str) -> ActionDef {
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some(cmd.to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        }
+    }
+
+    fn make_task_action(task_ref: &str) -> ActionDef {
+        ActionDef {
+            action_type: "task".to_string(),
+            name: None,
+            description: None,
+            task: Some(task_ref.to_string()),
+            cmd: None,
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        }
+    }
+
+    fn make_flow_step(action: &str) -> FlowStep {
+        FlowStep {
+            action: action.to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        }
+    }
+
+    #[test]
+    fn test_prefix_library_actions() {
+        let mut ws = WorkspaceConfig::new();
+        ws.actions
+            .insert("slack-notify".to_string(), make_shell_action("echo notify"));
+        ws.actions.insert(
+            "pagerduty-alert".to_string(),
+            make_shell_action("echo alert"),
+        );
+
+        let prefixed = prefix_library("common", ws);
+
+        assert_eq!(prefixed.actions.len(), 2);
+        assert!(prefixed.actions.contains_key("common.slack-notify"));
+        assert!(prefixed.actions.contains_key("common.pagerduty-alert"));
+        assert!(!prefixed.actions.contains_key("slack-notify"));
+    }
+
+    #[test]
+    fn test_prefix_library_tasks() {
+        let mut ws = WorkspaceConfig::new();
+        ws.actions
+            .insert("deploy".to_string(), make_shell_action("echo deploy"));
+
+        let mut flow = HashMap::new();
+        flow.insert("step1".to_string(), make_flow_step("deploy"));
+        ws.tasks.insert(
+            "full-deploy".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+
+        let prefixed = prefix_library("infra", ws);
+
+        assert_eq!(prefixed.tasks.len(), 1);
+        assert!(prefixed.tasks.contains_key("infra.full-deploy"));
+
+        // Action reference within the task should be rewritten
+        let task = &prefixed.tasks["infra.full-deploy"];
+        assert_eq!(task.flow["step1"].action, "infra.deploy");
+    }
+
+    #[test]
+    fn test_prefix_library_connection_types() {
+        use stroem_common::models::workflow::{ConnectionPropertyDef, ConnectionTypeDef};
+
+        let mut ws = WorkspaceConfig::new();
+        let mut props = HashMap::new();
+        props.insert(
+            "host".to_string(),
+            ConnectionPropertyDef {
+                property_type: "string".to_string(),
+                required: true,
+                default: None,
+                secret: false,
+            },
+        );
+        ws.connection_types.insert(
+            "postgres".to_string(),
+            ConnectionTypeDef { properties: props },
+        );
+
+        let prefixed = prefix_library("common", ws);
+
+        assert_eq!(prefixed.connection_types.len(), 1);
+        assert!(prefixed.connection_types.contains_key("common.postgres"));
+    }
+
+    #[test]
+    fn test_prefix_library_rewrites_hook_action_refs() {
+        let mut ws = WorkspaceConfig::new();
+        ws.actions
+            .insert("slack-notify".to_string(), make_shell_action("echo notify"));
+        ws.actions
+            .insert("deploy".to_string(), make_shell_action("echo deploy"));
+
+        let mut flow = HashMap::new();
+        flow.insert("step1".to_string(), make_flow_step("deploy"));
+
+        ws.tasks.insert(
+            "my-task".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow,
+                on_success: vec![HookDef {
+                    action: "slack-notify".to_string(),
+                    input: HashMap::new(),
+                }],
+                on_error: vec![HookDef {
+                    action: "slack-notify".to_string(),
+                    input: HashMap::new(),
+                }],
+            },
+        );
+
+        let prefixed = prefix_library("lib", ws);
+
+        let task = &prefixed.tasks["lib.my-task"];
+        assert_eq!(task.on_success[0].action, "lib.slack-notify");
+        assert_eq!(task.on_error[0].action, "lib.slack-notify");
+    }
+
+    #[test]
+    fn test_prefix_library_rewrites_task_action_refs() {
+        let mut ws = WorkspaceConfig::new();
+        ws.actions
+            .insert("run-canary".to_string(), make_task_action("canary-deploy"));
+        ws.actions
+            .insert("deploy".to_string(), make_shell_action("echo deploy"));
+
+        let mut flow = HashMap::new();
+        flow.insert("step1".to_string(), make_flow_step("deploy"));
+        ws.tasks.insert(
+            "canary-deploy".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+
+        let prefixed = prefix_library("common", ws);
+
+        // The action's task reference should be rewritten
+        let action = &prefixed.actions["common.run-canary"];
+        assert_eq!(action.task.as_deref(), Some("common.canary-deploy"));
+    }
+
+    #[test]
+    fn test_prefix_library_rewrites_connection_type_input_refs() {
+        use stroem_common::models::workflow::{ConnectionPropertyDef, ConnectionTypeDef};
+
+        let mut ws = WorkspaceConfig::new();
+
+        // Connection type
+        let mut props = HashMap::new();
+        props.insert(
+            "host".to_string(),
+            ConnectionPropertyDef {
+                property_type: "string".to_string(),
+                required: true,
+                default: None,
+                secret: false,
+            },
+        );
+        ws.connection_types.insert(
+            "postgres".to_string(),
+            ConnectionTypeDef { properties: props },
+        );
+
+        // Action with connection-type input
+        let mut action = make_shell_action("echo deploy");
+        action.input.insert(
+            "db".to_string(),
+            InputFieldDef {
+                field_type: "postgres".to_string(),
+                name: None,
+                description: None,
+                required: true,
+                secret: false,
+                default: None,
+                options: None,
+                allow_custom: false,
+                order: None,
+            },
+        );
+        ws.actions.insert("deploy".to_string(), action);
+
+        // Task with connection-type input
+        let mut flow = HashMap::new();
+        flow.insert("step1".to_string(), make_flow_step("deploy"));
+        let mut task_input = HashMap::new();
+        task_input.insert(
+            "database".to_string(),
+            InputFieldDef {
+                field_type: "postgres".to_string(),
+                name: None,
+                description: None,
+                required: true,
+                secret: false,
+                default: None,
+                options: None,
+                allow_custom: false,
+                order: None,
+            },
+        );
+        ws.tasks.insert(
+            "my-task".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: task_input,
+                flow,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+
+        let prefixed = prefix_library("common", ws);
+
+        // Action input type should be rewritten
+        let action = &prefixed.actions["common.deploy"];
+        assert_eq!(action.input["db"].field_type, "common.postgres");
+
+        // Task input type should be rewritten
+        let task = &prefixed.tasks["common.my-task"];
+        assert_eq!(task.input["database"].field_type, "common.postgres");
+    }
+
+    #[test]
+    fn test_prefix_library_ignores_triggers_secrets_connections() {
+        use stroem_common::models::workflow::{ConnectionDef, TriggerDef};
+
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("api-key".to_string(), serde_json::json!("secret"));
+        ws.connections.insert(
+            "my-db".to_string(),
+            ConnectionDef {
+                connection_type: Some("postgres".to_string()),
+                values: HashMap::new(),
+            },
+        );
+        ws.triggers.insert(
+            "nightly".to_string(),
+            TriggerDef::Scheduler {
+                cron: "0 0 * * *".to_string(),
+                task: "deploy".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+            },
+        );
+
+        let prefixed = prefix_library("common", ws);
+
+        // Triggers, secrets, and connections should be empty (not imported)
+        assert!(prefixed.secrets.is_empty());
+        assert!(prefixed.connections.is_empty());
+        assert!(prefixed.triggers.is_empty());
+    }
+
+    #[test]
+    fn test_prefix_library_unknown_action_ref_left_as_is() {
+        let mut ws = WorkspaceConfig::new();
+        ws.actions
+            .insert("deploy".to_string(), make_shell_action("echo deploy"));
+
+        let mut flow = HashMap::new();
+        // Reference to an action not in this library
+        flow.insert("step1".to_string(), make_flow_step("external-action"));
+        ws.tasks.insert(
+            "my-task".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+
+        let prefixed = prefix_library("lib", ws);
+
+        // Unknown ref should be left as-is (will fail validation)
+        let task = &prefixed.tasks["lib.my-task"];
+        assert_eq!(task.flow["step1"].action, "external-action");
+    }
+
+    #[test]
+    fn test_load_library_workspace_from_folder() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+        fs::write(
+            workflows_dir.join("actions.yaml"),
+            r#"
+actions:
+  slack-notify:
+    type: shell
+    cmd: "echo notify"
+  pagerduty-alert:
+    type: shell
+    cmd: "echo alert"
+tasks:
+  full-deploy:
+    flow:
+      notify:
+        action: slack-notify
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 0 * * *"
+    task: full-deploy
+secrets:
+  api-key: "should-be-ignored"
+connections:
+  my-db:
+    type: postgres
+    host: localhost
+"#,
+        )
+        .unwrap();
+
+        let config = load_library_workspace(temp.path()).unwrap();
+
+        // Actions, tasks, and connection_types loaded
+        assert_eq!(config.actions.len(), 2);
+        assert!(config.actions.contains_key("slack-notify"));
+        assert!(config.actions.contains_key("pagerduty-alert"));
+        assert_eq!(config.tasks.len(), 1);
+        assert!(config.tasks.contains_key("full-deploy"));
+        assert_eq!(config.connection_types.len(), 1);
+        assert!(config.connection_types.contains_key("postgres"));
+
+        // Triggers, secrets, and connections are loaded (they'll be stripped during prefix_library)
+        // load_library_workspace reads everything; prefix_library drops triggers/secrets/connections
+    }
+
+    #[test]
+    fn test_load_library_workspace_empty_dir() {
+        let temp = TempDir::new().unwrap();
+        let config = load_library_workspace(temp.path()).unwrap();
+        assert!(config.actions.is_empty());
+        assert!(config.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_merge_library_into_workspace() {
+        let mut workspace = WorkspaceConfig::new();
+        workspace
+            .actions
+            .insert("local-action".to_string(), make_shell_action("echo local"));
+
+        let mut lib_config = WorkspaceConfig::new();
+        lib_config.actions.insert(
+            "common.slack-notify".to_string(),
+            make_shell_action("echo notify"),
+        );
+
+        let lib = ResolvedLibrary {
+            config: lib_config,
+            path: PathBuf::from("/tmp/lib"),
+        };
+
+        merge_library_into_workspace(&mut workspace, &lib);
+
+        assert_eq!(workspace.actions.len(), 2);
+        assert!(workspace.actions.contains_key("local-action"));
+        assert!(workspace.actions.contains_key("common.slack-notify"));
+    }
+
+    #[test]
+    fn test_folder_library_resolver() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+        fs::write(
+            workflows_dir.join("actions.yaml"),
+            r#"
+actions:
+  slack-notify:
+    type: shell
+    cmd: "echo notify"
+tasks:
+  deploy:
+    flow:
+      notify:
+        action: slack-notify
+"#,
+        )
+        .unwrap();
+
+        let mut libs = HashMap::new();
+        libs.insert(
+            "common".to_string(),
+            LibraryDef::Folder {
+                path: temp.path().to_string_lossy().to_string(),
+            },
+        );
+
+        let resolver = LibraryResolver::new(PathBuf::from("/tmp/cache"), HashMap::new());
+        let resolved = resolver.resolve_all(&libs).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        let lib = &resolved["common"];
+        assert!(lib.config.actions.contains_key("common.slack-notify"));
+        assert!(lib.config.tasks.contains_key("common.deploy"));
+
+        // Internal reference should be rewritten
+        let task = &lib.config.tasks["common.deploy"];
+        assert_eq!(task.flow["notify"].action, "common.slack-notify");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_git_library_resolver() {
+        // Create a bare git repo with library content
+        let bare_dir = TempDir::new().unwrap();
+        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
+
+        // Build a tree with .workflows directory
+        let yaml_content = r#"actions:
+  slack-notify:
+    type: shell
+    cmd: echo notify
+tasks:
+  deploy:
+    flow:
+      notify:
+        action: slack-notify
+"#;
+        // Create the file at root level (no .workflows subdir in flat tree)
+        let blob_oid = bare_repo.blob(yaml_content.as_bytes()).unwrap();
+
+        let mut tb = bare_repo.treebuilder(None).unwrap();
+        tb.insert("actions.yaml", blob_oid, 0o100644).unwrap();
+        let tree_oid = tb.write().unwrap();
+        let tree = bare_repo.find_tree(tree_oid).unwrap();
+
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let commit_oid = bare_repo
+            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        bare_repo
+            .reference("HEAD", commit_oid, true, "set HEAD")
+            .ok();
+        bare_repo.set_head("refs/heads/main").unwrap();
+
+        let url = format!("file://{}", bare_dir.path().display());
+
+        let cache_dir = TempDir::new().unwrap();
+        let mut libs = HashMap::new();
+        libs.insert(
+            "common".to_string(),
+            LibraryDef::Git {
+                url,
+                git_ref: "main".to_string(),
+                auth: None,
+            },
+        );
+
+        let resolver = LibraryResolver::new(cache_dir.path().to_path_buf(), HashMap::new());
+        let resolved = resolver.resolve_all(&libs).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        let lib = &resolved["common"];
+        assert!(lib.config.actions.contains_key("common.slack-notify"));
+        assert!(lib.config.tasks.contains_key("common.deploy"));
+    }
+
+    #[test]
+    fn test_nonexistent_folder_library_fails() {
+        let mut libs = HashMap::new();
+        libs.insert(
+            "missing".to_string(),
+            LibraryDef::Folder {
+                path: "/nonexistent/path/12345".to_string(),
+            },
+        );
+
+        let resolver = LibraryResolver::new(PathBuf::from("/tmp/cache"), HashMap::new());
+        let resolved = resolver.resolve_all(&libs).unwrap();
+
+        // Should be empty (error logged, not propagated)
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_auth_resolution_found() {
+        let mut git_auth = HashMap::new();
+        git_auth.insert(
+            "my-token".to_string(),
+            GitAuthConfig {
+                auth_type: "token".to_string(),
+                key_path: None,
+                key: None,
+                token: Some("ghp_xxx".to_string()),
+                username: None,
+            },
+        );
+
+        let resolver = LibraryResolver::new(PathBuf::from("/tmp"), git_auth);
+        let auth = resolver.resolve_auth(Some("my-token")).unwrap();
+        assert!(auth.is_some());
+        assert_eq!(auth.unwrap().token.as_deref(), Some("ghp_xxx"));
+    }
+
+    #[test]
+    fn test_auth_resolution_not_found() {
+        let resolver = LibraryResolver::new(PathBuf::from("/tmp"), HashMap::new());
+        let result = resolver.resolve_auth(Some("nonexistent"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auth_resolution_none() {
+        let resolver = LibraryResolver::new(PathBuf::from("/tmp"), HashMap::new());
+        let auth = resolver.resolve_auth(None).unwrap();
+        assert!(auth.is_none());
+    }
+
+    #[test]
+    fn test_is_valid_library_name() {
+        // Valid names
+        assert!(is_valid_library_name("common"));
+        assert!(is_valid_library_name("my-lib"));
+        assert!(is_valid_library_name("lib_2"));
+        assert!(is_valid_library_name("A"));
+        assert!(is_valid_library_name("x123"));
+
+        // Invalid names
+        assert!(!is_valid_library_name(""));
+        assert!(!is_valid_library_name("-starts-with-dash"));
+        assert!(!is_valid_library_name("_starts-with-underscore"));
+        assert!(!is_valid_library_name("has.dot"));
+        assert!(!is_valid_library_name("has/slash"));
+        assert!(!is_valid_library_name("has\\backslash"));
+        assert!(!is_valid_library_name(".."));
+        assert!(!is_valid_library_name("has space"));
+        assert!(!is_valid_library_name("has@special"));
+    }
+
+    #[test]
+    fn test_invalid_library_name_skipped_in_resolve() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+        fs::write(
+            workflows_dir.join("actions.yaml"),
+            "actions:\n  notify:\n    type: shell\n    cmd: echo hi\n",
+        )
+        .unwrap();
+
+        let mut libs = HashMap::new();
+        // Valid library
+        libs.insert(
+            "good".to_string(),
+            LibraryDef::Folder {
+                path: temp.path().to_string_lossy().to_string(),
+            },
+        );
+        // Invalid library name (contains dot)
+        libs.insert(
+            "bad.name".to_string(),
+            LibraryDef::Folder {
+                path: temp.path().to_string_lossy().to_string(),
+            },
+        );
+        // Invalid library name (path traversal)
+        libs.insert(
+            "..".to_string(),
+            LibraryDef::Folder {
+                path: temp.path().to_string_lossy().to_string(),
+            },
+        );
+
+        let resolver = LibraryResolver::new(PathBuf::from("/tmp/cache"), HashMap::new());
+        let resolved = resolver.resolve_all(&libs).unwrap();
+
+        // Only the valid one should be resolved
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key("good"));
+    }
+
+    #[test]
+    fn test_merge_collision_overwrites() {
+        let mut workspace = WorkspaceConfig::new();
+        workspace.actions.insert(
+            "common.notify".to_string(),
+            make_shell_action("echo local-version"),
+        );
+
+        let mut lib_config = WorkspaceConfig::new();
+        lib_config.actions.insert(
+            "common.notify".to_string(),
+            make_shell_action("echo lib-version"),
+        );
+
+        let lib = ResolvedLibrary {
+            config: lib_config,
+            path: PathBuf::from("/tmp/lib"),
+        };
+
+        merge_library_into_workspace(&mut workspace, &lib);
+
+        // Library version should win
+        assert_eq!(workspace.actions.len(), 1);
+        assert_eq!(
+            workspace.actions["common.notify"].cmd.as_deref(),
+            Some("echo lib-version")
+        );
+    }
+}
