@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_common::template::{
-    prepare_action_input, render_env_map, render_input_map, render_string_opt,
+    prepare_action_input, render_env_map, render_input_map, render_json_strings, render_string_opt,
 };
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
@@ -413,6 +413,18 @@ pub async fn claim_job(
                     Err(e) => {
                         tracing::warn!("Failed to render action_spec script template: {:#}", e);
                     }
+                }
+            }
+        }
+
+        // Render manifest string values (e.g. serviceAccountName from input)
+        if let Some(manifest_val) = spec_obj.get("manifest") {
+            match render_json_strings(manifest_val, &context_value) {
+                Ok(rendered_manifest) => {
+                    spec_obj.insert("manifest".to_string(), rendered_manifest);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to render action_spec manifest templates: {:#}", e);
                 }
             }
         }

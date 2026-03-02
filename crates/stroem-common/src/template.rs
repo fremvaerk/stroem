@@ -85,6 +85,36 @@ pub fn render_template(template: &str, context: &serde_json::Value) -> Result<St
         .context("Failed to render template")
 }
 
+/// Recursively renders all string values in a JSON value as Tera templates.
+/// Objects and arrays are traversed; non-string leaves pass through unchanged.
+pub fn render_json_strings(
+    value: &serde_json::Value,
+    context: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    match value {
+        serde_json::Value::String(s) => {
+            let rendered = render_template(s, context)
+                .with_context(|| format!("Failed to render template in JSON string: {}", s))?;
+            Ok(serde_json::Value::String(rendered))
+        }
+        serde_json::Value::Object(map) => {
+            let mut result = serde_json::Map::new();
+            for (k, v) in map {
+                result.insert(k.clone(), render_json_strings(v, context)?);
+            }
+            Ok(serde_json::Value::Object(result))
+        }
+        serde_json::Value::Array(arr) => {
+            let result: Result<Vec<_>> = arr
+                .iter()
+                .map(|v| render_json_strings(v, context))
+                .collect();
+            Ok(serde_json::Value::Array(result?))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
 /// Renders all values in a String→String env map, returns a new HashMap.
 /// Each value is treated as a Tera template.
 pub fn render_env_map(
@@ -1610,5 +1640,47 @@ mod tests {
         let result = prepare_action_input(&input, &schema, &ws).unwrap();
 
         assert_eq!(result["token"], "secret-key-123");
+    }
+
+    #[test]
+    fn test_render_json_strings_nested() {
+        let value = json!({
+            "metadata": {
+                "namespace": "production"
+            },
+            "spec": {
+                "serviceAccountName": "{{ input.service_account }}"
+            }
+        });
+        let context = json!({ "input": { "service_account": "my-sa" } });
+        let result = render_json_strings(&value, &context).unwrap();
+        assert_eq!(result["metadata"]["namespace"], "production");
+        assert_eq!(result["spec"]["serviceAccountName"], "my-sa");
+    }
+
+    #[test]
+    fn test_render_json_strings_preserves_non_strings() {
+        let value = json!({
+            "replicas": 3,
+            "enabled": true,
+            "name": "{{ input.name }}",
+            "items": [1, "{{ input.label }}", null]
+        });
+        let context = json!({ "input": { "name": "test", "label": "prod" } });
+        let result = render_json_strings(&value, &context).unwrap();
+        assert_eq!(result["replicas"], 3);
+        assert_eq!(result["enabled"], true);
+        assert_eq!(result["name"], "test");
+        assert_eq!(result["items"][0], 1);
+        assert_eq!(result["items"][1], "prod");
+        assert!(result["items"][2].is_null());
+    }
+
+    #[test]
+    fn test_render_json_strings_error_on_bad_template() {
+        let value = json!({ "key": "{{ missing.var }}" });
+        let context = json!({});
+        let result = render_json_strings(&value, &context);
+        assert!(result.is_err());
     }
 }
