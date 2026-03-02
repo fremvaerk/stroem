@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { LoadingSpinner } from "@/components/loading-spinner";
+import { AlertTriangle } from "lucide-react";
 import { listWorkspaces } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useAsyncData } from "@/hooks/use-async-data";
@@ -56,12 +57,20 @@ export function WorkspacesPage() {
                 {workspaces.map((ws) => (
                   <TableRow key={ws.name}>
                     <TableCell>
-                      <Link
-                        to={`/tasks`}
-                        className="font-medium hover:underline"
-                      >
-                        {ws.name}
-                      </Link>
+                      <div className="flex flex-col gap-1">
+                        <Link
+                          to={`/tasks`}
+                          className="font-medium hover:underline"
+                        >
+                          {ws.name}
+                        </Link>
+                        {ws.error && (
+                          <div className="flex items-start gap-1.5 text-destructive">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span className="text-xs">{ws.error}</span>
+                          </div>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <Badge variant="secondary" className="font-mono text-xs">

@@ -4,6 +4,7 @@ export interface WorkspaceInfo {
   actions_count: number;
   triggers_count: number;
   revision?: string;
+  error?: string;
 }
 
 export interface TaskListItem {
