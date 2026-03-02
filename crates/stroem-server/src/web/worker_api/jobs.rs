@@ -42,6 +42,7 @@ pub struct ClaimRequest {
 pub struct ClaimResponse {
     pub workspace: Option<String>,
     pub job_id: Option<String>,
+    pub task_name: Option<String>,
     pub step_name: Option<String>,
     pub action_name: Option<String>,
     pub action_type: Option<String>,
@@ -171,6 +172,7 @@ pub async fn claim_job(
             return Json(ClaimResponse {
                 workspace: None,
                 job_id: None,
+                task_name: None,
                 step_name: None,
                 action_name: None,
                 action_type: None,
@@ -435,6 +437,7 @@ pub async fn claim_job(
     Json(ClaimResponse {
         workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
+        task_name: Some(job.task_name),
         step_name: Some(step.step_name),
         action_name: Some(step.action_name),
         action_type: Some(step.action_type),
@@ -650,5 +653,46 @@ pub async fn complete_job(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_claim_response_serializes_task_name() {
+        let resp = ClaimResponse {
+            workspace: Some("default".to_string()),
+            job_id: Some("abc-123".to_string()),
+            task_name: Some("deploy-api".to_string()),
+            step_name: Some("build".to_string()),
+            action_name: Some("shell".to_string()),
+            action_type: Some("shell".to_string()),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: Some("local".to_string()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["task_name"], "deploy-api");
+    }
+
+    #[test]
+    fn test_claim_response_empty_serializes_null_task_name() {
+        let resp = ClaimResponse {
+            workspace: None,
+            job_id: None,
+            task_name: None,
+            step_name: None,
+            action_name: None,
+            action_type: None,
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["task_name"].is_null());
     }
 }

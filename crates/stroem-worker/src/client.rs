@@ -18,6 +18,7 @@ pub struct ServerClient {
 pub struct ClaimedStep {
     pub job_id: Uuid,
     pub workspace: String,
+    pub task_name: String,
     pub step_name: String,
     pub action_name: String,
     pub action_type: String,
@@ -32,6 +33,7 @@ pub struct ClaimedStep {
 struct ClaimResponse {
     pub workspace: Option<String>,
     pub job_id: Option<String>,
+    pub task_name: Option<String>,
     pub step_name: Option<String>,
     pub action_name: Option<String>,
     pub action_type: Option<String>,
@@ -202,6 +204,7 @@ impl ServerClient {
             workspace: resp
                 .workspace
                 .context("Missing workspace in claim response")?,
+            task_name: resp.task_name.unwrap_or_default(),
             step_name: resp
                 .step_name
                 .context("Missing step_name in claim response")?,
@@ -394,5 +397,50 @@ mod tests {
         let client = ServerClient::new("http://localhost:8080", "token", None, None);
         let cloned = client.clone();
         assert_eq!(&*cloned.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_claim_response_missing_task_name_defaults_to_none() {
+        // Simulates an older server that does not emit task_name
+        let json = serde_json::json!({
+            "job_id": "abc-123",
+            "workspace": "default",
+            "step_name": "build",
+            "action_name": "run",
+            "action_type": "shell",
+            "runner": "local"
+        });
+        let resp: ClaimResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.task_name.is_none());
+    }
+
+    #[test]
+    fn test_claim_response_with_task_name() {
+        let json = serde_json::json!({
+            "job_id": "abc-123",
+            "workspace": "default",
+            "task_name": "deploy-api",
+            "step_name": "build",
+            "action_name": "run",
+            "action_type": "shell",
+            "runner": "local"
+        });
+        let resp: ClaimResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.task_name, Some("deploy-api".to_string()));
+    }
+
+    #[test]
+    fn test_claim_response_null_task_name() {
+        let json = serde_json::json!({
+            "job_id": "abc-123",
+            "workspace": "default",
+            "task_name": null,
+            "step_name": "build",
+            "action_name": "run",
+            "action_type": "shell",
+            "runner": "local"
+        });
+        let resp: ClaimResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.task_name.is_none());
     }
 }

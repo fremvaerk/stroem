@@ -229,6 +229,7 @@ impl StepExecutor {
 
         // Inject Strøm metadata env vars (used by KubeRunner for pod naming/workspace)
         env.insert("STROEM_JOB_ID".to_string(), step.job_id.to_string());
+        env.insert("STROEM_TASK_NAME".to_string(), step.task_name.clone());
         env.insert("STROEM_STEP_NAME".to_string(), step.step_name.clone());
         env.insert("STROEM_WORKSPACE".to_string(), step.workspace.clone());
 
@@ -260,6 +261,7 @@ mod tests {
         ClaimedStep {
             job_id: Uuid::new_v4(),
             workspace: "default".to_string(),
+            task_name: "test-task".to_string(),
             step_name: "test-step".to_string(),
             action_name: "test-action".to_string(),
             action_type: "shell".to_string(),
@@ -378,9 +380,10 @@ mod tests {
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
-        // Only the 3 STROEM_* metadata env vars should be present
-        assert_eq!(config.env.len(), 3);
+        // Only the 4 STROEM_* metadata env vars should be present
+        assert_eq!(config.env.len(), 4);
         assert!(config.env.contains_key("STROEM_JOB_ID"));
+        assert!(config.env.contains_key("STROEM_TASK_NAME"));
         assert!(config.env.contains_key("STROEM_STEP_NAME"));
         assert!(config.env.contains_key("STROEM_WORKSPACE"));
     }
@@ -395,8 +398,8 @@ mod tests {
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
-        // Only the 3 STROEM_* metadata env vars
-        assert_eq!(config.env.len(), 3);
+        // Only the 4 STROEM_* metadata env vars
+        assert_eq!(config.env.len(), 4);
     }
 
     #[test]
@@ -415,8 +418,8 @@ mod tests {
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
-        // 2 string values + 3 STROEM_* metadata env vars
-        assert_eq!(config.env.len(), 5);
+        // 2 string values + 4 STROEM_* metadata env vars
+        assert_eq!(config.env.len(), 6);
         assert_eq!(config.env.get("STR_VAL"), Some(&"hello".to_string()));
         assert_eq!(config.env.get("ANOTHER_STR"), Some(&"world".to_string()));
     }
@@ -753,9 +756,14 @@ mod tests {
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
         step.workspace = "my-workspace".to_string();
+        step.task_name = "deploy-task".to_string();
         step.step_name = "deploy-step".to_string();
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(
+            config.env.get("STROEM_TASK_NAME"),
+            Some(&"deploy-task".to_string())
+        );
         assert_eq!(
             config.env.get("STROEM_STEP_NAME"),
             Some(&"deploy-step".to_string())

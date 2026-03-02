@@ -262,21 +262,44 @@ impl KubeRunner {
             .context("Failed to build pod spec (manifest overrides may contain invalid fields)")
     }
 
-    /// Generate a pod name from job_id and step_name
-    fn pod_name(job_id: &str, step_name: &str) -> String {
-        // Take first 8 chars of job_id for brevity
-        let job_short = &job_id[..job_id.len().min(8)];
-        // Sanitize step name: lowercase, replace non-alphanumeric with dash
-        let step_sanitized: String = step_name
+    /// Sanitize a string for use in a Kubernetes DNS-1123 label:
+    /// lowercase, replace non-ASCII-alphanumeric with dash, collapse consecutive dashes,
+    /// trim leading/trailing dashes.
+    fn sanitize_k8s_name(s: &str) -> String {
+        let sanitized: String = s
             .to_lowercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        let step_sanitized = step_sanitized.trim_matches('-');
+        // Collapse consecutive dashes (e.g. "my--task" → "my-task")
+        let mut collapsed = String::with_capacity(sanitized.len());
+        for c in sanitized.chars() {
+            if c == '-' && collapsed.ends_with('-') {
+                continue;
+            }
+            collapsed.push(c);
+        }
+        collapsed.trim_matches('-').to_string()
+    }
+
+    /// Generate a pod name from job_id, step_name, and task_name.
+    /// Format: `stroem-{job_id_8chars}-{task}-{step}`, truncated to 63 chars.
+    /// The job_id prefix is placed early to guarantee uniqueness even when
+    /// long task/step names cause truncation.
+    fn pod_name(job_id: &str, step_name: &str, task_name: &str) -> String {
+        let job_short: String = job_id.chars().take(8).collect();
+        let task_sanitized = Self::sanitize_k8s_name(task_name);
+        let step_sanitized = Self::sanitize_k8s_name(step_name);
 
         // K8s name max 63 chars, must be DNS-1123 label
-        let name = format!("stroem-{}-{}", job_short, step_sanitized);
-        name.chars().take(63).collect()
+        let name = if task_sanitized.is_empty() {
+            format!("stroem-{}-{}", job_short, step_sanitized)
+        } else {
+            format!("stroem-{}-{}-{}", job_short, task_sanitized, step_sanitized)
+        };
+        // Truncate to 63 chars, trim trailing dash if truncation left one
+        let truncated: String = name.chars().take(63).collect();
+        truncated.trim_end_matches('-').to_string()
     }
 
     /// Extract workspace name from the workdir or env
@@ -348,18 +371,27 @@ impl Runner for KubeRunner {
             .get("STROEM_JOB_ID")
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
+        let task_name = config
+            .env
+            .get("STROEM_TASK_NAME")
+            .cloned()
+            .unwrap_or_default();
         let step_name = config
             .env
             .get("STROEM_STEP_NAME")
             .cloned()
             .unwrap_or_else(|| "step".to_string());
 
-        let pod_name = Self::pod_name(&job_id, &step_name);
+        let pod_name = Self::pod_name(&job_id, &step_name, &task_name);
+        let task_label = Self::sanitize_k8s_name(&task_name);
 
         let mut labels = HashMap::new();
         labels.insert("app".to_string(), "stroem-step".to_string());
         labels.insert("stroem.io/job-id".to_string(), job_id.clone());
         labels.insert("stroem.io/step".to_string(), step_name.clone());
+        if !task_label.is_empty() {
+            labels.insert("stroem.io/task".to_string(), task_label);
+        }
 
         let pod_spec = self
             .build_pod_spec(&pod_name, &config, &workspace_name, labels)
@@ -487,23 +519,121 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pod_name() {
-        let name = KubeRunner::pod_name("abcdef12-3456-7890", "my-step-name");
+    fn test_pod_name_with_task() {
+        // Format: stroem-{job_short}-{task}-{step}
+        let name = KubeRunner::pod_name("abcdef12-3456-7890", "my-step-name", "deploy-api");
+        assert_eq!(name, "stroem-abcdef12-deploy-api-my-step-name");
+        assert!(name.len() <= 63);
+    }
+
+    #[test]
+    fn test_pod_name_without_task() {
+        // Format falls back to: stroem-{job_short}-{step}
+        let name = KubeRunner::pod_name("abcdef12-3456-7890", "my-step-name", "");
         assert_eq!(name, "stroem-abcdef12-my-step-name");
         assert!(name.len() <= 63);
     }
 
     #[test]
     fn test_pod_name_sanitization() {
-        let name = KubeRunner::pod_name("12345678", "Step With Spaces!");
-        assert_eq!(name, "stroem-12345678-step-with-spaces");
+        let name = KubeRunner::pod_name("12345678", "Step With Spaces!", "My Task");
+        assert_eq!(name, "stroem-12345678-my-task-step-with-spaces");
     }
 
     #[test]
     fn test_pod_name_truncation() {
         let long_step = "a".repeat(100);
-        let name = KubeRunner::pod_name("12345678", &long_step);
+        let name = KubeRunner::pod_name("12345678", &long_step, "my-task");
         assert!(name.len() <= 63);
+        // job_short is placed early so it's never truncated
+        assert!(name.starts_with("stroem-12345678-"));
+    }
+
+    #[test]
+    fn test_pod_name_truncation_no_trailing_dash() {
+        let step = format!("{}-x", "a".repeat(50));
+        let name = KubeRunner::pod_name("12345678", &step, "task");
+        assert!(name.len() <= 63);
+        assert!(!name.ends_with('-'));
+    }
+
+    #[test]
+    fn test_pod_name_truncation_preserves_job_short() {
+        // Even with very long task + step, job_short is always present
+        let long_task = "a".repeat(40);
+        let long_step = "b".repeat(40);
+        let name = KubeRunner::pod_name("abcd1234", &long_step, &long_task);
+        assert!(name.len() <= 63);
+        assert!(name.starts_with("stroem-abcd1234-"));
+        assert!(!name.ends_with('-'));
+    }
+
+    #[test]
+    fn test_pod_name_unicode_replaced_with_dash() {
+        // Unicode chars like ë, â are not ASCII alphanumeric → replaced with dash
+        let name = KubeRunner::pod_name("12345678", "step", "dëploy-tâsk");
+        assert!(
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "Pod name contains non-ASCII characters: {}",
+            name
+        );
+        // d-ploy-t-sk after sanitization (ë→-, â→-), then dash collapse
+        assert_eq!(name, "stroem-12345678-d-ploy-t-sk-step");
+    }
+
+    #[test]
+    fn test_pod_name_task_all_special_chars() {
+        // Task that sanitizes entirely to empty → falls back to no-task format
+        let name = KubeRunner::pod_name("12345678", "deploy", "!@#$");
+        assert_eq!(name, "stroem-12345678-deploy");
+    }
+
+    #[test]
+    fn test_pod_name_task_only_dashes() {
+        // "---" → sanitize → trim → "" → no-task format
+        let name = KubeRunner::pod_name("12345678", "build", "---");
+        assert_eq!(name, "stroem-12345678-build");
+    }
+
+    #[test]
+    fn test_pod_name_consecutive_dashes_collapsed() {
+        // "my--task" after sanitization has consecutive dashes → collapsed
+        let name = KubeRunner::pod_name("12345678", "step", "my--task");
+        assert_eq!(name, "stroem-12345678-my-task-step");
+    }
+
+    #[test]
+    fn test_pod_name_dot_separator_in_library_task() {
+        // Library tasks use dot separator: "common.slack-notify" → "common-slack-notify"
+        let name = KubeRunner::pod_name("12345678", "notify", "common.slack-notify");
+        assert_eq!(name, "stroem-12345678-common-slack-notify-notify");
+    }
+
+    #[test]
+    fn test_sanitize_k8s_name_basic() {
+        assert_eq!(KubeRunner::sanitize_k8s_name("deploy-api"), "deploy-api");
+        assert_eq!(KubeRunner::sanitize_k8s_name("My Task"), "my-task");
+        assert_eq!(KubeRunner::sanitize_k8s_name(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_k8s_name_unicode() {
+        // Non-ASCII alphanumeric chars are replaced with dash then trimmed
+        assert_eq!(KubeRunner::sanitize_k8s_name("café"), "caf");
+        assert_eq!(KubeRunner::sanitize_k8s_name("dëploy"), "d-ploy");
+        assert_eq!(KubeRunner::sanitize_k8s_name("über-task"), "ber-task");
+    }
+
+    #[test]
+    fn test_sanitize_k8s_name_collapses_dashes() {
+        assert_eq!(KubeRunner::sanitize_k8s_name("a--b"), "a-b");
+        assert_eq!(KubeRunner::sanitize_k8s_name("a!!!b"), "a-b");
+        assert_eq!(KubeRunner::sanitize_k8s_name("---"), "");
+    }
+
+    #[test]
+    fn test_sanitize_k8s_name_all_special() {
+        assert_eq!(KubeRunner::sanitize_k8s_name("!@#$%"), "");
     }
 
     #[test]
@@ -535,6 +665,7 @@ mod tests {
         labels.insert("app".to_string(), "stroem-step".to_string());
         labels.insert("stroem.io/job-id".to_string(), "test-job".to_string());
         labels.insert("stroem.io/step".to_string(), "test-step".to_string());
+        labels.insert("stroem.io/task".to_string(), "test-task".to_string());
 
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", labels)
@@ -549,6 +680,7 @@ mod tests {
             labels.get("stroem.io/job-id"),
             Some(&"test-job".to_string())
         );
+        assert_eq!(labels.get("stroem.io/task"), Some(&"test-task".to_string()));
 
         // Verify spec
         let spec = pod.spec.unwrap();
