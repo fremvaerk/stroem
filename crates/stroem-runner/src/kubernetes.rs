@@ -9,6 +9,7 @@ use kube::api::{Api, DeleteParams, LogParams, PostParams};
 use kube::Client;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default image used for shell-in-pod execution when no image is specified.
 const DEFAULT_RUNNER_IMAGE: &str = "alpine:latest";
@@ -354,6 +355,93 @@ fn is_named_array(arr: &[Value]) -> bool {
             .all(|item| item.get("name").and_then(|n| n.as_str()).is_some())
 }
 
+/// Result of classifying a Kubernetes pod phase.
+enum PodPhaseStatus {
+    /// Pod completed successfully (exit code 0).
+    Succeeded,
+    /// Pod failed. `exit_code` is extracted from container status, or defaults to 1.
+    Failed { exit_code: i32 },
+    /// The step container is running — ready for live log streaming.
+    Running,
+    /// Pod is still being scheduled / init containers running.
+    Pending,
+    /// An unrecognised phase string from the Kubernetes API.
+    Unknown(String),
+}
+
+/// Classify a pod's phase and extract exit code from the step container status.
+fn classify_pod_status(pod: &Pod) -> Option<PodPhaseStatus> {
+    let status = pod.status.as_ref()?;
+    let phase = status.phase.as_deref()?;
+
+    Some(match phase {
+        "Succeeded" => PodPhaseStatus::Succeeded,
+        "Failed" => {
+            let mut exit_code = 1i32; // default for unresolvable failures
+            if let Some(container_statuses) = &status.container_statuses {
+                for cs in container_statuses {
+                    if cs.name == "step" {
+                        if let Some(terminated) =
+                            cs.state.as_ref().and_then(|s| s.terminated.as_ref())
+                        {
+                            exit_code = terminated.exit_code;
+                            if let Some(ref reason) = terminated.reason {
+                                tracing::warn!("Step container terminated: reason={}", reason);
+                            }
+                        }
+                    }
+                }
+            }
+            PodPhaseStatus::Failed { exit_code }
+        }
+        "Running" => PodPhaseStatus::Running,
+        "Pending" => PodPhaseStatus::Pending,
+        other => PodPhaseStatus::Unknown(other.to_string()),
+    })
+}
+
+/// Read log lines from an async stream, parse OUTPUT lines, and invoke the callback.
+///
+/// Note: The Kubernetes log API merges stdout and stderr into a single stream with no
+/// per-line stream indicator. All lines are reported as Stdout — unlike DockerRunner
+/// which can distinguish stderr via bollard's LogOutput type.
+async fn drain_log_stream(
+    stream: impl futures_util::io::AsyncRead + Unpin,
+    log_callback: &Option<Arc<LogCallback>>,
+) -> (Vec<String>, Vec<String>, Option<serde_json::Value>) {
+    let mut stdout_lines = Vec::new();
+    let stderr_lines = Vec::new();
+    let mut parsed_output = None;
+
+    let reader = futures_util::io::BufReader::new(stream);
+    let mut lines_stream = reader.lines();
+    while let Some(line_result) = futures_util::StreamExt::next(&mut lines_stream).await {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("Error reading log line: {:#}", e);
+                break;
+            }
+        };
+
+        if let Some(parsed) = parse_output_line(&line) {
+            parsed_output = Some(parsed);
+        }
+
+        stdout_lines.push(line.clone());
+
+        if let Some(ref cb) = log_callback {
+            cb(LogLine {
+                stream: LogStream::Stdout,
+                line,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+    }
+
+    (stdout_lines, stderr_lines, parsed_output)
+}
+
 #[async_trait]
 impl Runner for KubeRunner {
     async fn execute(
@@ -411,8 +499,10 @@ impl Runner for KubeRunner {
             .await
             .context("Failed to create pod")?;
 
-        // Wait for pod to reach terminal state
+        // Phase 1: Wait for step container to start or pod to reach terminal state.
+        // We need the container to be Running before we can start a follow log stream.
         let mut exit_code = -1i32;
+        let mut pod_terminal = false;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -421,86 +511,153 @@ impl Runner for KubeRunner {
                 .await
                 .context("Failed to get pod status")?;
 
-            if let Some(status) = &pod.status {
-                if let Some(phase) = &status.phase {
-                    match phase.as_str() {
-                        "Succeeded" => {
-                            exit_code = 0;
-                            break;
-                        }
-                        "Failed" => {
-                            // Try to get exit code from container status
-                            if let Some(container_statuses) = &status.container_statuses {
-                                for cs in container_statuses {
-                                    if cs.name == "step" {
-                                        if let Some(terminated) =
-                                            cs.state.as_ref().and_then(|s| s.terminated.as_ref())
-                                        {
-                                            exit_code = terminated.exit_code;
-                                        }
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                        "Running" | "Pending" => {
-                            tracing::debug!("Pod {} is {}", pod_name, phase);
-                        }
-                        _ => {
-                            tracing::warn!("Pod {} in unexpected phase: {}", pod_name, phase);
-                        }
-                    }
+            match classify_pod_status(&pod) {
+                Some(PodPhaseStatus::Succeeded) => {
+                    exit_code = 0;
+                    pod_terminal = true;
+                    break;
+                }
+                Some(PodPhaseStatus::Failed { exit_code: code }) => {
+                    exit_code = code;
+                    pod_terminal = true;
+                    break;
+                }
+                Some(PodPhaseStatus::Running) => {
+                    tracing::debug!("Pod {} is Running, starting live log stream", pod_name);
+                    break;
+                }
+                Some(PodPhaseStatus::Pending) => {
+                    tracing::debug!("Pod {} is Pending", pod_name);
+                }
+                Some(PodPhaseStatus::Unknown(ref phase)) => {
+                    tracing::warn!("Pod {} in unexpected phase: {}", pod_name, phase);
+                }
+                None => {
+                    tracing::debug!("Pod {} has no phase yet", pod_name);
                 }
             }
         }
 
-        // Stream logs from the step container
+        // Phase 2: Stream logs — live (follow) if container is running, or post-mortem if already terminal.
+        let log_callback = log_callback.map(Arc::new);
         let mut stdout_lines = Vec::new();
         let mut stderr_lines = Vec::new();
         let mut parsed_output = None;
 
-        let log_params = LogParams {
-            container: Some("step".to_string()),
-            ..Default::default()
-        };
-
-        match pods.log_stream(&pod_name, &log_params).await {
-            Ok(stream) => {
-                let reader = futures_util::io::BufReader::new(stream);
-                let mut lines_stream = reader.lines();
-                while let Some(line_result) = futures_util::StreamExt::next(&mut lines_stream).await
-                {
-                    let line = match line_result {
-                        Ok(l) => l,
-                        Err(e) => {
-                            tracing::warn!("Error reading log line: {:#}", e);
-                            break;
-                        }
-                    };
-
-                    // Check for OUTPUT: prefix
-                    if let Some(parsed) = parse_output_line(&line) {
-                        parsed_output = Some(parsed);
-                    }
-
-                    stdout_lines.push(line.clone());
-
-                    if let Some(ref callback) = log_callback {
-                        callback(LogLine {
-                            stream: LogStream::Stdout,
-                            line,
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
+        if pod_terminal {
+            // Pod reached terminal state before Running (e.g. init container failure).
+            // Fetch logs without follow — same as previous behavior for this edge case.
+            let log_params = LogParams {
+                container: Some("step".to_string()),
+                ..Default::default()
+            };
+            match pods.log_stream(&pod_name, &log_params).await {
+                Ok(stream) => {
+                    let (stdout, stderr, output) = drain_log_stream(stream, &log_callback).await;
+                    stdout_lines = stdout;
+                    stderr_lines = stderr;
+                    parsed_output = output;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to stream pod logs: {:#}", e);
+                    stderr_lines.push(format!("Failed to retrieve logs: {:#}", e));
                 }
             }
-            Err(e) => {
-                tracing::warn!("Failed to stream pod logs: {:#}", e);
-                stderr_lines.push(format!("Failed to retrieve logs: {:#}", e));
+        } else {
+            // Container is running — stream logs live while polling for terminal state.
+            // The follow stream ends naturally when the container exits.
+            let log_params = LogParams {
+                follow: true,
+                container: Some("step".to_string()),
+                ..Default::default()
+            };
+
+            let pods_log = pods.clone();
+            let pod_name_log = pod_name.clone();
+            let log_cb = log_callback.clone();
+            let log_task = tokio::spawn(async move {
+                match pods_log.log_stream(&pod_name_log, &log_params).await {
+                    Ok(stream) => drain_log_stream(stream, &log_cb).await,
+                    Err(e) => {
+                        tracing::warn!("Failed to stream pod logs: {:#}", e);
+                        (
+                            Vec::new(),
+                            vec![format!("Failed to retrieve logs: {:#}", e)],
+                            None,
+                        )
+                    }
+                }
+            });
+            let log_abort = log_task.abort_handle();
+
+            // Poll for terminal state concurrently while logs stream.
+            // Use explicit match instead of ? to ensure cleanup on error.
+            let poll_error: Option<anyhow::Error> = loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                let pod = match pods.get(&pod_name).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log_abort.abort();
+                        break Some(anyhow::Error::from(e).context("Failed to get pod status"));
+                    }
+                };
+
+                match classify_pod_status(&pod) {
+                    Some(PodPhaseStatus::Succeeded) => {
+                        exit_code = 0;
+                        break None;
+                    }
+                    Some(PodPhaseStatus::Failed { exit_code: code }) => {
+                        exit_code = code;
+                        break None;
+                    }
+                    Some(PodPhaseStatus::Unknown(ref phase)) => {
+                        tracing::warn!("Pod {} in unexpected phase: {}", pod_name, phase);
+                    }
+                    _ => {
+                        tracing::debug!("Pod {} still running", pod_name);
+                    }
+                }
+            };
+
+            // Wait for log stream to finish draining (with timeout as safety net).
+            match tokio::time::timeout(std::time::Duration::from_secs(10), log_task).await {
+                Ok(Ok((stdout, stderr, output))) => {
+                    stdout_lines = stdout;
+                    stderr_lines = stderr;
+                    parsed_output = output;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Log streaming task failed: {:#}", e);
+                }
+                Err(_) => {
+                    log_abort.abort();
+                    tracing::warn!(
+                        "Timed out waiting for log stream to drain for pod {}",
+                        pod_name
+                    );
+                }
             }
+
+            // Always clean up the pod before propagating any poll error.
+            if let Err(e) = pods.delete(&pod_name, &DeleteParams::default()).await {
+                tracing::warn!("Failed to delete pod {}: {:#}", pod_name, e);
+            }
+
+            if let Some(err) = poll_error {
+                return Err(err);
+            }
+
+            return Ok(RunResult {
+                exit_code,
+                stdout: stdout_lines.join("\n"),
+                stderr: stderr_lines.join("\n"),
+                output: parsed_output,
+            });
         }
 
-        // Delete the pod
+        // Phase 3: Cleanup — delete pod and return result (post-mortem path only).
         if let Err(e) = pods.delete(&pod_name, &DeleteParams::default()).await {
             tracing::warn!("Failed to delete pod {}: {:#}", pod_name, e);
         }
@@ -1310,5 +1467,213 @@ mod tests {
         // Without manifest override, namespace is not set on the pod
         // (Kubernetes API sets it from the URL namespace)
         assert!(pod.metadata.namespace.is_none());
+    }
+
+    // --- classify_pod_status tests ---
+
+    fn make_pod_with_phase(phase: &str) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": { "name": "test" },
+            "spec": { "containers": [{ "name": "step", "image": "alpine" }] },
+            "status": { "phase": phase }
+        }))
+        .unwrap()
+    }
+
+    fn make_pod_failed_with_exit(exit_code: i32, reason: Option<&str>) -> Pod {
+        let mut terminated = serde_json::json!({ "exitCode": exit_code });
+        if let Some(r) = reason {
+            terminated["reason"] = serde_json::json!(r);
+        }
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": { "name": "test" },
+            "spec": { "containers": [{ "name": "step", "image": "alpine" }] },
+            "status": {
+                "phase": "Failed",
+                "containerStatuses": [{
+                    "name": "step",
+                    "image": "alpine",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": { "terminated": terminated }
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_classify_succeeded() {
+        let pod = make_pod_with_phase("Succeeded");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Succeeded)
+        ));
+    }
+
+    #[test]
+    fn test_classify_running() {
+        let pod = make_pod_with_phase("Running");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Running)
+        ));
+    }
+
+    #[test]
+    fn test_classify_pending() {
+        let pod = make_pod_with_phase("Pending");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Pending)
+        ));
+    }
+
+    #[test]
+    fn test_classify_unknown_phase() {
+        let pod = make_pod_with_phase("Unknown");
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::Unknown(phase)) => assert_eq!(phase, "Unknown"),
+            other => panic!("Expected Unknown, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_classify_novel_phase() {
+        let pod = make_pod_with_phase("Terminating");
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::Unknown(phase)) => assert_eq!(phase, "Terminating"),
+            other => panic!("Expected Unknown, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_classify_failed_with_exit_code() {
+        let pod = make_pod_failed_with_exit(137, Some("OOMKilled"));
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::Failed { exit_code }) => assert_eq!(exit_code, 137),
+            other => panic!("Expected Failed, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_classify_failed_no_container_status_defaults_to_1() {
+        // Pod failed but no container statuses — e.g. scheduling failure
+        let pod = make_pod_with_phase("Failed");
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::Failed { exit_code }) => assert_eq!(exit_code, 1),
+            other => panic!("Expected Failed, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_classify_failed_exit_code_zero() {
+        // Unusual: pod "Failed" but container exit code 0 (init container failure)
+        let pod = make_pod_failed_with_exit(0, None);
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::Failed { exit_code }) => assert_eq!(exit_code, 0),
+            other => panic!("Expected Failed, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_classify_no_status() {
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": { "name": "test" },
+            "spec": { "containers": [{ "name": "step", "image": "alpine" }] }
+        }))
+        .unwrap();
+        assert!(classify_pod_status(&pod).is_none());
+    }
+
+    // --- drain_log_stream tests ---
+
+    #[tokio::test]
+    async fn test_drain_log_stream_normal_lines() {
+        let data = b"line one\nline two\nline three\n";
+        let cursor = futures_util::io::Cursor::new(data.to_vec());
+        let (stdout, stderr, output) = drain_log_stream(cursor, &None).await;
+        assert_eq!(stdout, vec!["line one", "line two", "line three"]);
+        assert!(stderr.is_empty());
+        assert!(output.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_drain_log_stream_output_parsing() {
+        let data = b"hello\nOUTPUT: {\"key\": \"value\"}\ndone\n";
+        let cursor = futures_util::io::Cursor::new(data.to_vec());
+        let (stdout, _stderr, output) = drain_log_stream(cursor, &None).await;
+        assert_eq!(stdout.len(), 3);
+        assert_eq!(output, Some(serde_json::json!({"key": "value"})));
+    }
+
+    #[tokio::test]
+    async fn test_drain_log_stream_last_output_wins() {
+        let data = b"OUTPUT: {\"a\": 1}\nOUTPUT: {\"b\": 2}\n";
+        let cursor = futures_util::io::Cursor::new(data.to_vec());
+        let (_stdout, _stderr, output) = drain_log_stream(cursor, &None).await;
+        assert_eq!(output, Some(serde_json::json!({"b": 2})));
+    }
+
+    #[tokio::test]
+    async fn test_drain_log_stream_empty() {
+        let cursor = futures_util::io::Cursor::new(Vec::<u8>::new());
+        let (stdout, stderr, output) = drain_log_stream(cursor, &None).await;
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        assert!(output.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_drain_log_stream_callback_invoked() {
+        let data = b"first\nsecond\n";
+        let cursor = futures_util::io::Cursor::new(data.to_vec());
+
+        let lines_received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let lines_clone = lines_received.clone();
+        let callback: Arc<LogCallback> = Arc::new(Box::new(move |log_line: LogLine| {
+            lines_clone.lock().unwrap().push(log_line.line);
+        }));
+        let cb = Some(callback);
+
+        let (stdout, _stderr, _output) = drain_log_stream(cursor, &cb).await;
+        assert_eq!(stdout, vec!["first", "second"]);
+
+        let received = lines_received.lock().unwrap();
+        assert_eq!(*received, vec!["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn test_drain_log_stream_callback_gets_stdout_stream() {
+        let data = b"hello\n";
+        let cursor = futures_util::io::Cursor::new(data.to_vec());
+
+        let streams = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let streams_clone = streams.clone();
+        let callback: Arc<LogCallback> = Arc::new(Box::new(move |log_line: LogLine| {
+            streams_clone.lock().unwrap().push(log_line.stream);
+        }));
+        let cb = Some(callback);
+
+        drain_log_stream(cursor, &cb).await;
+
+        let received = streams.lock().unwrap();
+        assert_eq!(*received, vec![LogStream::Stdout]);
+    }
+
+    #[tokio::test]
+    async fn test_drain_log_stream_invalid_output_json_ignored() {
+        let data = b"OUTPUT: not-json\nreal line\n";
+        let cursor = futures_util::io::Cursor::new(data.to_vec());
+        let (stdout, _stderr, output) = drain_log_stream(cursor, &None).await;
+        assert_eq!(stdout.len(), 2);
+        assert!(output.is_none()); // invalid JSON is silently ignored
     }
 }
