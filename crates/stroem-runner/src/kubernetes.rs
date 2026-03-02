@@ -341,7 +341,6 @@ impl Runner for KubeRunner {
         let client = Client::try_default()
             .await
             .context("Failed to create Kubernetes client")?;
-        let pods: Api<Pod> = Api::namespaced(client, &self.namespace);
 
         let workspace_name = Self::workspace_from_config(&config);
         let job_id = config
@@ -366,8 +365,16 @@ impl Runner for KubeRunner {
             .build_pod_spec(&pod_name, &config, &workspace_name, labels)
             .context("Failed to build pod spec")?;
 
+        // Use namespace from pod spec (set via manifest override) or fall back to configured default
+        let ns = pod_spec
+            .metadata
+            .namespace
+            .as_deref()
+            .unwrap_or(&self.namespace);
+        let pods: Api<Pod> = Api::namespaced(client, ns);
+
         // Create the pod
-        tracing::info!("Creating pod: {}", pod_name);
+        tracing::info!("Creating pod: {} in namespace: {}", pod_name, ns);
         pods.create(&PostParams::default(), &pod_spec)
             .await
             .context("Failed to create pod")?;
@@ -1144,5 +1151,32 @@ mod tests {
         let over = serde_json::json!([1, 2, 3]);
         merge_json(&mut base, &over);
         assert_eq!(base, serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_build_pod_spec_namespace_override() {
+        let runner = make_runner(); // configured with "stroem" namespace
+        let config = make_pod_config(Some(serde_json::json!({
+            "metadata": {
+                "namespace": "production"
+            }
+        })));
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        // Manifest override should set namespace on the pod metadata
+        assert_eq!(pod.metadata.namespace.as_deref(), Some("production"),);
+    }
+
+    #[test]
+    fn test_build_pod_spec_no_namespace_override() {
+        let runner = make_runner();
+        let config = make_pod_config(None);
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        // Without manifest override, namespace is not set on the pod
+        // (Kubernetes API sets it from the URL namespace)
+        assert!(pod.metadata.namespace.is_none());
     }
 }
