@@ -307,7 +307,12 @@ pub async fn claim_job(
             break 'action_defaults rendered_input;
         }
 
-        let input_val = rendered_input.unwrap_or_else(|| serde_json::json!({}));
+        let mut input_val = rendered_input.unwrap_or_else(|| serde_json::json!({}));
+
+        // Merge missing fields from job input that match the action's input schema.
+        // This handles the case where a flow step doesn't explicitly map a field
+        // (e.g. a connection input), but the job-level input has it resolved.
+        merge_missing_action_fields(&mut input_val, job.input.as_ref(), action.input.keys());
 
         match prepare_action_input(&input_val, &action.input, &workspace) {
             Ok(prepared) => Some(prepared),
@@ -656,6 +661,31 @@ pub async fn complete_job(
     }
 }
 
+/// Merge missing fields from job-level input into step input for fields declared
+/// in the action's input schema. Step-level values always take precedence.
+/// Null values in job input are skipped to avoid breaking downstream resolution.
+fn merge_missing_action_fields<'a>(
+    input_val: &mut serde_json::Value,
+    job_input: Option<&serde_json::Value>,
+    action_field_names: impl Iterator<Item = &'a String>,
+) {
+    let (Some(job_input), Some(input_obj)) = (job_input, input_val.as_object_mut()) else {
+        return;
+    };
+    let Some(job_map) = job_input.as_object() else {
+        return;
+    };
+    for field_name in action_field_names {
+        if !input_obj.contains_key(field_name) {
+            if let Some(val) = job_map.get(field_name) {
+                if !val.is_null() {
+                    input_obj.insert(field_name.clone(), val.clone());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,6 +706,142 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
+    }
+
+    // Helper: create field names vec for merge_missing_action_fields
+    fn field_names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_merge_missing_action_fields_from_job_input() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {
+                "host": "ch.example.com",
+                "port": 9000,
+                "database": "analytics"
+            }
+        });
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
+        assert_eq!(input_val["clickhouse"]["port"], 9000);
+        assert_eq!(input_val["clickhouse"]["database"], "analytics");
+    }
+
+    #[test]
+    fn test_merge_step_input_takes_precedence() {
+        let mut input_val = json!({"sql": "SELECT 2", "clickhouse": "step-override"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {"host": "ch.example.com"}
+        });
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 2");
+        assert_eq!(input_val["clickhouse"], "step-override");
+    }
+
+    #[test]
+    fn test_merge_skipped_when_job_input_is_none() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, None, names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_skipped_when_job_input_is_not_object() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!("some raw string");
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_skipped_when_input_val_is_not_object() {
+        let mut input_val = json!("raw");
+        let job_input = json!({"clickhouse": {"host": "h"}});
+        let names = field_names(&["clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val, json!("raw"));
+    }
+
+    #[test]
+    fn test_merge_skips_fields_not_in_job_input() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({"sql": "SELECT 1"});
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_skips_null_job_input_fields() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({"sql": "SELECT 1", "clickhouse": null});
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_multiple_missing_fields_all_filled() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {"host": "ch.example.com"},
+            "s3_bucket": "my-bucket",
+            "redis": {"url": "redis://localhost"}
+        });
+        let names = field_names(&["sql", "clickhouse", "s3_bucket", "redis"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
+        assert_eq!(input_val["s3_bucket"], "my-bucket");
+        assert_eq!(input_val["redis"]["url"], "redis://localhost");
+    }
+
+    #[test]
+    fn test_merge_ignores_job_fields_not_in_action_schema() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {"host": "ch.example.com"},
+            "extra_field": "should not appear"
+        });
+        // Action schema only declares "sql" and "clickhouse"
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
+        assert!(input_val.get("extra_field").is_none());
     }
 
     #[test]

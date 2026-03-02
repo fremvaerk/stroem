@@ -10572,3 +10572,224 @@ async fn test_ws_without_skip_backfill_sends_existing_logs() -> Result<()> {
     server.abort();
     Ok(())
 }
+
+// ─── Test: Connection input pass-through at claim ─────────────────────
+
+/// When a flow step maps only some inputs (e.g. `sql`) but omits a connection-typed
+/// input (e.g. `db`), the claim handler should pass through the resolved connection
+/// object from the job-level input.
+#[tokio::test]
+async fn test_connection_input_passthrough_at_claim() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+
+    let mut workspace = WorkspaceConfig::default();
+
+    // Connection: clickhouse-prod
+    workspace.connections.insert(
+        "clickhouse-prod".to_string(),
+        ConnectionDef {
+            connection_type: Some("clickhouse".to_string()),
+            values: HashMap::from([
+                ("host".to_string(), json!("ch.example.com")),
+                ("port".to_string(), json!(9000)),
+                ("database".to_string(), json!("analytics")),
+            ]),
+        },
+    );
+
+    // Action: execute-query — expects both `sql` (string) and `db` (clickhouse connection)
+    let mut action_input = HashMap::new();
+    action_input.insert(
+        "sql".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            name: None,
+            description: None,
+            required: true,
+            default: None,
+            secret: false,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    action_input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "clickhouse".to_string(),
+            name: None,
+            description: None,
+            required: true,
+            default: None,
+            secret: false,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    workspace.actions.insert(
+        "execute-query".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("echo running query".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: action_input,
+            output: None,
+            manifest: None,
+        },
+    );
+
+    // Task: run-query — has `sql` (string) and `db` (clickhouse) inputs.
+    // Flow step only maps `sql`, deliberately omits `db`.
+    let mut task_input = HashMap::new();
+    task_input.insert(
+        "sql".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            name: None,
+            description: None,
+            required: true,
+            default: None,
+            secret: false,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+    task_input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "clickhouse".to_string(),
+            name: None,
+            description: None,
+            required: true,
+            default: None,
+            secret: false,
+            options: None,
+            allow_custom: false,
+            order: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "query".to_string(),
+        FlowStep {
+            action: "execute-query".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            // Only map `sql`; `db` is NOT mapped here
+            input: HashMap::from([("sql".to_string(), json!("{{ input.sql }}"))]),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "run-query".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: task_input,
+            flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = build_router(state);
+
+    // Execute task: provide connection name "clickhouse-prod" for `db` input
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/run-query/execute",
+            json!({"input": {"sql": "SELECT count() FROM events", "db": "clickhouse-prod"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Register worker and claim the step
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    let body = body_json(response).await;
+
+    assert_eq!(body["step_name"].as_str().unwrap(), "query");
+
+    // The `sql` field should be rendered from the template
+    let input = &body["input"];
+    assert_eq!(input["sql"], "SELECT count() FROM events");
+
+    // The `db` field should be the resolved connection object (passed through from job input)
+    assert!(
+        input["db"].is_object(),
+        "db should be a resolved connection object, got: {}",
+        input["db"]
+    );
+    assert_eq!(input["db"]["host"], "ch.example.com");
+    assert_eq!(input["db"]["port"], 9000);
+    assert_eq!(input["db"]["database"], "analytics");
+
+    Ok(())
+}
