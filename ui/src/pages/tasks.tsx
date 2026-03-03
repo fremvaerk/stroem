@@ -116,26 +116,19 @@ function flattenTree(
   return rows;
 }
 
-/** Collect all folder paths for initial expanded state. */
-function allFolderPaths(folders: FolderNode[]): string[] {
-  const paths: string[] = [];
-  function walk(node: FolderNode) {
-    paths.push(node.fullPath);
-    for (const child of node.children) {
-      walk(child);
-    }
-  }
-  for (const folder of folders) {
-    walk(folder);
-  }
-  return paths;
-}
-
 export function TasksPage() {
   useTitle("Tasks");
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem("stroem_tasks_expanded_folders");
+      if (saved) return new Set(JSON.parse(saved));
+    } catch {
+      // ignore corrupt localStorage
+    }
+    return new Set();
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -144,9 +137,6 @@ export function TasksPage() {
         const data = await listAllTasks();
         if (!cancelled) {
           setTasks(data);
-          // Expand all folders by default
-          const { folders } = buildFolderTree(data);
-          setExpanded(new Set(allFolderPaths(folders)));
         }
       } catch {
         // ignore
@@ -177,6 +167,10 @@ export function TasksPage() {
       } else {
         next.add(path);
       }
+      localStorage.setItem(
+        "stroem_tasks_expanded_folders",
+        JSON.stringify([...next]),
+      );
       return next;
     });
   }
