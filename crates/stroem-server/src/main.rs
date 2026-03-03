@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::net::SocketAddr;
 use stroem_db::{create_pool, run_migrations, UserRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
@@ -167,10 +168,13 @@ async fn main() -> Result<()> {
 
     tracing::info!("Server listening on {}", config.listen);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(cancel_token))
-        .await
-        .context("Server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(cancel_token))
+    .await
+    .context("Server error")?;
 
     Ok(())
 }

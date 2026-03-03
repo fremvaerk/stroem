@@ -17,7 +17,110 @@ use axum::response::{IntoResponse, Response};
 use axum::{routing::delete, routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use serde_json::json;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use tower_governor::{
+    errors::GovernorError, governor::GovernorConfigBuilder, key_extractor::KeyExtractor,
+    GovernorLayer,
+};
+
+/// Client IP extractor for rate limiting.
+///
+/// Resolution order: `X-Forwarded-For` → `X-Real-IP` → `Forwarded` →
+/// `ConnectInfo<SocketAddr>` → fallback to `0.0.0.0`.
+///
+/// The fallback to `0.0.0.0` ensures requests that cannot be attributed to a
+/// real IP address (e.g. unit-test `oneshot` calls without a TCP socket) are
+/// still admitted rather than rejected with an extraction error.  In
+/// production this case should not occur because the server uses
+/// `into_make_service_with_connect_info`.
+#[derive(Clone, Copy, Debug)]
+struct ClientIpExtractor;
+
+impl KeyExtractor for ClientIpExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+        let headers = req.headers();
+
+        // X-Forwarded-For (first address in the list)
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').find_map(|p| p.trim().parse::<IpAddr>().ok()))
+        {
+            return Ok(ip);
+        }
+
+        // X-Real-IP
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+        {
+            return Ok(ip);
+        }
+
+        // ConnectInfo<SocketAddr> extension (populated by into_make_service_with_connect_info)
+        if let Some(ip) = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.ip())
+        {
+            return Ok(ip);
+        }
+
+        // SocketAddr extension (fallback for other setups)
+        if let Some(ip) = req
+            .extensions()
+            .get::<std::net::SocketAddr>()
+            .map(|a| a.ip())
+        {
+            return Ok(ip);
+        }
+
+        // Final fallback: use 0.0.0.0 so the request is not rejected outright.
+        // This applies to test harnesses where no real TCP socket is present.
+        Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+    }
+}
+
+/// Build a `GovernorLayer` keyed on client IP using [`ClientIpExtractor`].
+///
+/// `per_second_replenish` is the number of seconds between token refills — e.g.
+/// `12` means one token is added every 12 seconds.  `burst` is the maximum
+/// number of requests that can be made before throttling kicks in.
+///
+/// The error handler returns a JSON body so API clients receive a consistent
+/// `{"error": "Too many requests", "retry_after_secs": N}` payload instead of
+/// the plain-text default.
+macro_rules! auth_rate_limit_layer {
+    ($per_second:expr, $burst:expr) => {{
+        let config = GovernorConfigBuilder::default()
+            .key_extractor(ClientIpExtractor)
+            .per_second($per_second)
+            .burst_size($burst)
+            .finish()
+            .expect("valid governor config");
+        GovernorLayer::new(config).error_handler(|e| {
+            let wait = match &e {
+                GovernorError::TooManyRequests { wait_time, .. } => *wait_time,
+                _ => 0,
+            };
+            let body = serde_json::to_string(&serde_json::json!({
+                "error": "Too many requests",
+                "retry_after_secs": wait,
+            }))
+            .unwrap_or_default();
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::RETRY_AFTER, wait.to_string())
+                .body(axum::body::Body::from(body))
+                .expect("valid 429 response")
+        })
+    }};
+}
 
 /// Parse a path parameter as a [`uuid::Uuid`], returning a 400 response on failure.
 ///
@@ -133,7 +236,17 @@ async fn require_auth(
 }
 
 pub fn build_api_routes(state: Arc<AppState>) -> Router {
-    // Routes that require authentication (when auth is enabled)
+    // Rate-limited API key creation (strict: 5 req/min — one token every 12 s, burst 5).
+    // Sits inside the protected router so auth is verified before the rate limit check.
+    let api_key_create = Router::new()
+        .route(
+            "/auth/api-keys",
+            get(api_keys::list_api_keys).post(api_keys::create_api_key),
+        )
+        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
+        .layer(auth_rate_limit_layer!(12, 5));
+
+    // Routes that require authentication (when auth is enabled).
     let protected = Router::new()
         .route("/workspaces", get(workspaces::list_workspaces))
         .route("/workspaces/{ws}/tasks", get(tasks::list_tasks))
@@ -151,26 +264,37 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
-        .route(
-            "/auth/api-keys",
-            get(api_keys::list_api_keys).post(api_keys::create_api_key),
-        )
-        .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
+        .merge(api_key_create)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
         ));
 
-    // Public routes (no auth required — includes WS which handles auth internally)
-    let public = Router::new()
-        .route("/config", get(get_config))
-        .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
+    // Strict login rate limit: 5 req/min per IP (one token every 12 s, burst 5).
+    let login_routes = Router::new()
         .route("/auth/login", post(auth::login))
+        .layer(auth_rate_limit_layer!(12, 5));
+
+    // Moderate refresh rate limit: 10 req/min per IP (one token every 6 s, burst 10).
+    let refresh_routes = Router::new()
         .route("/auth/refresh", post(auth::refresh))
+        .layer(auth_rate_limit_layer!(6, 10));
+
+    // Relaxed limit for logout / me / OIDC: 20 req/min per IP (one token every 3 s, burst 20).
+    let general_auth_routes = Router::new()
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route("/auth/oidc/{provider}", get(oidc::oidc_start))
-        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback));
+        .route("/auth/oidc/{provider}/callback", get(oidc::oidc_callback))
+        .layer(auth_rate_limit_layer!(3, 20));
+
+    // Public routes (no auth required — includes WS which handles auth internally).
+    let public = Router::new()
+        .route("/config", get(get_config))
+        .route("/jobs/{id}/logs/stream", get(ws::job_log_stream))
+        .merge(login_routes)
+        .merge(refresh_routes)
+        .merge(general_auth_routes);
 
     Router::new()
         .merge(protected)
