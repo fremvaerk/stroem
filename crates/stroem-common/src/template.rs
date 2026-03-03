@@ -1364,6 +1364,132 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_connection_inputs_mixed_primitive_and_connection() {
+        let ws = make_ws_with_connection();
+        let input = json!({"db": "prod_db", "env": "production", "retries": 3, "debug": false});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+        schema.insert("env".to_string(), field("string", false, None));
+        schema.insert("retries".to_string(), field("integer", false, None));
+        schema.insert("debug".to_string(), field("boolean", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert!(result["db"].is_object());
+        assert_eq!(result["db"]["host"], "db.example.com");
+        assert_eq!(result["env"], "production");
+        assert_eq!(result["retries"], 3);
+        assert_eq!(result["debug"], false);
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_date_datetime_are_primitives() {
+        let ws = WorkspaceConfig::new();
+        let input = json!({"start": "2024-01-01", "ts": "2024-01-01T00:00:00Z"});
+        let mut schema = HashMap::new();
+        schema.insert("start".to_string(), field("date", false, None));
+        schema.insert("ts".to_string(), field("datetime", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["start"], "2024-01-01");
+        assert_eq!(result["ts"], "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_number_primitive_passthrough() {
+        let ws = WorkspaceConfig::new();
+        let input = json!({"ratio": 0.75});
+        let mut schema = HashMap::new();
+        schema.insert("ratio".to_string(), field("number", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["ratio"], 0.75);
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_field_not_in_schema_passes_through() {
+        // Fields not present in the schema should be left in the output untouched.
+        let ws = make_ws_with_connection();
+        let input = json!({"extra_field": "some-value", "count": 99});
+        let schema = HashMap::new();
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["extra_field"], "some-value");
+        assert_eq!(result["count"], 99);
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_null_input_treated_as_empty() {
+        let ws = make_ws_with_connection();
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        // null input is treated as empty object — missing field is silently skipped
+        let result = resolve_connection_inputs(&json!(null), &schema, &ws).unwrap();
+        assert!(result.get("db").is_none());
+        assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_boolean_value_for_connection_field_errors() {
+        let ws = make_ws_with_connection();
+        let input = json!({"db": true});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expects a connection name"));
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_multiple_connection_fields() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "primary_db".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("primary.example.com"));
+                    v
+                },
+            },
+        );
+        ws.connections.insert(
+            "replica_db".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("replica.example.com"));
+                    v
+                },
+            },
+        );
+
+        let input = json!({"primary": "primary_db", "replica": "replica_db"});
+        let mut schema = HashMap::new();
+        schema.insert("primary".to_string(), field("postgres", false, None));
+        schema.insert("replica".to_string(), field("postgres", false, None));
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["primary"]["host"], "primary.example.com");
+        assert_eq!(result["replica"]["host"], "replica.example.com");
+    }
+
+    #[test]
+    fn test_resolve_connection_inputs_empty_schema_passes_input_through() {
+        let ws = WorkspaceConfig::new();
+        let input = json!({"key": "value", "count": 5});
+        let schema = HashMap::new();
+
+        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        assert_eq!(result["key"], "value");
+        assert_eq!(result["count"], 5);
+    }
+
+    #[test]
     fn test_resolve_connection_inputs_untyped_connection() {
         let mut ws = WorkspaceConfig::new();
         ws.connection_types.insert(
@@ -1451,8 +1577,8 @@ mod tests {
             json!(null)
         );
         assert_eq!(
-            render_value_deep(&json!(3.14), &context).unwrap(),
-            json!(3.14)
+            render_value_deep(&json!(2.72), &context).unwrap(),
+            json!(2.72)
         );
     }
 

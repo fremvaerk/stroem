@@ -320,11 +320,45 @@ async fn fire_single_hook(
     Ok(())
 }
 
+/// Select which hooks to fire for a job, applying the priority and fallback rules.
+///
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    fn select_hooks_for_job<'a>(
+        workspace_config: &'a WorkspaceConfig,
+        job_source_type: &str,
+        job_status: &str,
+        task: &'a TaskDef,
+    ) -> Option<&'a [HookDef]> {
+        if job_source_type == "hook" {
+            return None;
+        }
+
+        let (task_hooks, ws_hooks) = match job_status {
+            "completed" => (&task.on_success, &workspace_config.on_success),
+            "failed" => (&task.on_error, &workspace_config.on_error),
+            _ => return None,
+        };
+
+        let is_top_level = matches!(job_source_type, "api" | "trigger" | "webhook");
+        let hooks: &[HookDef] = if !task_hooks.is_empty() {
+            task_hooks
+        } else if is_top_level {
+            ws_hooks
+        } else {
+            return None;
+        };
+
+        if hooks.is_empty() {
+            None
+        } else {
+            Some(hooks)
+        }
+    }
 
     #[test]
     fn test_hook_context_serialization() {
@@ -502,5 +536,191 @@ mod tests {
 
         let result = render_input_map(&input, &template_context).unwrap();
         assert_eq!(result["url"], "https://chat.googleapis.com/webhook/123");
+    }
+
+    // ─── Workspace-level hook fallback selection tests ───────────────────────
+
+    fn make_hook(action: &str) -> HookDef {
+        HookDef {
+            action: action.to_string(),
+            input: HashMap::new(),
+        }
+    }
+
+    fn make_task_def(on_success: Vec<HookDef>, on_error: Vec<HookDef>) -> TaskDef {
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success,
+            on_error,
+        }
+    }
+
+    fn make_workspace_config(on_success: Vec<HookDef>, on_error: Vec<HookDef>) -> WorkspaceConfig {
+        let mut config = WorkspaceConfig::new();
+        config.on_success = on_success;
+        config.on_error = on_error;
+        config
+    }
+
+    /// Task has its own on_success hooks — workspace on_success hooks must NOT be used.
+    #[test]
+    fn test_task_on_success_takes_priority_over_workspace() {
+        let task = make_task_def(vec![make_hook("task-notify")], vec![]);
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "api", "completed", &task).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].action, "task-notify");
+    }
+
+    /// Task has no on_success hooks — workspace on_success hooks are used as fallback
+    /// for a top-level job (source_type = "api").
+    #[test]
+    fn test_workspace_on_success_fallback_when_task_has_none() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "api", "completed", &task).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].action, "ws-notify");
+    }
+
+    /// Task has its own on_error hooks — workspace on_error hooks must NOT be used.
+    #[test]
+    fn test_task_on_error_takes_priority_over_workspace() {
+        let task = make_task_def(vec![], vec![make_hook("task-alert")]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")]);
+
+        let selected = select_hooks_for_job(&ws, "api", "failed", &task).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].action, "task-alert");
+    }
+
+    /// Task has no on_error hooks — workspace on_error hooks are used as fallback
+    /// for a top-level job (source_type = "api").
+    #[test]
+    fn test_workspace_on_error_fallback_when_task_has_none() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")]);
+
+        let selected = select_hooks_for_job(&ws, "api", "failed", &task).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].action, "ws-alert");
+    }
+
+    /// Task has on_success but no on_error — workspace fallback applies only for on_error.
+    #[test]
+    fn test_workspace_fallback_only_for_missing_hook_type() {
+        let task = make_task_def(vec![make_hook("task-notify")], vec![]);
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![make_hook("ws-alert")]);
+
+        // on_success: task hooks win
+        let success_hooks = select_hooks_for_job(&ws, "api", "completed", &task).unwrap();
+        assert_eq!(success_hooks.len(), 1);
+        assert_eq!(success_hooks[0].action, "task-notify");
+
+        // on_error: task has none, so workspace fallback fires
+        let error_hooks = select_hooks_for_job(&ws, "api", "failed", &task).unwrap();
+        assert_eq!(error_hooks.len(), 1);
+        assert_eq!(error_hooks[0].action, "ws-alert");
+    }
+
+    /// Workspace fallback does NOT fire for child jobs (source_type = "task").
+    #[test]
+    fn test_workspace_fallback_not_used_for_child_jobs() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![]);
+
+        // Child jobs (source_type = "task") must not use workspace fallback
+        let selected = select_hooks_for_job(&ws, "task", "completed", &task);
+        assert!(
+            selected.is_none(),
+            "workspace fallback must not fire for child jobs"
+        );
+    }
+
+    /// Workspace fallback does NOT fire for hook jobs (recursion guard).
+    #[test]
+    fn test_recursion_guard_prevents_hook_jobs_from_firing_hooks() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "hook", "completed", &task);
+        assert!(
+            selected.is_none(),
+            "hook jobs must never trigger further hooks"
+        );
+    }
+
+    /// Workspace fallback fires for trigger-sourced top-level jobs.
+    #[test]
+    fn test_workspace_fallback_fires_for_trigger_sourced_jobs() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "trigger", "completed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-notify");
+    }
+
+    /// Workspace fallback fires for webhook-sourced top-level jobs.
+    #[test]
+    fn test_workspace_fallback_fires_for_webhook_sourced_jobs() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")]);
+
+        let selected = select_hooks_for_job(&ws, "webhook", "failed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-alert");
+    }
+
+    /// No hooks at all — returns None rather than an empty slice.
+    #[test]
+    fn test_no_hooks_anywhere_returns_none() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![]);
+
+        assert!(select_hooks_for_job(&ws, "api", "completed", &task).is_none());
+        assert!(select_hooks_for_job(&ws, "api", "failed", &task).is_none());
+    }
+
+    /// Non-terminal statuses (e.g. "pending", "running") never produce hooks.
+    #[test]
+    fn test_non_terminal_status_returns_none() {
+        let task = make_task_def(
+            vec![make_hook("task-notify")],
+            vec![make_hook("task-alert")],
+        );
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![make_hook("ws-alert")]);
+
+        for status in &["pending", "running", "cancelled", "unknown"] {
+            assert!(
+                select_hooks_for_job(&ws, "api", status, &task).is_none(),
+                "status '{status}' should not trigger hooks"
+            );
+        }
+    }
+
+    /// Multiple workspace fallback hooks are all returned.
+    #[test]
+    fn test_workspace_fallback_returns_all_hooks_when_multiple() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(
+            vec![make_hook("ws-slack"), make_hook("ws-pagerduty")],
+            vec![],
+        );
+
+        let selected = select_hooks_for_job(&ws, "api", "completed", &task).unwrap();
+        assert_eq!(selected.len(), 2);
+        let actions: Vec<&str> = selected.iter().map(|h| h.action.as_str()).collect();
+        assert!(actions.contains(&"ws-slack"));
+        assert!(actions.contains(&"ws-pagerduty"));
     }
 }

@@ -10831,3 +10831,215 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Webhook sync-mode timeout tests ────────────────────────────────────────
+
+/// Build a minimal workspace and router wired with a sync-mode webhook trigger.
+///
+/// The trigger has a 1-second timeout so that tests can exercise the timeout
+/// path without waiting for the default 30 seconds.
+async fn setup_sync_webhook() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Minimal workspace: one shell action, one task, one sync webhook trigger.
+    let mut workspace = WorkspaceConfig::new();
+
+    workspace.actions.insert(
+        "noop".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("true".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "sync-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    // Sync webhook with a 1-second timeout so the test doesn't block for long.
+    workspace.triggers.insert(
+        "on-sync".to_string(),
+        TriggerDef::Webhook {
+            name: "sync-hook".to_string(),
+            task: "sync-task".to_string(),
+            secret: None,
+            input: HashMap::new(),
+            enabled: true,
+            mode: Some("sync".to_string()),
+            timeout_secs: Some(1),
+        },
+    );
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = build_router(state);
+
+    Ok((router, pool, temp_dir, container))
+}
+
+/// When a sync-mode webhook fires and the job does not complete within the
+/// configured timeout, the handler returns 202 Accepted with `"status": "running"`
+/// and the created `job_id`.
+///
+/// This exercises the `tokio::time::timeout` branch in `webhook_handler` where
+/// neither `rx.recv()` resolves nor the job completes before the deadline.
+#[tokio::test]
+async fn test_sync_webhook_timeout_returns_202_with_running_status() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_sync_webhook().await?;
+
+    // POST to the sync webhook — no worker is running, so the job will stay
+    // in "pending" state and the 1-second timeout will elapse.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hooks/sync-hook")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "sync webhook timeout must return 202 Accepted"
+    );
+
+    let body = body_json(response).await;
+
+    assert_eq!(
+        body["status"].as_str(),
+        Some("running"),
+        "timeout response must carry status=running"
+    );
+    assert_eq!(
+        body["trigger"].as_str(),
+        Some("sync-hook"),
+        "trigger name must be echoed back"
+    );
+    assert_eq!(
+        body["task"].as_str(),
+        Some("sync-task"),
+        "task name must be echoed back"
+    );
+
+    // job_id must be a valid UUID so the caller can poll for completion.
+    let job_id_str = body["job_id"].as_str().expect("job_id must be present");
+    let job_id: Uuid = job_id_str.parse().expect("job_id must be a valid UUID");
+    assert_ne!(job_id, Uuid::nil(), "job_id must not be the nil UUID");
+
+    Ok(())
+}
+
+/// An async-mode (default) webhook returns 200 immediately without waiting,
+/// while a sync-mode webhook with the same setup returns 202 on timeout.
+/// This documents the behavioural difference between the two modes.
+#[tokio::test]
+async fn test_async_webhook_returns_200_immediately() -> Result<()> {
+    // Use the standard test workspace which has `public-hook` (async, no secret).
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/hooks/public-hook")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await?;
+
+    // Async webhook always returns 200 immediately regardless of job state.
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "async webhook must return 200 OK immediately"
+    );
+
+    let body = body_json(response).await;
+    assert!(
+        body["job_id"].as_str().is_some(),
+        "job_id must be present in async response"
+    );
+    // Async response does NOT include a status field (job is just created).
+    assert!(
+        body.get("status").is_none(),
+        "async response must not include a status field"
+    );
+
+    Ok(())
+}

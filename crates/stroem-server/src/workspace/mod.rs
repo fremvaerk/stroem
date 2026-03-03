@@ -749,7 +749,7 @@ tasks:
         assert!(revision.is_some());
         // Verify it's a valid hex string (blake2 hash)
         let rev_str = revision.unwrap();
-        assert!(rev_str.len() > 0);
+        assert!(!rev_str.is_empty());
         assert!(rev_str.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

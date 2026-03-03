@@ -1786,6 +1786,209 @@ connections:
         assert!(ws.connections.is_empty());
     }
 
+    #[test]
+    fn test_render_connections_invalid_template_errors() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "bad".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("host".to_string(), json!("{{ missing.var }}"));
+                    v
+                },
+            },
+        );
+
+        let result = ws.render_connections();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bad"));
+    }
+
+    #[test]
+    fn test_render_connections_multiple_independent() {
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets.insert("token_a".to_string(), json!("secret-a"));
+        ws.secrets.insert("token_b".to_string(), json!("secret-b"));
+        ws.connections.insert(
+            "conn_a".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("token".to_string(), json!("{{ secret.token_a }}"));
+                    v
+                },
+            },
+        );
+        ws.connections.insert(
+            "conn_b".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("token".to_string(), json!("{{ secret.token_b }}"));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let a = ws.connections.get("conn_a").unwrap();
+        let b = ws.connections.get("conn_b").unwrap();
+        assert_eq!(a.values.get("token").unwrap(), "secret-a");
+        assert_eq!(b.values.get("token").unwrap(), "secret-b");
+    }
+
+    #[test]
+    fn test_render_connections_unknown_type_does_not_error() {
+        // A connection referencing a type that doesn't exist should warn but not fail.
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "orphan".to_string(),
+            ConnectionDef {
+                connection_type: Some("nonexistent_type".to_string()),
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("url".to_string(), json!("https://example.com"));
+                    v
+                },
+            },
+        );
+
+        let result = ws.render_connections();
+        assert!(result.is_ok());
+        let conn = ws.connections.get("orphan").unwrap();
+        assert_eq!(conn.values.get("url").unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn test_render_connections_type_with_no_properties() {
+        let mut ws = WorkspaceConfig::new();
+        ws.connection_types.insert(
+            "empty_type".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        ws.connections.insert(
+            "my_conn".to_string(),
+            ConnectionDef {
+                connection_type: Some("empty_type".to_string()),
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("url".to_string(), json!("https://example.com"));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("my_conn").unwrap();
+        assert_eq!(conn.values.get("url").unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn test_render_connections_nested_template_in_value() {
+        // Nested object with a template string inside one of its string fields.
+        let mut ws = WorkspaceConfig::new();
+        ws.secrets
+            .insert("api_key".to_string(), json!("sk-supersecret"));
+        ws.connections.insert(
+            "api".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert(
+                        "config".to_string(),
+                        json!({"key": "{{ secret.api_key }}", "timeout": 30}),
+                    );
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("api").unwrap();
+        let config = conn.values.get("config").unwrap();
+        assert_eq!(config["key"], "sk-supersecret");
+        assert_eq!(config["timeout"], 30);
+    }
+
+    #[test]
+    fn test_render_connections_non_string_values_passthrough() {
+        // Numbers, booleans, and nulls in connection values should not be modified.
+        let mut ws = WorkspaceConfig::new();
+        ws.connections.insert(
+            "cfg".to_string(),
+            ConnectionDef {
+                connection_type: None,
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("port".to_string(), json!(5432));
+                    v.insert("enabled".to_string(), json!(true));
+                    v.insert("timeout".to_string(), json!(30.5));
+                    v.insert("extra".to_string(), json!(null));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("cfg").unwrap();
+        assert_eq!(conn.values.get("port").unwrap(), &json!(5432));
+        assert_eq!(conn.values.get("enabled").unwrap(), &json!(true));
+        assert_eq!(conn.values.get("timeout").unwrap(), &json!(30.5));
+        assert_eq!(conn.values.get("extra").unwrap(), &json!(null));
+    }
+
+    #[test]
+    fn test_render_connections_default_not_applied_when_property_present() {
+        // If the connection already has the property, the type default must not overwrite it.
+        let mut ws = WorkspaceConfig::new();
+        ws.connection_types.insert(
+            "postgres".to_string(),
+            ConnectionTypeDef {
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert(
+                        "port".to_string(),
+                        ConnectionPropertyDef {
+                            property_type: "integer".to_string(),
+                            required: false,
+                            default: Some(json!(5432)),
+                            secret: false,
+                        },
+                    );
+                    props
+                },
+            },
+        );
+        ws.connections.insert(
+            "prod_db".to_string(),
+            ConnectionDef {
+                connection_type: Some("postgres".to_string()),
+                values: {
+                    let mut v = HashMap::new();
+                    v.insert("port".to_string(), json!(5433));
+                    v
+                },
+            },
+        );
+
+        ws.render_connections().unwrap();
+
+        let conn = ws.connections.get("prod_db").unwrap();
+        assert_eq!(conn.values.get("port").unwrap(), &json!(5433));
+    }
+
     // --- Inline action tests ---
     //
     // Inline actions are automatically hoisted during deserialization (via the

@@ -350,7 +350,7 @@ mod tests {
         // Write invalid UTF-8 to .revision file
         let ws_dir = cache.workspace_dir("test-ws");
         let rev_file = ws_dir.join(".revision");
-        std::fs::write(&rev_file, &[0xFF, 0xFE, 0xFD]).unwrap();
+        std::fs::write(&rev_file, [0xFF, 0xFE, 0xFD]).unwrap();
 
         // current_revision should return None (read_to_string fails on invalid UTF-8)
         assert_eq!(cache.current_revision("test-ws"), None);
