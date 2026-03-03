@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WorkflowDag } from "@/components/workflow-dag";
+import { ErrorBoundary } from "@/components/error-boundary";
 import {
   Table,
   TableBody,
@@ -411,11 +412,19 @@ export function TaskDetailPage() {
         </CardHeader>
         <CardContent>
           <div className="mb-4">
-            <WorkflowDag
-              flow={task.flow}
-              selectedStep={selectedDagStep}
-              onSelectStep={setSelectedDagStep}
-            />
+            <ErrorBoundary
+              fallback={
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  DAG visualization failed to render.
+                </p>
+              }
+            >
+              <WorkflowDag
+                flow={task.flow}
+                selectedStep={selectedDagStep}
+                onSelectStep={setSelectedDagStep}
+              />
+            </ErrorBoundary>
           </div>
           <div className="space-y-2">
             {flowSteps.map(([stepName, step], index) => (

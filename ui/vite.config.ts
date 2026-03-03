@@ -33,5 +33,13 @@ export default defineConfig({
   build: {
     outDir: "../crates/stroem-server/static",
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-xyflow": ["@xyflow/react", "@dagrejs/dagre"],
+          "vendor-react": ["react", "react-dom", "react-router"],
+        },
+      },
+    },
   },
 });
