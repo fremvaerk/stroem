@@ -75,7 +75,10 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
 
     // Check if job reached terminal state
     if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
-        if job_after.status == "completed" || job_after.status == "failed" {
+        if matches!(
+            job_after.status.as_str(),
+            "completed" | "failed" | "cancelled"
+        ) {
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
                 (job_after.parent_job_id, &job_after.parent_step_name)
@@ -129,6 +132,8 @@ async fn propagate_to_parent(
             child_job.output.clone(),
         )
         .await?;
+    } else if child_job.status == "cancelled" {
+        JobStepRepo::mark_cancelled(&state.pool, parent_job_id, parent_step).await?;
     } else {
         let err = format!("Child job {} failed", child_job.job_id);
         JobStepRepo::mark_failed(&state.pool, parent_job_id, parent_step, &err).await?;
@@ -168,7 +173,10 @@ async fn propagate_to_parent(
 
             // Check if parent job is now terminal — propagate recursively
             if let Ok(Some(parent_after)) = JobRepo::get(&state.pool, parent_job_id).await {
-                if parent_after.status == "completed" || parent_after.status == "failed" {
+                if matches!(
+                    parent_after.status.as_str(),
+                    "completed" | "failed" | "cancelled"
+                ) {
                     // Propagate up the chain if parent is also a child
                     if let (Some(grandparent_id), Some(ref grandparent_step)) =
                         (parent_after.parent_job_id, &parent_after.parent_step_name)
@@ -200,9 +208,13 @@ async fn propagate_to_parent(
 #[tracing::instrument(skip(state))]
 pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     let job = match JobRepo::get(&state.pool, job_id).await? {
-        Some(j) if j.status == "completed" || j.status == "failed" => j,
+        Some(j) if matches!(j.status.as_str(), "completed" | "failed" | "cancelled") => j,
         _ => return Ok(()),
     };
+
+    // Remove from the in-memory cancelled set to prevent unbounded growth.
+    // Safe to call unconditionally — no-op if not present.
+    crate::cancellation::clear_cancelled(state, job_id);
 
     // Propagate to parent
     if let (Some(parent_job_id), Some(ref parent_step)) = (job.parent_job_id, &job.parent_step_name)

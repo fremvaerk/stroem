@@ -25,7 +25,7 @@ pub struct ListJobsQuery {
     pub offset: i64,
 }
 
-const VALID_STATUSES: &[&str] = &["pending", "running", "completed", "failed"];
+const VALID_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "cancelled"];
 
 /// GET /api/jobs - List jobs
 #[tracing::instrument(skip(state))]
@@ -445,6 +445,42 @@ pub async fn get_job_logs(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to get logs: {}", e)})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/jobs/:id/cancel - Cancel a running or pending job
+#[tracing::instrument(skip(state))]
+pub async fn cancel_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let job_id = match parse_uuid_param(&id, "job") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    match crate::cancellation::cancel_job(&state, job_id).await {
+        Ok(crate::cancellation::CancelResult::Cancelled) => {
+            Json(json!({"status": "cancelled"})).into_response()
+        }
+        Ok(crate::cancellation::CancelResult::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Job not found"})),
+        )
+            .into_response(),
+        Ok(crate::cancellation::CancelResult::AlreadyTerminal) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "Job is already in a terminal state"})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to cancel job: {:#}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to cancel job: {}", e)})),
             )
                 .into_response()
         }

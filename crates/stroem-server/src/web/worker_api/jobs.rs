@@ -662,6 +662,27 @@ pub async fn append_log(
     }
 }
 
+/// GET /worker/jobs/:id/cancelled - Check if a job has been cancelled
+#[tracing::instrument(skip(state))]
+pub async fn check_cancelled(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let job_id = match Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid job ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    let cancelled = crate::cancellation::is_cancelled(&state, job_id);
+    Json(json!({"cancelled": cancelled})).into_response()
+}
+
 /// POST /worker/jobs/:id/complete - Mark job as completed (for local mode)
 #[tracing::instrument(skip(state))]
 pub async fn complete_job(

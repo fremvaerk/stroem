@@ -11,6 +11,7 @@ use bollard::query_parameters::{
 };
 use bollard::Docker;
 use futures_util::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::DEFAULT_RUNNER_IMAGE;
 
@@ -118,6 +119,7 @@ impl Runner for DockerRunner {
         &self,
         config: RunConfig,
         log_callback: Option<LogCallback>,
+        cancel_token: CancellationToken,
     ) -> Result<RunResult> {
         let image = config
             .image
@@ -184,45 +186,86 @@ impl Runner for DockerRunner {
         let mut stderr_lines = Vec::new();
         let mut parsed_output = None;
 
-        while let Some(chunk) = output.output.next().await {
-            match chunk {
-                Ok(log_output) => {
-                    let line = log_output.to_string();
-                    let line = line.trim_end_matches('\n').to_string();
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    let stream = match log_output {
-                        LogOutput::StdErr { .. } => LogStream::Stderr,
-                        _ => LogStream::Stdout,
-                    };
-
-                    match stream {
-                        LogStream::Stdout => {
-                            // Check for OUTPUT: prefix
-                            if let Some(parsed) = parse_output_line(&line) {
-                                parsed_output = Some(parsed);
-                            }
-                            stdout_lines.push(line.clone());
-                        }
-                        LogStream::Stderr => {
-                            stderr_lines.push(line.clone());
-                        }
-                    }
-
-                    if let Some(ref callback) = log_callback {
-                        callback(LogLine {
-                            stream,
-                            line,
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
+        // Helper closure to stop and remove a container on cancellation
+        let stop_and_remove = |docker: &Docker, id: &str| {
+            let docker = docker.clone();
+            let id = id.to_string();
+            async move {
+                if let Err(e) = docker.stop_container(&id, None).await {
+                    tracing::warn!("Failed to stop container {} on cancel: {:#}", &id[..12], e);
                 }
-                Err(e) => {
-                    tracing::warn!("Error reading container output: {:#}", e);
-                    break;
+                let remove_opts = RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                };
+                if let Err(e) = docker.remove_container(&id, Some(remove_opts)).await {
+                    tracing::warn!(
+                        "Failed to remove container {} on cancel: {:#}",
+                        &id[..12],
+                        e
+                    );
+                }
+            }
+        };
+
+        // Stream logs, with cancellation support
+        loop {
+            tokio::select! {
+                biased;
+
+                () = cancel_token.cancelled() => {
+                    tracing::info!("Cancellation requested — stopping container {}", &container_id[..12]);
+                    stop_and_remove(&self.docker, &container_id).await;
+                    return Ok(RunResult {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "Job cancelled".to_string(),
+                        output: None,
+                    });
+                }
+
+                chunk = output.output.next() => {
+                    let Some(chunk) = chunk else { break };
+                    match chunk {
+                        Ok(log_output) => {
+                            let line = log_output.to_string();
+                            let line = line.trim_end_matches('\n').to_string();
+
+                            if line.is_empty() {
+                                continue;
+                            }
+
+                            let stream = match log_output {
+                                LogOutput::StdErr { .. } => LogStream::Stderr,
+                                _ => LogStream::Stdout,
+                            };
+
+                            match stream {
+                                LogStream::Stdout => {
+                                    // Check for OUTPUT: prefix
+                                    if let Some(parsed) = parse_output_line(&line) {
+                                        parsed_output = Some(parsed);
+                                    }
+                                    stdout_lines.push(line.clone());
+                                }
+                                LogStream::Stderr => {
+                                    stderr_lines.push(line.clone());
+                                }
+                            }
+
+                            if let Some(ref callback) = log_callback {
+                                callback(LogLine {
+                                    stream,
+                                    line,
+                                    timestamp: chrono::Utc::now(),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Error reading container output: {:#}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -233,13 +276,31 @@ impl Runner for DockerRunner {
             .wait_container(&container_id, None::<WaitContainerOptions>);
 
         let mut exit_code = -1i32;
-        while let Some(result) = wait_stream.next().await {
-            match result {
-                Ok(response) => {
-                    exit_code = response.status_code as i32;
+        loop {
+            tokio::select! {
+                biased;
+
+                () = cancel_token.cancelled() => {
+                    tracing::info!("Cancellation requested during wait — stopping container {}", &container_id[..12]);
+                    stop_and_remove(&self.docker, &container_id).await;
+                    return Ok(RunResult {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "Job cancelled".to_string(),
+                        output: None,
+                    });
                 }
-                Err(e) => {
-                    tracing::warn!("Error waiting for container: {:#}", e);
+
+                result = wait_stream.next() => {
+                    let Some(result) = result else { break };
+                    match result {
+                        Ok(response) => {
+                            exit_code = response.status_code as i32;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Error waiting for container: {:#}", e);
+                        }
+                    }
                 }
             }
         }
@@ -507,8 +568,45 @@ mod tests {
             pod_manifest_overrides: None,
         };
 
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello-from-docker"));
+    }
+
+    /// Integration test: Docker cancellation kills the container.
+    /// Run with: cargo test -p stroem-runner --features docker -- --ignored test_docker_cancellation
+    #[tokio::test]
+    #[ignore]
+    async fn test_docker_cancellation() {
+        let runner = DockerRunner::new().expect("Docker must be available");
+        let config = RunConfig {
+            cmd: Some("sleep 60".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+
+        // Cancel after 500ms
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            token_clone.cancel();
+        });
+
+        let result = runner.execute(config, None, token).await.unwrap();
+        assert_eq!(result.exit_code, -1);
+        assert!(result.stderr.contains("Job cancelled"));
     }
 }

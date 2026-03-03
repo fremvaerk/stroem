@@ -229,7 +229,40 @@ Returns job metadata and all steps with statuses.
 }
 ```
 
-**Step statuses:** `pending`, `ready`, `running`, `completed`, `failed`, `skipped`
+**Step statuses:** `pending`, `ready`, `running`, `completed`, `failed`, `skipped`, `cancelled`
+
+## Cancel Job
+
+```
+POST /api/jobs/{id}/cancel
+```
+
+Cancels a pending or running job. Running steps are actively killed (processes terminated, containers stopped, pods deleted). Pending steps are marked as cancelled. Child jobs are recursively cancelled. Fires `on_error` hooks.
+
+| Parameter | Description |
+|-----------|-------------|
+| `id` | Job ID (UUID) |
+
+**Response (200):**
+
+```json
+{
+  "status": "cancelled"
+}
+```
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `404` | Job not found |
+| `409` | Job is already in a terminal state (completed, failed, or cancelled) |
+
+**CLI:**
+
+```bash
+stroem cancel <job_id>
+```
 
 ## Get Job Logs
 
@@ -314,4 +347,5 @@ All endpoints return errors in a consistent format:
 | `400` | Bad request (invalid input, missing fields) |
 | `401` | Unauthorized (missing or invalid token) |
 | `404` | Not found (unknown task, job, or step) |
+| `409` | Conflict (e.g., cancelling an already-terminal job) |
 | `500` | Internal server error |

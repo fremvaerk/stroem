@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft, LayoutList, Network, TriangleAlert } from "lucide-react";
+import { ArrowLeft, LayoutList, Network, TriangleAlert, XCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
@@ -12,7 +12,7 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { getJob } from "@/lib/api";
+import { getJob, cancelJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration } from "@/lib/formatting";
@@ -27,6 +27,7 @@ export function JobDetailPage() {
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"timeline" | "dag">("timeline");
+  const [cancelling, setCancelling] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -85,11 +86,35 @@ export function JobDetailPage() {
             {job.job_id}
           </p>
         </div>
-        <Button variant="outline" asChild>
-          <Link to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}>
-            Re-run
-          </Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          {(job.status === "pending" || job.status === "running") && (
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={cancelling}
+              onClick={async () => {
+                if (!window.confirm("Cancel this job? Running steps will be killed.")) return;
+                setCancelling(true);
+                try {
+                  await cancelJob(job.job_id);
+                } catch (err) {
+                  alert(err instanceof Error ? err.message : "Failed to cancel job");
+                } finally {
+                  setCancelling(false);
+                  await load();
+                }
+              }}
+            >
+              <XCircle className="mr-1.5 h-3.5 w-3.5" />
+              {cancelling ? "Cancelling..." : "Cancel Job"}
+            </Button>
+          )}
+          <Button variant="outline" asChild>
+            <Link to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}>
+              Re-run
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {job.status === "completed" &&

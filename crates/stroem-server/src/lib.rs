@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cancellation;
 pub mod config;
 pub mod hooks;
 pub mod job_completion;

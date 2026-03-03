@@ -5,7 +5,7 @@ use crate::log_storage::LogStorage;
 use crate::oidc::OidcProvider;
 use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use uuid::Uuid;
@@ -20,6 +20,9 @@ pub struct AppState {
     pub log_storage: Arc<LogStorage>,
     pub oidc_providers: Arc<HashMap<String, OidcProvider>>,
     pub job_completion: Arc<JobCompletionNotifier>,
+    /// Set of job IDs that have been cancelled. Workers poll this to detect
+    /// cancellation and kill running processes.
+    pub cancelled_jobs: Arc<std::sync::RwLock<HashSet<Uuid>>>,
 }
 
 impl AppState {
@@ -39,6 +42,7 @@ impl AppState {
             log_storage: Arc::new(log_storage),
             oidc_providers: Arc::new(oidc_providers),
             job_completion: Arc::new(JobCompletionNotifier::new()),
+            cancelled_jobs: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
@@ -99,6 +103,24 @@ mod tests {
         let log_storage = LogStorage::new(log_dir);
         let pool = PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
         AppState::new(pool, mgr, config, log_storage, HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_jobs_set_operations() {
+        let temp_dir = TempDir::new().unwrap();
+        let state = test_state(temp_dir.path());
+        let job_id = Uuid::new_v4();
+
+        // Initially empty
+        assert!(!state.cancelled_jobs.read().unwrap().contains(&job_id));
+
+        // Insert
+        state.cancelled_jobs.write().unwrap().insert(job_id);
+        assert!(state.cancelled_jobs.read().unwrap().contains(&job_id));
+
+        // Remove
+        state.cancelled_jobs.write().unwrap().remove(&job_id);
+        assert!(!state.cancelled_jobs.read().unwrap().contains(&job_id));
     }
 
     #[tokio::test]

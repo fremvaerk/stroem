@@ -35,12 +35,23 @@ pub async fn on_step_completed(
         tracing::info!("Skipped unreachable steps: {:?}", skipped);
     }
 
-    // 3. Check if all steps are terminal (completed/failed/skipped)
+    // 3. Check if all steps are terminal (completed/failed/skipped/cancelled)
     let all_terminal = JobStepRepo::all_steps_terminal(pool, job_id)
         .await
         .context("Failed to check if all steps are terminal")?;
 
     if all_terminal {
+        // If the job is already cancelled, don't overwrite it
+        let current_job = JobRepo::get(pool, job_id).await?;
+        if let Some(ref j) = current_job {
+            if j.status == "cancelled" {
+                tracing::info!(
+                    "Job {} is already cancelled, skipping status update",
+                    job_id
+                );
+                return Ok(());
+            }
+        }
         // 4. Check if any step failed
         let failed_names = JobStepRepo::get_failed_step_names(pool, job_id)
             .await

@@ -53,9 +53,10 @@ pub async fn fire_hooks(
     }
 
     // Select task-level and workspace-level hooks for this event type
+    // Cancelled jobs fire on_error hooks (treated as failure)
     let (task_hooks, ws_hooks) = match job.status.as_str() {
         "completed" => (&task.on_success, &workspace_config.on_success),
-        "failed" => (&task.on_error, &workspace_config.on_error),
+        "failed" | "cancelled" => (&task.on_error, &workspace_config.on_error),
         _ => return,
     };
 
@@ -109,7 +110,7 @@ pub async fn fire_hooks(
     let hook_type = if job.status == "completed" {
         "on_success"
     } else {
-        "on_error"
+        "on_error" // covers both "failed" and "cancelled"
     };
 
     for (i, hook) in hooks.iter().enumerate() {
@@ -340,7 +341,7 @@ mod tests {
 
         let (task_hooks, ws_hooks) = match job_status {
             "completed" => (&task.on_success, &workspace_config.on_success),
-            "failed" => (&task.on_error, &workspace_config.on_error),
+            "failed" | "cancelled" => (&task.on_error, &workspace_config.on_error),
             _ => return None,
         };
 
@@ -700,12 +701,23 @@ mod tests {
         );
         let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![make_hook("ws-alert")]);
 
-        for status in &["pending", "running", "cancelled", "unknown"] {
+        for status in &["pending", "running", "unknown"] {
             assert!(
                 select_hooks_for_job(&ws, "api", status, &task).is_none(),
                 "status '{status}' should not trigger hooks"
             );
         }
+    }
+
+    /// Cancelled jobs fire on_error hooks (treated as failure).
+    #[test]
+    fn test_cancelled_fires_on_error_hooks() {
+        let task = make_task_def(vec![], vec![make_hook("task-alert")]);
+        let ws = make_workspace_config(vec![], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "api", "cancelled", &task).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].action, "task-alert");
     }
 
     /// Multiple workspace fallback hooks are all returned.

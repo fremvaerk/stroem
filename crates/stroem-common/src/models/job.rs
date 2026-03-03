@@ -23,6 +23,7 @@ pub enum StepStatus {
     Completed,
     Failed,
     Skipped,
+    Cancelled,
 }
 
 /// Source of job execution
@@ -111,6 +112,16 @@ mod tests {
 
         let deserialized: StepStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, StepStatus::Ready);
+    }
+
+    #[test]
+    fn test_step_status_cancelled_serialization() {
+        let status = StepStatus::Cancelled;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#""cancelled""#);
+
+        let deserialized: StepStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, StepStatus::Cancelled);
     }
 
     #[test]

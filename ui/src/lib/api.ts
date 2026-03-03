@@ -299,6 +299,12 @@ export async function getUser(id: string): Promise<UserDetail> {
   return apiFetch<UserDetail>(`/api/users/${id}`);
 }
 
+export async function cancelJob(id: string): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/api/jobs/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
+}
+
 export async function getStepLogs(
   jobId: string,
   stepName: string,

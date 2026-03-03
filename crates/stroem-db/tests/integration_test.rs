@@ -1536,3 +1536,592 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Cancellation tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_cancel_job() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create a job with default pending status
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "cancel-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Verify initial state is pending
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist");
+    assert_eq!(job.status, "pending");
+    assert!(job.completed_at.is_none());
+
+    // Cancel the pending job — should succeed
+    let cancelled = JobRepo::cancel(&pool, job_id).await?;
+    assert!(cancelled, "cancel() should return true for a pending job");
+
+    // Verify status and completed_at are set
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist");
+    assert_eq!(job.status, "cancelled");
+    assert!(
+        job.completed_at.is_some(),
+        "completed_at should be set after cancel"
+    );
+
+    // Attempt to cancel again — already terminal, should return false
+    let cancelled_again = JobRepo::cancel(&pool, job_id).await?;
+    assert!(
+        !cancelled_again,
+        "cancel() should return false when job is already terminal"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_job_running() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create a worker and a job, then transition to running
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "cancel-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "cancel-running-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Transition to running via mark_running_if_pending
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist");
+    assert_eq!(job.status, "running");
+
+    // Cancel the running job — should succeed
+    let cancelled = JobRepo::cancel(&pool, job_id).await?;
+    assert!(cancelled, "cancel() should return true for a running job");
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist");
+    assert_eq!(job.status, "cancelled");
+    assert!(job.completed_at.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_job_already_completed() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "cancel-completed-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Mark completed before attempting cancel
+    JobRepo::mark_completed(&pool, job_id, Some(serde_json::json!({"result": "ok"}))).await?;
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist");
+    assert_eq!(job.status, "completed");
+
+    // Cancel on an already-completed job — should return false
+    let cancelled = JobRepo::cancel(&pool, job_id).await?;
+    assert!(
+        !cancelled,
+        "cancel() should return false for a completed job"
+    );
+
+    // Status must remain completed
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Job should exist");
+    assert_eq!(job.status, "completed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_child_jobs() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create a parent job
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Create two active child jobs linked to the parent
+    let child1_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("step-a"),
+    )
+    .await?;
+
+    let child2_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("step-b"),
+    )
+    .await?;
+
+    // Both children are pending — get_child_jobs returns pending + running
+    let children = JobRepo::get_child_jobs(&pool, parent_id).await?;
+    assert_eq!(
+        children.len(),
+        2,
+        "Both pending children should be returned"
+    );
+
+    let child_ids: Vec<Uuid> = children.iter().map(|j| j.job_id).collect();
+    assert!(child_ids.contains(&child1_id));
+    assert!(child_ids.contains(&child2_id));
+
+    // Complete one child — it should no longer appear in get_child_jobs
+    JobRepo::mark_completed(&pool, child1_id, None).await?;
+
+    let children = JobRepo::get_child_jobs(&pool, parent_id).await?;
+    assert_eq!(children.len(), 1, "Completed child should not be returned");
+    assert_eq!(children[0].job_id, child2_id);
+
+    // Complete the second child — result should be empty
+    JobRepo::mark_completed(&pool, child2_id, None).await?;
+
+    let children = JobRepo::get_child_jobs(&pool, parent_id).await?;
+    assert!(children.is_empty(), "No active children should remain");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_pending_steps() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Need a worker to mark a step as running
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "cancel-steps-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "cancel-steps-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Create three steps: one pending, one ready, one running
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "pending-step".to_string(),
+            action_name: "action1".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "ready-step".to_string(),
+            action_name: "action2".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "running-step".to_string(),
+            action_name: "action3".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Transition the third step to running
+    JobStepRepo::mark_running(&pool, job_id, "running-step", worker_id).await?;
+
+    // cancel_pending_steps should cancel pending + ready (2 steps), leaving running untouched
+    let count = JobStepRepo::cancel_pending_steps(&pool, job_id).await?;
+    assert_eq!(count, 2, "Two steps (pending + ready) should be cancelled");
+
+    // Verify individual step statuses
+    let all_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let status_map: HashMap<String, String> = all_steps
+        .iter()
+        .map(|s| (s.step_name.clone(), s.status.clone()))
+        .collect();
+
+    assert_eq!(status_map["pending-step"], "cancelled");
+    assert_eq!(status_map["ready-step"], "cancelled");
+    assert_eq!(
+        status_map["running-step"], "running",
+        "Running step must not be cancelled by cancel_pending_steps"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_running_steps() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "running-steps-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "running-steps-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Create steps in mixed statuses
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "pending-step".to_string(),
+            action_name: "action1".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "pending".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "ready-step".to_string(),
+            action_name: "action2".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "running-step-a".to_string(),
+            action_name: "action3".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "running-step-b".to_string(),
+            action_name: "action4".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "completed-step".to_string(),
+            action_name: "action5".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Before any running steps, result should be empty
+    let running = JobStepRepo::get_running_steps(&pool, job_id).await?;
+    assert!(running.is_empty(), "No running steps initially");
+
+    // Transition two steps to running and one to completed
+    JobStepRepo::mark_running(&pool, job_id, "running-step-a", worker_id).await?;
+    JobStepRepo::mark_running(&pool, job_id, "running-step-b", worker_id).await?;
+    JobStepRepo::mark_running(&pool, job_id, "completed-step", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "completed-step", None).await?;
+
+    // Only the two actively running steps should be returned
+    let running = JobStepRepo::get_running_steps(&pool, job_id).await?;
+    assert_eq!(running.len(), 2, "Exactly two steps should be running");
+
+    let running_names: Vec<&str> = running.iter().map(|s| s.step_name.as_str()).collect();
+    assert!(running_names.contains(&"running-step-a"));
+    assert!(running_names.contains(&"running-step-b"));
+
+    // Pending, ready, and completed steps must not appear
+    assert!(!running_names.contains(&"pending-step"));
+    assert!(!running_names.contains(&"ready-step"));
+    assert!(!running_names.contains(&"completed-step"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mark_cancelled_only_running() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "mark-cancelled-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "mark-cancelled-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Create a completed step and a running step
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "completed-step".to_string(),
+            action_name: "action1".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "running-step".to_string(),
+            action_name: "action2".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Put both through running, then complete one
+    JobStepRepo::mark_running(&pool, job_id, "completed-step", worker_id).await?;
+    JobStepRepo::mark_completed(
+        &pool,
+        job_id,
+        "completed-step",
+        Some(serde_json::json!({"ok": true})),
+    )
+    .await?;
+    JobStepRepo::mark_running(&pool, job_id, "running-step", worker_id).await?;
+
+    // Call mark_cancelled on the completed step — the WHERE status = 'running' guard must protect it
+    JobStepRepo::mark_cancelled(&pool, job_id, "completed-step").await?;
+
+    let all_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let status_map: HashMap<String, String> = all_steps
+        .iter()
+        .map(|s| (s.step_name.clone(), s.status.clone()))
+        .collect();
+
+    assert_eq!(
+        status_map["completed-step"], "completed",
+        "Completed step must remain completed after mark_cancelled"
+    );
+
+    // Call mark_cancelled on the running step — it should transition to cancelled
+    JobStepRepo::mark_cancelled(&pool, job_id, "running-step").await?;
+
+    let all_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let status_map: HashMap<String, String> = all_steps
+        .iter()
+        .map(|s| (s.step_name.clone(), s.status.clone()))
+        .collect();
+
+    assert_eq!(
+        status_map["running-step"], "cancelled",
+        "Running step should be cancelled by mark_cancelled"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_pending_steps_empty() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "empty-cancel-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "empty-cancel-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Create steps, then complete them all so none are pending or ready
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "step-a".to_string(),
+            action_name: "action1".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+        NewJobStep {
+            job_id,
+            step_name: "step-b".to_string(),
+            action_name: "action2".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // Transition both to completed via running
+    JobStepRepo::mark_running(&pool, job_id, "step-a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step-a", None).await?;
+    JobStepRepo::mark_running(&pool, job_id, "step-b", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step-b", None).await?;
+
+    // No pending/ready steps remain — cancel_pending_steps should return 0
+    let count = JobStepRepo::cancel_pending_steps(&pool, job_id).await?;
+    assert_eq!(
+        count, 0,
+        "No steps should be cancelled when all are already completed"
+    );
+
+    // Verify statuses are unchanged
+    let all_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    for step in &all_steps {
+        assert_eq!(
+            step.status, "completed",
+            "Step {} should remain completed",
+            step.step_name
+        );
+    }
+
+    Ok(())
+}

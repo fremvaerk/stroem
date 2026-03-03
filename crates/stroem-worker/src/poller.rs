@@ -120,14 +120,45 @@ async fn execute_claimed_step(
         }
     });
 
+    // Create a cancellation token for this step and spawn a cancel-checker
+    let step_cancel = CancellationToken::new();
+    let cancel_client = client.clone();
+    let cancel_job_id = step.job_id;
+    let cancel_token_clone = step_cancel.clone();
+    let cancel_checker = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            match cancel_client.check_job_cancelled(cancel_job_id).await {
+                Ok(true) => {
+                    tracing::info!(
+                        "Job {} cancelled by server, signalling runner",
+                        cancel_job_id
+                    );
+                    cancel_token_clone.cancel();
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to check cancellation for job {}: {:#}",
+                        cancel_job_id,
+                        e
+                    );
+                }
+            }
+        }
+    });
+
     // Execute the step inside an inner spawn to catch panics
     let inner_executor = executor.clone();
     let inner_step = step.clone();
     let inner_ws = ws_dir_str.clone();
     let inner_buffer = log_buffer.clone();
+    let inner_cancel = step_cancel.clone();
     let exec_handle = tokio::spawn(async move {
         inner_executor
-            .execute_step(&inner_step, &inner_ws, inner_buffer)
+            .execute_step(&inner_step, &inner_ws, inner_buffer, inner_cancel)
             .await
     });
 
@@ -138,6 +169,9 @@ async fn execute_claimed_step(
             Err(anyhow::anyhow!(msg))
         }
     };
+
+    // Stop the cancel-checker task
+    cancel_checker.abort();
 
     // Signal the log pusher to stop after its current flush completes
     log_cancel.cancel();

@@ -332,6 +332,34 @@ impl ServerClient {
         Ok(Some((bytes.to_vec(), revision)))
     }
 
+    /// Check if a job has been cancelled on the server
+    #[tracing::instrument(skip(self))]
+    pub async fn check_job_cancelled(&self, job_id: Uuid) -> Result<bool> {
+        let url = format!("{}/worker/jobs/{}/cancelled", self.base_url, job_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await
+            .context("Failed to check job cancellation")?;
+
+        let response = Self::check_response(response, "Check cancelled").await?;
+
+        #[derive(Deserialize)]
+        struct CancelledResponse {
+            cancelled: bool,
+        }
+
+        let resp: CancelledResponse = response
+            .json()
+            .await
+            .context("Failed to parse cancellation response")?;
+
+        Ok(resp.cancelled)
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(

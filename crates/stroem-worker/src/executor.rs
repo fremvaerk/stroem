@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use stroem_runner::{LogCallback, LogLine, RunConfig, RunResult, Runner, RunnerMode, ShellRunner};
+use tokio_util::sync::CancellationToken;
 
 use crate::client::ClaimedStep;
 
@@ -91,12 +92,13 @@ impl StepExecutor {
 
     /// Execute a claimed step and return the result.
     /// `workspace_dir` is the path to the extracted workspace for this step's workspace.
-    #[tracing::instrument(skip(self, log_buffer))]
+    #[tracing::instrument(skip(self, log_buffer, cancel_token))]
     pub async fn execute_step(
         &self,
         step: &ClaimedStep,
         workspace_dir: &str,
         log_buffer: Arc<Mutex<Vec<serde_json::Value>>>,
+        cancel_token: CancellationToken,
     ) -> Result<RunResult> {
         tracing::info!(
             "Executing step '{}' for job {}",
@@ -130,7 +132,7 @@ impl StepExecutor {
             .select_runner(step)
             .context("Failed to select runner")?;
         let result = runner
-            .execute(config, Some(log_callback))
+            .execute(config, Some(log_callback), cancel_token)
             .await
             .context("Failed to execute step")?;
 
@@ -478,7 +480,7 @@ mod tests {
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer.clone())
+            .execute_step(&step, "/tmp", log_buffer.clone(), CancellationToken::new())
             .await
             .unwrap();
 
@@ -505,7 +507,7 @@ mod tests {
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer)
+            .execute_step(&step, "/tmp", log_buffer, CancellationToken::new())
             .await
             .unwrap();
 
@@ -525,7 +527,7 @@ mod tests {
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer.clone())
+            .execute_step(&step, "/tmp", log_buffer.clone(), CancellationToken::new())
             .await
             .unwrap();
 
@@ -551,7 +553,7 @@ mod tests {
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer.clone())
+            .execute_step(&step, "/tmp", log_buffer.clone(), CancellationToken::new())
             .await
             .unwrap();
 

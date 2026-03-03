@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, env = "STROEM_URL", default_value = "http://localhost:8080")]
     server: String,
 
+    /// Authentication token (API key or JWT). Can also be set via STROEM_TOKEN env var.
+    #[arg(long, env = "STROEM_TOKEN")]
+    token: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -65,6 +69,11 @@ enum Commands {
         #[arg(long, default_value = "20")]
         limit: i64,
     },
+    /// Cancel a running or pending job
+    Cancel {
+        /// Job ID
+        job_id: String,
+    },
     /// List workspaces
     Workspaces,
 }
@@ -74,7 +83,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let client = Client::new();
+    let client = build_client(cli.token.as_deref())?;
 
     match cli.command {
         Commands::Validate { path } => {
@@ -96,6 +105,9 @@ async fn main() -> Result<()> {
         Commands::Tasks { workspace } => {
             cmd_tasks(&client, &cli.server, workspace.as_deref()).await?;
         }
+        Commands::Cancel { job_id } => {
+            cmd_cancel(&client, &cli.server, &job_id).await?;
+        }
         Commands::Jobs { limit } => {
             cmd_jobs(&client, &cli.server, limit).await?;
         }
@@ -105,6 +117,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build HTTP client, optionally with a default Authorization header.
+fn build_client(token: Option<&str>) -> Result<Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = token {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+                .context("Invalid token value")?,
+        );
+    }
+    Client::builder()
+        .default_headers(headers)
+        .build()
+        .context("Failed to build HTTP client")
 }
 
 async fn cmd_trigger(
@@ -134,6 +162,26 @@ async fn cmd_trigger(
         .unwrap_or("unknown");
 
     println!("Job created: {}", job_id);
+    Ok(())
+}
+
+async fn cmd_cancel(client: &Client, server: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .post(format!("{}/api/jobs/{}/cancel", server, job_id))
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    let body: Value = resp.json().await.context("Failed to parse response")?;
+
+    check_response(&status, &body)?;
+
+    let result_status = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    println!("Job {}: {}", job_id, result_status);
     Ok(())
 }
 
@@ -625,6 +673,25 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Subcommand: cancel
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn cancel_subcommand_captures_job_id() {
+        let cli = parse(&["stroem", "cancel", "abc-123"]).unwrap();
+        match cli.command {
+            Commands::Cancel { job_id } => assert_eq!(job_id, "abc-123"),
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn cancel_subcommand_requires_job_id() {
+        let result = parse(&["stroem", "cancel"]);
+        assert!(result.is_err());
+    }
+
+    // ---------------------------------------------------------------------------
     // Subcommand: status
     // ---------------------------------------------------------------------------
 
@@ -904,5 +971,37 @@ tasks:
             .unwrap_err()
             .to_string()
             .contains("Validation failed"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // --token flag
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn token_flag_defaults_to_none() {
+        let cli = parse(&["stroem", "workspaces"]).unwrap();
+        assert!(cli.token.is_none());
+    }
+
+    #[test]
+    fn token_flag_is_captured() {
+        let cli = parse(&["stroem", "--token", "strm_abc123", "workspaces"]).unwrap();
+        assert_eq!(cli.token, Some("strm_abc123".to_string()));
+    }
+
+    // ---------------------------------------------------------------------------
+    // build_client
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn build_client_without_token_succeeds() {
+        let result = build_client(None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_client_with_token_succeeds() {
+        let result = build_client(Some("strm_abc123"));
+        assert!(result.is_ok());
     }
 }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tokio_util::sync::CancellationToken;
 
 /// Result of running a step
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,10 +78,13 @@ pub enum LogStream {
 pub trait Runner: Send + Sync {
     /// Execute a command and return the result.
     /// The log_callback receives log lines in real-time as they're produced.
+    /// The cancel_token can be used to signal cancellation — runners should
+    /// kill the running process and return early when cancelled.
     async fn execute(
         &self,
         config: RunConfig,
         log_callback: Option<LogCallback>,
+        cancel_token: CancellationToken,
     ) -> Result<RunResult>;
 }
 

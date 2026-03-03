@@ -298,12 +298,12 @@ impl JobStepRepo {
         Ok(steps)
     }
 
-    /// Check if all steps for a job are terminal (completed/failed/skipped)
+    /// Check if all steps for a job are terminal (completed/failed/skipped/cancelled)
     pub async fn all_steps_terminal(pool: &PgPool, job_id: Uuid) -> Result<bool> {
         let row: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*) FROM job_step
-            WHERE job_id = $1 AND status NOT IN ('completed', 'failed', 'skipped')
+            WHERE job_id = $1 AND status NOT IN ('completed', 'failed', 'skipped', 'cancelled')
             "#,
         )
         .bind(job_id)
@@ -467,7 +467,7 @@ impl JobStepRepo {
                 let has_failed_dep = flow_step.depends_on.iter().any(|dep| {
                     status_map
                         .get(dep)
-                        .map(|s| s == "failed" || s == "skipped")
+                        .map(|s| s == "failed" || s == "skipped" || s == "cancelled")
                         .unwrap_or(false)
                 });
 
@@ -478,6 +478,56 @@ impl JobStepRepo {
             }
         }
         Ok(skipped)
+    }
+
+    /// Cancel all pending/ready steps for a job. Returns the number of steps cancelled.
+    pub async fn cancel_pending_steps(pool: &PgPool, job_id: Uuid) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'cancelled', completed_at = NOW()
+            WHERE job_id = $1 AND status IN ('pending', 'ready')
+            "#,
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .context("Failed to cancel pending steps")?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Get currently running steps for a job (for active cancellation/kill).
+    pub async fn get_running_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
+        let steps = sqlx::query_as::<_, JobStepRow>(&format!(
+            "SELECT {} FROM job_step WHERE job_id = $1 AND status = 'running'",
+            STEP_COLUMNS
+        ))
+        .bind(job_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to get running steps")?;
+
+        Ok(steps)
+    }
+
+    /// Mark a specific running step as cancelled. Only transitions from 'running' status
+    /// to prevent retroactively cancelling already-completed steps.
+    pub async fn mark_cancelled(pool: &PgPool, job_id: Uuid, step_name: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'cancelled', error_message = 'Job cancelled', completed_at = NOW()
+            WHERE job_id = $1 AND step_name = $2 AND status = 'running'
+            "#,
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await
+        .context("Failed to mark step as cancelled")?;
+
+        Ok(())
     }
 
     /// Find running steps assigned to any of the given (stale) workers.

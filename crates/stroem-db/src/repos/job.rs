@@ -455,6 +455,38 @@ impl JobRepo {
         Ok(jobs)
     }
 
+    /// Cancel a job (set status to cancelled, completed_at to NOW).
+    /// Only cancels jobs that are pending or running. Returns true if the job was updated.
+    pub async fn cancel(pool: &PgPool, job_id: Uuid) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job
+            SET status = 'cancelled', completed_at = NOW()
+            WHERE job_id = $1 AND status IN ('pending', 'running')
+            "#,
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .context("Failed to cancel job")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Get active child jobs for a parent job (for recursive cancellation)
+    pub async fn get_child_jobs(pool: &PgPool, parent_job_id: Uuid) -> Result<Vec<JobRow>> {
+        let jobs = sqlx::query_as::<_, JobRow>(&format!(
+            "SELECT {} FROM job WHERE parent_job_id = $1 AND status IN ('pending', 'running')",
+            JOB_COLUMNS
+        ))
+        .bind(parent_job_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to get child jobs")?;
+
+        Ok(jobs)
+    }
+
     /// Set log path
     pub async fn set_log_path(pool: &PgPool, job_id: Uuid, log_path: &str) -> Result<()> {
         sqlx::query(

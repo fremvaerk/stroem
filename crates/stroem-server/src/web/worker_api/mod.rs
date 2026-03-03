@@ -71,6 +71,7 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
             "/jobs/{id}/steps/{step}/complete",
             post(jobs::complete_step),
         )
+        .route("/jobs/{id}/cancelled", get(jobs::check_cancelled))
         .route("/jobs/{id}/logs", post(jobs::append_log))
         .route("/jobs/{id}/complete", post(jobs::complete_job))
         .route("/workspace/{ws}", get(workspace::download_workspace))

@@ -4,6 +4,7 @@ use crate::traits::{
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
 
 /// Shell runner that executes commands using the system shell
 pub struct ShellRunner;
@@ -26,6 +27,7 @@ impl Runner for ShellRunner {
         &self,
         config: RunConfig,
         log_callback: Option<LogCallback>,
+        cancel_token: CancellationToken,
     ) -> Result<RunResult> {
         // Build command
         let mut cmd = if let Some(ref command) = config.cmd {
@@ -105,40 +107,105 @@ impl Runner for ShellRunner {
             collected
         });
 
-        // Wait for both streams to complete
-        let (stdout_result, stderr_result) = tokio::join!(stdout_handle, stderr_handle);
+        // Race stream reading against cancellation. Stream handles are kept
+        // separate from `child` so we can kill the process on cancel and then
+        // still collect partial output from the readers (they EOF when the
+        // child's pipes close).
+        let streams_future = async {
+            let (stdout_result, stderr_result) = tokio::join!(stdout_handle, stderr_handle);
+            let (stdout_lines, parsed_output) = stdout_result?;
+            let stderr_lines = stderr_result?;
+            Ok::<_, anyhow::Error>((stdout_lines, stderr_lines, parsed_output))
+        };
+        tokio::pin!(streams_future);
 
-        // Unpack results
-        let (stdout_lines, parsed_output) = stdout_result?;
-        let stderr_lines = stderr_result?;
-
-        // Call log_callback for all collected lines if provided
-        if let Some(ref callback) = log_callback {
-            for line in &stdout_lines {
-                callback(LogLine {
-                    stream: LogStream::Stdout,
-                    line: line.clone(),
-                    timestamp: chrono::Utc::now(),
-                });
-            }
-            for line in &stderr_lines {
-                callback(LogLine {
-                    stream: LogStream::Stderr,
-                    line: line.clone(),
-                    timestamp: chrono::Utc::now(),
-                });
-            }
+        enum Outcome {
+            Cancelled,
+            Streams(anyhow::Result<(Vec<String>, Vec<String>, Option<serde_json::Value>)>),
         }
 
-        // Wait for the process to complete
-        let status = child.wait().await?;
+        let outcome = tokio::select! {
+            _ = cancel_token.cancelled() => Outcome::Cancelled,
+            result = &mut streams_future => Outcome::Streams(result),
+        };
 
-        Ok(RunResult {
-            exit_code: status.code().unwrap_or(-1),
-            stdout: stdout_lines.join("\n"),
-            stderr: stderr_lines.join("\n"),
-            output: parsed_output,
-        })
+        match outcome {
+            Outcome::Cancelled => {
+                // Kill the child process — this causes the stream readers to EOF
+                if let Err(e) = child.kill().await {
+                    tracing::warn!("Failed to kill child process on cancel: {:#}", e);
+                }
+                // Wait briefly for stream tasks to finish collecting partial output
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), streams_future)
+                        .await;
+
+                let (stdout_lines, stderr_lines, parsed_output) = match result {
+                    Ok(Ok((out, err, parsed))) => (out, err, parsed),
+                    _ => (Vec::new(), Vec::new(), None),
+                };
+
+                // Deliver partial logs via callback
+                if let Some(ref callback) = log_callback {
+                    for line in &stdout_lines {
+                        callback(LogLine {
+                            stream: LogStream::Stdout,
+                            line: line.clone(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                    for line in &stderr_lines {
+                        callback(LogLine {
+                            stream: LogStream::Stderr,
+                            line: line.clone(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                }
+
+                Ok(RunResult {
+                    exit_code: -1,
+                    stdout: stdout_lines.join("\n"),
+                    stderr: if stderr_lines.is_empty() {
+                        "Job cancelled".to_string()
+                    } else {
+                        format!("{}\nJob cancelled", stderr_lines.join("\n"))
+                    },
+                    output: parsed_output,
+                })
+            }
+            Outcome::Streams(result) => {
+                let (stdout_lines, stderr_lines, parsed_output) = result?;
+
+                // Call log_callback for all collected lines if provided
+                if let Some(ref callback) = log_callback {
+                    for line in &stdout_lines {
+                        callback(LogLine {
+                            stream: LogStream::Stdout,
+                            line: line.clone(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                    for line in &stderr_lines {
+                        callback(LogLine {
+                            stream: LogStream::Stderr,
+                            line: line.clone(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                }
+
+                // Wait for the process to complete
+                let status = child.wait().await?;
+
+                Ok(RunResult {
+                    exit_code: status.code().unwrap_or(-1),
+                    stdout: stdout_lines.join("\n"),
+                    stderr: stderr_lines.join("\n"),
+                    output: parsed_output,
+                })
+            }
+        }
     }
 }
 
@@ -171,7 +238,10 @@ mod tests {
     async fn test_simple_echo() {
         let runner = ShellRunner::new();
         let config = shell_config(Some("echo hello world"), None, HashMap::new());
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello world"));
         assert!(result.output.is_none());
@@ -181,7 +251,10 @@ mod tests {
     async fn test_exit_code() {
         let runner = ShellRunner::new();
         let config = shell_config(Some("exit 42"), None, HashMap::new());
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 42);
     }
 
@@ -191,7 +264,10 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("MY_VAR".to_string(), "my_value".to_string());
         let config = shell_config(Some("echo $MY_VAR"), None, env);
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.stdout.contains("my_value"));
     }
 
@@ -203,7 +279,10 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         let output = result.output.unwrap();
         assert_eq!(output["greeting"], "hello");
@@ -213,7 +292,10 @@ mod tests {
     async fn test_stderr_capture() {
         let runner = ShellRunner::new();
         let config = shell_config(Some("echo error >&2"), None, HashMap::new());
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.stderr.contains("error"));
     }
 
@@ -230,7 +312,10 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let result = runner.execute(config, Some(callback)).await.unwrap();
+        let result = runner
+            .execute(config, Some(callback), CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         let captured = lines.lock().unwrap();
         assert!(captured.len() >= 2);
@@ -240,7 +325,10 @@ mod tests {
     async fn test_working_directory() {
         let runner = ShellRunner::new();
         let config = shell_config(Some("pwd"), None, HashMap::new());
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.stdout.trim().contains("tmp"));
     }
 
@@ -252,7 +340,10 @@ mod tests {
             None,
             HashMap::new(),
         );
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert!(result.stdout.contains("line1"));
         assert!(result.stdout.contains("line2"));
         assert!(result.stdout.contains("line3"));
@@ -262,7 +353,38 @@ mod tests {
     async fn test_no_cmd_or_script_errors() {
         let runner = ShellRunner::new();
         let config = shell_config(None, None, HashMap::new());
-        let result = runner.execute(config, None).await;
+        let result = runner.execute(config, None, CancellationToken::new()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_kills_process() {
+        let runner = ShellRunner::new();
+        let config = shell_config(Some("sleep 60"), None, HashMap::new());
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+
+        // Cancel after 100ms
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            token_clone.cancel();
+        });
+
+        let result = runner.execute(config, None, token).await.unwrap();
+        assert_eq!(result.exit_code, -1);
+        assert_eq!(result.stderr, "Job cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_token_not_cancelled_runs_normally() {
+        let runner = ShellRunner::new();
+        let config = shell_config(Some("echo still-running"), None, HashMap::new());
+        // Token exists but is never cancelled
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("still-running"));
     }
 }

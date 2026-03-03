@@ -10,6 +10,7 @@ use kube::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::{DEFAULT_INIT_IMAGE, DEFAULT_RUNNER_IMAGE};
 
@@ -507,6 +508,7 @@ impl Runner for KubeRunner {
         &self,
         config: RunConfig,
         log_callback: Option<LogCallback>,
+        cancel_token: CancellationToken,
     ) -> Result<RunResult> {
         let client = Client::try_default()
             .await
@@ -564,7 +566,21 @@ impl Runner for KubeRunner {
         let mut pod_terminal = false;
         let mut backoff_first_seen: Option<std::time::Instant> = None;
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("Cancellation requested, deleting pod {}", pod_name);
+                    if let Err(e) = pods.delete(&pod_name, &DeleteParams::default()).await {
+                        tracing::warn!("Failed to delete pod {} on cancel: {:#}", pod_name, e);
+                    }
+                    return Ok(RunResult {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: "Job cancelled".to_string(),
+                        output: None,
+                    });
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
 
             let pod = pods
                 .get(&pod_name)
@@ -707,7 +723,22 @@ impl Runner for KubeRunner {
             // Poll for terminal state concurrently while logs stream.
             // Use explicit match instead of ? to ensure cleanup on error.
             let poll_error: Option<anyhow::Error> = loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("Cancellation requested, deleting pod {}", pod_name);
+                        log_abort.abort();
+                        if let Err(e) = pods.delete(&pod_name, &DeleteParams::default()).await {
+                            tracing::warn!("Failed to delete pod {} on cancel: {:#}", pod_name, e);
+                        }
+                        return Ok(RunResult {
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: "Job cancelled".to_string(),
+                            output: None,
+                        });
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
 
                 let pod = match pods.get(&pod_name).await {
                     Ok(p) => p,
@@ -1106,7 +1137,10 @@ mod tests {
             pod_manifest_overrides: None,
         };
 
-        let result = runner.execute(config, None).await.unwrap();
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello-from-kube"));
     }
@@ -2019,6 +2053,44 @@ mod tests {
             classify_pod_status(&pod),
             Some(PodPhaseStatus::Unknown(ref s)) if s == "SomeWeirdPhase"
         ));
+    }
+
+    /// Integration test: Kubernetes cancellation deletes the pod.
+    /// Run with: cargo test -p stroem-runner --features kubernetes -- --ignored test_kube_cancellation
+    #[tokio::test]
+    #[ignore]
+    async fn test_kube_cancellation() {
+        let runner = KubeRunner::new(
+            "default".to_string(),
+            "http://localhost:8080".to_string(),
+            "test-token".to_string(),
+        );
+        let config = RunConfig {
+            cmd: Some("sleep 60".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+
+        // Cancel after 2s (K8s pods take longer to start)
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            token_clone.cancel();
+        });
+
+        let result = runner.execute(config, None, token).await.unwrap();
+        assert_eq!(result.exit_code, -1);
+        assert!(result.stderr.contains("Job cancelled"));
     }
 
     #[test]
