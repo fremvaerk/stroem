@@ -231,6 +231,12 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         if let Some(task) = task {
             run_terminal_job_actions(state, &job, &workspace, &task).await;
         }
+    } else {
+        tracing::warn!(
+            "Workspace '{}' not found for terminal job {} — skipping hooks and S3 upload",
+            job.workspace,
+            job_id
+        );
     }
 
     Ok(())
@@ -254,7 +260,11 @@ async fn run_terminal_job_actions(
     // If a hook job failed, log it to the original job's server events
     if job.source_type == "hook" && job.status == "failed" {
         if let Some(ref source_id) = job.source_id {
-            if let Ok(original_job_id) = Uuid::parse_str(source_id) {
+            if let Some(original_job_id) = source_id
+                .split('/')
+                .next()
+                .and_then(|s| Uuid::parse_str(s).ok())
+            {
                 let error_msg = get_hook_error_summary(&state.pool, job).await;
                 state
                     .append_server_log(

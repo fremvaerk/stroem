@@ -324,7 +324,10 @@ impl WorkspaceManager {
                     let current_revision =
                         tokio::task::spawn_blocking(move || source_clone.peek_revision())
                             .await
-                            .unwrap_or(None);
+                            .unwrap_or_else(|e| {
+                                tracing::error!("peek_revision task failed: {:#}", e);
+                                None
+                            });
                     if current_revision == last_revision && current_revision.is_some() {
                         continue;
                     }
