@@ -31,7 +31,9 @@ fn validate_workflow_config_inner(
 
         // For type: task, verify the referenced task exists
         if action.action_type == "task" {
-            let task_ref = action.task.as_ref().unwrap(); // validated above
+            let task_ref = action.task.as_ref().expect(
+                "task field is required for action_type == task, enforced by validate_action",
+            );
             if !libraries_resolved && task_ref.contains('.') {
                 // Library task — skip when libraries not resolved
             } else if !config.tasks.contains_key(task_ref) {

@@ -77,6 +77,14 @@ pub struct AppendLogRequest {
     pub step_name: Option<String>,
 }
 
+#[derive(Serialize)]
+struct LogEntry<'a> {
+    ts: &'a str,
+    stream: &'a str,
+    step: &'a str,
+    line: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CompleteJobRequest {
     pub output: Option<serde_json::Value>,
@@ -585,13 +593,13 @@ pub async fn append_log(
         .lines
         .iter()
         .map(|entry| {
-            serde_json::json!({
-                "ts": entry.ts,
-                "stream": entry.stream,
-                "step": step,
-                "line": entry.line,
+            serde_json::to_string(&LogEntry {
+                ts: &entry.ts,
+                stream: &entry.stream,
+                step,
+                line: &entry.line,
             })
-            .to_string()
+            .unwrap_or_default()
         })
         .collect::<Vec<_>>()
         .join("\n")

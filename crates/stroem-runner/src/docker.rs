@@ -30,7 +30,7 @@ impl DockerRunner {
     /// Create a new DockerRunner connecting to a specific Docker host
     pub fn with_host(host: &str) -> Result<Self> {
         let docker = Docker::connect_with_http_defaults()
-            .context(format!("Failed to connect to Docker at {}", host))?;
+            .with_context(|| format!("Failed to connect to Docker at {}", host))?;
         Ok(Self { docker })
     }
 

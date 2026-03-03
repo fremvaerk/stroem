@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { WorkerStatusBadge } from "@/components/worker-status-badge";
 import { InfoGrid } from "@/components/info-grid";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
@@ -81,19 +82,7 @@ export function WorkerDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight">
               {worker.name}
             </h1>
-            <Badge
-              variant="secondary"
-              className={
-                worker.status === "active"
-                  ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
-                  : "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
-              }
-            >
-              {worker.status === "active" && (
-                <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-              )}
-              {worker.status}
-            </Badge>
+            <WorkerStatusBadge status={worker.status} />
           </div>
           <p className="mt-0.5 font-mono text-xs text-muted-foreground">
             {worker.worker_id}

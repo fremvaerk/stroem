@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +57,11 @@ async fn webhook_handler(
         let provided = extract_secret(&query, &headers);
         let is_valid = provided
             .as_deref()
-            .map(|s| s.as_bytes().ct_eq(expected_secret.as_bytes()).into())
+            .map(|s| {
+                let provided_hash = Sha256::digest(s.as_bytes());
+                let expected_hash = Sha256::digest(expected_secret.as_bytes());
+                provided_hash.ct_eq(&expected_hash).into()
+            })
             .unwrap_or(false);
         if !is_valid {
             return (

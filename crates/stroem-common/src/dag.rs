@@ -49,8 +49,13 @@ pub fn validate_dag(flow: &HashMap<String, FlowStep>) -> Result<Vec<String>> {
             }
 
             // Add edge from dep -> step_name
-            adj_list.get_mut(dep).unwrap().push(step_name.clone());
-            *in_degree.get_mut(step_name).unwrap() += 1;
+            adj_list
+                .get_mut(dep)
+                .expect("dep key was inserted during initialization")
+                .push(step_name.clone());
+            *in_degree
+                .get_mut(step_name)
+                .expect("step_name key was inserted during initialization") += 1;
         }
     }
 
@@ -71,7 +76,9 @@ pub fn validate_dag(flow: &HashMap<String, FlowStep>) -> Result<Vec<String>> {
         // Process all dependents
         if let Some(dependents) = adj_list.get(&step_name) {
             for dependent in dependents {
-                let degree = in_degree.get_mut(dependent).unwrap();
+                let degree = in_degree
+                    .get_mut(dependent)
+                    .expect("dependent key was inserted during initialization");
                 *degree -= 1;
                 if *degree == 0 {
                     queue.push_back(dependent.clone());

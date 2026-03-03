@@ -35,6 +35,8 @@ export function StepTimeline({
             <div
               role="button"
               tabIndex={0}
+              aria-label={`${step.step_name}, status: ${step.status}`}
+              aria-expanded={isExpanded}
               className="flex w-full gap-3 text-left hover:bg-muted/50 rounded-md px-1 -mx-1 transition-colors cursor-pointer"
               onClick={() =>
                 onSelectStep(isExpanded ? null : step.step_name)

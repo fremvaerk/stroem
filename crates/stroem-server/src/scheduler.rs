@@ -64,10 +64,14 @@ async fn run_loop(pool: PgPool, workspaces: Arc<WorkspaceManager>, cancel: Cance
 
         // Fire due triggers
         for key in &to_fire {
-            let state = triggers.get(key).unwrap();
+            let state = triggers
+                .get(key)
+                .expect("key came from iterating the triggers map");
             fire_trigger(&pool, &workspaces, state).await;
 
-            let state = triggers.get_mut(key).unwrap();
+            let state = triggers
+                .get_mut(key)
+                .expect("key came from iterating the triggers map");
             let now = Utc::now();
             state.last_run = Some(now);
             state.next_run = compute_next_run(&state.cron, Some(now), now);

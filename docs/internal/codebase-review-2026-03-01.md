@@ -22,38 +22,38 @@
 ## High Severity
 
 ### Security
-- **No rate limiting** on login, refresh, API key, and worker endpoints — brute-force risk
-- **OIDC state cookie missing `Secure` flag** — PKCE verifier transmitted over plain HTTP
-- **Refresh token in localStorage** — accessible to XSS; should be HttpOnly cookie
+- ~~**No rate limiting** on login, refresh, API key, and worker endpoints — brute-force risk~~ **FIXED** (per-IP rate limiting via `tower-governor`)
+- ~~**OIDC state cookie missing `Secure` flag** — PKCE verifier transmitted over plain HTTP~~ **FIXED** (conditional `; Secure` when base_url is HTTPS)
+- ~~**Refresh token in localStorage** — accessible to XSS; should be HttpOnly cookie~~ **FIXED** (HttpOnly cookie with SameSite=Strict, Path=/api/auth)
 - **Pod manifest overrides** can set `privileged: true`, `hostPath`, etc. — no blocklist
 
 ### Architecture
 - **Single-server bottleneck**: scheduler, recovery sweeper, log broadcast are all in-process with no leader election — prevents horizontal scaling
-- **No graceful shutdown on worker** — SIGTERM kills in-flight step executions
+- ~~**No graceful shutdown on worker** — SIGTERM kills in-flight step executions~~ **FIXED** (CancellationToken + semaphore drain)
 - **No runner cancellation mechanism** — stuck pods/containers run indefinitely (KubeRunner busy-polls forever with no timeout)
-- **No request timeouts on worker HTTP client** — hung server blocks worker indefinitely
+- ~~**No request timeouts on worker HTTP client** — hung server blocks worker indefinitely~~ **FIXED** (configurable connect + request timeouts)
 
 ### Code Quality
-- **Terminal job handling duplicated 3 times** in `job_recovery.rs` (~60 lines each) — `orchestrate_after_step`, `propagate_to_parent`, `handle_job_terminal`
-- **`blocking_read()` inside async fn** (`workspace/mod.rs:212`) — deadlocks on single-thread runtime
-- **`block_in_place` in spawned tasks** (`workspace/mod.rs:330`) — breaks on `current_thread` runtime; use `spawn_blocking`
+- ~~**Terminal job handling duplicated 3 times** in `job_recovery.rs` (~60 lines each)~~ **FIXED** (consolidated into `run_terminal_job_actions`)
+- ~~**`blocking_read()` inside async fn** (`workspace/mod.rs:212`) — deadlocks on single-thread runtime~~ **FIXED** (uses async `read().await`)
+- ~~**`block_in_place` in spawned tasks** (`workspace/mod.rs:330`) — breaks on `current_thread` runtime~~ **FIXED** (uses `spawn_blocking`)
 
 ### Performance
-- **Missing partial GIN index** on `job_step(status='ready', action_type!='task')` — claim query scans all historical steps
+- ~~**Missing partial GIN index** on `job_step(status='ready', action_type!='task')`~~ **FIXED** (migration 009)
 - **N+1 queries in orchestration**: `promote_ready_steps` fetches ALL steps then updates one-by-one
 - **Log file opened/closed on every append** (`log_storage.rs:129-146`) — 4 syscalls per chunk with 100 concurrent steps
-- **`get_workspace` called 4 times in single `claim_job` handler** — 4 lock acquisitions + deep clones per claim
+- ~~**`get_workspace` called 4 times in single `claim_job` handler**~~ **FIXED** (consolidated to single call)
 
 ### Frontend
-- **No error boundaries** — any render error crashes entire app to blank screen
+- ~~**No error boundaries** — any render error crashes entire app to blank screen~~ **FIXED** (per-page error boundaries + top-level catch-all)
 - **`useAsyncData` has no cancellation** — stale responses overwrite fresh state
 - **`useWorkerNames` fires separate HTTP request from every component** that imports it
 - **Dashboard fetches 100 jobs every 5s but uses only 10**; stat counts are wrong when >100 jobs exist
 
 ### Test Coverage
-- **Orchestrator has zero unit tests** — the most critical state machine in the codebase
+- ~~**Orchestrator has zero unit tests**~~ **FIXED** (9 integration tests covering DAG promotion, failures, continue_on_failure, diamond joins)
 - **Worker `execute_claimed_step` has no integration test** — core execution path tested only by shell E2E
-- **CLI has zero tests** (458 lines, completely untested)
+- ~~**CLI has zero tests**~~ **FIXED** (35 unit tests covering arg parsing, URL construction, validation, response checking)
 - **No live DockerRunner or KubeRunner execution tests**
 - **No frontend unit tests** (no Vitest setup) — token refresh race, WebSocket sequencing untested
 
@@ -64,7 +64,7 @@
 ### Security
 - Secrets passed as environment variables to containers (visible in pod spec, `/proc/environ`)
 - Webhook secret accepted in query string (logged by proxies, CDNs)
-- `subtle::ct_eq` short-circuits on length mismatch — length of webhook/worker secrets leakable
+- ~~`subtle::ct_eq` short-circuits on length mismatch — length of webhook/worker secrets leakable~~ **FIXED** (SHA-256 hash before ct_eq)
 - No authorization per-worker: any authenticated worker can complete any step, access any workspace
 - Refresh tokens not invalidated on password change (30-day window)
 - Error messages leak internal details (SQL errors, file paths) to API clients
@@ -75,19 +75,19 @@
 - No metrics/Prometheus endpoint — capacity planning blind
 - No proper health check (`/api/config` liveness probe doesn't verify DB/background tasks)
 - Log retention: local JSONL files grow unboundedly; no cleanup after S3 upload
-- Worker heartbeat task has no graceful shutdown (`tokio::spawn` with no `CancellationToken`)
-- Workspace watchers spawn with no cancellation token — no clean shutdown
+- ~~Worker heartbeat task has no graceful shutdown~~ **FIXED** (CancellationToken wired to shutdown signal)
+- ~~Workspace watchers spawn with no cancellation token — no clean shutdown~~ **FIXED** (CancellationToken passed from server main)
 - No API versioning (`/api/` with no version prefix)
 
 ### Code Quality / Rust
 - `action_type`, `status`, `source_type` are all `String` — should be enums for exhaustive matching
-- `log_handle.abort()` without `.await` — race condition on final log drain (`poller.rs:134`)
-- `context(format!(...))` at 3 sites — eagerly allocates on happy path; use `with_context(|| ...)`
-- `unwrap()` in production validation code (`dag.rs:52-53`, `validation.rs:34`)
-- Connection pool uses sqlx default (10 connections) — insufficient under concurrent load
+- ~~`log_handle.abort()` without `.await` — race condition on final log drain~~ **FIXED** (CancellationToken + graceful shutdown)
+- ~~`context(format!(...))` at 3 sites — eagerly allocates on happy path; use `with_context(|| ...)`~~ **FIXED**
+- ~~`unwrap()` in production validation code (`dag.rs:52-53`, `validation.rs:34`)~~ **FIXED** (replaced with `expect()`)
+- ~~Connection pool uses sqlx default (10 connections) — insufficient under concurrent load~~ **FIXED** (PgPoolOptions with max=20, min=5)
 - Workspace config deep-cloned on every `get_config_async` call — should return `Arc<WorkspaceConfig>`
-- Worker tarball extraction uses blocking I/O in async context without `spawn_blocking`
-- `notify` dependency hardcodes `macos_fsevent` feature — may fail to compile on Linux
+- ~~Worker tarball extraction uses blocking I/O in async context without `spawn_blocking`~~ **FIXED**
+- ~~`notify` dependency hardcodes `macos_fsevent` feature — may fail to compile on Linux~~ **FIXED** (uses default features)
 
 ### Performance
 - Claim query ordering causes hot-row contention (all workers compete for same UUID-ordered step)
@@ -95,8 +95,8 @@
 - S3 upload reads entire log into memory + blocks async with synchronous gzip compression
 - `LogBroadcast::subscribe` always acquires write lock even when channel exists
 - `WorkflowDag` recalculates full dagre layout on every `selectedStep` change
-- No Vite code splitting — `@xyflow/react` (~250KB) in main bundle
-- JSONL log line construction uses `serde_json::json!` macro (intermediate `Value` allocation per line)
+- ~~No Vite code splitting — `@xyflow/react` (~250KB) in main bundle~~ **FIXED** (manualChunks for xyflow)
+- ~~JSONL log line construction uses `serde_json::json!` macro (intermediate `Value` allocation per line)~~ **FIXED** (LogEntry struct)
 
 ### Test Coverage
 - No test for `render_connections()` or `resolve_connection_inputs()` in template.rs
@@ -107,19 +107,19 @@
 - No E2E test for worker recovery or cron scheduler triggers
 
 ### Frontend
-- Duplicated functions: `formatTime`/`formatDuration`/`formatRelativeTime` in `task-detail.tsx`
-- Worker status badge styling duplicated across `workers.tsx` and `worker-detail.tsx`
+- ~~Duplicated functions: `formatTime`/`formatDuration`/`formatRelativeTime` in `task-detail.tsx`~~ **FIXED** (extracted to `ui/src/lib/formatting.ts`)
+- ~~Worker status badge styling duplicated across `workers.tsx` and `worker-detail.tsx`~~ **FIXED** (shared `WorkerStatusBadge` component)
 - Loading spinner duplicated 10 times instead of using `LoadingSpinner` component
 - `task-detail.tsx` at 877 lines — should extract `InputFieldRow` and `ComboboxField`
 - `useAsyncData` doesn't reset data when fetcher changes — shows stale rows during loading
-- `apiFetch` calls `res.json()` on 204 No Content — throws unhandled error
+- ~~`apiFetch` calls `res.json()` on 204 No Content — throws unhandled error~~ **FIXED**
 - `useAsyncData` silently swallows all errors — no `error` state exposed
-- `sonner` and `next-themes` bundled but `<Toaster>` never mounted
+- ~~`sonner` and `next-themes` bundled but `<Toaster>` never mounted~~ **FIXED** (removed from deps)
 
 ### Accessibility
-- `StepTimeline` buttons missing `aria-label` and `aria-expanded`
-- `LogViewer` scrollable container has no `role="log"` or `aria-label`
-- "Live" streaming indicator is purely visual — no screen reader equivalent
+- ~~`StepTimeline` buttons missing `aria-label` and `aria-expanded`~~ **FIXED**
+- ~~`LogViewer` scrollable container has no `role="log"` or `aria-label`~~ **FIXED**
+- ~~"Live" streaming indicator is purely visual — no screen reader equivalent~~ **FIXED** (sr-only text)
 - `title` attributes used instead of accessible Tooltip components
 
 ---
@@ -130,25 +130,25 @@
 1. ~~**Add auth to WebSocket endpoint** — extract `AuthUser` in `ws.rs`~~ **DONE**
 2. ~~**Remove worker token from K8s pod spec** — use Secret ref + env var~~ **DONE** (moved to env array; K8s Secret ref is future improvement)
 3. ~~**Restrict CORS** to configured `base_url` origin~~ **DONE**
-4. **Add `Secure` flag** to OIDC state cookie when `base_url` is HTTPS
+4. ~~**Add `Secure` flag** to OIDC state cookie when `base_url` is HTTPS~~ **DONE**
 5. ~~**Fix `useJobLogs` race** — wait for REST backfill before starting WS accumulation~~ **DONE**
 6. ~~**Pass status filter to server API** in jobs page~~ **DONE**
-7. **Add error boundaries** around pages and DAG component
-8. **Add partial GIN index** on `job_step(status='ready')`
-9. **Fix `blocking_read`** in `get_config` — use `read().await` or remove method
-10. **Add HTTP timeouts** to worker client (1 line change)
+7. ~~**Add error boundaries** around pages and DAG component~~ **DONE** (per-page + DAG-specific)
+8. ~~**Add partial GIN index** on `job_step(status='ready')`~~ **DONE** (migration 009)
+9. ~~**Fix `blocking_read`** in `get_config` — use `read().await` or remove method~~ **DONE**
+10. ~~**Add HTTP timeouts** to worker client~~ **DONE**
 
 ### Short-term (days)
 11. ~~Wrap job+step creation in database transactions~~ **DONE**
-12. Extract terminal job handling into single function (remove 3x duplication)
-13. Add graceful shutdown to worker with `CancellationToken`
-14. Add `CancellationToken` to workspace watchers
-15. Fix 4x `get_workspace` in `claim_job` → single call
-16. Wrap `extract_tarball` in `spawn_blocking`
-17. Add Vite `manualChunks` for `@xyflow/react`
-18. Add rate limiting on auth endpoints
-19. Move refresh token to HttpOnly cookie
-20. Add orchestrator unit tests + CLI tests
+12. ~~Extract terminal job handling into single function (remove 3x duplication)~~ **DONE** (`run_terminal_job_actions`)
+13. ~~Add graceful shutdown to worker with `CancellationToken`~~ **DONE**
+14. ~~Add `CancellationToken` to workspace watchers~~ **DONE**
+15. ~~Fix 4x `get_workspace` in `claim_job` → single call~~ **DONE**
+16. ~~Wrap `extract_tarball` in `spawn_blocking`~~ **DONE**
+17. ~~Add Vite `manualChunks` for `@xyflow/react`~~ **DONE**
+18. ~~Add rate limiting on auth endpoints~~ **DONE** (per-IP via tower-governor)
+19. ~~Move refresh token to HttpOnly cookie~~ **DONE** (BFF pattern, SameSite=Strict)
+20. ~~Add orchestrator unit tests + CLI tests~~ **DONE** (9 orchestrator + 35 CLI tests)
 
 ### Medium-term (weeks)
 21. Convert stringly-typed fields to enums (`ActionType`, `JobStatus`, `SourceType`)

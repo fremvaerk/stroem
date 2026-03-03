@@ -82,7 +82,7 @@ pub fn load_config(path: &str) -> Result<WorkerConfig> {
                 .separator("__"),
         )
         .build()
-        .context(format!("Failed to build config from: {}", path))?
+        .with_context(|| format!("Failed to build config from: {}", path))?
         .try_deserialize()
         .context("Failed to deserialize worker config")?;
     config.validate()?;

@@ -10,6 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { WorkerStatusBadge } from "@/components/worker-status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { useTitle } from "@/hooks/use-title";
 import { useAsyncData } from "@/hooks/use-async-data";
@@ -75,19 +76,7 @@ export function WorkersPage() {
                       </Link>
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant="secondary"
-                        className={
-                          w.status === "active"
-                            ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
-                            : "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
-                        }
-                      >
-                        {w.status === "active" && (
-                          <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-                        )}
-                        {w.status}
-                      </Badge>
+                      <WorkerStatusBadge status={w.status} />
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">

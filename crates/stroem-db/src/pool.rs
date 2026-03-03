@@ -1,9 +1,15 @@
 use anyhow::Result;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Duration;
 
-/// Create a PostgreSQL connection pool
 pub async fn create_pool(database_url: &str) -> Result<PgPool> {
-    let pool = PgPool::connect(database_url).await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(database_url)
+        .await?;
     Ok(pool)
 }
 

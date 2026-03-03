@@ -65,15 +65,19 @@ export function LogViewer({ logs, isStreaming }: LogViewerProps) {
     <div className="relative">
       {isStreaming && (
         <div className="absolute right-3 top-3 flex items-center gap-1.5">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" />
-          <span className="text-[10px] font-medium uppercase tracking-wider text-green-600 dark:text-green-400">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" aria-hidden="true" />
+          <span className="text-[10px] font-medium uppercase tracking-wider text-green-600 dark:text-green-400" aria-hidden="true">
             Live
           </span>
+          <span className="sr-only">Log streaming is active</span>
         </div>
       )}
       <div
         ref={containerRef}
         onScroll={handleScroll}
+        role="log"
+        aria-label="Job execution logs"
+        aria-live="polite"
         className="max-h-[500px] min-h-[200px] overflow-auto rounded-lg bg-zinc-950 p-4 font-mono text-xs leading-relaxed"
       >
         {lines.length === 0 ? (

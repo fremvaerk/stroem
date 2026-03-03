@@ -46,6 +46,7 @@ import { getTask, listJobs, executeTask } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, JobListItem, FlowStep, InputField } from "@/lib/types";
 import { cn, formatActionName } from "@/lib/utils";
+import { formatTime, formatDuration, formatFutureTime } from "@/lib/formatting";
 
 const JOBS_PAGE_SIZE = 20;
 const SECRET_SENTINEL = "********";
@@ -106,40 +107,6 @@ function topoSortFlow(
   return sorted;
 }
 
-function formatTime(dateStr: string | null): string {
-  if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatDuration(start: string | null, end: string | null): string {
-  if (!start) return "-";
-  const s = new Date(start).getTime();
-  const e = end ? new Date(end).getTime() : Date.now();
-  const diff = Math.max(0, e - s);
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${minutes}m ${secs}s`;
-}
-
-function formatRelativeTime(isoStr: string): string {
-  const target = new Date(isoStr).getTime();
-  const now = Date.now();
-  const diff = target - now;
-  if (diff < 0) return "past";
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `in ${hours}h ${minutes % 60}m`;
-  const days = Math.floor(hours / 24);
-  return `in ${days}d ${hours % 24}h`;
-}
 
 export function TaskDetailPage() {
   const { workspace, name } = useParams<{ workspace: string; name: string }>();
@@ -390,7 +357,7 @@ export function TaskDetailPage() {
                           className="flex items-center gap-2 text-xs text-muted-foreground"
                         >
                           <span className="font-mono">
-                            {formatRelativeTime(run)}
+                            {formatFutureTime(run)}
                           </span>
                           <span className="text-muted-foreground/60">
                             {new Date(run).toLocaleString()}
