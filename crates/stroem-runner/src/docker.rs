@@ -12,8 +12,7 @@ use bollard::query_parameters::{
 use bollard::Docker;
 use futures_util::StreamExt;
 
-/// Default image used when no image is specified for shell-in-container execution.
-const DEFAULT_RUNNER_IMAGE: &str = "alpine:latest";
+use stroem_common::constants::DEFAULT_RUNNER_IMAGE;
 
 /// Docker runner that executes commands inside Docker containers
 pub struct DockerRunner {

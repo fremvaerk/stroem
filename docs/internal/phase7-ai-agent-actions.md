@@ -1,18 +1,18 @@
-# Phase 6 — AI Agent Actions & MCP Integration
+# Phase 7 — AI Agent Actions & MCP Integration
 
 ## Context
 
-Strøm orchestrates shell, Docker, Kubernetes, and sub-task actions. Phase 6 extends this to AI agents — letting workflows call LLMs as first-class steps, with full observability, tool access, and structured output. This makes Strøm a natural fit for agentic workflows where deterministic orchestration wraps non-deterministic AI reasoning.
+Strøm orchestrates shell, Docker, Kubernetes, and sub-task actions. Phase 7 extends this to AI agents — letting workflows call LLMs as first-class steps, with full observability, tool access, and structured output. This makes Strøm a natural fit for agentic workflows where deterministic orchestration wraps non-deterministic AI reasoning.
 
-## Phase 6 features (in implementation order)
+## Phase 7 features (in implementation order)
 
-### 6a. `type: agent` — Single-turn LLM calls (prompt → structured output)
-### 6b. Agent tool access — Multi-turn agent loops with Strøm tasks as tools
-### 6c. MCP server mode — Expose Strøm tasks as MCP tools for external agents
+### 7a. `type: agent` — Single-turn LLM calls (prompt → structured output)
+### 7b. Agent tool access — Multi-turn agent loops with Strøm tasks as tools
+### 7c. MCP server mode — Expose Strøm tasks as MCP tools for external agents
 
 ---
 
-## 6a. Single-Turn Agent Actions — Detailed Design
+## 7a. Single-Turn Agent Actions — Detailed Design
 
 The simplest useful integration: call an LLM with a rendered prompt, get structured output back. Follows the `type: task` server-side dispatch pattern exactly.
 
@@ -301,7 +301,7 @@ Uses `AppState::append_server_log()` (existing pattern from hooks/recovery).
 
 ---
 
-## 6b. Multi-Turn Agent Loops — Design Outline
+## 7b. Multi-Turn Agent Loops — Design Outline
 
 Extend `type: agent` to support multi-turn conversations where the agent can call tools.
 
@@ -381,7 +381,7 @@ Store the full conversation (messages + tool results) in a new `agent_state` JSO
 
 ---
 
-## 6c. MCP Server Mode — Design Outline
+## 7c. MCP Server Mode — Design Outline
 
 Expose Strøm's tasks as MCP tools so external agent frameworks can orchestrate Strøm workflows.
 
@@ -435,19 +435,19 @@ mcp:
 
 ## Dependency on other phases
 
-| Phase 6 feature | Depends on |
+| Phase 7 feature | Depends on |
 |---|---|
-| 6a. Single-turn agent | None (can implement now) |
-| 6b. Multi-turn with tools | Phase 5d (suspend/resume for tool calls) |
-| 6c. MCP server mode | None (can implement independently) |
+| 7a. Single-turn agent | None (can implement now) |
+| 7b. Multi-turn with tools | Phase 5d (suspend/resume for tool calls) |
+| 7c. MCP server mode | None (can implement independently) |
 
 ## Implementation order recommendation
 
-1. **6a** first — small surface area, high value, proves the pattern
-2. **6c** in parallel — independent, enables external agent use immediately
-3. **6b** after Phase 5d — requires suspend/resume infrastructure
+1. **7a** first — small surface area, high value, proves the pattern
+2. **7c** in parallel — independent, enables external agent use immediately
+3. **7b** after Phase 5d — requires suspend/resume infrastructure
 
-## Crate dependencies (6a only)
+## Crate dependencies (7a only)
 
 - `reqwest` — already in workspace (HTTP calls to LLM APIs)
 - `wiremock` — dev dependency for testing (mock LLM responses)
@@ -466,5 +466,5 @@ cd ui && bun run lint && bunx tsc --noEmit
 
 - Update `CLAUDE.md` with agent action type patterns
 - Add `docs/src/content/docs/guides/agent-actions.md` user guide
-- Update `docs/internal/stroem-v2-plan.md` with Phase 6 status
+- Update `docs/internal/stroem-v2-plan.md` with Phase 7 status
 - Add provider configuration reference to docs

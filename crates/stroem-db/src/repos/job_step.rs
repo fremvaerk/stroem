@@ -155,7 +155,8 @@ impl JobStepRepo {
         worker_tags: &[String],
         worker_id: Uuid,
     ) -> Result<Option<JobStepRow>> {
-        let worker_tags_json = serde_json::to_value(worker_tags)?;
+        let worker_tags_json =
+            serde_json::to_value(worker_tags).context("Failed to serialize worker tags")?;
         let step = sqlx::query_as::<_, JobStepRow>(&format!(
             r#"
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()

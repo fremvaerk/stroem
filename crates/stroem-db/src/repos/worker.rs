@@ -31,8 +31,9 @@ impl WorkerRepo {
         capabilities: &[String],
         tags: &[String],
     ) -> Result<()> {
-        let capabilities_json = serde_json::to_value(capabilities)?;
-        let tags_json = serde_json::to_value(tags)?;
+        let capabilities_json =
+            serde_json::to_value(capabilities).context("Failed to serialize capabilities")?;
+        let tags_json = serde_json::to_value(tags).context("Failed to serialize tags")?;
 
         sqlx::query(
             r#"
