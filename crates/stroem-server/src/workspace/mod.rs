@@ -319,8 +319,12 @@ impl WorkspaceManager {
                     // Check revision cheaply first. For folder sources this
                     // hashes file metadata+content without parsing YAML.
                     // For git sources this does a lightweight ls-remote
-                    // (blocking network call, so wrap in block_in_place).
-                    let current_revision = tokio::task::block_in_place(|| source.peek_revision());
+                    // (blocking network call, so wrap in spawn_blocking).
+                    let source_clone = source.clone();
+                    let current_revision =
+                        tokio::task::spawn_blocking(move || source_clone.peek_revision())
+                            .await
+                            .unwrap_or(None);
                     if current_revision == last_revision && current_revision.is_some() {
                         continue;
                     }

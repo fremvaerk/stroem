@@ -221,20 +221,23 @@ pub async fn claim_job(
         }
     };
 
+    // Fetch workspace config once — used for template rendering, secrets, and action defaults
+    let ws_config = state.get_workspace(&job.workspace).await;
+
     // Render template input at claim time using completed step outputs
     let rendered_input = 'render: {
         // Get flow step definition from workspace to find raw template input
-        let workspace = match state.get_workspace(&job.workspace).await {
+        let workspace = match ws_config.as_ref() {
             Some(w) => w,
             None => break 'render step.input.clone(),
         };
         let task = match workspace.tasks.get(&job.task_name) {
-            Some(t) => t.clone(),
+            Some(t) => t,
             None => break 'render step.input.clone(),
         };
 
         let flow_step = match task.flow.get(&step.step_name) {
-            Some(fs) => fs.clone(),
+            Some(fs) => fs,
             None => break 'render step.input.clone(),
         };
 
@@ -250,11 +253,9 @@ pub async fn claim_job(
         }
 
         // Add workspace secrets
-        if let Some(ws_config) = state.get_workspace(&job.workspace).await {
-            if !ws_config.secrets.is_empty() {
-                if let Ok(secrets_value) = serde_json::to_value(&ws_config.secrets) {
-                    context.insert("secret".to_string(), secrets_value);
-                }
+        if !workspace.secrets.is_empty() {
+            if let Ok(secrets_value) = serde_json::to_value(&workspace.secrets) {
+                context.insert("secret".to_string(), secrets_value);
             }
         }
 
@@ -287,7 +288,7 @@ pub async fn claim_job(
 
     // Merge action-level input defaults (e.g. object defaults with secret templates)
     let rendered_input = 'action_defaults: {
-        let workspace = match state.get_workspace(&job.workspace).await {
+        let workspace = match ws_config.as_ref() {
             Some(w) => w,
             None => break 'action_defaults rendered_input,
         };
@@ -314,7 +315,7 @@ pub async fn claim_job(
         // (e.g. a connection input), but the job-level input has it resolved.
         merge_missing_action_fields(&mut input_val, job.input.as_ref(), action.input.keys());
 
-        match prepare_action_input(&input_val, &action.input, &workspace) {
+        match prepare_action_input(&input_val, &action.input, workspace) {
             Ok(prepared) => Some(prepared),
             Err(e) => {
                 tracing::warn!("Failed to prepare action input: {:#}", e);
@@ -349,9 +350,9 @@ pub async fn claim_job(
         }
 
         // Add secrets from workspace
-        if let Some(ws_config) = state.get_workspace(&job.workspace).await {
-            if !ws_config.secrets.is_empty() {
-                let secrets_value = serde_json::to_value(&ws_config.secrets).unwrap_or_default();
+        if let Some(ref workspace) = ws_config {
+            if !workspace.secrets.is_empty() {
+                let secrets_value = serde_json::to_value(&workspace.secrets).unwrap_or_default();
                 spec_context.insert("secret".to_string(), secrets_value);
             }
         }

@@ -5,7 +5,7 @@ use crate::state::AppState;
 use anyhow::Result;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use stroem_common::models::workflow::{FlowStep, TaskDef};
+use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use uuid::Uuid;
 
@@ -101,45 +101,8 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 }
             }
 
-            // Fire hooks (best-effort)
-            crate::hooks::fire_hooks(state, &workspace, &job_after, &task).await;
-
-            // If a hook job failed, log it to the original job's server events
-            if job_after.source_type == "hook" && job_after.status == "failed" {
-                if let Some(ref source_id) = job_after.source_id {
-                    if let Ok(original_job_id) = Uuid::parse_str(source_id) {
-                        let error_msg = get_hook_error_summary(&state.pool, &job_after).await;
-                        state
-                            .append_server_log(
-                                original_job_id,
-                                &format!(
-                                    "[hooks] Hook '{}' failed: {}",
-                                    job_after.task_name, error_msg
-                                ),
-                            )
-                            .await;
-                    }
-                }
-            }
-
-            // Notify sync webhook waiters
-            state
-                .job_completion
-                .notify(JobCompletionEvent {
-                    job_id,
-                    status: job_after.status.clone(),
-                    output: job_after.output.clone(),
-                })
-                .await;
-
-            // S3 upload after hooks so server events are included
-            let log_storage = state.log_storage.clone();
-            let meta = meta_from_job(&job_after);
-            tokio::spawn(async move {
-                if let Err(e) = log_storage.upload_to_s3(job_id, &meta).await {
-                    tracing::warn!("Failed to upload logs to S3 for job {}: {:#}", job_id, e);
-                }
-            });
+            // Fire hooks, notify waiters, upload to S3
+            run_terminal_job_actions(state, &job_after, &workspace, &task).await;
         }
     }
 
@@ -214,51 +177,8 @@ async fn propagate_to_parent(
                         .await?;
                     }
 
-                    // Fire hooks for the parent
-                    crate::hooks::fire_hooks(state, &parent_ws, &parent_after, &parent_task).await;
-
-                    // If a hook job failed, log it to the original job's server events
-                    if parent_after.source_type == "hook" && parent_after.status == "failed" {
-                        if let Some(ref source_id) = parent_after.source_id {
-                            if let Ok(original_job_id) = Uuid::parse_str(source_id) {
-                                let error_msg =
-                                    get_hook_error_summary(&state.pool, &parent_after).await;
-                                state
-                                    .append_server_log(
-                                        original_job_id,
-                                        &format!(
-                                            "[hooks] Hook '{}' failed: {}",
-                                            parent_after.task_name, error_msg
-                                        ),
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-
-                    // Notify sync webhook waiters for the parent
-                    state
-                        .job_completion
-                        .notify(JobCompletionEvent {
-                            job_id: parent_job_id,
-                            status: parent_after.status.clone(),
-                            output: parent_after.output.clone(),
-                        })
-                        .await;
-
-                    // S3 upload for parent after hooks
-                    let log_storage = state.log_storage.clone();
-                    let pjid = parent_job_id;
-                    let meta = meta_from_job(&parent_after);
-                    tokio::spawn(async move {
-                        if let Err(e) = log_storage.upload_to_s3(pjid, &meta).await {
-                            tracing::warn!(
-                                "Failed to upload logs to S3 for parent job {}: {:#}",
-                                pjid,
-                                e
-                            );
-                        }
-                    });
+                    // Fire hooks, notify waiters, upload to S3
+                    run_terminal_job_actions(state, &parent_after, &parent_ws, &parent_task).await;
                 }
             }
         }
@@ -301,7 +221,7 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         }
     }
 
-    // Fire hooks (best-effort, only if workspace/task can be resolved)
+    // Fire hooks, notify waiters, upload to S3 (best-effort, only if workspace/task can be resolved)
     if let Some(workspace) = state.get_workspace(&job.workspace).await {
         let task = match workspace.tasks.get(&job.task_name) {
             Some(t) => Some(t.clone()),
@@ -309,15 +229,33 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
             None => None,
         };
         if let Some(task) = task {
-            crate::hooks::fire_hooks(state, &workspace, &job, &task).await;
+            run_terminal_job_actions(state, &job, &workspace, &task).await;
         }
     }
+
+    Ok(())
+}
+
+/// Perform all side effects for a job that has just reached terminal state:
+/// fire hooks, log hook failure to the originating job, notify sync waiters,
+/// and upload logs to S3. This consolidates logic that is otherwise duplicated
+/// across `orchestrate_after_step`, `propagate_to_parent`, and `handle_job_terminal`.
+async fn run_terminal_job_actions(
+    state: &AppState,
+    job: &JobRow,
+    workspace: &WorkspaceConfig,
+    task: &TaskDef,
+) {
+    let job_id = job.job_id;
+
+    // Fire hooks (best-effort)
+    crate::hooks::fire_hooks(state, workspace, job, task).await;
 
     // If a hook job failed, log it to the original job's server events
     if job.source_type == "hook" && job.status == "failed" {
         if let Some(ref source_id) = job.source_id {
             if let Ok(original_job_id) = Uuid::parse_str(source_id) {
-                let error_msg = get_hook_error_summary(&state.pool, &job).await;
+                let error_msg = get_hook_error_summary(&state.pool, job).await;
                 state
                     .append_server_log(
                         original_job_id,
@@ -340,14 +278,12 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
 
     // S3 upload after hooks so server events are included
     let log_storage = state.log_storage.clone();
-    let meta = meta_from_job(&job);
+    let meta = meta_from_job(job);
     tokio::spawn(async move {
         if let Err(e) = log_storage.upload_to_s3(job_id, &meta).await {
             tracing::warn!("Failed to upload logs to S3 for job {}: {:#}", job_id, e);
         }
     });
-
-    Ok(())
 }
 
 /// Build a minimal TaskDef for hook jobs (which use synthetic task names).
