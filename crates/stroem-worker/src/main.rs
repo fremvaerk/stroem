@@ -3,6 +3,7 @@ use clap::Parser;
 use stroem_worker::config::load_config;
 use stroem_worker::executor::StepExecutor;
 use stroem_worker::poller::run_worker;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(name = "stroem-worker", about = "Strøm workflow worker")]
@@ -79,6 +80,40 @@ async fn main() -> Result<()> {
         executor = executor.with_kube_runner(kube_runner);
     }
 
+    // Set up graceful shutdown
+    let cancel_token = CancellationToken::new();
+    let shutdown_token = cancel_token.clone();
+    tokio::spawn(async move {
+        shutdown_signal(shutdown_token).await;
+    });
+
     // Run the worker
-    run_worker(config, executor).await
+    run_worker(config, executor, cancel_token).await
+}
+
+async fn shutdown_signal(cancel_token: CancellationToken) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Shutdown signal received, stopping worker...");
+    cancel_token.cancel();
 }

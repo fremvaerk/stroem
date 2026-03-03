@@ -13,6 +13,7 @@ serde_yaml.workspace = true
 stroem-common.workspace = true
 stroem-runner.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

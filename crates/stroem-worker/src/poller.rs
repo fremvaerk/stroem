@@ -2,12 +2,16 @@ use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::client::ServerClient;
 use crate::config::WorkerConfig;
 use crate::executor::StepExecutor;
 use crate::workspace_cache::WorkspaceCache;
+
+/// How long to wait for in-flight steps to finish on shutdown before giving up.
+const DRAIN_TIMEOUT_SECS: u64 = 30;
 
 /// Push a single error log line to the server (best-effort).
 /// Uses stream "stderr" so the UI renders it in red.
@@ -187,8 +191,15 @@ async fn execute_claimed_step(
 }
 
 /// Main worker loop: register, heartbeat, and poll for jobs.
-#[tracing::instrument(skip(config, executor))]
-pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<()> {
+///
+/// The `cancel_token` is used for graceful shutdown. When cancelled, the loop stops
+/// accepting new work and waits up to `DRAIN_TIMEOUT_SECS` for in-flight steps to finish.
+#[tracing::instrument(skip(config, executor, cancel_token))]
+pub async fn run_worker(
+    config: WorkerConfig,
+    executor: StepExecutor,
+    cancel_token: CancellationToken,
+) -> Result<()> {
     tracing::info!("Starting worker '{}'", config.worker_name);
 
     // Create shared clients, executor, and workspace cache
@@ -205,42 +216,61 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
     std::fs::create_dir_all(&config.workspace_cache_dir)
         .context("Failed to create workspace cache directory")?;
 
-    // Register with server (retry with exponential backoff)
+    // Register with server (retry with exponential backoff, but stop if cancelled)
     let tags = config.tags.as_deref();
     let worker_id = {
         let mut attempt = 0u32;
         loop {
-            match client
-                .register(&config.worker_name, &config.capabilities, tags)
-                .await
-            {
-                Ok(id) => break id,
-                Err(e) => {
-                    attempt += 1;
-                    let delay = Duration::from_secs(2u64.saturating_pow(attempt).min(60));
-                    tracing::warn!(
-                        "Failed to register worker (attempt {attempt}), retrying in {}s: {:#}",
-                        delay.as_secs(),
-                        e
-                    );
-                    tokio::time::sleep(delay).await;
+            tokio::select! {
+                result = client.register(&config.worker_name, &config.capabilities, tags) => {
+                    match result {
+                        Ok(id) => break id,
+                        Err(e) => {
+                            attempt += 1;
+                            let delay = Duration::from_secs(2u64.saturating_pow(attempt).min(60));
+                            tracing::warn!(
+                                "Failed to register worker (attempt {attempt}), retrying in {}s: {:#}",
+                                delay.as_secs(),
+                                e
+                            );
+                            tokio::select! {
+                                () = tokio::time::sleep(delay) => {},
+                                () = cancel_token.cancelled() => {
+                                    tracing::info!("Shutdown requested during registration, exiting");
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+                () = cancel_token.cancelled() => {
+                    tracing::info!("Shutdown requested during registration, exiting");
+                    return Ok(());
                 }
             }
         }
     };
     tracing::info!("Registered as worker {}", worker_id);
 
-    // Spawn heartbeat task (every 30s)
+    // Spawn heartbeat task (every 30s), stops when cancel_token is cancelled
     let heartbeat_client = client.clone();
     let heartbeat_worker_id = worker_id;
+    let heartbeat_cancel = cancel_token.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
-            interval.tick().await;
-            if let Err(e) = heartbeat_client.heartbeat(heartbeat_worker_id).await {
-                tracing::warn!("Heartbeat failed: {:#}", e);
-            } else {
-                tracing::debug!("Heartbeat sent successfully");
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = heartbeat_client.heartbeat(heartbeat_worker_id).await {
+                        tracing::warn!("Heartbeat failed: {:#}", e);
+                    } else {
+                        tracing::debug!("Heartbeat sent successfully");
+                    }
+                }
+                () = heartbeat_cancel.cancelled() => {
+                    tracing::debug!("Heartbeat task stopping (shutdown)");
+                    break;
+                }
             }
         }
     });
@@ -256,18 +286,28 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
     );
 
     loop {
-        // Acquire semaphore permit
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .context("Failed to acquire semaphore permit")?;
+        // Acquire semaphore permit, or stop if cancelled
+        let permit = tokio::select! {
+            result = semaphore.clone().acquire_owned() => {
+                result.context("Failed to acquire semaphore permit")?
+            }
+            () = cancel_token.cancelled() => {
+                tracing::info!("Shutdown requested, stopping poll loop");
+                break;
+            }
+        };
 
-        // Try to claim a step
-        match client
-            .claim_step(worker_id, &config.capabilities, tags)
-            .await
-        {
+        // Try to claim a step, or stop if cancelled
+        let claim_result = tokio::select! {
+            result = client.claim_step(worker_id, &config.capabilities, tags) => result,
+            () = cancel_token.cancelled() => {
+                tracing::info!("Shutdown requested, stopping poll loop");
+                drop(permit);
+                break;
+            }
+        };
+
+        match claim_result {
             Ok(Some(step)) => {
                 tracing::info!(
                     "Claimed step '{}' for job {} (workspace: {}, action: {})",
@@ -295,18 +335,60 @@ pub async fn run_worker(config: WorkerConfig, executor: StepExecutor) -> Result<
                 });
             }
             Ok(None) => {
-                // No work available, drop permit and sleep
+                // No work available, drop permit and sleep (or exit if cancelled)
                 drop(permit);
                 tracing::debug!("No work available, sleeping");
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    () = tokio::time::sleep(poll_interval) => {},
+                    () = cancel_token.cancelled() => {
+                        tracing::info!("Shutdown requested, stopping poll loop");
+                        break;
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!("Failed to claim step: {:#}", e);
                 drop(permit);
-                tokio::time::sleep(poll_interval).await;
+                tokio::select! {
+                    () = tokio::time::sleep(poll_interval) => {},
+                    () = cancel_token.cancelled() => {
+                        tracing::info!("Shutdown requested, stopping poll loop");
+                        break;
+                    }
+                }
             }
         }
     }
+
+    // Drain: wait for all in-flight steps to complete
+    tracing::info!(
+        "Waiting up to {}s for in-flight steps to complete...",
+        DRAIN_TIMEOUT_SECS
+    );
+
+    // Acquiring all permits means all spawned step tasks have released theirs (i.e., finished).
+    let drain_result = tokio::time::timeout(
+        Duration::from_secs(DRAIN_TIMEOUT_SECS),
+        semaphore.acquire_many(config.max_concurrent as u32),
+    )
+    .await;
+
+    match drain_result {
+        Ok(Ok(_)) => {
+            tracing::info!("All in-flight steps completed, worker shutting down cleanly");
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("Semaphore error during drain: {:#}", e);
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Drain timeout ({}s) exceeded — some steps may not have finished",
+                DRAIN_TIMEOUT_SECS
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
