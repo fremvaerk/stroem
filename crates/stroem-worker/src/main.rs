@@ -101,7 +101,9 @@ async fn shutdown_signal(cancel_token: CancellationToken) {
     #[cfg(unix)]
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => { sig.recv().await; }
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
             Err(e) => {
                 tracing::error!("Failed to install SIGTERM handler: {:#}", e);
                 std::future::pending::<()>().await;

@@ -95,14 +95,19 @@ async fn execute_claimed_step(
     let log_buffer = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn log pusher (flushes buffer every 1s)
+    let log_cancel = CancellationToken::new();
     let buffer_clone = log_buffer.clone();
     let log_client = client.clone();
     let log_job_id = step.job_id;
     let log_step_name = step.step_name.clone();
+    let log_cancel_clone = log_cancel.clone();
     let log_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = log_cancel_clone.cancelled() => break,
+            }
             let lines = drain_log_buffer(&buffer_clone);
             if !lines.is_empty() {
                 if let Err(e) = log_client
@@ -134,8 +139,11 @@ async fn execute_claimed_step(
         }
     };
 
-    // Stop log pusher, flush remaining logs
-    log_handle.abort();
+    // Signal the log pusher to stop after its current flush completes
+    log_cancel.cancel();
+    // Wait for log pusher to finish (timeout prevents hanging if something goes wrong)
+    let _ = tokio::time::timeout(Duration::from_secs(5), log_handle).await;
+    // Push any lines that accumulated between the last flush and shutdown
     let remaining = drain_log_buffer(&log_buffer);
     if !remaining.is_empty() {
         if let Err(e) = client
@@ -369,7 +377,8 @@ pub async fn run_worker(
     // Acquiring all permits means all spawned step tasks have released theirs (i.e., finished).
     let drain_result = tokio::time::timeout(
         Duration::from_secs(DRAIN_TIMEOUT_SECS),
-        semaphore.acquire_many(config.max_concurrent as u32),
+        semaphore
+            .acquire_many(u32::try_from(config.max_concurrent).expect("validated at config load")),
     )
     .await;
 

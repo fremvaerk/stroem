@@ -101,7 +101,12 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 }
             }
 
-            // Fire hooks, notify waiters, upload to S3
+            // Fire hooks, notify waiters, upload to S3.
+            // This intentionally runs for child jobs too (source_type == "task"):
+            // - fire_hooks() already skips workspace-level hooks for non-top-level jobs
+            // - task-level hooks should fire regardless of how the task was invoked
+            // - S3 upload is per-job (each child has its own log file)
+            // - job_completion.notify() is a no-op when no sync waiters exist
             run_terminal_job_actions(state, &job_after, &workspace, &task).await;
         }
     }

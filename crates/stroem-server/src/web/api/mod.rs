@@ -81,6 +81,11 @@ impl KeyExtractor for ClientIpExtractor {
 
         // Final fallback: use 0.0.0.0 so the request is not rejected outright.
         // This applies to test harnesses where no real TCP socket is present.
+        //
+        // WARNING: In production, all unattributed requests share a single rate
+        // limit bucket (0.0.0.0). Deploy behind a reverse proxy (nginx, Caddy,
+        // cloud LB) that sets X-Forwarded-For or X-Real-IP, or ensure the server
+        // is started with `into_make_service_with_connect_info` (the default).
         Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
     }
 }
@@ -101,7 +106,7 @@ macro_rules! auth_rate_limit_layer {
             .per_second($per_second)
             .burst_size($burst)
             .finish()
-            .expect("valid governor config");
+            .expect("governor config: per_second and burst_size must be > 0");
         GovernorLayer::new(config).error_handler(|e| {
             let wait = match &e {
                 GovernorError::TooManyRequests { wait_time, .. } => *wait_time,

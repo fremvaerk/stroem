@@ -36,6 +36,11 @@ impl WorkerConfig {
 
     /// Validate config values after deserialization
     pub fn validate(&self) -> Result<()> {
+        if self.max_concurrent == 0 {
+            anyhow::bail!("max_concurrent must be greater than 0");
+        }
+        u32::try_from(self.max_concurrent)
+            .context("max_concurrent must fit in u32 (value too large)")?;
         if self.request_timeout_secs == Some(0) {
             anyhow::bail!("request_timeout_secs must be greater than 0");
         }
@@ -382,6 +387,26 @@ workspace_cache_dir: "/tmp/stroem-workspace"
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.connect_timeout_secs.is_none());
         assert!(config.request_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn test_validate_zero_max_concurrent_rejected() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 0
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("max_concurrent"),
+            "Error should mention max_concurrent: {}",
+            err
+        );
     }
 
     #[test]
