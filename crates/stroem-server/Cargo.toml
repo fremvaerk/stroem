@@ -45,6 +45,7 @@ axum-extra = { version = "0.12", features = ["cookie"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 subtle = "2"
 walkdir = "2"
+dashmap = "6"
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 

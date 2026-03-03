@@ -245,6 +245,19 @@ export async function listTriggers(
   );
 }
 
+// Stats
+export interface DashboardStats {
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+}
+
+export async function getStats(): Promise<DashboardStats> {
+  return apiFetch<DashboardStats>("/api/stats");
+}
+
 // Jobs
 export async function listJobs(
   limit = 50,

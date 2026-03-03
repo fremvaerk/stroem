@@ -2125,3 +2125,70 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_get_status_counts() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Empty database — all counts should be zero (or absent from the map)
+    let counts = JobRepo::get_status_counts(&pool).await?;
+    assert_eq!(*counts.get("pending").unwrap_or(&0), 0);
+    assert_eq!(*counts.get("running").unwrap_or(&0), 0);
+    assert_eq!(*counts.get("completed").unwrap_or(&0), 0);
+    assert_eq!(*counts.get("failed").unwrap_or(&0), 0);
+    assert_eq!(*counts.get("cancelled").unwrap_or(&0), 0);
+
+    // Create 3 pending jobs
+    for i in 0..3 {
+        JobRepo::create(
+            &pool,
+            "default",
+            &format!("task-{i}"),
+            "distributed",
+            None,
+            "api",
+            None,
+        )
+        .await?;
+    }
+
+    // Mark one job as completed and one as failed
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "w1",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let job_ids: Vec<Uuid> = JobRepo::list(&pool, None, None, 10, 0)
+        .await?
+        .into_iter()
+        .map(|j| j.job_id)
+        .collect();
+
+    JobRepo::mark_running(&pool, job_ids[0], worker_id).await?;
+    JobRepo::mark_completed(&pool, job_ids[0], None).await?;
+
+    JobRepo::mark_running(&pool, job_ids[1], worker_id).await?;
+    JobRepo::mark_failed(&pool, job_ids[1]).await?;
+
+    // Recount — expect 1 pending, 0 running, 1 completed, 1 failed
+    let counts = JobRepo::get_status_counts(&pool).await?;
+    assert_eq!(*counts.get("pending").unwrap_or(&0), 1);
+    assert_eq!(*counts.get("running").unwrap_or(&0), 0);
+    assert_eq!(*counts.get("completed").unwrap_or(&0), 1);
+    assert_eq!(*counts.get("failed").unwrap_or(&0), 1);
+    assert_eq!(*counts.get("cancelled").unwrap_or(&0), 0);
+
+    // Cancel the remaining pending job
+    JobRepo::cancel(&pool, job_ids[2]).await?;
+
+    let counts = JobRepo::get_status_counts(&pool).await?;
+    assert_eq!(*counts.get("pending").unwrap_or(&0), 0);
+    assert_eq!(*counts.get("cancelled").unwrap_or(&0), 1);
+
+    Ok(())
+}

@@ -303,6 +303,9 @@ async fn run_terminal_job_actions(
         })
         .await;
 
+    // Flush and close the cached log file handle before S3 upload
+    state.log_storage.close_log(job_id).await;
+
     // S3 upload after hooks so server events are included
     let log_storage = state.log_storage.clone();
     let meta = meta_from_job(job);

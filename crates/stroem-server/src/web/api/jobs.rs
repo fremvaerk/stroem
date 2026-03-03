@@ -27,6 +27,40 @@ pub struct ListJobsQuery {
 
 const VALID_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "cancelled"];
 
+#[derive(Debug, Serialize)]
+pub struct DashboardStats {
+    pub pending: i64,
+    pub running: i64,
+    pub completed: i64,
+    pub failed: i64,
+    pub cancelled: i64,
+}
+
+/// GET /api/stats - Accurate job status counts for the dashboard
+#[tracing::instrument(skip(state))]
+pub async fn get_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match JobRepo::get_status_counts(&state.pool).await {
+        Ok(counts) => {
+            let stats = DashboardStats {
+                pending: *counts.get("pending").unwrap_or(&0),
+                running: *counts.get("running").unwrap_or(&0),
+                completed: *counts.get("completed").unwrap_or(&0),
+                failed: *counts.get("failed").unwrap_or(&0),
+                cancelled: *counts.get("cancelled").unwrap_or(&0),
+            };
+            (StatusCode::OK, Json(stats)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to get stats: {:#}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to get stats"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// GET /api/jobs - List jobs
 #[tracing::instrument(skip(state))]
 pub async fn list_jobs(
@@ -713,5 +747,48 @@ mod tests {
         }
 
         assert_eq!(steps_json[0]["depends_on"], json!([]));
+    }
+
+    #[test]
+    fn test_dashboard_stats_serialization() {
+        // Verify DashboardStats serializes to the expected JSON shape consumed by
+        // the frontend getStats() call.
+        let stats = DashboardStats {
+            pending: 3,
+            running: 1,
+            completed: 42,
+            failed: 5,
+            cancelled: 2,
+        };
+
+        let value = serde_json::to_value(&stats).expect("serialization should succeed");
+        assert_eq!(value["pending"], json!(3));
+        assert_eq!(value["running"], json!(1));
+        assert_eq!(value["completed"], json!(42));
+        assert_eq!(value["failed"], json!(5));
+        assert_eq!(value["cancelled"], json!(2));
+
+        // All five fields must be present — no extras, no missing keys.
+        let obj = value.as_object().expect("must be an object");
+        assert_eq!(obj.len(), 5);
+    }
+
+    #[test]
+    fn test_dashboard_stats_defaults_to_zero_from_empty_map() {
+        // Simulate what get_stats does when the DB returns an empty HashMap
+        // (i.e. no jobs exist yet).
+        let counts: HashMap<String, i64> = HashMap::new();
+        let stats = DashboardStats {
+            pending: *counts.get("pending").unwrap_or(&0),
+            running: *counts.get("running").unwrap_or(&0),
+            completed: *counts.get("completed").unwrap_or(&0),
+            failed: *counts.get("failed").unwrap_or(&0),
+            cancelled: *counts.get("cancelled").unwrap_or(&0),
+        };
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.running, 0);
+        assert_eq!(stats.completed, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.cancelled, 0);
     }
 }

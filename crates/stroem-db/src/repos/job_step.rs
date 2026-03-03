@@ -366,9 +366,9 @@ impl JobStepRepo {
         Ok(())
     }
 
-    /// Update steps from pending to ready based on completed dependencies
-    /// This is called by the orchestrator after a step completes
-    /// Returns the names of newly promoted steps
+    /// Update steps from pending to ready based on completed dependencies.
+    /// This is called by the orchestrator after a step completes.
+    /// Returns the names of newly promoted steps.
     pub async fn promote_ready_steps(
         pool: &PgPool,
         job_id: Uuid,
@@ -383,12 +383,12 @@ impl JobStepRepo {
             .map(|s| (s.step_name.clone(), s.status.clone()))
             .collect();
 
-        // Find pending steps that can be promoted
-        let mut promoted = Vec::new();
-
-        for step in steps.iter().filter(|s| s.status == "pending") {
-            // Check if all dependencies are completed
-            if let Some(flow_step) = flow.get(&step.step_name) {
+        // Collect all step names that are ready to be promoted
+        let to_promote: Vec<String> = steps
+            .iter()
+            .filter(|s| s.status == "pending")
+            .filter_map(|step| {
+                let flow_step = flow.get(&step.step_name)?;
                 let deps_met = flow_step.depends_on.iter().all(|dep| {
                     status_map
                         .get(dep)
@@ -401,28 +401,30 @@ impl JobStepRepo {
                         })
                         .unwrap_or(false)
                 });
-
                 if deps_met {
-                    // Promote this step to ready
-                    sqlx::query(
-                        r#"
-                        UPDATE job_step
-                        SET status = 'ready'
-                        WHERE job_id = $1 AND step_name = $2
-                        "#,
-                    )
-                    .bind(job_id)
-                    .bind(&step.step_name)
-                    .execute(pool)
-                    .await
-                    .context("Failed to promote step to ready")?;
-
-                    promoted.push(step.step_name.clone());
+                    Some(step.step_name.clone())
+                } else {
+                    None
                 }
-            }
+            })
+            .collect();
+
+        if !to_promote.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE job_step
+                SET status = 'ready'
+                WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'
+                "#,
+            )
+            .bind(job_id)
+            .bind(&to_promote)
+            .execute(pool)
+            .await
+            .context("Failed to promote steps to ready")?;
         }
 
-        Ok(promoted)
+        Ok(to_promote)
     }
 
     /// Mark a step as skipped (unreachable due to failed dependency)
@@ -458,11 +460,14 @@ impl JobStepRepo {
             .map(|s| (s.step_name.clone(), s.status.clone()))
             .collect();
 
-        let mut skipped = Vec::new();
-        for step in steps.iter().filter(|s| s.status == "pending") {
-            if let Some(flow_step) = flow.get(&step.step_name) {
+        // Collect all step names that must be skipped in this pass
+        let to_skip: Vec<String> = steps
+            .iter()
+            .filter(|s| s.status == "pending")
+            .filter_map(|step| {
+                let flow_step = flow.get(&step.step_name)?;
                 if flow_step.continue_on_failure {
-                    continue;
+                    return None;
                 }
                 let has_failed_dep = flow_step.depends_on.iter().any(|dep| {
                     status_map
@@ -470,14 +475,30 @@ impl JobStepRepo {
                         .map(|s| s == "failed" || s == "skipped" || s == "cancelled")
                         .unwrap_or(false)
                 });
-
                 if has_failed_dep {
-                    Self::mark_skipped(pool, job_id, &step.step_name).await?;
-                    skipped.push(step.step_name.clone());
+                    Some(step.step_name.clone())
+                } else {
+                    None
                 }
-            }
+            })
+            .collect();
+
+        if !to_skip.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE job_step
+                SET status = 'skipped', completed_at = NOW()
+                WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'
+                "#,
+            )
+            .bind(job_id)
+            .bind(&to_skip)
+            .execute(pool)
+            .await
+            .context("Failed to skip unreachable steps")?;
         }
-        Ok(skipped)
+
+        Ok(to_skip)
     }
 
     /// Cancel all pending/ready steps for a job. Returns the number of steps cancelled.

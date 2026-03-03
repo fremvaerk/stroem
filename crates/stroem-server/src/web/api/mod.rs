@@ -265,6 +265,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/users/{id}", get(users::get_user))
         .route("/workers", get(workers::list_workers))
         .route("/workers/{id}", get(workers::get_worker))
+        .route("/stats", get(jobs::get_stats))
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))

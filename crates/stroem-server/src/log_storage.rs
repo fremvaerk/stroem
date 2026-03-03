@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use std::path::{Path, PathBuf};
-use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 #[cfg(feature = "s3")]
@@ -22,25 +26,38 @@ pub struct JobLogMeta {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Log storage handles writing and reading job logs
+/// A cached, buffered file handle for a single job's log file.
+type CachedHandle = Arc<Mutex<BufWriter<File>>>;
+
+/// Log storage handles writing and reading job logs.
+///
+/// File handles are kept open and buffered across multiple [`append_log`] calls,
+/// eliminating the open/close overhead on every chunk. Call [`close_log`] when a
+/// job reaches a terminal state to flush and evict the handle.
 #[derive(Clone)]
 pub struct LogStorage {
     base_dir: PathBuf,
+    /// Whether the base directory has been created at least once.
+    dir_created: Arc<AtomicBool>,
+    /// Open, buffered file handles keyed by job UUID.
+    file_cache: Arc<DashMap<Uuid, CachedHandle>>,
     #[cfg(feature = "s3")]
     s3: Option<S3Backend>,
 }
 
 impl LogStorage {
-    /// Create a new log storage
+    /// Create a new log storage backed by `base_dir`.
     pub fn new(base_dir: impl AsRef<Path>) -> Self {
         Self {
             base_dir: base_dir.as_ref().to_path_buf(),
+            dir_created: Arc::new(AtomicBool::new(false)),
+            file_cache: Arc::new(DashMap::new()),
             #[cfg(feature = "s3")]
             s3: None,
         }
     }
 
-    /// Configure S3 backend for log archival
+    /// Configure S3 backend for log archival.
     #[cfg(feature = "s3")]
     pub async fn with_s3(mut self, s3_config: &S3Config) -> Result<Self> {
         let mut aws_config_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -71,7 +88,7 @@ impl LogStorage {
         Ok(self)
     }
 
-    /// Configure S3 backend with a pre-built client (for testing)
+    /// Configure S3 backend with a pre-built client (for testing).
     #[cfg(feature = "s3")]
     pub fn with_s3_client(
         mut self,
@@ -88,6 +105,7 @@ impl LogStorage {
     }
 
     /// Build a structured S3 key from job metadata.
+    ///
     /// Format: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz`
     #[cfg(feature = "s3")]
     fn s3_key(&self, job_id: Uuid, meta: &JobLogMeta) -> String {
@@ -105,45 +123,93 @@ impl LogStorage {
         )
     }
 
-    /// Get the JSONL log file path for a job
+    /// Get the JSONL log file path for a job.
     fn log_path(&self, job_id: Uuid) -> PathBuf {
-        self.base_dir.join(format!("{}.jsonl", job_id))
+        self.base_dir.join(format!("{job_id}.jsonl"))
     }
 
-    /// Get the legacy .log file path (for backward compatibility)
+    /// Get the legacy .log file path (for backward compatibility).
     fn legacy_log_path(&self, job_id: Uuid) -> PathBuf {
-        self.base_dir.join(format!("{}.log", job_id))
+        self.base_dir.join(format!("{job_id}.log"))
     }
 
-    /// Ensure the log directory exists
+    /// Ensure the log directory exists.
+    ///
+    /// Uses an [`AtomicBool`] flag so that the directory stat is skipped on
+    /// subsequent calls once we know the directory has been created.
     async fn ensure_dir(&self) -> Result<()> {
-        if !self.base_dir.exists() {
-            fs::create_dir_all(&self.base_dir)
-                .await
-                .context("Failed to create log directory")?;
+        if self.dir_created.load(Ordering::Relaxed) {
+            return Ok(());
         }
+        fs::create_dir_all(&self.base_dir)
+            .await
+            .context("Failed to create log directory")?;
+        self.dir_created.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Append a log chunk to a job's log file
-    pub async fn append_log(&self, job_id: Uuid, chunk: &str) -> Result<()> {
-        self.ensure_dir().await?;
+    /// Return the cached file handle for `job_id`, creating it if absent.
+    ///
+    /// The directory is only created once (guarded by `dir_created`).
+    async fn get_or_open(&self, job_id: Uuid) -> Result<CachedHandle> {
+        // Fast path: handle already in cache.
+        if let Some(handle) = self.file_cache.get(&job_id) {
+            return Ok(Arc::clone(&handle));
+        }
 
+        // Slow path: open the file and insert into cache.
+        self.ensure_dir().await?;
         let path = self.log_path(job_id);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .await
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+            .with_context(|| format!("Failed to open log file: {path:?}"))?;
 
-        file.write_all(chunk.as_bytes())
+        let handle: CachedHandle = Arc::new(Mutex::new(BufWriter::new(file)));
+
+        // Another task may have raced us — `entry()` API on DashMap is
+        // synchronous so we use `or_insert` to let the winner's handle win.
+        let stored = self
+            .file_cache
+            .entry(job_id)
+            .or_insert_with(|| Arc::clone(&handle));
+        Ok(Arc::clone(&stored))
+    }
+
+    /// Append a log chunk to the job's log file.
+    ///
+    /// The file handle is kept open between calls (buffered via [`BufWriter`]),
+    /// so only a single `open` syscall is paid over the lifetime of a job.
+    /// Data is flushed to the OS on each call so readers can observe it
+    /// immediately.
+    pub async fn append_log(&self, job_id: Uuid, chunk: &str) -> Result<()> {
+        let handle = self.get_or_open(job_id).await?;
+        let mut writer = handle.lock().await;
+        writer
+            .write_all(chunk.as_bytes())
             .await
             .context("Failed to write to log file")?;
-
-        file.flush().await.context("Failed to flush log file")?;
-
+        writer.flush().await.context("Failed to flush log file")?;
         Ok(())
+    }
+
+    /// Flush and evict the cached file handle for `job_id`.
+    ///
+    /// Call this when a job reaches a terminal state so the `BufWriter`
+    /// internal buffer is drained to disk and the file descriptor is released.
+    /// It is safe to call when no handle exists (e.g. if the job wrote no
+    /// logs); in that case the method is a no-op.
+    pub async fn close_log(&self, job_id: Uuid) {
+        if let Some((_, handle)) = self.file_cache.remove(&job_id) {
+            // Flush the BufWriter. Ignore errors at close time — the data
+            // has already been flushed on every `append_log` call.
+            let mut writer = handle.lock().await;
+            if let Err(err) = writer.flush().await {
+                tracing::warn!("Failed to flush log file on close for job {job_id}: {err}");
+            }
+        }
     }
 
     /// Upload a job's log file to S3 (gzip-compressed). No-op if S3 is not configured.
@@ -192,7 +258,7 @@ impl LogStorage {
         Ok(())
     }
 
-    /// Download a job's log from S3 (gzip-compressed). Returns None if the key doesn't exist.
+    /// Download a job's log from S3 (gzip-compressed). Returns `None` if the key doesn't exist.
     #[cfg(feature = "s3")]
     async fn get_log_from_s3(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<Option<String>> {
         if let Some(ref s3) = self.s3 {
@@ -240,7 +306,8 @@ impl LogStorage {
     }
 
     /// Get the full log contents for a job.
-    /// Checks for .jsonl first, falls back to legacy .log file, then S3.
+    ///
+    /// Checks for `.jsonl` first, falls back to legacy `.log` file, then S3.
     #[allow(unused_variables)]
     pub async fn get_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<String> {
         let path = self.log_path(job_id);
@@ -264,7 +331,7 @@ impl LogStorage {
         Ok(String::new())
     }
 
-    /// Read file contents
+    /// Read file contents as a UTF-8 string.
     async fn read_file(path: &Path) -> Result<String> {
         let mut file = fs::File::open(path)
             .await
@@ -279,6 +346,7 @@ impl LogStorage {
     }
 
     /// Get log lines for a specific step within a job.
+    ///
     /// Parses each line as JSON and filters by the `step` field.
     /// Non-JSON lines (legacy format) are skipped.
     pub async fn get_step_log(
@@ -305,7 +373,7 @@ impl LogStorage {
         })
     }
 
-    /// Get the log file path as a string (for storing in database)
+    /// Get the log file path as a string (for storing in database).
     pub fn get_log_path(&self, job_id: Uuid) -> String {
         self.log_path(job_id).to_string_lossy().to_string()
     }
@@ -353,6 +421,9 @@ mod tests {
             .await
             .unwrap();
 
+        // Flush before reading so BufWriter contents are on disk.
+        storage.close_log(job_id).await;
+
         let log = storage.get_log(job_id, &test_meta()).await.unwrap();
         assert_eq!(log, format!("{}\n{}\n", line1, line2));
     }
@@ -387,6 +458,9 @@ mod tests {
             .await
             .unwrap();
 
+        storage.close_log(job1).await;
+        storage.close_log(job2).await;
+
         let meta = test_meta();
         let log1 = storage.get_log(job1, &meta).await.unwrap();
         let log2 = storage.get_log(job2, &meta).await.unwrap();
@@ -410,6 +484,8 @@ mod tests {
             .await
             .unwrap();
 
+        storage.close_log(job_id).await;
+
         let meta = test_meta();
         let build_logs = storage.get_step_log(job_id, "build", &meta).await.unwrap();
         assert_eq!(build_logs, format!("{}\n{}\n", build1, build2));
@@ -429,6 +505,8 @@ mod tests {
             .append_log(job_id, &format!("{}\n", line))
             .await
             .unwrap();
+
+        storage.close_log(job_id).await;
 
         let logs = storage
             .get_step_log(job_id, "deploy", &test_meta())
@@ -452,6 +530,8 @@ mod tests {
             )
             .await
             .unwrap();
+
+        storage.close_log(job_id).await;
 
         let logs = storage
             .get_step_log(job_id, "build", &test_meta())
@@ -521,6 +601,8 @@ mod tests {
             .await
             .unwrap();
 
+        storage.close_log(job_id).await;
+
         let log = storage.get_log(job_id, &test_meta()).await.unwrap();
         assert!(log.contains("new content"));
         assert!(!log.contains("legacy content"));
@@ -543,6 +625,8 @@ mod tests {
             )
             .await
             .unwrap();
+
+        storage.close_log(job_id).await;
 
         // Both stdout and stderr for "build" should be returned
         let build_logs = storage
@@ -567,6 +651,8 @@ mod tests {
             .await
             .unwrap();
 
+        storage.close_log(job_id).await;
+
         // upload_to_s3 should be a no-op (no S3 configured) and return Ok
         storage.upload_to_s3(job_id, &test_meta()).await.unwrap();
     }
@@ -579,6 +665,139 @@ mod tests {
 
         // No local file written — upload_to_s3 should return Ok (graceful skip)
         storage.upload_to_s3(job_id, &test_meta()).await.unwrap();
+    }
+
+    // --- New tests for the file handle cache ---
+
+    /// Verify that appending multiple chunks to the same job produces the
+    /// correct concatenated content (i.e. the cached handle is reused and no
+    /// data is lost between calls).
+    #[tokio::test]
+    async fn test_file_handle_reused_across_appends() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LogStorage::new(temp_dir.path());
+        let job_id = Uuid::new_v4();
+
+        let chunks = ["alpha\n", "beta\n", "gamma\n", "delta\n"];
+
+        for chunk in &chunks {
+            storage.append_log(job_id, chunk).await.unwrap();
+        }
+
+        // Confirm the cache contains exactly one entry for this job.
+        assert!(
+            storage.file_cache.contains_key(&job_id),
+            "handle should still be cached before close_log"
+        );
+
+        storage.close_log(job_id).await;
+
+        // The handle must be gone after close.
+        assert!(
+            !storage.file_cache.contains_key(&job_id),
+            "handle should be evicted after close_log"
+        );
+
+        // Read back and verify all chunks are present in order.
+        let content = tokio::fs::read_to_string(storage.log_path(job_id))
+            .await
+            .unwrap();
+        assert_eq!(content, "alpha\nbeta\ngamma\ndelta\n");
+    }
+
+    /// Verify that `close_log` flushes buffered data to disk and removes the
+    /// entry from the cache.
+    #[tokio::test]
+    async fn test_close_log_flushes_and_evicts() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LogStorage::new(temp_dir.path());
+        let job_id = Uuid::new_v4();
+
+        let line = jsonl_line("step", "stdout", "important data");
+        storage
+            .append_log(job_id, &format!("{line}\n"))
+            .await
+            .unwrap();
+
+        // Calling close_log twice must not panic (second call is a no-op).
+        storage.close_log(job_id).await;
+        storage.close_log(job_id).await;
+
+        assert!(
+            !storage.file_cache.contains_key(&job_id),
+            "cache entry must be gone after close_log"
+        );
+
+        // The file must be readable and contain the expected content.
+        let on_disk = tokio::fs::read_to_string(storage.log_path(job_id))
+            .await
+            .unwrap();
+        assert!(on_disk.contains("important data"));
+    }
+
+    /// Verify that concurrent appends to *different* jobs are independent and
+    /// produce correct content for each job.
+    #[tokio::test]
+    async fn test_concurrent_appends_different_jobs() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LogStorage::new(temp_dir.path()));
+
+        let job_a = Uuid::new_v4();
+        let job_b = Uuid::new_v4();
+
+        let storage_a = Arc::clone(&storage);
+        let storage_b = Arc::clone(&storage);
+
+        let handle_a = tokio::spawn(async move {
+            for i in 0_u32..20 {
+                storage_a
+                    .append_log(job_a, &format!("job-a line {i}\n"))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let handle_b = tokio::spawn(async move {
+            for i in 0_u32..20 {
+                storage_b
+                    .append_log(job_b, &format!("job-b line {i}\n"))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        handle_a.await.unwrap();
+        handle_b.await.unwrap();
+
+        storage.close_log(job_a).await;
+        storage.close_log(job_b).await;
+
+        let content_a = tokio::fs::read_to_string(storage.log_path(job_a))
+            .await
+            .unwrap();
+        let content_b = tokio::fs::read_to_string(storage.log_path(job_b))
+            .await
+            .unwrap();
+
+        // Each job should have exactly 20 lines.
+        assert_eq!(content_a.lines().count(), 20, "job-a should have 20 lines");
+        assert_eq!(content_b.lines().count(), 20, "job-b should have 20 lines");
+
+        // No cross-contamination.
+        assert!(
+            !content_a.contains("job-b"),
+            "job-a must not contain job-b data"
+        );
+        assert!(
+            !content_b.contains("job-a"),
+            "job-b must not contain job-a data"
+        );
+
+        // All lines for each job are present.
+        for i in 0_u32..20 {
+            assert!(content_a.contains(&format!("job-a line {i}")));
+            assert!(content_b.contains(&format!("job-b line {i}")));
+        }
     }
 
     #[cfg(feature = "s3")]

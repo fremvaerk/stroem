@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name";
@@ -485,6 +486,21 @@ impl JobRepo {
         .context("Failed to get child jobs")?;
 
         Ok(jobs)
+    }
+
+    /// Get job counts grouped by status (used for dashboard stats)
+    pub async fn get_status_counts(pool: &PgPool) -> Result<HashMap<String, i64>> {
+        let rows =
+            sqlx::query_as::<_, (String, i64)>("SELECT status, COUNT(*) FROM job GROUP BY status")
+                .fetch_all(pool)
+                .await
+                .context("Failed to get job status counts")?;
+
+        let mut counts = HashMap::new();
+        for (status, count) in rows {
+            counts.insert(status, count);
+        }
+        Ok(counts)
     }
 
     /// Set log path

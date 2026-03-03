@@ -1,7 +1,7 @@
 use crate::traits::{
     parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode,
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::io::AsyncBufReadExt;
 use k8s_openapi::api::core::v1::Pod;
@@ -261,8 +261,9 @@ impl KubeRunner {
             Self::inject_startup_configmap(&mut pod_json, cm_name);
         }
 
-        // Apply pod manifest overrides via deep-merge
+        // Validate overrides for dangerous fields before applying them
         if let Some(ref overrides) = config.pod_manifest_overrides {
+            validate_pod_overrides(overrides).context("Pod manifest override validation failed")?;
             merge_json(&mut pod_json, overrides);
         }
 
@@ -360,6 +361,125 @@ fn is_named_array(arr: &[Value]) -> bool {
         && arr
             .iter()
             .all(|item| item.get("name").and_then(|n| n.as_str()).is_some())
+}
+
+/// Validate pod manifest overrides for dangerous security fields before they are applied.
+///
+/// Rejects overrides that attempt to set:
+/// - `spec.containers[*].securityContext.privileged: true`
+/// - `spec.containers[*].securityContext.allowPrivilegeEscalation: true`
+/// - `spec.initContainers[*].securityContext.privileged: true`
+/// - `spec.initContainers[*].securityContext.allowPrivilegeEscalation: true`
+/// - `spec.hostNetwork: true`
+/// - `spec.hostPID: true`
+/// - `spec.hostIPC: true`
+/// - `spec.volumes[*].hostPath` (any value)
+/// - `spec.containers[*].volumeMounts[*].mountPath: "/var/run/docker.sock"`
+///
+/// # Errors
+///
+/// Returns an error with a descriptive message for each rejected field.
+///
+/// # Examples
+///
+/// ```rust
+/// # use serde_json::json;
+/// # use stroem_runner::kubernetes::validate_pod_overrides;
+/// // Safe override passes
+/// let safe = json!({"spec": {"serviceAccountName": "my-sa"}});
+/// assert!(validate_pod_overrides(&safe).is_ok());
+///
+/// // Privileged container is rejected
+/// let dangerous = json!({"spec": {"containers": [{"name": "step", "securityContext": {"privileged": true}}]}});
+/// assert!(validate_pod_overrides(&dangerous).is_err());
+/// ```
+pub fn validate_pod_overrides(overrides: &Value) -> Result<()> {
+    // Null / non-object overrides are harmless
+    let Some(spec) = overrides.get("spec") else {
+        return Ok(());
+    };
+
+    // spec.hostNetwork
+    if spec.get("hostNetwork").and_then(Value::as_bool) == Some(true) {
+        bail!("Pod manifest override rejected: hostNetwork is not allowed");
+    }
+
+    // spec.hostPID
+    if spec.get("hostPID").and_then(Value::as_bool) == Some(true) {
+        bail!("Pod manifest override rejected: hostPID is not allowed");
+    }
+
+    // spec.hostIPC
+    if spec.get("hostIPC").and_then(Value::as_bool) == Some(true) {
+        bail!("Pod manifest override rejected: hostIPC is not allowed");
+    }
+
+    // spec.volumes[*].hostPath
+    if let Some(volumes) = spec.get("volumes").and_then(Value::as_array) {
+        for volume in volumes {
+            if volume.get("hostPath").is_some() {
+                bail!("Pod manifest override rejected: hostPath volumes are not allowed");
+            }
+        }
+    }
+
+    // Validate container security context and volume mounts for a named container list.
+    let check_containers = |containers: &[Value], label: &str| -> Result<()> {
+        for container in containers {
+            // securityContext.privileged
+            if container
+                .get("securityContext")
+                .and_then(|sc| sc.get("privileged"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                bail!(
+                    "Pod manifest override rejected: privileged containers are not allowed ({})",
+                    label
+                );
+            }
+
+            // securityContext.allowPrivilegeEscalation
+            if container
+                .get("securityContext")
+                .and_then(|sc| sc.get("allowPrivilegeEscalation"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                bail!(
+                    "Pod manifest override rejected: allowPrivilegeEscalation is not allowed ({})",
+                    label
+                );
+            }
+
+            // volumeMounts[*].mountPath == "/var/run/docker.sock"
+            if let Some(mounts) = container.get("volumeMounts").and_then(Value::as_array) {
+                for mount in mounts {
+                    if mount.get("mountPath").and_then(Value::as_str)
+                        == Some("/var/run/docker.sock")
+                    {
+                        bail!(
+                            "Pod manifest override rejected: mounting /var/run/docker.sock is not allowed ({})",
+                            label
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+
+    // spec.containers[*]
+    if let Some(containers) = spec.get("containers").and_then(Value::as_array) {
+        check_containers(containers, "containers")?;
+    }
+
+    // spec.initContainers[*]
+    if let Some(init_containers) = spec.get("initContainers").and_then(Value::as_array) {
+        check_containers(init_containers, "initContainers")?;
+    }
+
+    Ok(())
 }
 
 /// Result of classifying a Kubernetes pod phase.
@@ -1690,6 +1810,312 @@ mod tests {
         // Without manifest override, namespace is not set on the pod
         // (Kubernetes API sets it from the URL namespace)
         assert!(pod.metadata.namespace.is_none());
+    }
+
+    // --- validate_pod_overrides tests ---
+
+    #[test]
+    fn test_validate_pod_overrides_empty_passes() {
+        assert!(validate_pod_overrides(&serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_null_passes() {
+        assert!(validate_pod_overrides(&serde_json::Value::Null).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_no_spec_passes() {
+        let v = serde_json::json!({"metadata": {"annotations": {"x": "y"}}});
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_safe_overrides_pass() {
+        // resources, labels, annotations, service account, node selector, tolerations
+        let v = serde_json::json!({
+            "metadata": {
+                "annotations": {"iam.amazonaws.com/role": "my-role"}
+            },
+            "spec": {
+                "serviceAccountName": "my-sa",
+                "nodeSelector": {"gpu": "true"},
+                "tolerations": [{"key": "gpu", "operator": "Exists"}],
+                "containers": [{
+                    "name": "step",
+                    "resources": {
+                        "limits": {"memory": "512Mi"},
+                        "requests": {"cpu": "250m"}
+                    }
+                }]
+            }
+        });
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_host_network_rejected() {
+        let v = serde_json::json!({"spec": {"hostNetwork": true}});
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("hostNetwork"),
+            "Error should mention hostNetwork: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_host_network_false_passes() {
+        let v = serde_json::json!({"spec": {"hostNetwork": false}});
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_host_pid_rejected() {
+        let v = serde_json::json!({"spec": {"hostPID": true}});
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("hostPID"),
+            "Error should mention hostPID: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_host_ipc_rejected() {
+        let v = serde_json::json!({"spec": {"hostIPC": true}});
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("hostIPC"),
+            "Error should mention hostIPC: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_host_path_volume_rejected() {
+        let v = serde_json::json!({
+            "spec": {
+                "volumes": [{"name": "host-vol", "hostPath": {"path": "/tmp"}}]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("hostPath"),
+            "Error should mention hostPath: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_empty_dir_volume_passes() {
+        let v = serde_json::json!({
+            "spec": {
+                "volumes": [{"name": "tmp", "emptyDir": {}}]
+            }
+        });
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_secret_volume_passes() {
+        let v = serde_json::json!({
+            "spec": {
+                "volumes": [{"name": "my-secret", "secret": {"secretName": "db-creds"}}]
+            }
+        });
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_privileged_container_rejected() {
+        let v = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "step",
+                    "securityContext": {"privileged": true}
+                }]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("privileged"),
+            "Error should mention privileged: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_privileged_false_passes() {
+        let v = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "step",
+                    "securityContext": {"privileged": false}
+                }]
+            }
+        });
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_allow_privilege_escalation_container_rejected() {
+        let v = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "step",
+                    "securityContext": {"allowPrivilegeEscalation": true}
+                }]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("allowPrivilegeEscalation"),
+            "Error should mention allowPrivilegeEscalation: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_privileged_init_container_rejected() {
+        let v = serde_json::json!({
+            "spec": {
+                "initContainers": [{
+                    "name": "setup",
+                    "securityContext": {"privileged": true}
+                }]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("privileged"),
+            "Error should mention privileged: {}",
+            err
+        );
+        assert!(
+            err.to_string().contains("initContainers"),
+            "Error should mention initContainers: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_allow_privilege_escalation_init_container_rejected() {
+        let v = serde_json::json!({
+            "spec": {
+                "initContainers": [{
+                    "name": "setup",
+                    "securityContext": {"allowPrivilegeEscalation": true}
+                }]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("allowPrivilegeEscalation"),
+            "Error should mention allowPrivilegeEscalation: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_docker_sock_mount_rejected() {
+        let v = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "step",
+                    "volumeMounts": [{
+                        "name": "docker-sock",
+                        "mountPath": "/var/run/docker.sock"
+                    }]
+                }]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("/var/run/docker.sock"),
+            "Error should mention the socket path: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_other_mount_path_passes() {
+        let v = serde_json::json!({
+            "spec": {
+                "containers": [{
+                    "name": "step",
+                    "volumeMounts": [{
+                        "name": "secrets",
+                        "mountPath": "/run/secrets"
+                    }]
+                }]
+            }
+        });
+        assert!(validate_pod_overrides(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_pod_overrides_multiple_containers_all_checked() {
+        // Second container (sidecar) has privileged: true — should be caught
+        let v = serde_json::json!({
+            "spec": {
+                "containers": [
+                    {"name": "step", "securityContext": {"privileged": false}},
+                    {"name": "sidecar", "securityContext": {"privileged": true}}
+                ]
+            }
+        });
+        let err = validate_pod_overrides(&v).unwrap_err();
+        assert!(err.to_string().contains("privileged"));
+    }
+
+    #[test]
+    fn test_build_pod_spec_privileged_override_rejected() {
+        // Verify validate_pod_overrides is called inside build_pod_spec
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "containers": [{"name": "step", "securityContext": {"privileged": true}}]
+            }
+        })));
+        let result = runner.build_pod_spec("test-pod", &config, "default", make_labels());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("privileged"),
+            "Expected 'privileged' in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_build_pod_spec_host_network_override_rejected() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {"hostNetwork": true}
+        })));
+        let result = runner.build_pod_spec("test-pod", &config, "default", make_labels());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("hostNetwork"),
+            "Expected 'hostNetwork' in: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_build_pod_spec_host_path_override_rejected() {
+        let runner = make_runner();
+        let config = make_pod_config(Some(serde_json::json!({
+            "spec": {
+                "volumes": [{"name": "host", "hostPath": {"path": "/etc"}}]
+            }
+        })));
+        let result = runner.build_pod_spec("test-pod", &config, "default", make_labels());
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("hostPath"), "Expected 'hostPath' in: {}", msg);
     }
 
     // --- classify_pod_status tests ---

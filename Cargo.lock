@@ -4889,6 +4889,7 @@ dependencies = [
  "clap",
  "config",
  "croner",
+ "dashmap",
  "flate2",
  "futures-util",
  "git2",

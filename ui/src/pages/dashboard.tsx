@@ -12,7 +12,8 @@ import {
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { listJobs } from "@/lib/api";
+import { getStats, listJobs } from "@/lib/api";
+import type { DashboardStats } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { formatRelativeTime } from "@/lib/formatting";
 import type { JobListItem } from "@/lib/types";
@@ -20,6 +21,13 @@ import type { JobListItem } from "@/lib/types";
 export function DashboardPage() {
   useTitle("Dashboard");
   const [jobs, setJobs] = useState<JobListItem[]>([]);
+  const [stats, setStats] = useState<DashboardStats>({
+    pending: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -27,8 +35,14 @@ export function DashboardPage() {
 
     async function load() {
       try {
-        const data = await listJobs(100, 0);
-        if (!cancelled) setJobs(data.items);
+        const [statsData, jobsData] = await Promise.all([
+          getStats(),
+          listJobs(10, 0),
+        ]);
+        if (!cancelled) {
+          setStats(statsData);
+          setJobs(jobsData.items);
+        }
       } catch {
         // ignore
       } finally {
@@ -44,37 +58,28 @@ export function DashboardPage() {
     };
   }, []);
 
-  const counts = {
-    pending: jobs.filter((j) => j.status === "pending").length,
-    running: jobs.filter((j) => j.status === "running").length,
-    completed: jobs.filter((j) => j.status === "completed").length,
-    failed: jobs.filter((j) => j.status === "failed").length,
-  };
-
-  const recentJobs = jobs.slice(0, 10);
-
   const statCards = [
     {
       label: "Pending",
-      value: counts.pending,
+      value: stats.pending,
       icon: Clock,
       color: "text-yellow-600 dark:text-yellow-400",
     },
     {
       label: "Running",
-      value: counts.running,
+      value: stats.running,
       icon: Loader2,
       color: "text-blue-600 dark:text-blue-400",
     },
     {
       label: "Completed",
-      value: counts.completed,
+      value: stats.completed,
       icon: CheckCircle2,
       color: "text-green-600 dark:text-green-400",
     },
     {
       label: "Failed",
-      value: counts.failed,
+      value: stats.failed,
       icon: XCircle,
       color: "text-red-600 dark:text-red-400",
     },
@@ -116,7 +121,7 @@ export function DashboardPage() {
           <CardTitle className="text-base">Recent Jobs</CardTitle>
         </CardHeader>
         <CardContent>
-          {recentJobs.length === 0 ? (
+          {jobs.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No jobs yet. Trigger a task to get started.
             </p>
@@ -131,7 +136,7 @@ export function DashboardPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {recentJobs.map((job) => (
+                {jobs.map((job) => (
                   <TableRow key={job.job_id}>
                     <TableCell>
                       <Link
