@@ -448,6 +448,36 @@ pub async fn claim_job(
         Some(serde_json::Value::Object(spec_obj))
     };
 
+    // Render action_image templates (e.g. {{ input.image_tag }})
+    let rendered_image = 'render_image: {
+        let Some(ref image_str) = step.action_image else {
+            break 'render_image step.action_image.clone();
+        };
+        if !image_str.contains("{{") {
+            break 'render_image step.action_image.clone();
+        }
+        // Build context (same as spec rendering above)
+        let mut img_context = serde_json::Map::new();
+        if let Some(ref input_val) = rendered_input {
+            img_context.insert("input".to_string(), input_val.clone());
+        }
+        if let Some(ref workspace) = ws_config {
+            if !workspace.secrets.is_empty() {
+                let secrets_value = serde_json::to_value(&workspace.secrets).unwrap_or_default();
+                img_context.insert("secret".to_string(), secrets_value);
+            }
+        }
+        let context_value = serde_json::Value::Object(img_context);
+        let img_opt = Some(image_str.clone());
+        match render_string_opt(&img_opt, &context_value) {
+            Ok(rendered) => rendered,
+            Err(e) => {
+                tracing::warn!("Failed to render action_image template: {:#}", e);
+                step.action_image.clone()
+            }
+        }
+    };
+
     Json(ClaimResponse {
         workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
@@ -455,7 +485,7 @@ pub async fn claim_job(
         step_name: Some(step.step_name),
         action_name: Some(step.action_name),
         action_type: Some(step.action_type),
-        action_image: step.action_image,
+        action_image: rendered_image,
         action_spec: rendered_action_spec,
         input: rendered_input,
         runner: Some(step.runner),

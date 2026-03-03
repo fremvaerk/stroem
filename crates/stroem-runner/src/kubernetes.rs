@@ -371,11 +371,38 @@ enum PodPhaseStatus {
     Running,
     /// Pod is still being scheduled / init containers running.
     Pending,
+    /// A container is stuck in a waiting state with a terminal error (e.g. InvalidImageName).
+    WaitingError { reason: String, message: String },
     /// An unrecognised phase string from the Kubernetes API.
     Unknown(String),
 }
 
+/// Waiting reasons that indicate a permanent failure (will never recover).
+const TERMINAL_WAITING_REASONS: &[&str] = &[
+    "InvalidImageName",
+    "ErrImageNeverPull",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+];
+
+/// Waiting reasons that indicate a transient failure. After enough retries
+/// Kubernetes gives up and the pod stays Pending — treat as terminal.
+const BACKOFF_WAITING_REASONS: &[&str] = &[
+    "ImagePullBackOff",
+    "ErrImagePull",
+    "CrashLoopBackOff",
+    "RegistryUnavailable",
+];
+
+/// Maximum time (seconds) to wait for a Pending pod with a backoff reason
+/// before treating it as a permanent failure.
+const BACKOFF_TIMEOUT_SECS: u64 = 300;
+
 /// Classify a pod's phase and extract exit code from the step container status.
+///
+/// In addition to checking the pod phase, this inspects container waiting states
+/// to detect image pull errors and other permanent failures that keep the pod in
+/// `Pending` without ever transitioning to `Failed`.
 fn classify_pod_status(pod: &Pod) -> Option<PodPhaseStatus> {
     let status = pod.status.as_ref()?;
     let phase = status.phase.as_deref()?;
@@ -401,7 +428,33 @@ fn classify_pod_status(pod: &Pod) -> Option<PodPhaseStatus> {
             PodPhaseStatus::Failed { exit_code }
         }
         "Running" => PodPhaseStatus::Running,
-        "Pending" => PodPhaseStatus::Pending,
+        "Pending" => {
+            // Check both init_container_statuses and container_statuses for waiting errors.
+            // Init containers are checked first since they run before the main containers.
+            let all_statuses = status
+                .init_container_statuses
+                .iter()
+                .flatten()
+                .chain(status.container_statuses.iter().flatten());
+
+            for cs in all_statuses {
+                if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
+                    let reason = waiting.reason.as_deref().unwrap_or("");
+                    if TERMINAL_WAITING_REASONS.contains(&reason)
+                        || BACKOFF_WAITING_REASONS.contains(&reason)
+                    {
+                        let message = waiting.message.clone().unwrap_or_else(|| {
+                            format!("Container {} waiting: {}", cs.name, reason)
+                        });
+                        return Some(PodPhaseStatus::WaitingError {
+                            reason: reason.to_string(),
+                            message,
+                        });
+                    }
+                }
+            }
+            PodPhaseStatus::Pending
+        }
         other => PodPhaseStatus::Unknown(other.to_string()),
     })
 }
@@ -509,6 +562,7 @@ impl Runner for KubeRunner {
         // We need the container to be Running before we can start a follow log stream.
         let mut exit_code = -1i32;
         let mut pod_terminal = false;
+        let mut backoff_first_seen: Option<std::time::Instant> = None;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -532,7 +586,61 @@ impl Runner for KubeRunner {
                     tracing::debug!("Pod {} is Running, starting live log stream", pod_name);
                     break;
                 }
+                Some(PodPhaseStatus::WaitingError { reason, message }) => {
+                    if TERMINAL_WAITING_REASONS.contains(&reason.as_str()) {
+                        // Immediate terminal errors — no point waiting
+                        tracing::error!(
+                            "Pod {} has terminal container error: {} — {}",
+                            pod_name,
+                            reason,
+                            message
+                        );
+                        if let Some(ref cb) = log_callback {
+                            let _ = cb(LogLine {
+                                stream: LogStream::Stderr,
+                                line: format!("Container error: {} — {}", reason, message),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                        exit_code = 1;
+                        pod_terminal = true;
+                        break;
+                    }
+                    // Backoff errors — wait up to BACKOFF_TIMEOUT_SECS
+                    let first_seen = backoff_first_seen.get_or_insert_with(std::time::Instant::now);
+                    let elapsed = first_seen.elapsed().as_secs();
+                    if elapsed >= BACKOFF_TIMEOUT_SECS {
+                        tracing::error!(
+                            "Pod {} stuck in {} for {}s, giving up: {}",
+                            pod_name,
+                            reason,
+                            elapsed,
+                            message
+                        );
+                        if let Some(ref cb) = log_callback {
+                            let _ = cb(LogLine {
+                                stream: LogStream::Stderr,
+                                line: format!(
+                                    "Container error: {} after {}s — {}",
+                                    reason, elapsed, message
+                                ),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                        exit_code = 1;
+                        pod_terminal = true;
+                        break;
+                    }
+                    tracing::warn!(
+                        "Pod {} waiting: {} ({}s elapsed) — {}",
+                        pod_name,
+                        reason,
+                        elapsed,
+                        message
+                    );
+                }
                 Some(PodPhaseStatus::Pending) => {
+                    backoff_first_seen = None; // Reset if no longer in error state
                     tracing::debug!("Pod {} is Pending", pod_name);
                 }
                 Some(PodPhaseStatus::Unknown(ref phase)) => {
@@ -616,6 +724,16 @@ impl Runner for KubeRunner {
                     }
                     Some(PodPhaseStatus::Failed { exit_code: code }) => {
                         exit_code = code;
+                        break None;
+                    }
+                    Some(PodPhaseStatus::WaitingError { reason, message }) => {
+                        tracing::error!(
+                            "Pod {} has container error during log streaming: {} — {}",
+                            pod_name,
+                            reason,
+                            message
+                        );
+                        exit_code = 1;
                         break None;
                     }
                     Some(PodPhaseStatus::Unknown(ref phase)) => {
@@ -1746,5 +1864,200 @@ mod tests {
         let (stdout, _stderr, output) = drain_log_stream(cursor, &None).await;
         assert_eq!(stdout.len(), 2);
         assert!(output.is_none()); // invalid JSON is silently ignored
+    }
+
+    // --- classify_pod_status tests ---
+
+    fn make_pod(phase: &str) -> Pod {
+        use k8s_openapi::api::core::v1::PodStatus;
+        Pod {
+            metadata: Default::default(),
+            spec: None,
+            status: Some(PodStatus {
+                phase: Some(phase.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn make_pod_with_waiting(phase: &str, container_name: &str, reason: &str) -> Pod {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateWaiting, ContainerStatus, PodStatus,
+        };
+        Pod {
+            metadata: Default::default(),
+            spec: None,
+            status: Some(PodStatus {
+                phase: Some(phase.to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: container_name.to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some(reason.to_string()),
+                            message: Some(format!("Error: {}", reason)),
+                        }),
+                        ..Default::default()
+                    }),
+                    image: String::new(),
+                    image_id: String::new(),
+                    ready: false,
+                    restart_count: 0,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_classify_pod_status_succeeded() {
+        let pod = make_pod("Succeeded");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Succeeded)
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_failed() {
+        let pod = make_pod("Failed");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Failed { exit_code: 1 })
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_running() {
+        let pod = make_pod("Running");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Running)
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_pending_no_waiting() {
+        let pod = make_pod("Pending");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Pending)
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_pending_with_invalid_image_name() {
+        let pod = make_pod_with_waiting("Pending", "step", "InvalidImageName");
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::WaitingError { reason, message }) => {
+                assert_eq!(reason, "InvalidImageName");
+                assert!(message.contains("InvalidImageName"));
+            }
+            other => panic!(
+                "Expected WaitingError, got {:?}",
+                other.map(|_| "something else")
+            ),
+        }
+    }
+
+    #[test]
+    fn test_classify_pod_status_pending_with_image_pull_backoff() {
+        let pod = make_pod_with_waiting("Pending", "step", "ImagePullBackOff");
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::WaitingError { reason, .. }) => {
+                assert_eq!(reason, "ImagePullBackOff");
+            }
+            other => panic!(
+                "Expected WaitingError, got {:?}",
+                other.map(|_| "something else")
+            ),
+        }
+    }
+
+    #[test]
+    fn test_classify_pod_status_pending_with_err_image_never_pull() {
+        let pod = make_pod_with_waiting("Pending", "step", "ErrImageNeverPull");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::WaitingError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_pending_with_create_container_error() {
+        let pod = make_pod_with_waiting("Pending", "step", "CreateContainerConfigError");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::WaitingError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_pending_with_normal_waiting() {
+        // ContainerCreating is a normal waiting reason — should still be Pending
+        let pod = make_pod_with_waiting("Pending", "step", "ContainerCreating");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Pending)
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_no_status() {
+        let pod = Pod {
+            metadata: Default::default(),
+            spec: None,
+            status: None,
+        };
+        assert!(classify_pod_status(&pod).is_none());
+    }
+
+    #[test]
+    fn test_classify_pod_status_unknown_phase() {
+        let pod = make_pod("SomeWeirdPhase");
+        assert!(matches!(
+            classify_pod_status(&pod),
+            Some(PodPhaseStatus::Unknown(ref s)) if s == "SomeWeirdPhase"
+        ));
+    }
+
+    #[test]
+    fn test_classify_pod_status_init_container_waiting_error() {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateWaiting, ContainerStatus, PodStatus,
+        };
+        let pod = Pod {
+            metadata: Default::default(),
+            spec: None,
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                init_container_statuses: Some(vec![ContainerStatus {
+                    name: "workspace-init".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("InvalidImageName".to_string()),
+                            message: Some("bad init image".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    image: String::new(),
+                    image_id: String::new(),
+                    ready: false,
+                    restart_count: 0,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+        match classify_pod_status(&pod) {
+            Some(PodPhaseStatus::WaitingError { reason, message }) => {
+                assert_eq!(reason, "InvalidImageName");
+                assert_eq!(message, "bad init image");
+            }
+            other => panic!(
+                "Expected WaitingError, got {:?}",
+                other.map(|_| "something else")
+            ),
+        }
     }
 }

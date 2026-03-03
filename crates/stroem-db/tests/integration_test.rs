@@ -4,8 +4,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{
-    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo,
-    UserAuthLinkRepo, UserRepo, WorkerRepo,
+    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, UserAuthLinkRepo, UserRepo,
+    WorkerRepo,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -15,7 +15,14 @@ async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)
     let container = Postgres::default().start().await?;
     let port = container.get_host_port_ipv4(5432).await?;
     let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-    let pool = create_pool(&url).await?;
+    // Use a lightweight pool for tests: no eager min_connections (avoids
+    // timeouts when many containers start simultaneously under Docker pressure),
+    // and a longer acquire timeout to tolerate slow container startup.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(&url)
+        .await?;
     run_migrations(&pool).await?;
     Ok((pool, container))
 }
