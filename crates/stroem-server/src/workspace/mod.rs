@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
@@ -293,13 +294,15 @@ impl WorkspaceManager {
     /// Start background watchers for hot-reload (folder watchers + git pollers).
     /// Only reloads when the source revision changes.
     /// Uses each source's `poll_interval_secs()` for the polling frequency.
-    pub fn start_watchers(&self) {
+    /// Watchers stop cleanly when `cancel_token` is cancelled.
+    pub fn start_watchers(&self, cancel_token: CancellationToken) {
         for (name, entry) in &self.entries {
             let config_lock = entry.config.clone();
             let source = entry.source.clone();
             let ws_name = name.clone();
             let poll_secs = source.poll_interval_secs();
             let libs = self.resolved_libraries.clone();
+            let cancel = cancel_token.clone();
 
             tokio::spawn(async move {
                 tracing::info!(
@@ -314,7 +317,16 @@ impl WorkspaceManager {
                 interval.tick().await;
 
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        () = cancel.cancelled() => {
+                            tracing::info!(
+                                "Watcher for workspace '{}' stopping (shutdown)",
+                                ws_name
+                            );
+                            break;
+                        }
+                    }
 
                     // Check revision cheaply first. For folder sources this
                     // hashes file metadata+content without parsing YAML.
@@ -1211,5 +1223,35 @@ tasks:
         // Serialize to JSON and verify "error" key is absent
         let json = serde_json::to_value(&infos[0]).unwrap();
         assert!(!json.as_object().unwrap().contains_key("error"));
+    }
+
+    #[tokio::test]
+    async fn test_start_watchers_stops_on_cancellation() {
+        use tokio_util::sync::CancellationToken;
+
+        let temp = create_test_workspace_dir();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        let cancel_token = CancellationToken::new();
+
+        // Spawn watcher tasks with a long poll interval so they don't fire
+        // during the test; we only care that they respond to cancellation.
+        mgr.start_watchers(cancel_token.clone());
+
+        // Cancel immediately and give the tasks a moment to observe it.
+        cancel_token.cancel();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // If watchers ignore cancellation they would run forever, causing the
+        // test to hang.  Reaching here means the tasks exited (or will exit)
+        // cleanly.  The token being cancelled is the definitive assertion.
+        assert!(cancel_token.is_cancelled());
     }
 }

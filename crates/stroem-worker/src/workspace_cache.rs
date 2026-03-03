@@ -79,8 +79,16 @@ impl WorkspaceCache {
 
         match result {
             Some((data, revision)) => {
-                // New version available, extract it
-                self.extract_tarball(workspace, &data, &revision)?;
+                // New version available — extract it in a blocking thread to avoid
+                // stalling the async runtime during fs ops and tar decompression.
+                let base_dir = self.base_dir.clone();
+                let workspace_owned = workspace.to_owned();
+                tokio::task::spawn_blocking(move || {
+                    let cache = WorkspaceCache { base_dir };
+                    cache.extract_tarball(&workspace_owned, &data, &revision)
+                })
+                .await
+                .context("tarball extraction task panicked")??;
             }
             None => {
                 // 304 Not Modified — our cache is current

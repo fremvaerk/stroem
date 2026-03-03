@@ -27,54 +27,41 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
-function getRefreshToken(): string | null {
-  return localStorage.getItem("stroem_refresh_token");
-}
-
-export function hasRefreshToken(): boolean {
-  return !!getRefreshToken();
-}
-
-function setRefreshToken(token: string | null) {
-  if (token) {
-    localStorage.setItem("stroem_refresh_token", token);
-  } else {
-    localStorage.removeItem("stroem_refresh_token");
-  }
-}
+// The refresh token is stored in an HttpOnly cookie managed by the server.
+// The browser sends it automatically on requests to /api/auth/* when
+// credentials: "include" is set — JavaScript cannot read or write it.
 
 async function refreshAccessToken(): Promise<boolean> {
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) return false;
-
   try {
     const res = await fetch("/api/auth/refresh", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
+      credentials: "include",
     });
     if (!res.ok) {
-      setRefreshToken(null);
       setAccessToken(null);
       return false;
     }
     const data: TokenResponse = await res.json();
     setAccessToken(data.access_token);
-    setRefreshToken(data.refresh_token);
     return true;
   } catch {
-    setRefreshToken(null);
     setAccessToken(null);
     return false;
   }
+}
+
+// Attempt a silent refresh on startup to check whether a valid refresh cookie
+// exists. Used by the auth context to restore session across page reloads.
+export async function tryRestoreSession(): Promise<boolean> {
+  return refreshAccessToken();
 }
 
 async function apiFetch<T>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  // Preemptively refresh if we have no access token but have a refresh token
-  if (!accessToken && getRefreshToken()) {
+  // Preemptively refresh if we have no access token (cookie may still be valid)
+  if (!accessToken) {
     if (!refreshPromise) {
       refreshPromise = refreshAccessToken().finally(() => {
         refreshPromise = null;
@@ -97,7 +84,7 @@ async function apiFetch<T>(
 
   let res = await fetch(url, { ...options, headers });
 
-  if (res.status === 401 && getRefreshToken()) {
+  if (res.status === 401) {
     if (!refreshPromise) {
       refreshPromise = refreshAccessToken().finally(() => {
         refreshPromise = null;
@@ -138,10 +125,13 @@ export async function login(
   email: string,
   password: string,
 ): Promise<TokenResponse> {
+  // credentials: "include" ensures the Set-Cookie response header is accepted
+  // by the browser (the refresh token HttpOnly cookie).
   const res = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
+    credentials: "include",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -149,21 +139,17 @@ export async function login(
   }
   const data: TokenResponse = await res.json();
   setAccessToken(data.access_token);
-  setRefreshToken(data.refresh_token);
   return data;
 }
 
 export async function logout(): Promise<void> {
-  const refreshToken = getRefreshToken();
-  if (refreshToken) {
-    await fetch("/api/auth/logout", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    }).catch(() => {});
-  }
+  // credentials: "include" sends the refresh cookie so the server can revoke it,
+  // and the response clears the cookie (Max-Age=0).
+  await fetch("/api/auth/logout", {
+    method: "POST",
+    credentials: "include",
+  }).catch(() => {});
   setAccessToken(null);
-  setRefreshToken(null);
 }
 
 export async function getMe(): Promise<AuthUser> {
@@ -197,9 +183,10 @@ export async function getServerConfig(): Promise<ServerConfig> {
   }
 }
 
-export function setTokensFromOidc(accessToken: string, refreshToken: string) {
+export function setTokensFromOidc(accessToken: string) {
   setAccessToken(accessToken);
-  setRefreshToken(refreshToken);
+  // The refresh token arrives as an HttpOnly cookie set by the OIDC callback
+  // redirect — no JavaScript action required.
 }
 
 // Workspaces

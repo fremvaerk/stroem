@@ -942,6 +942,38 @@ async fn body_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+/// Extract the `stroem_refresh` cookie value from a response's Set-Cookie headers.
+fn extract_refresh_cookie(response: &axum::response::Response) -> Option<String> {
+    response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("stroem_refresh="))
+        .and_then(|s| {
+            s.strip_prefix("stroem_refresh=")
+                .and_then(|rest| rest.split(';').next())
+                .map(|v| v.to_string())
+        })
+        .filter(|v| !v.is_empty())
+}
+
+/// Build a request with a cookie header containing the refresh token.
+fn api_request_with_cookie(
+    method: &str,
+    uri: &str,
+    body: Value,
+    cookie: &str,
+) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
 /// Helper to build a log push request body using the JSONL `lines` format.
 fn log_lines_body(step_name: &str, lines: &[(&str, &str)]) -> Value {
     let entries: Vec<Value> = lines
@@ -3433,9 +3465,11 @@ async fn test_auth_login_success() -> Result<()> {
         ))
         .await?;
     assert_eq!(response.status(), 200);
+    // Refresh token is now in Set-Cookie header (HttpOnly cookie)
+    let refresh_cookie = extract_refresh_cookie(&response);
+    assert!(refresh_cookie.is_some(), "Expected stroem_refresh cookie");
     let body = body_json(response).await;
     assert!(body["access_token"].is_string());
-    assert!(body["refresh_token"].is_string());
 
     Ok(())
 }
@@ -3491,30 +3525,32 @@ async fn test_auth_refresh_success() -> Result<()> {
             json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
         ))
         .await?;
-    let body = body_json(response).await;
-    let refresh_token = body["refresh_token"].as_str().unwrap().to_string();
+    let refresh_token = extract_refresh_cookie(&response).unwrap();
+    let cookie = format!("stroem_refresh={}", refresh_token);
 
-    // Refresh
+    // Refresh via cookie
     let response = router
         .clone()
-        .oneshot(api_request(
+        .oneshot(api_request_with_cookie(
             "POST",
             "/api/auth/refresh",
-            json!({"refresh_token": refresh_token}),
+            json!({}),
+            &cookie,
         ))
         .await?;
     assert_eq!(response.status(), 200);
+    let new_refresh = extract_refresh_cookie(&response).unwrap();
+    assert_ne!(new_refresh, refresh_token); // new token issued
     let body = body_json(response).await;
     assert!(body["access_token"].is_string());
-    let new_refresh = body["refresh_token"].as_str().unwrap().to_string();
-    assert_ne!(new_refresh, refresh_token); // new token issued
 
     // Old refresh token should be invalid now (rotation)
     let response = router
-        .oneshot(api_request(
+        .oneshot(api_request_with_cookie(
             "POST",
             "/api/auth/refresh",
-            json!({"refresh_token": refresh_token}),
+            json!({}),
+            &cookie,
         ))
         .await?;
     assert_eq!(response.status(), 401);
@@ -3555,26 +3591,28 @@ async fn test_auth_logout() -> Result<()> {
             json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}),
         ))
         .await?;
-    let body = body_json(response).await;
-    let refresh_token = body["refresh_token"].as_str().unwrap().to_string();
+    let refresh_token = extract_refresh_cookie(&response).unwrap();
+    let cookie = format!("stroem_refresh={}", refresh_token);
 
-    // Logout
+    // Logout via cookie
     let response = router
         .clone()
-        .oneshot(api_request(
+        .oneshot(api_request_with_cookie(
             "POST",
             "/api/auth/logout",
-            json!({"refresh_token": refresh_token}),
+            json!({}),
+            &cookie,
         ))
         .await?;
     assert_eq!(response.status(), 200);
 
     // Refresh should now fail
     let response = router
-        .oneshot(api_request(
+        .oneshot(api_request_with_cookie(
             "POST",
             "/api/auth/refresh",
-            json!({"refresh_token": refresh_token}),
+            json!({}),
+            &cookie,
         ))
         .await?;
     assert_eq!(response.status(), 401);

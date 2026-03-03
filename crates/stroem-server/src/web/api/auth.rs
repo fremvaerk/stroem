@@ -1,19 +1,23 @@
 use crate::auth::{
     create_access_token, generate_refresh_token, hash_refresh_token, verify_password,
 };
+use crate::config::AuthConfig;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_db::{RefreshTokenRepo, UserRepo};
+
+const REFRESH_COOKIE_NAME: &str = "stroem_refresh";
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -24,30 +28,60 @@ pub struct LoginRequest {
 #[derive(Debug, Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
-    pub refresh_token: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RefreshRequest {
-    pub refresh_token: String,
+    /// Accepted for backward compatibility (CLI / API clients that cannot use cookies).
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LogoutRequest {
-    pub refresh_token: String,
+    /// Accepted for backward compatibility (CLI / API clients that cannot use cookies).
+    pub refresh_token: Option<String>,
+}
+
+/// Build the `Set-Cookie` header value for the refresh token cookie.
+///
+/// Pass `max_age_secs = 0` and an empty `token` to produce a clearing cookie.
+pub fn refresh_token_cookie(token: &str, max_age_secs: i64, auth_config: &AuthConfig) -> String {
+    let secure = if auth_config
+        .base_url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("https://"))
+    {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{}={}; HttpOnly; SameSite=Strict; Path=/api/auth; Max-Age={}{}",
+        REFRESH_COOKIE_NAME, token, max_age_secs, secure
+    )
+}
+
+/// Issued token pair returned from [`issue_token_pair`].
+///
+/// Contains the raw access token (for the JSON response) and the raw refresh
+/// token (for the `Set-Cookie` header).  The refresh token is **not** included
+/// in the JSON response body; callers must set it as an HttpOnly cookie.
+pub struct IssuedTokenPair {
+    pub access_token: String,
+    pub raw_refresh_token: String,
 }
 
 /// Create an access token + refresh token pair and persist the refresh token.
 ///
-/// Returns a ready-to-send [`TokenResponse`] on success, or a pre-built error
-/// [`Response`] on failure so callers can directly `return` it.
+/// Returns [`IssuedTokenPair`] on success, or a pre-built error [`Response`]
+/// on failure so callers can directly `return` it.
 #[allow(clippy::result_large_err)]
 pub async fn issue_token_pair(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     email: &str,
     jwt_secret: &str,
-) -> Result<TokenResponse, Response> {
+) -> Result<IssuedTokenPair, Response> {
     let access_token = match create_access_token(&user_id.to_string(), email, jwt_secret) {
         Ok(t) => t,
         Err(e) => {
@@ -72,9 +106,9 @@ pub async fn issue_token_pair(
             .into_response());
     }
 
-    Ok(TokenResponse {
+    Ok(IssuedTokenPair {
         access_token,
-        refresh_token: raw_refresh,
+        raw_refresh_token: raw_refresh,
     })
 }
 
@@ -156,16 +190,31 @@ pub async fn login(
     )
     .await
     {
-        Ok(tokens) => Json(tokens).into_response(),
+        Ok(tokens) => {
+            let cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
+            (
+                [(header::SET_COOKIE, cookie)],
+                Json(TokenResponse {
+                    access_token: tokens.access_token,
+                }),
+            )
+                .into_response()
+        }
         Err(resp) => resp,
     }
 }
 
 /// POST /api/auth/refresh
-#[tracing::instrument(skip(state, req))]
+///
+/// The refresh token is read from the `stroem_refresh` HttpOnly cookie.
+/// For backward compatibility, the token may also be supplied in the JSON
+/// body (`refresh_token` field) — this path is retained for CLI / API clients
+/// that cannot use browser cookies.
+#[tracing::instrument(skip(state, jar, req))]
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RefreshRequest>,
+    jar: CookieJar,
+    req: Option<Json<RefreshRequest>>,
 ) -> impl IntoResponse {
     let auth_config = match &state.config.auth {
         Some(cfg) => cfg,
@@ -178,7 +227,24 @@ pub async fn refresh(
         }
     };
 
-    let token_hash = hash_refresh_token(&req.refresh_token);
+    // Prefer cookie; fall back to body token (backward compat for CLI/API clients).
+    let raw_token = jar
+        .get(REFRESH_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .or_else(|| req.as_ref().and_then(|r| r.refresh_token.clone()));
+
+    let raw_token = match raw_token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "No refresh token provided"})),
+            )
+                .into_response()
+        }
+    };
+
+    let token_hash = hash_refresh_token(&raw_token);
 
     let token_row = match RefreshTokenRepo::get_by_hash(&state.pool, &token_hash).await {
         Ok(Some(row)) => row,
@@ -240,29 +306,67 @@ pub async fn refresh(
     )
     .await
     {
-        Ok(tokens) => Json(tokens).into_response(),
+        Ok(tokens) => {
+            let cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
+            (
+                [(header::SET_COOKIE, cookie)],
+                Json(TokenResponse {
+                    access_token: tokens.access_token,
+                }),
+            )
+                .into_response()
+        }
         Err(resp) => resp,
     }
 }
 
 /// POST /api/auth/logout
-#[tracing::instrument(skip(state, req))]
+///
+/// The refresh token is read from the `stroem_refresh` HttpOnly cookie.
+/// For backward compatibility, the token may also be supplied in the JSON
+/// body (`refresh_token` field).  The cookie is always cleared in the response
+/// regardless of how the token was supplied.
+#[tracing::instrument(skip(state, jar, req))]
 pub async fn logout(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<LogoutRequest>,
+    jar: CookieJar,
+    req: Option<Json<LogoutRequest>>,
 ) -> impl IntoResponse {
-    let token_hash = hash_refresh_token(&req.refresh_token);
+    let auth_config = state.config.auth.as_ref();
 
-    if let Err(e) = RefreshTokenRepo::delete(&state.pool, &token_hash).await {
-        tracing::error!("Failed to delete refresh token: {:#}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Internal server error"})),
-        )
-            .into_response();
+    // Prefer cookie; fall back to body token.
+    let raw_token = jar
+        .get(REFRESH_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .or_else(|| req.as_ref().and_then(|r| r.refresh_token.clone()));
+
+    if let Some(raw) = raw_token.filter(|t| !t.is_empty()) {
+        let token_hash = hash_refresh_token(&raw);
+        if let Err(e) = RefreshTokenRepo::delete(&state.pool, &token_hash).await {
+            tracing::error!("Failed to delete refresh token: {:#}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response();
+        }
     }
 
-    Json(json!({"status": "ok"})).into_response()
+    // Clear the cookie in the response (Max-Age=0), respecting the Secure flag.
+    let clear_cookie = auth_config
+        .map(|cfg| refresh_token_cookie("", 0, cfg))
+        .unwrap_or_else(|| {
+            format!(
+                "{}=; HttpOnly; SameSite=Strict; Path=/api/auth; Max-Age=0",
+                REFRESH_COOKIE_NAME
+            )
+        });
+
+    (
+        [(header::SET_COOKIE, clear_cookie)],
+        Json(json!({"status": "ok"})),
+    )
+        .into_response()
 }
 
 /// GET /api/auth/me

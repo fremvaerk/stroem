@@ -26,20 +26,20 @@ export default function App() {
           <Route path="/login/callback" element={<LoginCallbackPage />} />
           <Route element={<ProtectedRoute />}>
             <Route element={<AppLayout />}>
-              <Route index element={<DashboardPage />} />
-              <Route path="workspaces" element={<WorkspacesPage />} />
-              <Route path="tasks" element={<TasksPage />} />
+              <Route index element={<ErrorBoundary><DashboardPage /></ErrorBoundary>} />
+              <Route path="workspaces" element={<ErrorBoundary><WorkspacesPage /></ErrorBoundary>} />
+              <Route path="tasks" element={<ErrorBoundary><TasksPage /></ErrorBoundary>} />
               <Route
                 path="workspaces/:workspace/tasks/:name"
-                element={<TaskDetailPage />}
+                element={<ErrorBoundary><TaskDetailPage /></ErrorBoundary>}
               />
-              <Route path="jobs" element={<JobsPage />} />
-              <Route path="jobs/:id" element={<JobDetailPage />} />
-              <Route path="workers" element={<WorkersPage />} />
-              <Route path="workers/:id" element={<WorkerDetailPage />} />
-              <Route path="users" element={<UsersPage />} />
-              <Route path="users/:id" element={<UserDetailPage />} />
-              <Route path="settings" element={<SettingsPage />} />
+              <Route path="jobs" element={<ErrorBoundary><JobsPage /></ErrorBoundary>} />
+              <Route path="jobs/:id" element={<ErrorBoundary><JobDetailPage /></ErrorBoundary>} />
+              <Route path="workers" element={<ErrorBoundary><WorkersPage /></ErrorBoundary>} />
+              <Route path="workers/:id" element={<ErrorBoundary><WorkerDetailPage /></ErrorBoundary>} />
+              <Route path="users" element={<ErrorBoundary><UsersPage /></ErrorBoundary>} />
+              <Route path="users/:id" element={<ErrorBoundary><UserDetailPage /></ErrorBoundary>} />
+              <Route path="settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
             </Route>
           </Route>
         </Routes>

@@ -11,21 +11,22 @@ function parseCallbackHash() {
   return {
     error: params.get("error"),
     accessToken: params.get("access_token"),
-    refreshToken: params.get("refresh_token"),
   };
 }
 
 export function LoginCallbackPage() {
-  const { error: urlError, accessToken, refreshToken } = useMemo(() => parseCallbackHash(), []);
+  const { error: urlError, accessToken } = useMemo(() => parseCallbackHash(), []);
 
-  const error = urlError ?? (!accessToken || !refreshToken ? "Missing tokens in callback" : null);
+  // The refresh token is delivered as an HttpOnly cookie by the server redirect
+  // — it never appears in the URL hash.
+  const error = urlError ?? (!accessToken ? "Missing access token in callback" : null);
 
   useEffect(() => {
-    if (accessToken && refreshToken) {
-      setTokensFromOidc(accessToken, refreshToken);
+    if (accessToken) {
+      setTokensFromOidc(accessToken);
       window.location.href = "/";
     }
-  }, [accessToken, refreshToken]);
+  }, [accessToken]);
 
   if (!error) {
     return (

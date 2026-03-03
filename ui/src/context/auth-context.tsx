@@ -40,12 +40,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setHasInternalAuth(config.hasInternalAuth);
       setOidcProviders(config.oidcProviders);
 
-      if (config.authRequired && api.hasRefreshToken()) {
+      if (config.authRequired) {
         try {
-          const me = await api.getMe();
-          if (!cancelled) setUser(me);
+          // tryRestoreSession attempts a silent token refresh using the
+          // HttpOnly refresh cookie. If the cookie is absent or expired this
+          // resolves false and we stay unauthenticated.
+          const restored = await api.tryRestoreSession();
+          if (restored && !cancelled) {
+            const me = await api.getMe();
+            if (!cancelled) setUser(me);
+          }
         } catch {
-          // Refresh token expired or invalid
+          // Refresh token expired or invalid — stay logged out
         }
       }
       if (!cancelled) setIsLoading(false);

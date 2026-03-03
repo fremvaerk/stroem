@@ -109,9 +109,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Start background watchers for hot-reload
-    workspace_manager.start_watchers();
-
     // Initialize OIDC providers
     let oidc_providers = if let Some(auth) = &config.auth {
         if auth.providers.values().any(|p| p.provider_type == "oidc") {
@@ -151,6 +148,7 @@ async fn main() -> Result<()> {
 
     // Start background tasks
     let cancel_token = CancellationToken::new();
+    state.workspaces.start_watchers(cancel_token.clone());
     let _scheduler = stroem_server::scheduler::start(
         state.pool.clone(),
         state.workspaces.clone(),

@@ -1,7 +1,7 @@
 use crate::config::AuthConfig;
 use crate::oidc::{create_state_jwt, provision_user, validate_state_jwt, OidcStateClaims};
 use crate::state::AppState;
-use crate::web::api::auth::issue_token_pair;
+use crate::web::api::auth::{issue_token_pair, refresh_token_cookie};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -281,23 +281,27 @@ pub async fn oidc_callback(
     };
 
     // Clear state cookie (Secure flag must match the original cookie)
-    let clear_cookie = format!(
+    let clear_state_cookie = format!(
         "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
         STATE_COOKIE_NAME,
         cookie_secure_flag(auth_config)
     );
 
-    // Redirect to frontend callback with tokens in hash fragment
+    // Set the refresh token as an HttpOnly cookie (XSS-safe).
+    let refresh_cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
+
+    // Redirect to frontend callback with only the access token in hash fragment.
+    // The refresh token travels via the Set-Cookie header, not the URL.
     let redirect_url = format!(
-        "/login/callback#access_token={}&refresh_token={}",
-        url::form_urlencoded::byte_serialize(tokens.access_token.as_bytes()).collect::<String>(),
-        url::form_urlencoded::byte_serialize(tokens.refresh_token.as_bytes()).collect::<String>()
+        "/login/callback#access_token={}",
+        url::form_urlencoded::byte_serialize(tokens.access_token.as_bytes()).collect::<String>()
     );
 
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, &redirect_url)
-        .header(header::SET_COOKIE, clear_cookie)
+        .header(header::SET_COOKIE, clear_state_cookie)
+        .header(header::SET_COOKIE, refresh_cookie)
         .body(axum::body::Body::empty())
         .unwrap()
         .into_response()

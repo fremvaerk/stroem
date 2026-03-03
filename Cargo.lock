@@ -4814,6 +4814,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stroem-common",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
