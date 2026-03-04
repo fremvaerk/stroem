@@ -1,0 +1,384 @@
+use anyhow::{Context, Result};
+use stroem_common::models::workflow::WorkspaceConfig;
+use stroem_common::template::{
+    prepare_action_input, render_env_map, render_input_map, render_json_strings, render_string_opt,
+};
+use stroem_db::JobStepRow;
+
+/// Context needed for rendering step input and action specs.
+pub struct RenderContext<'a> {
+    pub workspace: &'a WorkspaceConfig,
+    pub task_name: &'a str,
+    pub step: &'a JobStepRow,
+    pub job_input: Option<&'a serde_json::Value>,
+    /// Completed steps as (step_name, output) pairs
+    pub completed_steps: &'a [(String, Option<serde_json::Value>)],
+}
+
+/// Result of rendering: rendered input, rendered action_spec, rendered image.
+pub struct RenderResult {
+    pub input: Option<serde_json::Value>,
+    pub action_spec: Option<serde_json::Value>,
+    pub image: Option<String>,
+}
+
+/// Render step input by evaluating Tera templates against the context.
+///
+/// Returns the raw stored input if the workspace/task/step cannot be found,
+/// or if the flow step has no template input configured.
+pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value>> {
+    let task = match ctx.workspace.tasks.get(ctx.task_name) {
+        Some(t) => t,
+        None => return Ok(ctx.step.input.clone()),
+    };
+    let flow_step = match task.flow.get(&ctx.step.step_name) {
+        Some(fs) => fs,
+        None => return Ok(ctx.step.input.clone()),
+    };
+
+    if flow_step.input.is_empty() {
+        return Ok(ctx.step.input.clone());
+    }
+
+    // Build template context: { "input": job.input, "secret": ..., "step_name": { "output": ... }, ... }
+    let mut context = serde_json::Map::new();
+    if let Some(job_input) = ctx.job_input {
+        context.insert("input".to_string(), job_input.clone());
+    }
+
+    if !ctx.workspace.secrets.is_empty() {
+        if let Ok(secrets_value) = serde_json::to_value(&ctx.workspace.secrets) {
+            context.insert("secret".to_string(), secrets_value);
+        }
+    }
+
+    // Add completed step outputs to context.
+    // Step names are sanitized (hyphens → underscores) so Tera can resolve
+    // dotted paths like {{ step_name.output.key }}.
+    for (step_name, output) in ctx.completed_steps {
+        let mut step_ctx = serde_json::Map::new();
+        if let Some(output) = output {
+            step_ctx.insert("output".to_string(), output.clone());
+        }
+        let safe_name = step_name.replace('-', "_");
+        context.insert(safe_name, serde_json::Value::Object(step_ctx));
+    }
+
+    let context_value = serde_json::Value::Object(context);
+    let rendered = render_input_map(&flow_step.input, &context_value)
+        .context("Failed to render step input template")?;
+    Ok(Some(rendered))
+}
+
+/// Merge action-level input defaults and prepare final input.
+///
+/// Looks up the action definition for this step and applies defaults and
+/// connection resolution. Falls through to the rendered input unchanged if
+/// no action is found or if the action has no input schema.
+pub fn prepare_step_action_input(
+    rendered_input: Option<serde_json::Value>,
+    ctx: &RenderContext,
+) -> Result<Option<serde_json::Value>> {
+    let task = match ctx.workspace.tasks.get(ctx.task_name) {
+        Some(t) => t,
+        None => return Ok(rendered_input),
+    };
+    let flow_step = match task.flow.get(&ctx.step.step_name) {
+        Some(fs) => fs,
+        None => return Ok(rendered_input),
+    };
+    let action = match ctx.workspace.actions.get(&flow_step.action) {
+        Some(a) => a,
+        None => return Ok(rendered_input),
+    };
+    if action.input.is_empty() {
+        return Ok(rendered_input);
+    }
+
+    let mut input_val = rendered_input.unwrap_or_else(|| serde_json::json!({}));
+
+    // Merge missing fields from job input that match the action's input schema.
+    // This handles the case where a flow step doesn't explicitly map a field
+    // (e.g. a connection input), but the job-level input has it resolved.
+    merge_missing_action_fields(&mut input_val, ctx.job_input, action.input.keys());
+
+    let prepared = prepare_action_input(&input_val, &action.input, ctx.workspace)
+        .context("Failed to prepare action input")?;
+    Ok(Some(prepared))
+}
+
+/// Render action_spec templates (env, cmd, script, manifest).
+///
+/// Returns `None` if `action_spec` is `None`. Returns the spec unchanged if
+/// it is not a JSON object.
+pub fn render_action_spec(
+    action_spec: Option<&serde_json::Value>,
+    rendered_input: Option<&serde_json::Value>,
+    secrets: &serde_json::Value,
+) -> Result<Option<serde_json::Value>> {
+    let original_spec = match action_spec {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let mut spec_obj = match original_spec.as_object() {
+        Some(obj) => obj.clone(),
+        None => return Ok(Some(original_spec.clone())),
+    };
+
+    // Build context with rendered input + secrets
+    let mut spec_ctx = serde_json::Map::new();
+    if let Some(input_val) = rendered_input {
+        spec_ctx.insert("input".to_string(), input_val.clone());
+    }
+    spec_ctx.insert("secret".to_string(), secrets.clone());
+    let spec_context = serde_json::Value::Object(spec_ctx);
+
+    // Render env values if present
+    if let Some(env_val) = spec_obj.get("env") {
+        if let Some(env_obj) = env_val.as_object() {
+            let env_map: std::collections::HashMap<String, String> = env_obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            let rendered_env =
+                render_env_map(&env_map, &spec_context).context("Failed to render env template")?;
+            let rendered_env_value: serde_json::Map<String, serde_json::Value> = rendered_env
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            spec_obj.insert(
+                "env".to_string(),
+                serde_json::Value::Object(rendered_env_value),
+            );
+        }
+    }
+
+    // Render cmd if present
+    if let Some(cmd_val) = spec_obj.get("cmd") {
+        if let Some(cmd_str) = cmd_val.as_str() {
+            let cmd_opt = Some(cmd_str.to_string());
+            if let Some(rendered_cmd) = render_string_opt(&cmd_opt, &spec_context)
+                .context("Failed to render cmd template")?
+            {
+                spec_obj.insert("cmd".to_string(), serde_json::Value::String(rendered_cmd));
+            }
+        }
+    }
+
+    // Render script if present
+    if let Some(script_val) = spec_obj.get("script") {
+        if let Some(script_str) = script_val.as_str() {
+            let script_opt = Some(script_str.to_string());
+            if let Some(rendered_script) = render_string_opt(&script_opt, &spec_context)
+                .context("Failed to render script template")?
+            {
+                spec_obj.insert(
+                    "script".to_string(),
+                    serde_json::Value::String(rendered_script),
+                );
+            }
+        }
+    }
+
+    // Render manifest string values (e.g. serviceAccountName from input)
+    if let Some(manifest_val) = spec_obj.get("manifest") {
+        let rendered_manifest = render_json_strings(manifest_val, &spec_context)
+            .context("Failed to render manifest template")?;
+        spec_obj.insert("manifest".to_string(), rendered_manifest);
+    }
+
+    Ok(Some(serde_json::Value::Object(spec_obj)))
+}
+
+/// Render image template (e.g. `{{ input.image_tag }}`).
+///
+/// Returns the image unchanged if it contains no template syntax.
+pub fn render_image(
+    image: Option<&str>,
+    rendered_input: Option<&serde_json::Value>,
+    secrets: &serde_json::Value,
+) -> Result<Option<String>> {
+    let image_str = match image {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    if !image_str.contains("{{") {
+        return Ok(Some(image_str.to_string()));
+    }
+
+    let mut spec_ctx = serde_json::Map::new();
+    if let Some(input_val) = rendered_input {
+        spec_ctx.insert("input".to_string(), input_val.clone());
+    }
+    spec_ctx.insert("secret".to_string(), secrets.clone());
+    let spec_context = serde_json::Value::Object(spec_ctx);
+
+    let img_opt = Some(image_str.to_string());
+    render_string_opt(&img_opt, &spec_context).context("Failed to render image template")
+}
+
+/// Merge missing fields from job-level input into step input for fields declared
+/// in the action's input schema. Step-level values always take precedence.
+/// Null values in job input are skipped to avoid breaking downstream resolution.
+pub fn merge_missing_action_fields<'a>(
+    input_val: &mut serde_json::Value,
+    job_input: Option<&serde_json::Value>,
+    action_field_names: impl Iterator<Item = &'a String>,
+) {
+    let (Some(job_input), Some(input_obj)) = (job_input, input_val.as_object_mut()) else {
+        return;
+    };
+    let Some(job_map) = job_input.as_object() else {
+        return;
+    };
+    for field_name in action_field_names {
+        if !input_obj.contains_key(field_name) {
+            if let Some(val) = job_map.get(field_name) {
+                if !val.is_null() {
+                    input_obj.insert(field_name.clone(), val.clone());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn field_names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_merge_missing_action_fields_from_job_input() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {
+                "host": "ch.example.com",
+                "port": 9000,
+                "database": "analytics"
+            }
+        });
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
+        assert_eq!(input_val["clickhouse"]["port"], 9000);
+        assert_eq!(input_val["clickhouse"]["database"], "analytics");
+    }
+
+    #[test]
+    fn test_merge_step_input_takes_precedence() {
+        let mut input_val = json!({"sql": "SELECT 2", "clickhouse": "step-override"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {"host": "ch.example.com"}
+        });
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 2");
+        assert_eq!(input_val["clickhouse"], "step-override");
+    }
+
+    #[test]
+    fn test_merge_skipped_when_job_input_is_none() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, None, names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_skipped_when_job_input_is_not_object() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!("some raw string");
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_skipped_when_input_val_is_not_object() {
+        let mut input_val = json!("raw");
+        let job_input = json!({"clickhouse": {"host": "h"}});
+        let names = field_names(&["clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val, json!("raw"));
+    }
+
+    #[test]
+    fn test_merge_skips_fields_not_in_job_input() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({"sql": "SELECT 1"});
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_skips_null_job_input_fields() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({"sql": "SELECT 1", "clickhouse": null});
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert!(input_val.get("clickhouse").is_none());
+    }
+
+    #[test]
+    fn test_merge_multiple_missing_fields_all_filled() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {"host": "ch.example.com"},
+            "s3_bucket": "my-bucket",
+            "redis": {"url": "redis://localhost"}
+        });
+        let names = field_names(&["sql", "clickhouse", "s3_bucket", "redis"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
+        assert_eq!(input_val["s3_bucket"], "my-bucket");
+        assert_eq!(input_val["redis"]["url"], "redis://localhost");
+    }
+
+    #[test]
+    fn test_merge_ignores_job_fields_not_in_action_schema() {
+        let mut input_val = json!({"sql": "SELECT 1"});
+        let job_input = json!({
+            "sql": "SELECT 1",
+            "clickhouse": {"host": "ch.example.com"},
+            "extra_field": "should not appear"
+        });
+        let names = field_names(&["sql", "clickhouse"]);
+
+        merge_missing_action_fields(&mut input_val, Some(&job_input), names.iter());
+
+        assert_eq!(input_val["sql"], "SELECT 1");
+        assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
+        assert!(input_val.get("extra_field").is_none());
+    }
+}

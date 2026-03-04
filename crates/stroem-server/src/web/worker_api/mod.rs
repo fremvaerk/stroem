@@ -1,4 +1,5 @@
 pub mod jobs;
+pub mod rendering;
 pub mod workspace;
 
 use crate::state::AppState;
