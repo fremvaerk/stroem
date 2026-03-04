@@ -52,19 +52,19 @@ Last updated: 2026-03-04.
 - [x] `notify` uses default features (no macos_fsevent hardcode)
 - [x] Log file handles cached in DashMap (no open/close per append)
 - [x] JSONL log lines use LogEntry struct (no intermediate Value allocation)
-- [ ] `action_type`, `status`, `source_type` are all String — should be enums for exhaustive matching
-- [ ] Workspace config deep-cloned on every `get_config_async` — should return `Arc<WorkspaceConfig>`
-- [ ] UUID parsing boilerplate repeated 6 times in worker API — create custom Axum extractor
-- [ ] Business logic mixed into web handlers (claim_job does template rendering inline)
-- [ ] No validation of `worker_token` length, `jwt_secret` strength, or timeout minimums
-- [ ] `get_step_log` reads entire file into memory to filter by step name
-- [ ] S3 download reads entire object into memory for decompression
+- [x] `action_type`, `status`, `source_type` are all String — ActionType/SourceType/JobStatus/StepStatus enums with Display/AsRef/FromStr
+- [x] Workspace config deep-cloned on every `get_config_async` — returns `Arc<WorkspaceConfig>`
+- [x] UUID parsing boilerplate repeated 6 times in worker API — uses Axum `Path<Uuid>` extractor
+- [x] Business logic mixed into web handlers — extracted `rendering.rs` module from `claim_job`
+- [x] No validation of `worker_token` length, `jwt_secret` strength, or timeout minimums — `validate()` on ServerConfig/WorkerConfig
+- [x] `get_step_log` reads entire file into memory to filter by step name — line-by-line BufReader streaming
+- [x] S3 download reads entire object into memory for decompression — streaming GzDecoder + BufReader
 - [x] LogBroadcast channels grow unbounded — bounded broadcast + DashMap cleanup already in place
 - [ ] K8s pod logs fetched only after termination — no live streaming during execution
-- [ ] Missing `#[serde(deny_unknown_fields)]` on config types — typos silently ignored
-- [ ] `validate_dag` clones all step names into HashMap keys — use `&str` references
+- [x] Missing `#[serde(deny_unknown_fields)]` on config types — added to all config structs
+- [x] `validate_dag` clones all step names into HashMap keys — uses `&str` references
 - [x] `Vec::remove(0)` in topological sort — already uses VecDeque
-- [ ] Workspace cache race on concurrent extraction — add per-workspace Mutex
+- [x] Workspace cache race on concurrent extraction — per-workspace Mutex + atomic rename
 
 ## Performance
 
