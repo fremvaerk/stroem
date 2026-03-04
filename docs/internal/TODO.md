@@ -60,7 +60,7 @@ Last updated: 2026-03-04.
 - [x] `get_step_log` reads entire file into memory to filter by step name — line-by-line BufReader streaming
 - [x] S3 download reads entire object into memory for decompression — streaming GzDecoder + BufReader
 - [x] LogBroadcast channels grow unbounded — bounded broadcast + DashMap cleanup already in place
-- [ ] K8s pod logs fetched only after termination — no live streaming during execution
+- [x] K8s pod logs fetched only after termination — already streams live via `follow: true` in LogParams
 - [x] Missing `#[serde(deny_unknown_fields)]` on config types — added to all config structs
 - [x] `validate_dag` clones all step names into HashMap keys — uses `&str` references
 - [x] `Vec::remove(0)` in topological sort — already uses VecDeque
