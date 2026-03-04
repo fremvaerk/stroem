@@ -1079,4 +1079,298 @@ tasks:
             Some("echo lib-version")
         );
     }
+
+    /// Build a `WorkflowConfig` from a `WorkspaceConfig` so we can call the
+    /// validation helpers, which operate on the single-file type.
+    fn workspace_config_to_workflow_config(
+        ws: WorkspaceConfig,
+    ) -> stroem_common::models::workflow::WorkflowConfig {
+        stroem_common::models::workflow::WorkflowConfig {
+            secrets: ws.secrets,
+            connection_types: ws.connection_types,
+            connections: ws.connections,
+            actions: ws.actions,
+            tasks: ws.tasks,
+            triggers: ws.triggers,
+            on_success: ws.on_success,
+            on_error: ws.on_error,
+        }
+    }
+
+    /// Full integration test: folder library on disk → WorkspaceManager::new()
+    /// → merged config → validation passes.
+    ///
+    /// Verifies that library actions, tasks, and connection types are properly
+    /// prefixed, internal references are rewritten, and the merged workspace
+    /// passes `validate_workflow_config_with_libraries`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_full_library_pipeline_through_workspace_manager() {
+        use crate::config::{LibraryDef, WorkspaceSourceDef};
+        use crate::workspace::WorkspaceManager;
+        use stroem_common::validation::validate_workflow_config_with_libraries;
+
+        // --- Library temp dir ---
+        let library_dir = TempDir::new().unwrap();
+        let lib_workflows = library_dir.path().join(".workflows");
+        fs::create_dir(&lib_workflows).unwrap();
+        fs::write(
+            lib_workflows.join("common.yaml"),
+            r#"
+actions:
+  slack-notify:
+    type: shell
+    cmd: "echo notifying"
+  run-deploy:
+    type: shell
+    cmd: "echo deploying"
+tasks:
+  deploy-pipeline:
+    flow:
+      deploy:
+        action: run-deploy
+      notify:
+        action: slack-notify
+        depends_on: [deploy]
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+      port:
+        type: integer
+        default: 5432
+"#,
+        )
+        .unwrap();
+
+        // --- Workspace temp dir ---
+        let workspace_dir = TempDir::new().unwrap();
+        let ws_workflows = workspace_dir.path().join(".workflows");
+        fs::create_dir(&ws_workflows).unwrap();
+        fs::write(
+            ws_workflows.join("main.yaml"),
+            r#"
+actions:
+  build:
+    type: shell
+    cmd: "echo building"
+tasks:
+  ci-pipeline:
+    flow:
+      build:
+        action: build
+      deploy:
+        action: common.run-deploy
+        depends_on: [build]
+      notify:
+        action: common.slack-notify
+        depends_on: [deploy]
+"#,
+        )
+        .unwrap();
+
+        // --- Build config maps ---
+        let mut workspace_defs = HashMap::new();
+        workspace_defs.insert(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: workspace_dir.path().to_string_lossy().to_string(),
+            },
+        );
+
+        let mut library_defs = HashMap::new();
+        library_defs.insert(
+            "common".to_string(),
+            LibraryDef::Folder {
+                path: library_dir.path().to_string_lossy().to_string(),
+            },
+        );
+
+        // --- Create WorkspaceManager ---
+        let mgr = WorkspaceManager::new(workspace_defs, library_defs, HashMap::new()).await;
+
+        // --- Fetch the merged config ---
+        let config = mgr
+            .get_config("default")
+            .await
+            .expect("workspace 'default' should be loaded");
+
+        // Workspace-local action is present
+        assert!(
+            config.actions.contains_key("build"),
+            "workspace-local action 'build' must be in merged config"
+        );
+
+        // Library actions are present with namespace prefix
+        assert!(
+            config.actions.contains_key("common.slack-notify"),
+            "library action 'common.slack-notify' must be in merged config"
+        );
+        assert!(
+            config.actions.contains_key("common.run-deploy"),
+            "library action 'common.run-deploy' must be in merged config"
+        );
+
+        // Library task is present with namespace prefix
+        assert!(
+            config.tasks.contains_key("common.deploy-pipeline"),
+            "library task 'common.deploy-pipeline' must be in merged config"
+        );
+
+        // Library task's internal flow step references are rewritten to use prefixed names
+        let lib_task = &config.tasks["common.deploy-pipeline"];
+        assert_eq!(
+            lib_task.flow["deploy"].action, "common.run-deploy",
+            "library task's 'deploy' step must reference 'common.run-deploy'"
+        );
+        assert_eq!(
+            lib_task.flow["notify"].action, "common.slack-notify",
+            "library task's 'notify' step must reference 'common.slack-notify'"
+        );
+
+        // Library connection type is present with namespace prefix
+        assert!(
+            config.connection_types.contains_key("common.postgres"),
+            "library connection type 'common.postgres' must be in merged config"
+        );
+
+        // Workspace task still references library actions by their prefixed names
+        let ws_task = &config.tasks["ci-pipeline"];
+        assert_eq!(
+            ws_task.flow["deploy"].action, "common.run-deploy",
+            "workspace task's 'deploy' step must reference 'common.run-deploy'"
+        );
+        assert_eq!(
+            ws_task.flow["notify"].action, "common.slack-notify",
+            "workspace task's 'notify' step must reference 'common.slack-notify'"
+        );
+
+        // Full validation with library references enabled — must return Ok
+        let workflow_config = workspace_config_to_workflow_config(config);
+        let result = validate_workflow_config_with_libraries(&workflow_config);
+        assert!(
+            result.is_ok(),
+            "validate_workflow_config_with_libraries must succeed; error: {:?}",
+            result.err()
+        );
+    }
+
+    /// Integration test: a workspace that references a library action that does
+    /// not exist should produce a validation error when calling
+    /// `validate_workflow_config_with_libraries`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_library_pipeline_missing_library_ref_fails_validation() {
+        use crate::config::{LibraryDef, WorkspaceSourceDef};
+        use crate::workspace::WorkspaceManager;
+        use stroem_common::validation::validate_workflow_config_with_libraries;
+
+        // --- Library temp dir (same as above) ---
+        let library_dir = TempDir::new().unwrap();
+        let lib_workflows = library_dir.path().join(".workflows");
+        fs::create_dir(&lib_workflows).unwrap();
+        fs::write(
+            lib_workflows.join("common.yaml"),
+            r#"
+actions:
+  slack-notify:
+    type: shell
+    cmd: "echo notifying"
+  run-deploy:
+    type: shell
+    cmd: "echo deploying"
+tasks:
+  deploy-pipeline:
+    flow:
+      deploy:
+        action: run-deploy
+      notify:
+        action: slack-notify
+        depends_on: [deploy]
+connection_types:
+  postgres:
+    properties:
+      host:
+        type: string
+        required: true
+      port:
+        type: integer
+        default: 5432
+"#,
+        )
+        .unwrap();
+
+        // --- Workspace that references a nonexistent library action ---
+        let workspace_dir = TempDir::new().unwrap();
+        let ws_workflows = workspace_dir.path().join(".workflows");
+        fs::create_dir(&ws_workflows).unwrap();
+        fs::write(
+            ws_workflows.join("main.yaml"),
+            r#"
+actions:
+  build:
+    type: shell
+    cmd: "echo building"
+tasks:
+  broken-pipeline:
+    flow:
+      build:
+        action: build
+      missing:
+        action: common.nonexistent-action
+        depends_on: [build]
+"#,
+        )
+        .unwrap();
+
+        // --- Build config maps ---
+        let mut workspace_defs = HashMap::new();
+        workspace_defs.insert(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: workspace_dir.path().to_string_lossy().to_string(),
+            },
+        );
+
+        let mut library_defs = HashMap::new();
+        library_defs.insert(
+            "common".to_string(),
+            LibraryDef::Folder {
+                path: library_dir.path().to_string_lossy().to_string(),
+            },
+        );
+
+        // --- Create WorkspaceManager ---
+        let mgr = WorkspaceManager::new(workspace_defs, library_defs, HashMap::new()).await;
+
+        // The workspace loads successfully (library loading is best-effort)
+        let config = mgr
+            .get_config("default")
+            .await
+            .expect("workspace 'default' should be loaded even with bad refs");
+
+        // Library actions are still merged in
+        assert!(
+            config.actions.contains_key("common.slack-notify"),
+            "library action 'common.slack-notify' must be present"
+        );
+
+        // But `common.nonexistent-action` is not in the library — validation must fail
+        assert!(
+            !config.actions.contains_key("common.nonexistent-action"),
+            "'common.nonexistent-action' must NOT be in the merged config"
+        );
+
+        let workflow_config = workspace_config_to_workflow_config(config);
+        let result = validate_workflow_config_with_libraries(&workflow_config);
+        assert!(
+            result.is_err(),
+            "validate_workflow_config_with_libraries must return Err for unknown library ref"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("common.nonexistent-action"),
+            "error message must mention the unknown action; got: {err_msg}"
+        );
+    }
 }

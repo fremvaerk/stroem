@@ -126,7 +126,7 @@ Last updated: 2026-03-04.
 - [x] Version reporting feature tests (DB round-trip, API responses, serde backward compat, /api/config version)
 - [ ] Worker `execute_claimed_step` integration test (core execution path only tested via E2E)
 - [ ] Live DockerRunner execution tests
-- [ ] Live KubeRunner execution tests
+- [ ] Live KubeRunner execution tests (use testcontainers k3s module; refactor KubeRunner to accept optional kube::Client; NoWorkspace mode first, WithWorkspace needs mock tarball endpoint)
 - [ ] Runner error path tests (Docker daemon unavailable, image not found)
 - [x] `render_connections()` unit test (13 tests in workflow.rs)
 - [x] `resolve_connection_inputs()` unit test (17 tests in template.rs)
@@ -135,8 +135,8 @@ Last updated: 2026-03-04.
 - [x] Tag-containment edge cases in `claim_ready_step` (6 tests in stroem-db integration_test.rs)
 - [ ] Migration idempotency test
 - [x] Auth middleware helper function unit tests (14 unit + 30+ integration tests)
-- [ ] Webhook sync-mode timeout test
-- [ ] Scheduler `fire_trigger` → job creation test
+- [x] Webhook sync-mode timeout test (integration test in stroem-server: sync returns 202 on timeout, async returns 200)
+- [x] Scheduler `fire_trigger` → job creation test (4 integration tests: fires cron, disabled skip, input passthrough, clean shutdown)
 - [ ] `propagate_to_parent` unit test
 - [ ] Worker registration retry/backoff test
 - [ ] Worker semaphore/max-concurrent limit test
@@ -146,7 +146,7 @@ Last updated: 2026-03-04.
 - [ ] Playwright: OIDC login flow
 - [ ] Playwright: webhook trigger display
 - [ ] Playwright: Dashboard content
-- [ ] Full library loading pipeline integration test
+- [x] Full library loading pipeline integration test (2 tests in library.rs: happy path through WorkspaceManager::new + validation failure for missing ref)
 - [ ] Git workspace source auth failure test
 
 ## Roadmap Items (from review)
