@@ -45,10 +45,11 @@ export function JobDetailPage() {
     load();
   }, [load]);
 
-  // Auto-refresh while pending or running
+  // Auto-refresh while pending or running (adaptive interval)
   useEffect(() => {
     if (!job || (job.status !== "pending" && job.status !== "running")) return;
-    const interval = setInterval(load, 3000);
+    const hasRunningSteps = job.steps.some((s) => s.status === "running");
+    const interval = setInterval(load, hasRunningSteps ? 3000 : 8000);
     return () => clearInterval(interval);
   }, [job, load]);
 

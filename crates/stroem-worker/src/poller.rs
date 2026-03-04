@@ -232,6 +232,18 @@ pub(crate) async fn execute_claimed_step(
     }
 }
 
+/// Compute the poll interval with exponential backoff.
+///
+/// Returns `base * 2^(min(consecutive_idle - 1, 2))`, capped at 4× base.
+/// When `consecutive_idle` is 0 (work was just found), returns `base`.
+fn compute_poll_backoff(base: Duration, consecutive_idle: u32) -> Duration {
+    if consecutive_idle <= 1 {
+        return base;
+    }
+    let exp = (consecutive_idle - 1).min(2);
+    base * 2u32.pow(exp)
+}
+
 /// Main worker loop: register, heartbeat, and poll for jobs.
 ///
 /// The `cancel_token` is used for graceful shutdown. When cancelled, the loop stops
@@ -327,6 +339,7 @@ pub async fn run_worker(
         config.max_concurrent
     );
 
+    let mut consecutive_idle: u32 = 0;
     loop {
         // Acquire semaphore permit, or stop if cancelled
         let permit = tokio::select! {
@@ -351,6 +364,7 @@ pub async fn run_worker(
 
         match claim_result {
             Ok(Some(step)) => {
+                consecutive_idle = 0;
                 tracing::info!(
                     "Claimed step '{}' for job {} (workspace: {}, action: {})",
                     step.step_name,
@@ -377,11 +391,13 @@ pub async fn run_worker(
                 });
             }
             Ok(None) => {
-                // No work available, drop permit and sleep (or exit if cancelled)
+                // No work available, drop permit and sleep with backoff (or exit if cancelled)
                 drop(permit);
-                tracing::debug!("No work available, sleeping");
+                consecutive_idle = consecutive_idle.saturating_add(1);
+                let backoff = compute_poll_backoff(poll_interval, consecutive_idle);
+                tracing::debug!("No work available, sleeping {}ms", backoff.as_millis());
                 tokio::select! {
-                    () = tokio::time::sleep(poll_interval) => {},
+                    () = tokio::time::sleep(backoff) => {},
                     () = cancel_token.cancelled() => {
                         tracing::info!("Shutdown requested, stopping poll loop");
                         break;
@@ -391,8 +407,10 @@ pub async fn run_worker(
             Err(e) => {
                 tracing::warn!("Failed to claim step: {:#}", e);
                 drop(permit);
+                consecutive_idle = consecutive_idle.saturating_add(1);
+                let backoff = compute_poll_backoff(poll_interval, consecutive_idle);
                 tokio::select! {
-                    () = tokio::time::sleep(poll_interval) => {},
+                    () = tokio::time::sleep(backoff) => {},
                     () = cancel_token.cancelled() => {
                         tracing::info!("Shutdown requested, stopping poll loop");
                         break;
@@ -570,6 +588,40 @@ mod tests {
         assert!(result.is_err());
         // Should be the original error, not a panic message
         assert_eq!(result.unwrap_err().to_string(), "connection refused");
+    }
+
+    // --- compute_poll_backoff tests ---
+
+    #[test]
+    fn test_poll_backoff_zero_returns_base() {
+        let base = Duration::from_secs(2);
+        assert_eq!(compute_poll_backoff(base, 0), base);
+    }
+
+    #[test]
+    fn test_poll_backoff_one_returns_base() {
+        let base = Duration::from_secs(2);
+        assert_eq!(compute_poll_backoff(base, 1), base);
+    }
+
+    #[test]
+    fn test_poll_backoff_two_doubles() {
+        let base = Duration::from_secs(2);
+        assert_eq!(compute_poll_backoff(base, 2), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn test_poll_backoff_three_quadruples() {
+        let base = Duration::from_secs(2);
+        assert_eq!(compute_poll_backoff(base, 3), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_poll_backoff_capped_at_4x() {
+        let base = Duration::from_secs(2);
+        assert_eq!(compute_poll_backoff(base, 100), Duration::from_secs(8));
+        assert_eq!(compute_poll_backoff(base, 4), Duration::from_secs(8));
+        assert_eq!(compute_poll_backoff(base, u32::MAX), Duration::from_secs(8));
     }
 
     // --- drain_log_buffer tests ---

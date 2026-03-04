@@ -223,22 +223,25 @@ impl LogStorage {
                 return Ok(());
             }
 
-            let raw = fs::read(&path)
-                .await
-                .with_context(|| format!("Failed to read log file for S3 upload: {:?}", path))?;
+            let path_clone = path.clone();
+            let compressed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+                use flate2::write::GzEncoder;
+                use flate2::Compression;
+                use std::io::Write;
 
-            // Gzip compress
-            use flate2::write::GzEncoder;
-            use flate2::Compression;
-            use std::io::Write;
-
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder
-                .write_all(&raw)
-                .context("Failed to gzip-compress log data")?;
-            let compressed = encoder
-                .finish()
-                .context("Failed to finish gzip compression")?;
+                let raw = std::fs::read(&path_clone).with_context(|| {
+                    format!("Failed to read log file for S3 upload: {:?}", path_clone)
+                })?;
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder
+                    .write_all(&raw)
+                    .context("Failed to gzip-compress log data")?;
+                encoder
+                    .finish()
+                    .context("Failed to finish gzip compression")
+            })
+            .await
+            .context("spawn_blocking panicked")??;
 
             let key = self.s3_key(job_id, meta);
             s3.client

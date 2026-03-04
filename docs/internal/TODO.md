@@ -73,12 +73,12 @@ Last updated: 2026-03-04.
 - [x] Log file handle caching — DashMap + AtomicBool
 - [x] 4x `get_workspace` in `claim_job` — consolidated to single call
 - [x] Vite code splitting for @xyflow/react
-- [ ] Claim query ordering causes hot-row contention (all workers compete for same UUID-ordered step)
-- [ ] Worker poll has no exponential backoff on empty queue
-- [ ] S3 upload reads entire log into memory + synchronous gzip in async context
-- [ ] `LogBroadcast::subscribe` always acquires write lock even when channel exists
-- [ ] WorkflowDag recalculates full dagre layout on every selectedStep change
-- [ ] Job Detail REST polls every 3s while WebSocket already active — make adaptive
+- [x] Claim query ordering causes hot-row contention — `ORDER BY random()` in claim query
+- [x] Worker poll has no exponential backoff on empty queue — `compute_poll_backoff` with 4× cap
+- [x] S3 upload reads entire log into memory + synchronous gzip in async context — `spawn_blocking`
+- [x] `LogBroadcast::subscribe` always acquires write lock even when channel exists — read-then-write pattern
+- [x] WorkflowDag recalculates full dagre layout on every selectedStep change — split into layout + selection memos
+- [x] Job Detail REST polls every 3s while WebSocket already active — adaptive 8s/3s based on running steps
 
 ## Frontend
 

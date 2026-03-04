@@ -164,7 +164,7 @@ impl JobStepRepo {
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
                 WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type != 'task'
-                ORDER BY job_id, step_name
+                ORDER BY random()
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )

@@ -18,6 +18,14 @@ impl LogBroadcast {
 
     /// Subscribe to log messages for a job. Creates the channel on first subscribe.
     pub async fn subscribe(&self, job_id: Uuid) -> broadcast::Receiver<String> {
+        // Fast path: read lock only (most common case — channel already exists)
+        {
+            let channels = self.channels.read().await;
+            if let Some(sender) = channels.get(&job_id) {
+                return sender.subscribe();
+            }
+        }
+        // Slow path: write lock with double-check
         let mut channels = self.channels.write().await;
         let sender = channels
             .entry(job_id)
@@ -101,6 +109,37 @@ mod tests {
 
         let channels = lb.channels.read().await;
         assert!(!channels.contains_key(&job_id));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_subscribe() {
+        use std::sync::Arc;
+
+        let lb = Arc::new(LogBroadcast::new());
+        let job_id = Uuid::new_v4();
+
+        // Spawn 10 concurrent subscribers
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let lb_clone = Arc::clone(&lb);
+            handles.push(tokio::spawn(
+                async move { lb_clone.subscribe(job_id).await },
+            ));
+        }
+
+        let mut receivers = Vec::new();
+        for handle in handles {
+            receivers.push(handle.await.unwrap());
+        }
+
+        // Broadcast a message
+        lb.broadcast(job_id, "concurrent-test\n".to_string()).await;
+
+        // All 10 receivers should get the message
+        for rx in &mut receivers {
+            let msg = rx.recv().await.unwrap();
+            assert_eq!(msg, "concurrent-test\n");
+        }
     }
 
     #[tokio::test]

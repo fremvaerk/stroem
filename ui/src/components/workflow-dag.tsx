@@ -187,14 +187,14 @@ export function WorkflowDag({
   selectedStep,
   onSelectStep,
 }: WorkflowDagProps) {
-  const { nodes, edges } = useMemo(() => {
+  // Layout memo: expensive dagre layout, only recalculated when steps/flow change
+  const { layoutNodes, layoutEdges } = useMemo(() => {
     const rawNodes: Node[] = [];
     const rawEdges: Edge[] = [];
-    const targets = new Set<string>(); // nodes that are depended on
-    const hasDeps = new Set<string>(); // nodes that have dependencies
+    const targets = new Set<string>();
+    const hasDeps = new Set<string>();
 
     if (steps) {
-      // Job mode: build from steps with status
       const statusMap = new Map(steps.map((s) => [s.step_name, s.status]));
       for (const step of steps) {
         rawNodes.push({
@@ -205,7 +205,7 @@ export function WorkflowDag({
             label: step.step_name,
             action: step.action_name,
             status: step.status,
-            selected: selectedStep === step.step_name,
+            selected: false,
           } satisfies StepNodeData,
         });
         for (const dep of step.depends_on ?? []) {
@@ -227,12 +227,10 @@ export function WorkflowDag({
         }
       }
 
-      // Identify root nodes (no deps) and leaf nodes (not depended on)
       const allIds = new Set(steps.map((s) => s.step_name));
       const roots = [...allIds].filter((id) => !hasDeps.has(id));
       const leaves = [...allIds].filter((id) => !targets.has(id));
 
-      // Add Start sentinel -> root nodes
       rawNodes.push({
         id: START_ID,
         type: "sentinel",
@@ -249,7 +247,6 @@ export function WorkflowDag({
         });
       }
 
-      // Add leaf nodes -> Finish sentinel
       rawNodes.push({
         id: FINISH_ID,
         type: "sentinel",
@@ -272,7 +269,6 @@ export function WorkflowDag({
         });
       }
     } else if (flow) {
-      // Task mode: build from flow definition (no status)
       for (const [name, flowStep] of Object.entries(flow)) {
         rawNodes.push({
           id: name,
@@ -281,7 +277,7 @@ export function WorkflowDag({
           data: {
             label: flowStep.name ?? name,
             action: flowStep.action,
-            selected: selectedStep === name,
+            selected: false,
           } satisfies StepNodeData,
         });
         for (const dep of flowStep.depends_on ?? []) {
@@ -337,8 +333,25 @@ export function WorkflowDag({
       }
     }
 
-    return getLayoutedElements(rawNodes, rawEdges);
-  }, [steps, flow, selectedStep]);
+    const { nodes: ln, edges: le } = getLayoutedElements(rawNodes, rawEdges);
+    return { layoutNodes: ln, layoutEdges: le };
+  }, [steps, flow]);
+
+  // Selection memo: cheap toggle, runs on every selectedStep change without re-running dagre
+  const nodes = useMemo(() => {
+    return layoutNodes.map((node) => {
+      if (node.type !== "step") return node;
+      // Safe: sentinel nodes are filtered above by the type guard
+      const data = node.data as StepNodeData;
+      const currentlySelected = selectedStep === node.id;
+      if (data.selected === currentlySelected) return node;
+      return {
+        ...node,
+        data: { ...data, selected: currentlySelected },
+      };
+    });
+  }, [layoutNodes, selectedStep]);
+  const edges = layoutEdges;
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {

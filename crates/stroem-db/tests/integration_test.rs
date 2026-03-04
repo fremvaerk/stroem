@@ -2650,3 +2650,69 @@ async fn test_worker_list_includes_version() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_claim_random_order_no_duplicates() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "random-claim-test",
+        "distributed",
+        None,
+        "user",
+        None,
+    )
+    .await?;
+
+    let steps: Vec<NewJobStep> = (0..3)
+        .map(|i| NewJobStep {
+            job_id,
+            step_name: format!("step-{}", i),
+            action_name: "test-action".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(serde_json::json!({"cmd": "echo test"})),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        })
+        .collect();
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // 3 workers claim concurrently
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let pool_clone = pool.clone();
+        let worker_id = Uuid::new_v4();
+        handles.push(tokio::spawn(async move {
+            WorkerRepo::register(
+                &pool_clone,
+                worker_id,
+                &format!("worker-{}", i),
+                &["shell".to_string()],
+                &["shell".to_string()],
+                None,
+            )
+            .await
+            .unwrap();
+            JobStepRepo::claim_ready_step(&pool_clone, &["shell".to_string()], worker_id).await
+        }));
+    }
+
+    let mut claimed_names: Vec<String> = Vec::new();
+    for handle in handles {
+        if let Ok(Ok(Some(step))) = handle.await {
+            claimed_names.push(step.step_name.clone());
+        }
+    }
+
+    assert_eq!(claimed_names.len(), 3, "All 3 workers should claim a step");
+    claimed_names.sort();
+    claimed_names.dedup();
+    assert_eq!(claimed_names.len(), 3, "No duplicate step claims");
+
+    Ok(())
+}
