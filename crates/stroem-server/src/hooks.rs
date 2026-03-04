@@ -61,7 +61,10 @@ pub async fn fire_hooks(
     };
 
     // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.
-    let is_top_level = matches!(job.source_type.as_str(), "api" | "trigger" | "webhook");
+    let is_top_level = matches!(
+        job.source_type.as_str(),
+        "api" | "user" | "trigger" | "webhook"
+    );
     let hooks: &[HookDef] = if !task_hooks.is_empty() {
         task_hooks
     } else if is_top_level {
@@ -345,7 +348,7 @@ mod tests {
             _ => return None,
         };
 
-        let is_top_level = matches!(job_source_type, "api" | "trigger" | "webhook");
+        let is_top_level = matches!(job_source_type, "api" | "user" | "trigger" | "webhook");
         let hooks: &[HookDef] = if !task_hooks.is_empty() {
             task_hooks
         } else if is_top_level {
@@ -670,6 +673,16 @@ mod tests {
 
         let selected = select_hooks_for_job(&ws, "trigger", "completed", &task).unwrap();
         assert_eq!(selected[0].action, "ws-notify");
+    }
+
+    /// Workspace fallback fires for user-sourced (authenticated API) top-level jobs.
+    #[test]
+    fn test_workspace_fallback_fires_for_user_sourced_jobs() {
+        let task = make_task_def(vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")]);
+
+        let selected = select_hooks_for_job(&ws, "user", "failed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-alert");
     }
 
     /// Workspace fallback fires for webhook-sourced top-level jobs.
