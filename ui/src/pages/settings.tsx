@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import {
   Dialog,
   DialogContent,
@@ -278,9 +279,7 @@ export function SettingsPage() {
           </Dialog>
 
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-            </div>
+            <LoadingSpinner />
           ) : keys.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No API keys yet. Create one to get started.

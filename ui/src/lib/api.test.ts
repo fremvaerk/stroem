@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   setAccessToken,
   getAccessToken,
+  tryRestoreSession,
   ApiError,
   login,
   logout,
@@ -50,6 +51,74 @@ describe("token helpers", () => {
   it("setAccessToken and getAccessToken round-trip", () => {
     setAccessToken("my-token");
     expect(getAccessToken()).toBe("my-token");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TokenManager refresh deduplication
+// ---------------------------------------------------------------------------
+
+describe("TokenManager refresh deduplication", () => {
+  beforeEach(() => {
+    setAccessToken(null);
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    setAccessToken(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("deduplicates concurrent refresh calls into a single fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      json: () => Promise.resolve({ access_token: "new-token", token_type: "bearer" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Fire 3 concurrent refresh attempts
+    const [r1, r2, r3] = await Promise.all([
+      tryRestoreSession(),
+      tryRestoreSession(),
+      tryRestoreSession(),
+    ]);
+
+    expect(r1).toBe(true);
+    expect(r2).toBe(true);
+    expect(r3).toBe(true);
+    // Only one actual fetch should have been made
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getAccessToken()).toBe("new-token");
+  });
+
+  it("allows a new refresh after a failed one completes", async () => {
+    const fetchMock = vi
+      .fn()
+      // First refresh fails
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        headers: new Headers(),
+        json: () => Promise.resolve({}),
+      })
+      // Second refresh succeeds
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "Content-Type": "application/json" }),
+        json: () => Promise.resolve({ access_token: "recovered", token_type: "bearer" }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await tryRestoreSession();
+    expect(first).toBe(false);
+
+    const second = await tryRestoreSession();
+    expect(second).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(getAccessToken()).toBe("recovered");
   });
 });
 
@@ -257,6 +326,7 @@ describe("getServerConfig", () => {
       authRequired: false,
       hasInternalAuth: false,
       oidcProviders: [],
+      version: null,
     });
   });
 
@@ -267,6 +337,7 @@ describe("getServerConfig", () => {
       authRequired: false,
       hasInternalAuth: false,
       oidcProviders: [],
+      version: null,
     });
   });
 

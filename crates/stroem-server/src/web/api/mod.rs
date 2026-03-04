@@ -256,6 +256,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
     // Routes that require authentication (when auth is enabled).
     let protected = Router::new()
         .route("/workspaces", get(workspaces::list_workspaces))
+        .route("/tasks", get(tasks::list_all_tasks))
         .route("/workspaces/{ws}/tasks", get(tasks::list_tasks))
         .route("/workspaces/{ws}/tasks/{name}", get(tasks::get_task))
         .route("/workspaces/{ws}/triggers", get(triggers::list_triggers))

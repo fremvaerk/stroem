@@ -12,6 +12,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { WorkerStatusBadge } from "@/components/worker-status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
 import { useAsyncData } from "@/hooks/use-async-data";
 import { listWorkers } from "@/lib/api";
@@ -46,9 +47,7 @@ export function WorkersPage() {
         </CardHeader>
         <CardContent>
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-            </div>
+            <LoadingSpinner />
           ) : workerList.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No workers registered.

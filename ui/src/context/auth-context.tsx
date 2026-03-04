@@ -20,6 +20,7 @@ interface AuthContextValue {
   serverVersion: string | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  restoreFromOidc: (accessToken: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -77,6 +78,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  const restoreFromOidc = useCallback(async (accessToken: string) => {
+    api.setTokensFromOidc(accessToken);
+    const me = await api.getMe();
+    setUser(me);
+  }, []);
+
   const value = useMemo(
     () => ({
       user,
@@ -88,8 +95,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       serverVersion,
       login,
       logout,
+      restoreFromOidc,
     }),
-    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, serverVersion, login, logout],
+    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, serverVersion, login, logout, restoreFromOidc],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;

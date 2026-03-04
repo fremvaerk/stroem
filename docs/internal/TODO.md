@@ -94,17 +94,17 @@ Last updated: 2026-03-04.
 - [x] StepTimeline `aria-label` and `aria-expanded`
 - [x] LogViewer `role="log"` and `aria-label`
 - [x] "Live" indicator sr-only text
-- [ ] Loading spinner inlined ~10 times — use LoadingSpinner component consistently
-- [ ] `task-detail.tsx` at 877 lines — extract InputFieldRow, ComboboxField
-- [ ] Array index as React key for log lines (`log-viewer.tsx:88`)
-- [ ] `listAllTasks` is N+1 (one request per workspace) — add cross-workspace endpoint
-- [ ] Token refresh deduplication has fragile invariants — encapsulate in class
-- [ ] `login-callback.tsx` uses `window.location.href` — full page reload loses in-memory token
-- [ ] `title` attributes used instead of accessible Tooltip components
-- [ ] `@types/dagre` installed but `@dagrejs/dagre` ships own types — remove
-- [ ] Both `tw-animate-css` and `tailwindcss-animate` installed — remove unused one
-- [ ] No sourcemap in production builds
-- [ ] `vite.config.ts` suppresses proxy errors silently
+- [x] Loading spinner inlined ~10 times — use LoadingSpinner component consistently
+- [x] `task-detail.tsx` at 877 lines — extract InputFieldRow, ComboboxField
+- [x] Array index as React key for log lines (`log-viewer.tsx:88`)
+- [x] `listAllTasks` is N+1 (one request per workspace) — add cross-workspace endpoint
+- [x] Token refresh deduplication has fragile invariants — encapsulate in class
+- [x] `login-callback.tsx` uses `window.location.href` — full page reload loses in-memory token
+- [x] `title` attributes used instead of accessible Tooltip components
+- [x] `@types/dagre` installed but `@dagrejs/dagre` ships own types — remove
+- [x] Both `tw-animate-css` and `tailwindcss-animate` installed — remove unused one
+- [x] No sourcemap in production builds
+- [x] `vite.config.ts` suppresses proxy errors silently
 
 ## Test Coverage
 

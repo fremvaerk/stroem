@@ -57,6 +57,30 @@ pub struct ExecuteTaskResponse {
     pub job_id: String,
 }
 
+/// GET /api/tasks - List all tasks from all workspaces
+#[tracing::instrument(skip(state))]
+pub async fn list_all_tasks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut tasks = Vec::new();
+    for (ws_name, workspace) in state.workspaces.get_all_configs().await {
+        for (name, task) in &workspace.tasks {
+            let has_triggers = workspace
+                .triggers
+                .values()
+                .any(|t| t.enabled() && t.task() == *name);
+            tasks.push(TaskListItem {
+                id: name.clone(),
+                name: task.name.clone(),
+                description: task.description.clone(),
+                mode: task.mode.clone(),
+                workspace: ws_name.clone(),
+                folder: task.folder.clone(),
+                has_triggers,
+            });
+        }
+    }
+    Json(tasks).into_response()
+}
+
 /// GET /api/workspaces/:ws/tasks - List all tasks from a workspace
 #[tracing::instrument(skip(state))]
 pub async fn list_tasks(

@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { PaginationControls } from "@/components/pagination-controls";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
 import { listUsers } from "@/lib/api";
 import type { UserListItem } from "@/lib/types";
@@ -65,9 +66,7 @@ export function UsersPage() {
         </CardHeader>
         <CardContent>
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-            </div>
+            <LoadingSpinner />
           ) : users.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No users found.

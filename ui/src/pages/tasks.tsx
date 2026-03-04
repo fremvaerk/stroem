@@ -12,6 +12,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { listAllTasks } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import type { TaskListItem } from "@/lib/types";
@@ -248,9 +253,14 @@ export function TasksPage() {
                               {task.name ?? task.id}
                             </Link>
                             {task.has_triggers && (
-                              <span title="Has scheduled triggers">
-                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                              </span>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span>
+                                    <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent>Has scheduled triggers</TooltipContent>
+                              </Tooltip>
                             )}
                           </div>
                           {task.description && (

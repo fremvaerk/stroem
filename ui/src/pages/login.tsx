@@ -3,6 +3,7 @@ import { Navigate } from "react-router";
 import { Zap } from "lucide-react";
 import { useAuth } from "@/context/auth-context";
 import { useTitle } from "@/hooks/use-title";
+import { LoadingSpinner } from "@/components/loading-spinner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -24,11 +25,7 @@ export function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
 
   if (isLoading) {
-    return (
-      <div className="flex h-screen items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-      </div>
-    );
+    return <LoadingSpinner className="flex h-screen items-center justify-center" />;
   }
 
   if (!authRequired || isAuthenticated) {

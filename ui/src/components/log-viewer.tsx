@@ -89,7 +89,7 @@ export function LogViewer({ logs, isStreaming }: LogViewerProps) {
               const ts = formatTimestamp(parsed.ts);
               const isStderr = parsed.stream === "stderr";
               return (
-                <div key={i} className="flex">
+                <div key={`log-${i}`} className="flex">
                   {ts && (
                     <span className="mr-3 shrink-0 select-none text-zinc-600">
                       {ts}
@@ -106,7 +106,7 @@ export function LogViewer({ logs, isStreaming }: LogViewerProps) {
             }
             // Legacy plain text line
             return (
-              <div key={i} className="text-zinc-300">
+              <div key={`log-${i}`} className="text-zinc-300">
                 {raw}
               </div>
             );

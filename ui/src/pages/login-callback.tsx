@@ -1,9 +1,10 @@
-import { useEffect, useMemo } from "react";
-import { Link } from "react-router";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router";
 import { Zap } from "lucide-react";
-import { setTokensFromOidc } from "@/lib/api";
+import { useAuth } from "@/context/auth-context";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { LoadingSpinner } from "@/components/loading-spinner";
 
 function parseCallbackHash() {
   const hash = window.location.hash.substring(1);
@@ -15,25 +16,25 @@ function parseCallbackHash() {
 }
 
 export function LoginCallbackPage() {
+  const navigate = useNavigate();
+  const { restoreFromOidc } = useAuth();
   const { error: urlError, accessToken } = useMemo(() => parseCallbackHash(), []);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   // The refresh token is delivered as an HttpOnly cookie by the server redirect
   // — it never appears in the URL hash.
-  const error = urlError ?? (!accessToken ? "Missing access token in callback" : null);
+  const error = urlError ?? restoreError ?? (!accessToken ? "Missing access token in callback" : null);
 
   useEffect(() => {
     if (accessToken) {
-      setTokensFromOidc(accessToken);
-      window.location.href = "/";
+      restoreFromOidc(accessToken)
+        .then(() => navigate("/", { replace: true }))
+        .catch(() => setRestoreError("Failed to restore session from OIDC callback"));
     }
-  }, [accessToken]);
+  }, [accessToken, restoreFromOidc, navigate]);
 
   if (!error) {
-    return (
-      <div className="flex h-screen items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
-      </div>
-    );
+    return <LoadingSpinner className="flex h-screen items-center justify-center" />;
   }
 
   return (

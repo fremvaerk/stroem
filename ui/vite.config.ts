@@ -18,9 +18,9 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
         configure: (proxy) => {
-          proxy.on("error", () => {});
+          proxy.on("error", (err) => { console.warn("Proxy error:", err.message); });
           proxy.on("proxyReqWs", (_proxyReq, _req, socket) => {
-            socket.on("error", () => {});
+            socket.on("error", (err) => { console.warn("WebSocket proxy error:", err.message); });
           });
         },
       },
@@ -31,6 +31,7 @@ export default defineConfig({
     },
   },
   build: {
+    sourcemap: 'hidden',
     outDir: "../crates/stroem-server/static",
     emptyOutDir: true,
     rollupOptions: {

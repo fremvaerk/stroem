@@ -228,6 +228,16 @@ impl WorkspaceManager {
         self.entries.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Get all workspace configs as (name, config) pairs
+    pub async fn get_all_configs(&self) -> Vec<(String, Arc<WorkspaceConfig>)> {
+        let mut result = Vec::new();
+        for (name, entry) in &self.entries {
+            let config = entry.config.read().await;
+            result.push((name.clone(), Arc::clone(&config)));
+        }
+        result
+    }
+
     /// List all workspaces including ones that failed to load.
     /// Failed workspaces have `error` set and zero counts.
     pub async fn list_workspace_info(&self) -> Vec<WorkspaceInfo> {

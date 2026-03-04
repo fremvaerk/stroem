@@ -16,44 +16,71 @@ import type {
   CreateApiKeyResponse,
 } from "./types";
 
-let accessToken: string | null = null;
-let refreshPromise: Promise<boolean> | null = null;
-
-export function setAccessToken(token: string | null) {
-  accessToken = token;
-}
-
-export function getAccessToken(): string | null {
-  return accessToken;
-}
-
 // The refresh token is stored in an HttpOnly cookie managed by the server.
 // The browser sends it automatically on requests to /api/auth/* when
 // credentials: "include" is set — JavaScript cannot read or write it.
 
-async function refreshAccessToken(): Promise<boolean> {
-  try {
-    const res = await fetch("/api/auth/refresh", {
-      method: "POST",
-      credentials: "include",
-    });
-    if (!res.ok) {
-      setAccessToken(null);
+class TokenManager {
+  private accessToken: string | null = null;
+  private refreshPromise: Promise<boolean> | null = null;
+
+  getToken(): string | null {
+    return this.accessToken;
+  }
+
+  setToken(token: string | null) {
+    this.accessToken = token;
+  }
+
+  async ensureToken(): Promise<void> {
+    if (this.accessToken) return;
+    await this.refresh();
+  }
+
+  async refresh(): Promise<boolean> {
+    if (this.refreshPromise) return this.refreshPromise;
+    this.refreshPromise = this._doRefresh();
+    try {
+      return await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+
+  private async _doRefresh(): Promise<boolean> {
+    try {
+      const res = await fetch("/api/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        this.accessToken = null;
+        return false;
+      }
+      const data: TokenResponse = await res.json();
+      this.accessToken = data.access_token;
+      return true;
+    } catch {
+      this.accessToken = null;
       return false;
     }
-    const data: TokenResponse = await res.json();
-    setAccessToken(data.access_token);
-    return true;
-  } catch {
-    setAccessToken(null);
-    return false;
   }
+}
+
+const tokenManager = new TokenManager();
+
+export function setAccessToken(token: string | null) {
+  tokenManager.setToken(token);
+}
+
+export function getAccessToken(): string | null {
+  return tokenManager.getToken();
 }
 
 // Attempt a silent refresh on startup to check whether a valid refresh cookie
 // exists. Used by the auth context to restore session across page reloads.
 export async function tryRestoreSession(): Promise<boolean> {
-  return refreshAccessToken();
+  return tokenManager.refresh();
 }
 
 async function apiFetch<T>(
@@ -61,21 +88,15 @@ async function apiFetch<T>(
   options: RequestInit = {},
 ): Promise<T> {
   // Preemptively refresh if we have no access token (cookie may still be valid)
-  if (!accessToken) {
-    if (!refreshPromise) {
-      refreshPromise = refreshAccessToken().finally(() => {
-        refreshPromise = null;
-      });
-    }
-    await refreshPromise;
-  }
+  await tokenManager.ensureToken();
 
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
   };
 
-  if (accessToken) {
-    headers["Authorization"] = `Bearer ${accessToken}`;
+  const token = tokenManager.getToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   if (options.body && !headers["Content-Type"]) {
@@ -85,14 +106,9 @@ async function apiFetch<T>(
   let res = await fetch(url, { ...options, headers });
 
   if (res.status === 401) {
-    if (!refreshPromise) {
-      refreshPromise = refreshAccessToken().finally(() => {
-        refreshPromise = null;
-      });
-    }
-    const refreshed = await refreshPromise;
+    const refreshed = await tokenManager.refresh();
     if (refreshed) {
-      headers["Authorization"] = `Bearer ${accessToken}`;
+      headers["Authorization"] = `Bearer ${tokenManager.getToken()}`;
       res = await fetch(url, { ...options, headers });
     }
   }
@@ -142,7 +158,7 @@ export async function login(
     throw new ApiError(res.status, body.error || "Login failed");
   }
   const data: TokenResponse = await res.json();
-  setAccessToken(data.access_token);
+  tokenManager.setToken(data.access_token);
   return data;
 }
 
@@ -153,7 +169,7 @@ export async function logout(): Promise<void> {
     method: "POST",
     credentials: "include",
   }).catch(() => {});
-  setAccessToken(null);
+  tokenManager.setToken(null);
 }
 
 export async function getMe(): Promise<AuthUser> {
@@ -189,8 +205,8 @@ export async function getServerConfig(): Promise<ServerConfig> {
   }
 }
 
-export function setTokensFromOidc(accessToken: string) {
-  setAccessToken(accessToken);
+export function setTokensFromOidc(token: string) {
+  tokenManager.setToken(token);
   // The refresh token arrives as an HttpOnly cookie set by the OIDC callback
   // redirect — no JavaScript action required.
 }
@@ -208,11 +224,7 @@ export async function listTasks(workspace: string): Promise<TaskListItem[]> {
 }
 
 export async function listAllTasks(): Promise<TaskListItem[]> {
-  const workspaces = await listWorkspaces();
-  const results = await Promise.all(
-    workspaces.map((ws) => listTasks(ws.name)),
-  );
-  return results.flat();
+  return apiFetch<TaskListItem[]>("/api/tasks");
 }
 
 export async function getTask(
