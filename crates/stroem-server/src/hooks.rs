@@ -2,6 +2,7 @@ use crate::state::AppState;
 use anyhow::Context;
 use serde::Serialize;
 use sqlx::PgPool;
+use stroem_common::models::job::{JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{HookDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::render_input_map;
 use stroem_common::validation::{compute_required_tags, derive_runner};
@@ -48,15 +49,17 @@ pub async fn fire_hooks(
     task: &TaskDef,
 ) {
     // Recursion guard: hook jobs never trigger further hooks
-    if job.source_type == "hook" {
+    if job.source_type == SourceType::Hook.as_ref() {
         return;
     }
 
     // Select task-level and workspace-level hooks for this event type
     // Cancelled jobs fire on_error hooks (treated as failure)
-    let (task_hooks, ws_hooks) = match job.status.as_str() {
-        "completed" => (&task.on_success, &workspace_config.on_success),
-        "failed" | "cancelled" => (&task.on_error, &workspace_config.on_error),
+    let (task_hooks, ws_hooks) = match job.status.parse::<JobStatus>().ok() {
+        Some(JobStatus::Completed) => (&task.on_success, &workspace_config.on_success),
+        Some(JobStatus::Failed) | Some(JobStatus::Cancelled) => {
+            (&task.on_error, &workspace_config.on_error)
+        }
         _ => return,
     };
 
@@ -110,7 +113,7 @@ pub async fn fire_hooks(
         }
     };
 
-    let hook_type = if job.status == "completed" {
+    let hook_type = if job.status == JobStatus::Completed.as_ref() {
         "on_success"
     } else {
         "on_error" // covers both "failed" and "cancelled"
@@ -160,7 +163,7 @@ async fn build_hook_context(
 
     let failed_steps: Vec<FailedStepInfo> = steps
         .iter()
-        .filter(|s| s.status == "failed")
+        .filter(|s| s.status == StepStatus::Failed.as_ref())
         .map(|s| {
             let continue_on_failure = task
                 .flow
@@ -202,7 +205,7 @@ async fn build_hook_context(
         task_name: job.task_name.clone(),
         job_id: job.job_id.to_string(),
         status: job.status.clone(),
-        is_success: job.status == "completed",
+        is_success: job.status == JobStatus::Completed.as_ref(),
         error_message,
         source_type: job.source_type.clone(),
         source_id: job.source_id.clone(),
@@ -250,6 +253,7 @@ async fn fire_single_hook(
 
     // If the action is type: task, create a full job for the referenced task
     if action.action_type == "task" {
+        // action_type is a String field on ActionDef
         let task_ref = action
             .task
             .as_ref()
@@ -305,7 +309,7 @@ async fn fire_single_hook(
         action_image: action.image.clone(),
         action_spec,
         input: Some(rendered_input),
-        status: "ready".to_string(),
+        status: StepStatus::Ready.to_string(),
         required_tags,
         runner,
     };

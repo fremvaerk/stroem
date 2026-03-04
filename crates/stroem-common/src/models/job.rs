@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use uuid::Uuid;
 
 /// Job execution status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Pending,
@@ -13,12 +14,45 @@ pub enum JobStatus {
     Cancelled,
 }
 
+impl fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
+impl AsRef<str> for JobStatus {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::str::FromStr for JobStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            other => anyhow::bail!("Unknown job status: {}", other),
+        }
+    }
+}
+
 /// Job step execution status
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Pending,
     Ready,
+    Claimed,
     Running,
     Completed,
     Failed,
@@ -26,14 +60,128 @@ pub enum StepStatus {
     Cancelled,
 }
 
-/// Source of job execution
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl fmt::Display for StepStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
+impl AsRef<str> for StepStatus {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Claimed => "claimed",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::str::FromStr for StepStatus {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "ready" => Ok(Self::Ready),
+            "claimed" => Ok(Self::Claimed),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "skipped" => Ok(Self::Skipped),
+            "cancelled" => Ok(Self::Cancelled),
+            other => anyhow::bail!("Unknown step status: {}", other),
+        }
+    }
+}
+
+/// Source that triggered a job
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
-    Trigger,
-    User,
     Api,
+    User,
+    Trigger,
     Webhook,
+    Hook,
+    Task,
+}
+
+impl fmt::Display for SourceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
+impl AsRef<str> for SourceType {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Api => "api",
+            Self::User => "user",
+            Self::Trigger => "trigger",
+            Self::Webhook => "webhook",
+            Self::Hook => "hook",
+            Self::Task => "task",
+        }
+    }
+}
+
+impl std::str::FromStr for SourceType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "api" => Ok(Self::Api),
+            "user" => Ok(Self::User),
+            "trigger" => Ok(Self::Trigger),
+            "webhook" => Ok(Self::Webhook),
+            "hook" => Ok(Self::Hook),
+            "task" => Ok(Self::Task),
+            other => anyhow::bail!("Unknown source type: {}", other),
+        }
+    }
+}
+
+/// Type of action a step executes
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionType {
+    Shell,
+    Docker,
+    Pod,
+    Task,
+}
+
+impl fmt::Display for ActionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
+impl AsRef<str> for ActionType {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Shell => "shell",
+            Self::Docker => "docker",
+            Self::Pod => "pod",
+            Self::Task => "task",
+        }
+    }
+}
+
+impl std::str::FromStr for ActionType {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "shell" => Ok(Self::Shell),
+            "docker" => Ok(Self::Docker),
+            "pod" => Ok(Self::Pod),
+            "task" => Ok(Self::Task),
+            other => anyhow::bail!("Unknown action type: {}", other),
+        }
+    }
 }
 
 /// Job represents a single task execution
@@ -95,23 +243,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_job_status_serialization() {
-        let status = JobStatus::Running;
-        let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, r#""running""#);
-
-        let deserialized: JobStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, JobStatus::Running);
+    fn test_job_status_display() {
+        assert_eq!(JobStatus::Pending.to_string(), "pending");
+        assert_eq!(JobStatus::Running.to_string(), "running");
+        assert_eq!(JobStatus::Completed.to_string(), "completed");
+        assert_eq!(JobStatus::Failed.to_string(), "failed");
+        assert_eq!(JobStatus::Cancelled.to_string(), "cancelled");
     }
 
     #[test]
-    fn test_step_status_serialization() {
+    fn test_job_status_from_str() {
+        assert_eq!("pending".parse::<JobStatus>().unwrap(), JobStatus::Pending);
+        assert_eq!("running".parse::<JobStatus>().unwrap(), JobStatus::Running);
+        assert_eq!(
+            "completed".parse::<JobStatus>().unwrap(),
+            JobStatus::Completed
+        );
+        assert_eq!("failed".parse::<JobStatus>().unwrap(), JobStatus::Failed);
+        assert_eq!(
+            "cancelled".parse::<JobStatus>().unwrap(),
+            JobStatus::Cancelled
+        );
+        assert!("invalid".parse::<JobStatus>().is_err());
+    }
+
+    #[test]
+    fn test_job_status_serde_roundtrip() {
+        let status = JobStatus::Completed;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#""completed""#);
+        let parsed: JobStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, status);
+    }
+
+    #[test]
+    fn test_step_status_display() {
+        assert_eq!(StepStatus::Pending.to_string(), "pending");
+        assert_eq!(StepStatus::Ready.to_string(), "ready");
+        assert_eq!(StepStatus::Claimed.to_string(), "claimed");
+        assert_eq!(StepStatus::Running.to_string(), "running");
+        assert_eq!(StepStatus::Completed.to_string(), "completed");
+        assert_eq!(StepStatus::Failed.to_string(), "failed");
+        assert_eq!(StepStatus::Skipped.to_string(), "skipped");
+        assert_eq!(StepStatus::Cancelled.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn test_step_status_from_str() {
+        assert_eq!(
+            "pending".parse::<StepStatus>().unwrap(),
+            StepStatus::Pending
+        );
+        assert_eq!("ready".parse::<StepStatus>().unwrap(), StepStatus::Ready);
+        assert_eq!(
+            "claimed".parse::<StepStatus>().unwrap(),
+            StepStatus::Claimed
+        );
+        assert_eq!(
+            "running".parse::<StepStatus>().unwrap(),
+            StepStatus::Running
+        );
+        assert_eq!(
+            "completed".parse::<StepStatus>().unwrap(),
+            StepStatus::Completed
+        );
+        assert_eq!("failed".parse::<StepStatus>().unwrap(), StepStatus::Failed);
+        assert_eq!(
+            "skipped".parse::<StepStatus>().unwrap(),
+            StepStatus::Skipped
+        );
+        assert_eq!(
+            "cancelled".parse::<StepStatus>().unwrap(),
+            StepStatus::Cancelled
+        );
+        assert!("invalid".parse::<StepStatus>().is_err());
+    }
+
+    #[test]
+    fn test_step_status_serde_roundtrip() {
         let status = StepStatus::Ready;
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(json, r#""ready""#);
-
-        let deserialized: StepStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, StepStatus::Ready);
+        let parsed: StepStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, status);
     }
 
     #[test]
@@ -125,6 +339,68 @@ mod tests {
     }
 
     #[test]
+    fn test_source_type_display() {
+        assert_eq!(SourceType::Api.to_string(), "api");
+        assert_eq!(SourceType::User.to_string(), "user");
+        assert_eq!(SourceType::Trigger.to_string(), "trigger");
+        assert_eq!(SourceType::Webhook.to_string(), "webhook");
+        assert_eq!(SourceType::Hook.to_string(), "hook");
+        assert_eq!(SourceType::Task.to_string(), "task");
+    }
+
+    #[test]
+    fn test_source_type_from_str() {
+        assert_eq!("api".parse::<SourceType>().unwrap(), SourceType::Api);
+        assert_eq!("user".parse::<SourceType>().unwrap(), SourceType::User);
+        assert_eq!(
+            "trigger".parse::<SourceType>().unwrap(),
+            SourceType::Trigger
+        );
+        assert_eq!(
+            "webhook".parse::<SourceType>().unwrap(),
+            SourceType::Webhook
+        );
+        assert_eq!("hook".parse::<SourceType>().unwrap(), SourceType::Hook);
+        assert_eq!("task".parse::<SourceType>().unwrap(), SourceType::Task);
+        assert!("invalid".parse::<SourceType>().is_err());
+    }
+
+    #[test]
+    fn test_source_type_serde_roundtrip() {
+        let source = SourceType::Webhook;
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(json, r#""webhook""#);
+        let parsed: SourceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, source);
+    }
+
+    #[test]
+    fn test_action_type_display() {
+        assert_eq!(ActionType::Shell.to_string(), "shell");
+        assert_eq!(ActionType::Docker.to_string(), "docker");
+        assert_eq!(ActionType::Pod.to_string(), "pod");
+        assert_eq!(ActionType::Task.to_string(), "task");
+    }
+
+    #[test]
+    fn test_action_type_from_str() {
+        assert_eq!("shell".parse::<ActionType>().unwrap(), ActionType::Shell);
+        assert_eq!("docker".parse::<ActionType>().unwrap(), ActionType::Docker);
+        assert_eq!("pod".parse::<ActionType>().unwrap(), ActionType::Pod);
+        assert_eq!("task".parse::<ActionType>().unwrap(), ActionType::Task);
+        assert!("invalid".parse::<ActionType>().is_err());
+    }
+
+    #[test]
+    fn test_action_type_serde_roundtrip() {
+        let action_type = ActionType::Shell;
+        let json = serde_json::to_string(&action_type).unwrap();
+        assert_eq!(json, r#""shell""#);
+        let parsed: ActionType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action_type);
+    }
+
+    #[test]
     fn test_source_type_serialization() {
         let source = SourceType::Webhook;
         let json = serde_json::to_string(&source).unwrap();
@@ -132,6 +408,16 @@ mod tests {
 
         let deserialized: SourceType = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, SourceType::Webhook);
+    }
+
+    #[test]
+    fn test_job_status_serialization() {
+        let status = JobStatus::Running;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#""running""#);
+
+        let deserialized: JobStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, JobStatus::Running);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
@@ -386,7 +387,7 @@ impl JobStepRepo {
         // Collect all step names that are ready to be promoted
         let to_promote: Vec<String> = steps
             .iter()
-            .filter(|s| s.status == "pending")
+            .filter(|s| s.status == StepStatus::Pending.as_ref())
             .filter_map(|step| {
                 let flow_step = flow.get(&step.step_name)?;
                 let deps_met = flow_step.depends_on.iter().all(|dep| {
@@ -394,9 +395,10 @@ impl JobStepRepo {
                         .get(dep)
                         .map(|status| {
                             if flow_step.continue_on_failure {
-                                status == "completed" || status == "failed"
+                                status == StepStatus::Completed.as_ref()
+                                    || status == StepStatus::Failed.as_ref()
                             } else {
-                                status == "completed"
+                                status == StepStatus::Completed.as_ref()
                             }
                         })
                         .unwrap_or(false)
@@ -463,7 +465,7 @@ impl JobStepRepo {
         // Collect all step names that must be skipped in this pass
         let to_skip: Vec<String> = steps
             .iter()
-            .filter(|s| s.status == "pending")
+            .filter(|s| s.status == StepStatus::Pending.as_ref())
             .filter_map(|step| {
                 let flow_step = flow.get(&step.step_name)?;
                 if flow_step.continue_on_failure {
@@ -472,7 +474,11 @@ impl JobStepRepo {
                 let has_failed_dep = flow_step.depends_on.iter().any(|dep| {
                     status_map
                         .get(dep)
-                        .map(|s| s == "failed" || s == "skipped" || s == "cancelled")
+                        .map(|s| {
+                            s == StepStatus::Failed.as_ref()
+                                || s == StepStatus::Skipped.as_ref()
+                                || s == StepStatus::Cancelled.as_ref()
+                        })
                         .unwrap_or(false)
                 });
                 if has_failed_dep {

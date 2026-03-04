@@ -5,6 +5,7 @@ use crate::state::AppState;
 use anyhow::Result;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::models::job::{JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use uuid::Uuid;
@@ -46,7 +47,9 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
 
     let task = match workspace.tasks.get(&job.task_name) {
         Some(t) => t.clone(),
-        None if job.source_type == "hook" => build_minimal_task_def(state, job_id).await?,
+        None if job.source_type == SourceType::Hook.as_ref() => {
+            build_minimal_task_def(state, job_id).await?
+        }
         None => {
             tracing::error!(
                 "Task '{}' not found in workspace '{}'",
@@ -76,8 +79,8 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
     // Check if job reached terminal state
     if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
         if matches!(
-            job_after.status.as_str(),
-            "completed" | "failed" | "cancelled"
+            job_after.status.parse::<JobStatus>().ok(),
+            Some(JobStatus::Completed) | Some(JobStatus::Failed) | Some(JobStatus::Cancelled)
         ) {
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
@@ -124,7 +127,7 @@ async fn propagate_to_parent(
     parent_job_id: Uuid,
     parent_step: &str,
 ) -> Result<()> {
-    if child_job.status == "completed" {
+    if child_job.status == JobStatus::Completed.as_ref() {
         JobStepRepo::mark_completed(
             &state.pool,
             parent_job_id,
@@ -132,7 +135,7 @@ async fn propagate_to_parent(
             child_job.output.clone(),
         )
         .await?;
-    } else if child_job.status == "cancelled" {
+    } else if child_job.status == JobStatus::Cancelled.as_ref() {
         JobStepRepo::mark_cancelled(&state.pool, parent_job_id, parent_step).await?;
     } else {
         let err = format!("Child job {} failed", child_job.job_id);
@@ -145,7 +148,7 @@ async fn propagate_to_parent(
         if let Some(parent_ws) = state.get_workspace(&parent_job.workspace).await {
             let parent_task = match parent_ws.tasks.get(&parent_job.task_name) {
                 Some(t) => t.clone(),
-                None if parent_job.source_type == "hook" => {
+                None if parent_job.source_type == SourceType::Hook.as_ref() => {
                     build_minimal_task_def(state, parent_job_id).await?
                 }
                 None => {
@@ -174,8 +177,10 @@ async fn propagate_to_parent(
             // Check if parent job is now terminal — propagate recursively
             if let Ok(Some(parent_after)) = JobRepo::get(&state.pool, parent_job_id).await {
                 if matches!(
-                    parent_after.status.as_str(),
-                    "completed" | "failed" | "cancelled"
+                    parent_after.status.parse::<JobStatus>().ok(),
+                    Some(JobStatus::Completed)
+                        | Some(JobStatus::Failed)
+                        | Some(JobStatus::Cancelled)
                 ) {
                     // Propagate up the chain if parent is also a child
                     if let (Some(grandparent_id), Some(ref grandparent_step)) =
@@ -208,7 +213,14 @@ async fn propagate_to_parent(
 #[tracing::instrument(skip(state))]
 pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     let job = match JobRepo::get(&state.pool, job_id).await? {
-        Some(j) if matches!(j.status.as_str(), "completed" | "failed" | "cancelled") => j,
+        Some(j)
+            if matches!(
+                j.status.parse::<JobStatus>().ok(),
+                Some(JobStatus::Completed) | Some(JobStatus::Failed) | Some(JobStatus::Cancelled)
+            ) =>
+        {
+            j
+        }
         _ => return Ok(()),
     };
 
@@ -242,7 +254,9 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     if let Some(workspace) = state.get_workspace(&job.workspace).await {
         let task = match workspace.tasks.get(&job.task_name) {
             Some(t) => Some(t.clone()),
-            None if job.source_type == "hook" => Some(build_minimal_task_def(state, job_id).await?),
+            None if job.source_type == SourceType::Hook.as_ref() => {
+                Some(build_minimal_task_def(state, job_id).await?)
+            }
             None => None,
         };
         if let Some(task) = task {
@@ -275,7 +289,7 @@ async fn run_terminal_job_actions(
     crate::hooks::fire_hooks(state, workspace, job, task).await;
 
     // If a hook job failed, log it to the original job's server events
-    if job.source_type == "hook" && job.status == "failed" {
+    if job.source_type == SourceType::Hook.as_ref() && job.status == JobStatus::Failed.as_ref() {
         if let Some(ref source_id) = job.source_id {
             if let Some(original_job_id) = source_id
                 .split('/')
@@ -357,7 +371,7 @@ async fn get_hook_error_summary(pool: &PgPool, job: &JobRow) -> String {
 /// Extract the error message from the first failed step, or "unknown error".
 fn extract_first_failure(steps: &[JobStepRow]) -> String {
     for step in steps {
-        if step.status == "failed" {
+        if step.status == StepStatus::Failed.as_ref() {
             if let Some(ref msg) = step.error_message {
                 return msg.clone();
             }
@@ -382,7 +396,7 @@ mod tests {
             action_spec: None,
             input: None,
             output: None,
-            status: status.to_string(),
+            status: status.to_string(), // DB model stays as String
             worker_id: None,
             started_at: Some(Utc::now()),
             completed_at: Some(Utc::now()),

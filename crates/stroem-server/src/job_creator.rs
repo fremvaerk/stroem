@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::template::{
     merge_defaults, prepare_action_input, render_input_map, resolve_connection_inputs,
@@ -89,9 +90,9 @@ fn create_job_for_task_inner<'a>(
             };
 
             let status = if flow_step.depends_on.is_empty() {
-                "ready"
+                StepStatus::Ready
             } else {
-                "pending"
+                StepStatus::Pending
             };
 
             let action_spec = serde_json::to_value(action).ok();
@@ -106,7 +107,7 @@ fn create_job_for_task_inner<'a>(
                 action_image: action.image.clone(),
                 action_spec,
                 input: Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
-                status: status.to_string(),
+                status: status.to_string(), // NewJobStep.status is String for DB compatibility
                 required_tags,
                 runner,
             });
@@ -160,7 +161,7 @@ pub async fn handle_task_steps(
     let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
 
     for step in &steps {
-        if step.status != "ready" || step.action_type != "task" {
+        if step.status != StepStatus::Ready.as_ref() || step.action_type != "task" {
             continue;
         }
 
@@ -283,7 +284,7 @@ fn build_step_render_context(
         ctx.insert("input".to_string(), input.clone());
     }
     for s in steps {
-        if s.status == "completed" {
+        if s.status == StepStatus::Completed.as_ref() {
             let mut step_ctx = serde_json::Map::new();
             if let Some(ref output) = s.output {
                 step_ctx.insert("output".to_string(), output.clone());

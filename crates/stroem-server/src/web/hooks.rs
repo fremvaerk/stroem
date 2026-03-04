@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use stroem_common::models::job::JobStatus;
 use stroem_common::models::workflow::TriggerDef;
 use subtle::ConstantTimeEq;
 
@@ -119,7 +120,9 @@ async fn webhook_handler(
                 // between create_job_for_task and subscribe. If already terminal,
                 // return immediately without waiting.
                 if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-                    if job.status == "completed" || job.status == "failed" {
+                    if job.status == JobStatus::Completed.as_ref()
+                        || job.status == JobStatus::Failed.as_ref()
+                    {
                         return Json(json!({
                             "job_id": job_id.to_string(),
                             "trigger": name,

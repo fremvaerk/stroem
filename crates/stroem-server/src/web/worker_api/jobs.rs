@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use stroem_common::models::job::StepStatus;
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
 
@@ -275,7 +276,7 @@ pub async fn claim_job(
         match JobStepRepo::get_steps_for_job(&state.pool, step.job_id).await {
             Ok(all_steps) => all_steps
                 .into_iter()
-                .filter(|s| s.status == "completed")
+                .filter(|s| s.status == StepStatus::Completed.as_ref())
                 .map(|s| (s.step_name, s.output))
                 .collect(),
             Err(_) => vec![],
