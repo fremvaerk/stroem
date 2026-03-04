@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashSet;
+use stroem_common::models::job::JobStatus;
 use stroem_common::models::workflow::TaskDef;
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
@@ -44,7 +45,7 @@ pub async fn on_step_completed(
         // If the job is already cancelled, don't overwrite it
         let current_job = JobRepo::get(pool, job_id).await?;
         if let Some(ref j) = current_job {
-            if j.status == "cancelled" {
+            if j.status == JobStatus::Cancelled.as_ref() {
                 tracing::info!(
                     "Job {} is already cancelled, skipping status update",
                     job_id

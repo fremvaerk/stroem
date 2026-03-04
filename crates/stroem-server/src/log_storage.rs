@@ -138,13 +138,13 @@ impl LogStorage {
     /// Uses an [`AtomicBool`] flag so that the directory stat is skipped on
     /// subsequent calls once we know the directory has been created.
     async fn ensure_dir(&self) -> Result<()> {
-        if self.dir_created.load(Ordering::Relaxed) {
+        if self.dir_created.load(Ordering::Acquire) {
             return Ok(());
         }
         fs::create_dir_all(&self.base_dir)
             .await
             .context("Failed to create log directory")?;
-        self.dir_created.store(true, Ordering::Relaxed);
+        self.dir_created.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -395,7 +395,16 @@ impl LogStorage {
     }
 
     /// Check if a JSONL line belongs to the given step.
+    ///
+    /// Uses a fast-path `contains` check to avoid JSON parsing for lines that
+    /// cannot possibly match — the vast majority of lines in a multi-step job.
     fn line_matches_step(line: &str, step_name: &str) -> bool {
+        // Fast path: if the step name doesn't appear anywhere in the line there
+        // is no need to parse the JSON at all.
+        if !line.contains(step_name) {
+            return false;
+        }
+        // Parse only when the step name is present in the raw string.
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
             parsed.get("step").and_then(|s| s.as_str()) == Some(step_name)
         } else {
@@ -957,6 +966,49 @@ mod tests {
             key,
             "main/build/2025/01/02/2025-01-02T03-04-05_11111111-2222-3333-4444-555555555555.jsonl.gz"
         );
+    }
+
+    /// Verify that multiple async tasks appending to the *same* job concurrently
+    /// all succeed and that no lines are lost or corrupted.
+    #[tokio::test]
+    async fn test_concurrent_appends_same_job() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LogStorage::new(temp_dir.path()));
+        let job_id = Uuid::new_v4();
+
+        let mut handles = vec![];
+        for t in 0..5_u32 {
+            let s = Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                for i in 0..20_u32 {
+                    s.append_log(job_id, &format!("t{t}-line{i}\n"))
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        storage.close_log(job_id).await;
+
+        let content = tokio::fs::read_to_string(storage.log_path(job_id))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 100, "expected 100 lines (5 tasks × 20 lines)");
+
+        // Verify every line from every task is present.
+        for t in 0..5_u32 {
+            for i in 0..20_u32 {
+                assert!(
+                    content.contains(&format!("t{t}-line{i}")),
+                    "missing t{t}-line{i}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "s3")]

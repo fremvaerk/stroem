@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use flate2::read::GzDecoder;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tar::Archive;
 
@@ -55,45 +55,7 @@ impl WorkspaceCache {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
-        self.extract_tarball_locked(name, data, revision)
-    }
-
-    /// Inner extraction logic — caller must hold the per-workspace lock.
-    fn extract_tarball_locked(&self, name: &str, data: &[u8], revision: &str) -> Result<()> {
-        let ws_dir = self.workspace_dir(name);
-        let tmp_dir = self.base_dir.join(format!("{}.tmp", name));
-
-        // Extract to a temporary directory first
-        if tmp_dir.exists() {
-            std::fs::remove_dir_all(&tmp_dir).context("Failed to remove temp directory")?;
-        }
-        std::fs::create_dir_all(&tmp_dir).context("Failed to create temp directory")?;
-
-        let decoder = GzDecoder::new(data);
-        let mut archive = Archive::new(decoder);
-        archive
-            .unpack(&tmp_dir)
-            .context("Failed to extract workspace tarball")?;
-
-        // Write revision file into the temp dir
-        let rev_file = tmp_dir.join(".revision");
-        std::fs::write(&rev_file, revision).context("Failed to write revision file")?;
-
-        // Atomic swap: remove old workspace dir, rename temp into place
-        if ws_dir.exists() {
-            std::fs::remove_dir_all(&ws_dir).context("Failed to remove old workspace directory")?;
-        }
-        std::fs::rename(&tmp_dir, &ws_dir)
-            .context("Failed to rename temp to workspace directory")?;
-
-        tracing::info!(
-            "Extracted workspace '{}' (revision: {}) to {}",
-            name,
-            revision,
-            ws_dir.display()
-        );
-
-        Ok(())
+        extract_tarball_inner(&self.base_dir, name, data, revision)
     }
 
     /// Ensure the workspace is up-to-date by downloading if necessary.
@@ -125,12 +87,7 @@ impl WorkspaceCache {
                     let _guard = lock
                         .lock()
                         .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-                    // Construct a minimal cache handle for the blocking task
-                    let cache = WorkspaceCache {
-                        base_dir,
-                        per_workspace_locks: Arc::new(DashMap::new()),
-                    };
-                    cache.extract_tarball_locked(&workspace_owned, &data, &revision)
+                    extract_tarball_inner(&base_dir, &workspace_owned, &data, &revision)
                 })
                 .await
                 .context("tarball extraction task panicked")??;
@@ -150,6 +107,99 @@ impl WorkspaceCache {
 
         Ok(ws_dir)
     }
+}
+
+/// Inner extraction logic — caller must hold the per-workspace lock.
+///
+/// Extracts `data` (a gzip-compressed tar archive) into `base_dir/name/`, writing
+/// a `.revision` file with `revision`.  Uses a temp directory + atomic rename so
+/// concurrent readers always see a consistent workspace state.
+fn extract_tarball_inner(base_dir: &Path, name: &str, data: &[u8], revision: &str) -> Result<()> {
+    let ws_dir = base_dir.join(name);
+    let tmp_dir = base_dir.join(format!("{}.tmp", name));
+
+    // Extract to a temporary directory first
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).context("Failed to remove temp directory")?;
+    }
+    std::fs::create_dir_all(&tmp_dir).context("Failed to create temp directory")?;
+
+    let decoder = GzDecoder::new(data);
+    let mut archive = Archive::new(decoder);
+    archive
+        .unpack(&tmp_dir)
+        .context("Failed to extract workspace tarball")?;
+
+    // Write revision file into the temp dir
+    let rev_file = tmp_dir.join(".revision");
+    std::fs::write(&rev_file, revision).context("Failed to write revision file")?;
+
+    // Atomic swap: remove old workspace dir, rename temp into place.
+    // Fall back to recursive copy+remove when the rename crosses filesystem boundaries
+    // (EXDEV / error code 18 on Unix).
+    if ws_dir.exists() {
+        std::fs::remove_dir_all(&ws_dir).context("Failed to remove old workspace directory")?;
+    }
+
+    rename_or_copy(&tmp_dir, &ws_dir)?;
+
+    tracing::info!(
+        "Extracted workspace '{}' (revision: {}) to {}",
+        name,
+        revision,
+        ws_dir.display()
+    );
+
+    Ok(())
+}
+
+/// Rename `src` to `dst`, falling back to a recursive copy + remove when the
+/// two paths reside on different filesystems (EXDEV, OS error 18 on Unix).
+fn rename_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => {}
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(18) => {
+            // Cross-filesystem move: copy recursively then remove the source tree.
+            copy_dir_all(src, dst)?;
+            std::fs::remove_dir_all(src).context("Failed to remove temp directory after copy")?;
+        }
+        Err(e) => return Err(e).context("Failed to rename temp to workspace directory"),
+    }
+    Ok(())
+}
+
+/// Recursively copy the directory tree rooted at `src` into `dst`.
+///
+/// `dst` must not exist yet; it will be created by this function.
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)
+        .with_context(|| format!("Failed to create directory {}", dst.display()))?;
+
+    for entry in std::fs::read_dir(src)
+        .with_context(|| format!("Failed to read directory {}", src.display()))?
+    {
+        let entry = entry.with_context(|| format!("Failed to read entry in {}", src.display()))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("Failed to get file type for {}", src_path.display()))?;
+
+        if file_type.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -462,5 +512,39 @@ mod tests {
             assert!(cache.workspace_dir(&ws_name).exists());
             assert_eq!(cache.current_revision(&ws_name), Some("rev1".to_string()));
         }
+    }
+
+    #[test]
+    fn test_copy_dir_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+
+        // Build a small source tree
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("root.txt"), b"root").unwrap();
+        std::fs::write(src.join("sub").join("nested.txt"), b"nested").unwrap();
+
+        copy_dir_all(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read(dst.join("root.txt")).unwrap(), b"root");
+        assert_eq!(
+            std::fs::read(dst.join("sub").join("nested.txt")).unwrap(),
+            b"nested"
+        );
+    }
+
+    #[test]
+    fn test_rename_or_copy_same_fs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("file.txt"), b"data").unwrap();
+
+        rename_or_copy(&src, &dst).unwrap();
+
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(dst.join("file.txt")).unwrap(), b"data");
     }
 }

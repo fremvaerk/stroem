@@ -1251,4 +1251,155 @@ worker_token: "token"
         assert!(matches!(&config.libraries["infra"], LibraryDef::Git { .. }));
         assert_eq!(config.git_auth.len(), 1);
     }
+
+    // ─── Boundary validation tests ────────────────────────────────────────────
+
+    fn make_valid_server_config(worker_token: &str) -> ServerConfig {
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{worker_token}"
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn make_valid_server_config_with_auth(worker_token: &str, jwt_secret: &str) -> ServerConfig {
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{worker_token}"
+auth:
+  jwt_secret: "{jwt_secret}"
+  refresh_secret: "{worker_token}"
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn make_valid_server_config_with_recovery(
+        heartbeat_timeout_secs: u64,
+        sweep_interval_secs: u64,
+    ) -> ServerConfig {
+        let token = valid_32char_token();
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{token}"
+recovery:
+  heartbeat_timeout_secs: {heartbeat_timeout_secs}
+  sweep_interval_secs: {sweep_interval_secs}
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn test_validate_worker_token_exactly_32_chars() {
+        // Exactly 32 characters — must pass
+        let token: String = "a".repeat(32);
+        let config = make_valid_server_config(&token);
+        assert!(
+            config.validate().is_ok(),
+            "32-char worker_token should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_worker_token_31_chars_fails() {
+        // 31 characters — must fail (below the 32-char minimum)
+        let token: String = "a".repeat(31);
+        let config = make_valid_server_config(&token);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("worker_token"),
+            "Error should mention worker_token: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_jwt_secret_exactly_32_chars() {
+        // Exactly 32 characters — must pass
+        let token = valid_32char_token();
+        let jwt: String = "b".repeat(32);
+        let config = make_valid_server_config_with_auth(token, &jwt);
+        assert!(
+            config.validate().is_ok(),
+            "32-char jwt_secret should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_jwt_secret_31_chars_fails() {
+        // 31 characters — must fail
+        let token = valid_32char_token();
+        let jwt: String = "b".repeat(31);
+        let config = make_valid_server_config_with_auth(token, &jwt);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("jwt_secret"),
+            "Error should mention jwt_secret: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_heartbeat_timeout_exactly_10() {
+        // heartbeat_timeout_secs = 10 (the minimum) — must pass
+        let config = make_valid_server_config_with_recovery(10, 5);
+        assert!(
+            config.validate().is_ok(),
+            "heartbeat_timeout_secs = 10 should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_heartbeat_timeout_9_fails() {
+        // heartbeat_timeout_secs = 9 (below the minimum of 10) — must fail
+        let config = make_valid_server_config_with_recovery(9, 5);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("heartbeat_timeout_secs"),
+            "Error should mention heartbeat_timeout_secs: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_sweep_interval_exactly_5() {
+        // sweep_interval_secs = 5 (the minimum) — must pass
+        let config = make_valid_server_config_with_recovery(10, 5);
+        assert!(
+            config.validate().is_ok(),
+            "sweep_interval_secs = 5 should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_sweep_interval_4_fails() {
+        // sweep_interval_secs = 4 (below the minimum of 5) — must fail
+        let config = make_valid_server_config_with_recovery(10, 4);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("sweep_interval_secs"),
+            "Error should mention sweep_interval_secs: {}",
+            err
+        );
+    }
 }

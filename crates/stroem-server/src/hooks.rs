@@ -2,7 +2,7 @@ use crate::state::AppState;
 use anyhow::Context;
 use serde::Serialize;
 use sqlx::PgPool;
-use stroem_common::models::job::{JobStatus, SourceType, StepStatus};
+use stroem_common::models::job::{ActionType, JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{HookDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::render_input_map;
 use stroem_common::validation::{compute_required_tags, derive_runner};
@@ -252,7 +252,7 @@ async fn fire_single_hook(
     };
 
     // If the action is type: task, create a full job for the referenced task
-    if action.action_type == "task" {
+    if action.action_type == ActionType::Task.as_ref() {
         // action_type is a String field on ActionDef
         let task_ref = action
             .task

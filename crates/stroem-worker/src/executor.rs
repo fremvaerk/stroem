@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use stroem_common::models::job::ActionType;
 use stroem_runner::{LogCallback, LogLine, RunConfig, RunResult, Runner, RunnerMode, ShellRunner};
 use tokio_util::sync::CancellationToken;
 
@@ -153,7 +154,7 @@ impl StepExecutor {
             .context("Missing action_spec in claimed step")?;
 
         let runner_field = step.runner.as_deref().unwrap_or("local");
-        let is_type2 = step.action_type == "shell"; // Type 2: shell with workspace
+        let is_type2 = step.action_type == ActionType::Shell.as_ref(); // Type 2: shell with workspace
         let runner_mode = if is_type2 {
             RunnerMode::WithWorkspace
         } else {

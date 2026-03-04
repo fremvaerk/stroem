@@ -575,4 +575,85 @@ workspace_cache_dir: "/tmp/stroem-workspace"
         let config: WorkerConfig = serde_yaml::from_str(&yaml).unwrap();
         assert!(config.validate().is_ok());
     }
+
+    // ─── Boundary validation tests ────────────────────────────────────────────
+
+    fn make_valid_worker_config(worker_token: &str) -> WorkerConfig {
+        let yaml = format!(
+            r#"
+server_url: "http://localhost:8080"
+worker_token: "{worker_token}"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn make_valid_worker_config_with_poll(
+        worker_token: &str,
+        poll_interval_secs: u64,
+    ) -> WorkerConfig {
+        let yaml = format!(
+            r#"
+server_url: "http://localhost:8080"
+worker_token: "{worker_token}"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: {poll_interval_secs}
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn test_validate_worker_token_exactly_32_chars() {
+        // Exactly 32 characters — must pass
+        let token: String = "a".repeat(32);
+        let config = make_valid_worker_config(&token);
+        assert!(
+            config.validate().is_ok(),
+            "32-char worker_token should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_worker_token_31_chars_fails() {
+        // 31 characters — must fail (below the 32-char minimum)
+        let token: String = "a".repeat(31);
+        let config = make_valid_worker_config(&token);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("worker_token"),
+            "Error should mention worker_token: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_poll_interval_exactly_1() {
+        // poll_interval_secs = 1 (the minimum non-zero value) — must pass
+        let token = valid_32char_token();
+        let config = make_valid_worker_config_with_poll(token, 1);
+        assert!(
+            config.validate().is_ok(),
+            "poll_interval_secs = 1 should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_poll_interval_zero_fails() {
+        // poll_interval_secs = 0 — must fail
+        let token = valid_32char_token();
+        let config = make_valid_worker_config_with_poll(token, 0);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("poll_interval_secs"),
+            "Error should mention poll_interval_secs: {}",
+            err
+        );
+    }
 }

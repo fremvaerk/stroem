@@ -247,9 +247,540 @@ pub fn merge_missing_action_fields<'a>(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
+    use stroem_common::models::workflow::{
+        ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
+    };
+    use stroem_db::JobStepRow;
+    use uuid::Uuid;
 
     fn field_names(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn make_input_field(field_type: &str) -> InputFieldDef {
+        InputFieldDef {
+            field_type: field_type.to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            order: None,
+        }
+    }
+
+    fn make_action(action_type: &str) -> ActionDef {
+        ActionDef {
+            action_type: action_type.to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        }
+    }
+
+    fn make_flow_step(action: &str, input: HashMap<String, serde_json::Value>) -> FlowStep {
+        FlowStep {
+            action: action.to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input,
+            continue_on_failure: false,
+            inline_action: None,
+        }
+    }
+
+    fn make_step_row(step_name: &str, input: Option<serde_json::Value>) -> JobStepRow {
+        JobStepRow {
+            job_id: Uuid::nil(),
+            step_name: step_name.to_string(),
+            action_name: "test-action".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: None,
+            input,
+            output: None,
+            status: "ready".to_string(),
+            worker_id: None,
+            started_at: None,
+            completed_at: None,
+            error_message: None,
+            required_tags: json!([]),
+            runner: "local".to_string(),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // render_step_input
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_render_step_input_task_not_found_returns_step_input() {
+        let workspace = WorkspaceConfig::default();
+        let step = make_step_row("step1", Some(json!({"key": "value"})));
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "nonexistent-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"key": "value"})));
+    }
+
+    #[test]
+    fn test_render_step_input_step_not_found_returns_step_input() {
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        task.flow.insert(
+            "other-step".to_string(),
+            make_flow_step("my-action", HashMap::new()),
+        );
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("missing-step", Some(json!({"original": true})));
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"original": true})));
+    }
+
+    #[test]
+    fn test_render_step_input_empty_flow_step_input_returns_step_input() {
+        // When flow_step.input is empty, the stored step input is returned as-is.
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        // flow step has no input mapping
+        task.flow.insert(
+            "step1".to_string(),
+            make_flow_step("my-action", HashMap::new()),
+        );
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", Some(json!({"stored": "value"})));
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"stored": "value"})));
+    }
+
+    #[test]
+    fn test_render_step_input_renders_job_input_template() {
+        let flow_input = HashMap::from([("greeting".to_string(), json!("Hello {{ input.name }}"))]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        task.flow
+            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", None);
+        let job_input = json!({"name": "World"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: Some(&job_input),
+            completed_steps: &[],
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"greeting": "Hello World"})));
+    }
+
+    #[test]
+    fn test_render_step_input_renders_step_output_reference() {
+        let flow_input =
+            HashMap::from([("value".to_string(), json!("{{ step_a.output.result }}"))]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        task.flow
+            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", None);
+        let completed_steps = vec![(
+            "step-a".to_string(),
+            Some(json!({"result": "computed-value"})),
+        )];
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &completed_steps,
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"value": "computed-value"})));
+    }
+
+    #[test]
+    fn test_render_step_input_sanitizes_hyphens_to_underscores() {
+        // Step names with hyphens must be accessed via underscores in templates.
+        let flow_input =
+            HashMap::from([("out".to_string(), json!("{{ say_hello.output.message }}"))]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        task.flow
+            .insert("step2".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step2", None);
+        // Completed step name has a hyphen — sanitized to underscore in context.
+        let completed_steps = vec![(
+            "say-hello".to_string(),
+            Some(json!({"message": "hi there"})),
+        )];
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &completed_steps,
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"out": "hi there"})));
+    }
+
+    #[test]
+    fn test_render_step_input_includes_secrets_in_context() {
+        let flow_input = HashMap::from([("token".to_string(), json!("{{ secret.API_TOKEN }}"))]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        task.flow
+            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+        workspace
+            .secrets
+            .insert("API_TOKEN".to_string(), json!("secret-value-123"));
+
+        let step = make_step_row("step1", None);
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"token": "secret-value-123"})));
+    }
+
+    // -------------------------------------------------------------------------
+    // render_action_spec
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_render_action_spec_none_returns_none() {
+        let secrets = json!({});
+        let result = render_action_spec(None, None, &secrets).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_render_action_spec_non_object_returns_unchanged() {
+        let spec = json!("just a string");
+        let secrets = json!({});
+        let result = render_action_spec(Some(&spec), None, &secrets).unwrap();
+        assert_eq!(result, Some(json!("just a string")));
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_env_template() {
+        let spec = json!({"env": {"MY_VAR": "prefix-{{ input.key }}"}});
+        let rendered_input = json!({"key": "world"});
+        let secrets = json!({});
+
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result["env"]["MY_VAR"], "prefix-world");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_cmd_template() {
+        let spec = json!({"cmd": "echo {{ input.message }}"});
+        let rendered_input = json!({"message": "hello"});
+        let secrets = json!({});
+
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result["cmd"], "echo hello");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_script_template() {
+        let spec = json!({"script": "#!/bin/bash\necho {{ input.greeting }}"});
+        let rendered_input = json!({"greeting": "hi"});
+        let secrets = json!({});
+
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result["script"], "#!/bin/bash\necho hi");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_manifest_templates() {
+        let spec = json!({
+            "manifest": {
+                "spec": {
+                    "serviceAccountName": "{{ input.sa_name }}"
+                }
+            }
+        });
+        let rendered_input = json!({"sa_name": "my-service-account"});
+        let secrets = json!({});
+
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            result["manifest"]["spec"]["serviceAccountName"],
+            "my-service-account"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // render_image
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_render_image_none_returns_none() {
+        let secrets = json!({});
+        let result = render_image(None, None, &secrets).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_render_image_no_template_syntax_returns_unchanged() {
+        let secrets = json!({});
+        let result = render_image(Some("my-registry/my-image:latest"), None, &secrets).unwrap();
+        assert_eq!(result, Some("my-registry/my-image:latest".to_string()));
+    }
+
+    #[test]
+    fn test_render_image_renders_input_tag_template() {
+        let rendered_input = json!({"tag": "v1.2.3"});
+        let secrets = json!({});
+        let result = render_image(
+            Some("my-registry/app:{{ input.tag }}"),
+            Some(&rendered_input),
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(result, Some("my-registry/app:v1.2.3".to_string()));
+    }
+
+    #[test]
+    fn test_render_image_renders_secret_registry_template() {
+        let rendered_input = json!({});
+        let secrets = json!({"registry": "private.registry.io"});
+        let result = render_image(
+            Some("{{ secret.registry }}/app:latest"),
+            Some(&rendered_input),
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(result, Some("private.registry.io/app:latest".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // prepare_step_action_input
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_prepare_step_action_input_task_not_found_returns_rendered_input() {
+        let workspace = WorkspaceConfig::default();
+        let step = make_step_row("step1", None);
+        let job_input = json!({"name": "Alice"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "nonexistent",
+            step: &step,
+            job_input: Some(&job_input),
+            completed_steps: &[],
+        };
+        let rendered_input = Some(json!({"foo": "bar"}));
+
+        let result = prepare_step_action_input(rendered_input.clone(), &ctx).unwrap();
+        assert_eq!(result, rendered_input);
+    }
+
+    #[test]
+    fn test_prepare_step_action_input_action_not_found_returns_rendered_input() {
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        task.flow.insert(
+            "step1".to_string(),
+            make_flow_step("nonexistent-action", HashMap::new()),
+        );
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", None);
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+        };
+        let rendered_input = Some(json!({"foo": "bar"}));
+
+        let result = prepare_step_action_input(rendered_input.clone(), &ctx).unwrap();
+        assert_eq!(result, rendered_input);
+    }
+
+    #[test]
+    fn test_prepare_step_action_input_merges_missing_job_input_fields() {
+        // When a flow step doesn't map a field but the job input has it,
+        // and the action's schema declares it, it should be merged in.
+        let mut action = make_action("shell");
+        action
+            .input
+            .insert("sql".to_string(), make_input_field("string"));
+        action
+            .input
+            .insert("extra".to_string(), make_input_field("string"));
+
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            on_success: vec![],
+            on_error: vec![],
+        };
+        // flow step only maps "sql", not "extra"
+        let flow_input = HashMap::from([("sql".to_string(), json!("SELECT 1"))]);
+        task.flow
+            .insert("step1".to_string(), make_flow_step("run-query", flow_input));
+
+        let mut workspace = WorkspaceConfig::default();
+        workspace.actions.insert("run-query".to_string(), action);
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", None);
+        // job_input has "extra" which should be merged for action schema fields
+        let job_input = json!({"sql": "SELECT 1", "extra": "from-job"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: Some(&job_input),
+            completed_steps: &[],
+        };
+        // rendered_input only contains "sql"
+        let rendered_input = Some(json!({"sql": "SELECT 1"}));
+
+        let result = prepare_step_action_input(rendered_input, &ctx)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result["sql"], "SELECT 1");
+        assert_eq!(result["extra"], "from-job");
     }
 
     #[test]
