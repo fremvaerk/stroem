@@ -4855,6 +4855,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "stroem-e2e"
+version = "0.5.8"
+dependencies = [
+ "anyhow",
+ "axum",
+ "reqwest 0.13.2",
+ "serde_json",
+ "sqlx",
+ "stroem-common",
+ "stroem-db",
+ "stroem-server",
+ "stroem-worker",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "stroem-runner"
 version = "0.5.8"
 dependencies = [

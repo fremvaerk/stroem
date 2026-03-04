@@ -1,0 +1,24 @@
+[package]
+name = "stroem-e2e"
+version.workspace = true
+edition.workspace = true
+# No lib — tests only
+
+[dev-dependencies]
+stroem-server = { path = "../stroem-server" }
+stroem-worker = { path = "../stroem-worker", default-features = false }
+stroem-db = { path = "../stroem-db" }
+stroem-common = { path = "../stroem-common" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
