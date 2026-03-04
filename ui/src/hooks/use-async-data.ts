@@ -16,6 +16,11 @@ interface UseAsyncDataOptions {
  * preventing stale data from overwriting fresher results (race condition
  * guard). Resets data and loading state when the fetcher changes.
  *
+ * Background polls (interval ticks) skip `setLoading(true)` to avoid
+ * spinner flash and skip `setData()` entirely when the response is
+ * identical to the last one (deep equality via JSON.stringify), preventing
+ * unnecessary re-renders / table redraws.
+ *
  * @example
  * const fetcher = useCallback(() => listWorkers(PAGE_SIZE, offset), [offset]);
  * const { data, loading, error } = useAsyncData(fetcher, { pollInterval: 5000 });
@@ -33,36 +38,54 @@ export function useAsyncData<T>(
   // discarding responses from superseded (stale) fetches.
   const requestIdRef = useRef(0);
 
-  const load = useCallback(async () => {
-    const currentId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await fetcher();
-      if (currentId === requestIdRef.current) {
-        setData(result);
+  // Last serialized response — used to skip redundant setData on polls.
+  const lastJsonRef = useRef("");
+
+  const load = useCallback(
+    async (isBackground = false) => {
+      const currentId = ++requestIdRef.current;
+      if (!isBackground) {
+        // Foreground loads show a spinner and immediately clear any previous
+        // error so the UI does not show stale error text alongside the spinner.
+        setLoading(true);
+        setError(null);
       }
-    } catch (err) {
-      if (currentId === requestIdRef.current) {
-        setError(err instanceof Error ? err.message : "Failed to load");
+      try {
+        const result = await fetcher();
+        if (currentId === requestIdRef.current) {
+          // Clear any previous error on success regardless of foreground/background.
+          // A successful background poll means the transient error has resolved.
+          setError(null);
+          const json = JSON.stringify(result);
+          if (json !== lastJsonRef.current) {
+            lastJsonRef.current = json;
+            setData(result);
+          }
+        }
+      } catch (err) {
+        if (currentId === requestIdRef.current) {
+          setError(err instanceof Error ? err.message : "Failed to load");
+        }
+      } finally {
+        if (currentId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
-    } finally {
-      if (currentId === requestIdRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [fetcher]);
+    },
+    [fetcher],
+  );
 
   useEffect(() => {
     // Reset visible state immediately when the fetcher changes so consumers
     // never see data from a previous fetcher while the new one is in flight.
     setData(null);
     setError(null);
+    lastJsonRef.current = "";
 
     load();
 
     if (options.pollInterval && options.pollInterval > 0) {
-      const interval = setInterval(load, options.pollInterval);
+      const interval = setInterval(() => load(true), options.pollInterval);
       return () => {
         requestIdRef.current++;
         clearInterval(interval);

@@ -171,6 +171,119 @@ describe("useAsyncData", () => {
       expect(result.current.data).toBe("call-3");
     });
 
+    it("skips re-render when polled data is identical", async () => {
+      vi.useFakeTimers();
+
+      const payload = { items: [{ id: 1, name: "a" }], total: 1 };
+      const fetcher = vi.fn().mockResolvedValue(payload);
+
+      const { result } = renderHook(() =>
+        useAsyncData(fetcher, { pollInterval: 5_000 }),
+      );
+
+      // Flush the initial load.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(result.current.data).toEqual(payload);
+      const firstData = result.current.data;
+
+      // Fire a poll — same data returned.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      // Reference equality: setData was never called, so the object is the same.
+      expect(result.current.data).toBe(firstData);
+    });
+
+    it("does not set loading=true on background polls", async () => {
+      vi.useFakeTimers();
+
+      // Use a deferred fetcher so we can observe hook state while the poll
+      // is in flight (before the promise resolves).
+      let resolvePoll!: (v: string) => void;
+      let callCount = 0;
+      const fetcher = vi.fn().mockImplementation(() => {
+        callCount += 1;
+        if (callCount === 1) {
+          // Initial load resolves immediately.
+          return Promise.resolve("call-1");
+        }
+        // Background poll hangs until we manually resolve it.
+        return new Promise<string>((res) => {
+          resolvePoll = res;
+        });
+      });
+
+      const { result } = renderHook(() =>
+        useAsyncData(fetcher, { pollInterval: 5_000 }),
+      );
+
+      // Flush the initial load.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(result.current.loading).toBe(false);
+      expect(result.current.data).toBe("call-1");
+
+      // Fire the background poll — timer ticks but promise stays pending.
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+
+      // While the background poll is in flight, loading must still be false.
+      expect(result.current.loading).toBe(false);
+
+      // Resolve the poll and confirm loading stays false afterwards too.
+      await act(async () => {
+        resolvePoll("call-2");
+      });
+      expect(result.current.loading).toBe(false);
+      expect(result.current.data).toBe("call-2");
+    });
+
+    it("does not clear a visible error before a background poll resolves", async () => {
+      vi.useFakeTimers();
+
+      // First call fails; subsequent calls hang until manually resolved.
+      let resolvePoll!: (v: string) => void;
+      let callCount = 0;
+      const fetcher = vi.fn().mockImplementation(() => {
+        callCount += 1;
+        if (callCount === 1) {
+          return Promise.reject(new Error("network error"));
+        }
+        return new Promise<string>((res) => {
+          resolvePoll = res;
+        });
+      });
+
+      const { result } = renderHook(() =>
+        useAsyncData(fetcher, { pollInterval: 5_000 }),
+      );
+
+      // Flush the initial (failing) load.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(result.current.error).toBe("network error");
+      expect(result.current.loading).toBe(false);
+
+      // Fire the background poll — error must remain visible while in flight.
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(result.current.error).toBe("network error");
+
+      // Resolve the poll successfully — only now should the error clear.
+      await act(async () => {
+        resolvePoll("recovered");
+      });
+      expect(result.current.error).toBeNull();
+      expect(result.current.data).toBe("recovered");
+    });
+
     it("stops polling after unmount", async () => {
       vi.useFakeTimers();
 
