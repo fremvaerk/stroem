@@ -38,7 +38,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = load_config(&cli.config)?;
 
-    tracing::info!("Starting worker '{}'", config.worker_name);
+    tracing::info!(
+        "Starting worker '{}' v{}",
+        config.worker_name,
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Build executor with optional runners
     #[allow(unused_mut)]

@@ -169,21 +169,23 @@ export interface ServerConfig {
   authRequired: boolean;
   hasInternalAuth: boolean;
   oidcProviders: OidcProvider[];
+  version: string | null;
 }
 
 export async function getServerConfig(): Promise<ServerConfig> {
   try {
     const res = await fetch("/api/config");
     if (!res.ok)
-      return { authRequired: false, hasInternalAuth: false, oidcProviders: [] };
+      return { authRequired: false, hasInternalAuth: false, oidcProviders: [], version: null };
     const data = await res.json();
     return {
       authRequired: !!data.auth_required,
       hasInternalAuth: !!data.has_internal_auth,
       oidcProviders: data.oidc_providers || [],
+      version: data.version ?? null,
     };
   } catch {
-    return { authRequired: false, hasInternalAuth: false, oidcProviders: [] };
+    return { authRequired: false, hasInternalAuth: false, oidcProviders: [], version: null };
   }
 }
 

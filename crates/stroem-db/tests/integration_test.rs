@@ -136,6 +136,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -245,6 +246,7 @@ async fn test_claim_concurrency() -> Result<()> {
                 &format!("worker-{}", i),
                 &["shell".to_string()],
                 &["shell".to_string()],
+                None,
             )
             .await
             .unwrap();
@@ -298,6 +300,7 @@ async fn test_step_lifecycle() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -553,6 +556,7 @@ async fn test_worker_register_and_heartbeat() -> Result<()> {
         "test-worker",
         &capabilities,
         &capabilities,
+        None,
     )
     .await?;
 
@@ -771,6 +775,7 @@ async fn test_job_status_transitions() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
     JobRepo::mark_running(&pool, job_id, worker_id).await?;
@@ -861,6 +866,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         "shell-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -878,6 +884,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         "docker-worker",
         &["docker".to_string()],
         &["docker".to_string()],
+        None,
     )
     .await?;
 
@@ -909,6 +916,7 @@ async fn test_worker_list() -> Result<()> {
         "worker-alpha",
         &["shell".to_string()],
         &["shell".to_string(), "docker".to_string()],
+        None,
     )
     .await?;
 
@@ -919,6 +927,7 @@ async fn test_worker_list() -> Result<()> {
         "worker-beta",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -1598,6 +1607,7 @@ async fn test_cancel_job_running() -> Result<()> {
         "cancel-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -1755,6 +1765,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
         "cancel-steps-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -1845,6 +1856,7 @@ async fn test_get_running_steps() -> Result<()> {
         "running-steps-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -1961,6 +1973,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
         "mark-cancelled-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -2057,6 +2070,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
         "empty-cancel-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -2160,6 +2174,7 @@ async fn test_get_status_counts() -> Result<()> {
         "w1",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -2189,6 +2204,69 @@ async fn test_get_status_counts() -> Result<()> {
     let counts = JobRepo::get_status_counts(&pool).await?;
     assert_eq!(*counts.get("pending").unwrap_or(&0), 0);
     assert_eq!(*counts.get("cancelled").unwrap_or(&0), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_worker_register_stores_version() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Register WITH a version string
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "versioned-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+        Some("0.5.9"),
+    )
+    .await?;
+
+    let worker = WorkerRepo::get(&pool, worker_id)
+        .await?
+        .expect("Worker should exist");
+    assert_eq!(worker.version.as_deref(), Some("0.5.9"));
+
+    // Register WITHOUT a version string (legacy worker)
+    let legacy_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        legacy_id,
+        "legacy-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+        None,
+    )
+    .await?;
+
+    let legacy = WorkerRepo::get(&pool, legacy_id)
+        .await?
+        .expect("Legacy worker should exist");
+    assert!(legacy.version.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_worker_list_includes_version() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "versioned-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+        Some("1.2.3"),
+    )
+    .await?;
+
+    let workers = WorkerRepo::list(&pool, 10, 0).await?;
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0].version.as_deref(), Some("1.2.3"));
 
     Ok(())
 }

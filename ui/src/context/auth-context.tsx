@@ -17,6 +17,7 @@ interface AuthContextValue {
   authRequired: boolean;
   hasInternalAuth: boolean;
   oidcProviders: OidcProvider[];
+  serverVersion: string | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -29,6 +30,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [authRequired, setAuthRequired] = useState(false);
   const [hasInternalAuth, setHasInternalAuth] = useState(false);
   const [oidcProviders, setOidcProviders] = useState<OidcProvider[]>([]);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +41,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setAuthRequired(config.authRequired);
       setHasInternalAuth(config.hasInternalAuth);
       setOidcProviders(config.oidcProviders);
+      setServerVersion(config.version);
 
       if (config.authRequired) {
         try {
@@ -82,10 +85,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       authRequired,
       hasInternalAuth,
       oidcProviders,
+      serverVersion,
       login,
       logout,
     }),
-    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, login, logout],
+    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, serverVersion, login, logout],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;

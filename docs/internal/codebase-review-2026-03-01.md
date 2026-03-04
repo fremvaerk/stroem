@@ -102,9 +102,10 @@
 - No test for `render_connections()` or `resolve_connection_inputs()` in template.rs
 - ~~No DB-level test for `mark_failed`/`mark_skipped`, transaction rollback, or parent/child columns~~ **PARTIALLY FIXED** (mark_failed, mark_skipped, transaction rollback, parent/child tests added; mark_cancelled added)
 - No webhook sync-mode timeout test
-- No test for workspace-level hook fallback behavior
+- ~~No test for workspace-level hook fallback behavior~~ **FIXED** (unit test for `source_type = "user"` in hooks.rs)
 - No Playwright test for Settings page (API key management)
-- ~~No E2E test for worker recovery or cron scheduler triggers~~ **FIXED** (E2E integration tests added)
+- ~~No E2E test for worker recovery~~ **FIXED** (E2E integration tests added)
+- No E2E test for cron scheduler triggers
 
 ### Frontend
 - ~~Duplicated functions: `formatTime`/`formatDuration`/`formatRelativeTime` in `task-detail.tsx`~~ **FIXED** (extracted to `ui/src/lib/formatting.ts`)
@@ -637,7 +638,7 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - Orchestrator has zero unit tests (Gap 16)
 - Scheduler `fire_trigger` → job creation not tested (Gap 17)
 - `propagate_to_parent` no unit test (Gap 18)
-- Workspace-level hook fallback behavior no unit test (Gap 19)
+- ~~Workspace-level hook fallback behavior no unit test (Gap 19)~~ **FIXED** (hooks.rs unit tests including `source_type = "user"`)
 
 #### Worker Gaps
 - `execute_claimed_step` no integration test (Gap 20)
@@ -659,9 +660,9 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 #### Integration / E2E Gaps
 - Full library loading pipeline not integration-tested (Gap 31)
 - Git workspace source auth failure not tested (Gap 32)
-- ~~No E2E test for worker recovery (Gap 33)~~ **FIXED** (E2E integration tests added)
-- ~~No E2E test for cron scheduler triggers (Gap 34)~~ **FIXED** (E2E integration tests added)
-- ~~No E2E test for multi-workspace scenarios (Gap 35)~~ **FIXED** (E2E integration tests added)
+- ~~No E2E test for worker recovery (Gap 33)~~ **FIXED** (stroem-e2e crate: test_worker_recovery)
+- No E2E test for cron scheduler triggers (Gap 34)
+- No E2E test for multi-workspace scenarios (Gap 35)
 
 ---
 

@@ -112,6 +112,7 @@ export interface WorkerListItem {
   name: string;
   status: string;
   tags: string[];
+  version: string | null;
   last_heartbeat: string | null;
   registered_at: string;
 }

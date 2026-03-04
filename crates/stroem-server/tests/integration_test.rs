@@ -904,6 +904,7 @@ async fn register_test_worker(pool: &PgPool) -> Uuid {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await
     .expect("Failed to register test worker");
@@ -1112,6 +1113,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -1249,6 +1251,7 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
     let response = router
@@ -2752,6 +2755,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -2822,6 +2826,7 @@ async fn test_first_step_template_rendering() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -2867,6 +2872,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3151,6 +3157,7 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3198,6 +3205,7 @@ async fn test_secret_reference_in_env() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3243,6 +3251,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3298,6 +3307,7 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3358,6 +3368,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3441,6 +3452,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3515,6 +3527,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3596,6 +3609,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3671,6 +3685,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3736,6 +3751,7 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -3931,6 +3947,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -4148,6 +4165,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -4224,6 +4242,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -11712,6 +11731,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
@@ -12943,6 +12963,102 @@ async fn test_multi_workspace_task_not_found_in_wrong_workspace() -> Result<()> 
         .oneshot(api_get("/api/workspaces/default/tasks/deploy-app"))
         .await?;
     assert_eq!(resp.status(), 404);
+
+    Ok(())
+}
+
+// ─── Worker version integration tests ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_worker_register_with_version_stored_in_db() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Register worker WITH a version field
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "versioned-worker", "capabilities": ["shell"], "version": "0.5.9"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let worker_id: Uuid = body["worker_id"].as_str().unwrap().parse()?;
+
+    // Verify the version was persisted to the database
+    let worker = WorkerRepo::get(&pool, worker_id)
+        .await?
+        .expect("Worker should exist in DB");
+    assert_eq!(worker.version.as_deref(), Some("0.5.9"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_worker_register_without_version_stores_null() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Register worker WITHOUT a version field (legacy backward-compat behaviour)
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "legacy-worker", "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let worker_id: Uuid = body["worker_id"].as_str().unwrap().parse()?;
+
+    // Version must be NULL in the database
+    let worker = WorkerRepo::get(&pool, worker_id)
+        .await?
+        .expect("Worker should exist in DB");
+    assert!(worker.version.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_list_workers_response_includes_version() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Register a worker with a known version
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "v-worker", "capabilities": ["shell"], "version": "1.2.3"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Fetch the workers list and verify the version field is present
+    let response = router.oneshot(api_get("/api/workers")).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+
+    let items = body["items"].as_array().expect("items should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["version"].as_str(), Some("1.2.3"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_config_returns_version_field() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.oneshot(api_get("/api/config")).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+
+    // The version field must be present and non-empty
+    let version = body["version"]
+        .as_str()
+        .expect("version should be a string");
+    assert!(!version.is_empty(), "version should not be empty");
 
     Ok(())
 }

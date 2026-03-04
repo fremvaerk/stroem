@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const WORKER_COLUMNS: &str =
-    "worker_id, name, capabilities, tags, last_heartbeat, registered_at, status";
+    "worker_id, name, capabilities, tags, last_heartbeat, registered_at, status, version";
 
 /// Worker row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -17,6 +17,7 @@ pub struct WorkerRow {
     pub last_heartbeat: Option<DateTime<Utc>>,
     pub registered_at: DateTime<Utc>,
     pub status: String,
+    pub version: Option<String>,
 }
 
 /// Repository for worker operations
@@ -30,6 +31,7 @@ impl WorkerRepo {
         name: &str,
         capabilities: &[String],
         tags: &[String],
+        version: Option<&str>,
     ) -> Result<()> {
         let capabilities_json =
             serde_json::to_value(capabilities).context("Failed to serialize capabilities")?;
@@ -37,14 +39,15 @@ impl WorkerRepo {
 
         sqlx::query(
             r#"
-            INSERT INTO worker (worker_id, name, capabilities, tags, last_heartbeat)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO worker (worker_id, name, capabilities, tags, last_heartbeat, version)
+            VALUES ($1, $2, $3, $4, NOW(), $5)
             "#,
         )
         .bind(worker_id)
         .bind(name)
         .bind(capabilities_json)
         .bind(tags_json)
+        .bind(version)
         .execute(pool)
         .await
         .context("Failed to register worker")?;

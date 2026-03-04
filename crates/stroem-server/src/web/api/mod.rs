@@ -168,6 +168,7 @@ struct OidcProviderInfo {
 }
 
 /// GET /api/config -- public endpoint returning server configuration for the UI
+#[tracing::instrument(skip(state))]
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let oidc_providers: Vec<OidcProviderInfo> = state
         .oidc_providers
@@ -194,6 +195,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "auth_required": state.config.auth.is_some(),
         "oidc_providers": oidc_providers,
         "has_internal_auth": has_internal_auth,
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 

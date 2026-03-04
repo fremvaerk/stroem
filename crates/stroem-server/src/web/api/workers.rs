@@ -37,6 +37,7 @@ pub async fn list_workers(
                         "name": w.name,
                         "status": w.status,
                         "tags": w.tags,
+                        "version": w.version,
                         "last_heartbeat": w.last_heartbeat,
                         "registered_at": w.registered_at,
                     })
@@ -122,6 +123,7 @@ pub async fn get_worker(
         "name": worker.name,
         "status": worker.status,
         "tags": worker.tags,
+        "version": worker.version,
         "last_heartbeat": worker.last_heartbeat,
         "registered_at": worker.registered_at,
         "jobs": jobs_json,

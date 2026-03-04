@@ -19,6 +19,7 @@ pub struct RegisterRequest {
     pub name: String,
     pub capabilities: Vec<String>,
     pub tags: Option<Vec<String>>,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,11 +106,15 @@ pub async fn register_worker(
         &req.name,
         &req.capabilities,
         effective_tags,
+        req.version.as_deref(),
     )
     .await
     {
         Ok(_) => {
-            tracing::info!("Registered worker: {} ({})", req.name, worker_id);
+            match &req.version {
+                Some(v) => tracing::info!("Registered worker: {} ({}) v{}", req.name, worker_id, v),
+                None => tracing::info!("Registered worker: {} ({})", req.name, worker_id),
+            }
             Json(RegisterResponse {
                 worker_id: worker_id.to_string(),
             })
@@ -927,6 +932,38 @@ mod tests {
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
         assert!(input_val.get("extra_field").is_none());
+    }
+
+    #[test]
+    fn test_register_request_deserializes_version() {
+        let json = serde_json::json!({
+            "name": "worker-1",
+            "capabilities": ["shell"],
+            "version": "0.5.9"
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.version.as_deref(), Some("0.5.9"));
+    }
+
+    #[test]
+    fn test_register_request_version_absent_is_none() {
+        let json = serde_json::json!({
+            "name": "worker-1",
+            "capabilities": ["shell"]
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert!(req.version.is_none());
+    }
+
+    #[test]
+    fn test_register_request_version_null_is_none() {
+        let json = serde_json::json!({
+            "name": "worker-1",
+            "capabilities": ["shell"],
+            "version": null
+        });
+        let req: RegisterRequest = serde_json::from_value(json).unwrap();
+        assert!(req.version.is_none());
     }
 
     #[test]

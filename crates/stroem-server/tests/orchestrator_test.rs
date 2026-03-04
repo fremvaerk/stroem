@@ -39,6 +39,7 @@ async fn register_worker(pool: &PgPool) -> Uuid {
         "test-worker",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await
     .expect("worker registration");

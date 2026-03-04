@@ -59,6 +59,7 @@ export function WorkersPage() {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Version</TableHead>
                   <TableHead>Tags</TableHead>
                   <TableHead>Last Heartbeat</TableHead>
                   <TableHead>Registered</TableHead>
@@ -77,6 +78,9 @@ export function WorkersPage() {
                     </TableCell>
                     <TableCell>
                       <WorkerStatusBadge status={w.status} />
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {w.version ?? <span aria-label="Version unknown">—</span>}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">

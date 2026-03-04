@@ -264,7 +264,7 @@ pub async fn run_worker(
         let mut attempt = 0u32;
         loop {
             tokio::select! {
-                result = client.register(&config.worker_name, &config.capabilities, tags) => {
+                result = client.register(&config.worker_name, &config.capabilities, tags, Some(env!("CARGO_PKG_VERSION"))) => {
                     match result {
                         Ok(id) => break id,
                         Err(e) => {

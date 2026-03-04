@@ -41,7 +41,7 @@ function isActive(pathname: string, href: string): boolean {
 
 export function AppSidebar() {
   const { pathname } = useLocation();
-  const { user, authRequired, logout } = useAuth();
+  const { user, authRequired, serverVersion, logout } = useAuth();
 
   const adminItems = useMemo(() => {
     const items = [{ title: "Workers", href: "/workers", icon: Server }];
@@ -66,7 +66,7 @@ export function AppSidebar() {
                     Strøm
                   </span>
                   <span className="truncate text-xs text-muted-foreground">
-                    Workflow Platform
+                    {serverVersion ? `v${serverVersion}` : "Workflow Platform"}
                   </span>
                 </div>
               </Link>

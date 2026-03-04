@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    tracing::info!("Starting Strøm server");
+    tracing::info!("Starting Strøm server v{}", env!("CARGO_PKG_VERSION"));
 
     // Load configuration
     let cli = Cli::parse();

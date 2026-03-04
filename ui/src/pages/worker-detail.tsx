@@ -91,7 +91,7 @@ export function WorkerDetailPage() {
       </div>
 
       <InfoGrid
-        columns={5}
+        columns={6}
         items={[
           {
             label: "Worker ID",
@@ -102,6 +102,12 @@ export function WorkerDetailPage() {
             ),
           },
           { label: "Status", value: worker.status },
+          {
+            label: "Version",
+            value: worker.version ?? (
+              <span className="text-muted-foreground">—</span>
+            ),
+          },
           {
             label: "Tags",
             value:

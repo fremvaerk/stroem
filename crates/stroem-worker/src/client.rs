@@ -48,6 +48,7 @@ struct RegisterRequest {
     name: String,
     capabilities: Vec<String>,
     tags: Option<Vec<String>>,
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,12 +117,14 @@ impl ServerClient {
         name: &str,
         capabilities: &[String],
         tags: Option<&[String]>,
+        version: Option<&str>,
     ) -> Result<Uuid> {
         let url = format!("{}/worker/register", self.base_url);
         let req = RegisterRequest {
             name: name.to_string(),
             capabilities: capabilities.to_vec(),
             tags: tags.map(|t| t.to_vec()),
+            version: version.map(|v| v.to_string()),
         };
 
         let response = self

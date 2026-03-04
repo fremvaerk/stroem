@@ -49,6 +49,16 @@ Every new feature or significant change **must** include documentation updates:
 - Add/update user-facing docs in `docs/src/content/docs/` (Starlight site), README, or CLI help text for anything users interact with.
 - Keep code comments minimal — only where logic isn't self-evident.
 
+### TODO Tracking
+Maintain `docs/internal/TODO.md` as the consolidated task tracker:
+- When discovering a new issue, improvement, or missing feature during work, add it to the appropriate section in `TODO.md`.
+- When completing a task that has a corresponding entry, mark it `[x]` in `TODO.md`.
+- Keep sections organized: Security, Architecture, Code Quality, Performance, Frontend, Test Coverage, Roadmap, Bugs.
+
+### Work Execution
+- **Use subagents** as much as possible — delegate research, code review, exploration, and specialized tasks to appropriate Agent types (Explore, code-reviewer, rust-engineer, typescript-pro, etc.).
+- **Use agent teams** for complex multi-step tasks that benefit from parallel work (e.g., full-stack features, large refactors, multi-file changes with independent subtasks).
+
 ### Tera Templating
 - Step names with hyphens (e.g., `say-hello`) are sanitized to underscores (`say_hello`) in the template context because Tera interprets hyphens as subtraction.
 - Workflow YAML must use underscored names in template references: `{{ say_hello.output.greeting }}`, not `{{ say-hello.output.greeting }}`.

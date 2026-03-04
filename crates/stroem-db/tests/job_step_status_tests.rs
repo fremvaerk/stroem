@@ -402,6 +402,7 @@ async fn test_step_transition_ready_to_running_to_failed() -> Result<()> {
         "worker-1",
         &["shell".to_string()],
         &["shell".to_string()],
+        None,
     )
     .await?;
 
