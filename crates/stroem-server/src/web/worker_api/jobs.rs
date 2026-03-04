@@ -156,6 +156,41 @@ pub async fn heartbeat(
     }
 }
 
+/// Fail a step that was claimed but couldn't be rendered.
+/// Marks the step as failed, logs the error, and triggers orchestration.
+async fn fail_claimed_step(
+    state: &Arc<AppState>,
+    job_id: Uuid,
+    step_name: &str,
+    error_msg: &str,
+) -> axum::response::Response {
+    tracing::error!(
+        job_id = %job_id,
+        step_name = %step_name,
+        "Template rendering failed at claim time: {}",
+        error_msg
+    );
+    state.append_server_log(job_id, error_msg).await;
+
+    if let Err(e) = JobStepRepo::mark_failed(&state.pool, job_id, step_name, error_msg).await {
+        tracing::error!("Failed to mark step as failed after render error: {:#}", e);
+    } else {
+        // Trigger orchestration so the job can progress (fail/skip downstream steps)
+        if let Err(e) = crate::job_recovery::orchestrate_after_step(state, job_id, step_name).await
+        {
+            let orch_msg = format!("Failed to orchestrate after render failure: {:#}", e);
+            tracing::error!("{}", orch_msg);
+            state.append_server_log(job_id, &orch_msg).await;
+        }
+    }
+
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"error": error_msg})),
+    )
+        .into_response()
+}
+
 /// POST /worker/jobs/claim - Claim next ready step
 #[tracing::instrument(skip(state))]
 pub async fn claim_job(
@@ -288,8 +323,8 @@ pub async fn claim_job(
         match render_input_map(&flow_step.input, &context_value) {
             Ok(rendered) => Some(rendered),
             Err(e) => {
-                tracing::warn!("Failed to render step input template: {:#}", e);
-                step.input.clone()
+                let msg = format!("Failed to render step input template: {:#}", e);
+                return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
             }
         }
     };
@@ -326,60 +361,45 @@ pub async fn claim_job(
         match prepare_action_input(&input_val, &action.input, workspace) {
             Ok(prepared) => Some(prepared),
             Err(e) => {
-                tracing::warn!("Failed to prepare action input: {:#}", e);
-                Some(input_val)
+                let msg = format!("Failed to prepare action input: {:#}", e);
+                return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
             }
         }
     };
 
-    // Persist rendered input to DB so the job detail API can return it
-    if let Err(e) = JobStepRepo::update_input(
-        &state.pool,
-        step.job_id,
-        &step.step_name,
-        rendered_input.clone(),
-    )
-    .await
-    {
-        tracing::warn!("Failed to persist rendered input: {:#}", e);
-    }
-
     // Render action_spec env/cmd/script templates at claim time
+    // Build rendering context with rendered input + secrets
+    let mut spec_context = serde_json::Map::new();
+    if let Some(ref input_val) = rendered_input {
+        spec_context.insert("input".to_string(), input_val.clone());
+    }
+    if let Some(ref workspace) = ws_config {
+        if !workspace.secrets.is_empty() {
+            let secrets_value = serde_json::to_value(&workspace.secrets).unwrap_or_default();
+            spec_context.insert("secret".to_string(), secrets_value);
+        }
+    }
+    let spec_context_value = serde_json::Value::Object(spec_context);
+
     let rendered_action_spec = 'render_spec: {
         let original_spec = match &step.action_spec {
             Some(spec) => spec.clone(),
             None => break 'render_spec step.action_spec.clone(),
         };
 
-        // Build rendering context with rendered input + secrets
-        let mut spec_context = serde_json::Map::new();
-        if let Some(ref input_val) = rendered_input {
-            spec_context.insert("input".to_string(), input_val.clone());
-        }
-
-        // Add secrets from workspace
-        if let Some(ref workspace) = ws_config {
-            if !workspace.secrets.is_empty() {
-                let secrets_value = serde_json::to_value(&workspace.secrets).unwrap_or_default();
-                spec_context.insert("secret".to_string(), secrets_value);
-            }
-        }
-
-        let context_value = serde_json::Value::Object(spec_context);
-
-        // Render env values if present
         let mut spec_obj = match original_spec.as_object() {
             Some(obj) => obj.clone(),
             None => break 'render_spec Some(original_spec),
         };
 
+        // Render env values if present
         if let Some(env_val) = spec_obj.get("env") {
             if let Some(env_obj) = env_val.as_object() {
                 let env_map: std::collections::HashMap<String, String> = env_obj
                     .iter()
                     .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect();
-                match render_env_map(&env_map, &context_value) {
+                match render_env_map(&env_map, &spec_context_value) {
                     Ok(rendered_env) => {
                         let rendered_env_value: serde_json::Map<String, serde_json::Value> =
                             rendered_env
@@ -392,7 +412,8 @@ pub async fn claim_job(
                         );
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to render action_spec env templates: {:#}", e);
+                        let msg = format!("Failed to render env template: {:#}", e);
+                        return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
                     }
                 }
             }
@@ -402,13 +423,14 @@ pub async fn claim_job(
         if let Some(cmd_val) = spec_obj.get("cmd") {
             if let Some(cmd_str) = cmd_val.as_str() {
                 let cmd_opt = Some(cmd_str.to_string());
-                match render_string_opt(&cmd_opt, &context_value) {
+                match render_string_opt(&cmd_opt, &spec_context_value) {
                     Ok(Some(rendered_cmd)) => {
                         spec_obj.insert("cmd".to_string(), serde_json::Value::String(rendered_cmd));
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::warn!("Failed to render action_spec cmd template: {:#}", e);
+                        let msg = format!("Failed to render cmd template: {:#}", e);
+                        return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
                     }
                 }
             }
@@ -418,7 +440,7 @@ pub async fn claim_job(
         if let Some(script_val) = spec_obj.get("script") {
             if let Some(script_str) = script_val.as_str() {
                 let script_opt = Some(script_str.to_string());
-                match render_string_opt(&script_opt, &context_value) {
+                match render_string_opt(&script_opt, &spec_context_value) {
                     Ok(Some(rendered_script)) => {
                         spec_obj.insert(
                             "script".to_string(),
@@ -427,7 +449,8 @@ pub async fn claim_job(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::warn!("Failed to render action_spec script template: {:#}", e);
+                        let msg = format!("Failed to render script template: {:#}", e);
+                        return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
                     }
                 }
             }
@@ -435,12 +458,13 @@ pub async fn claim_job(
 
         // Render manifest string values (e.g. serviceAccountName from input)
         if let Some(manifest_val) = spec_obj.get("manifest") {
-            match render_json_strings(manifest_val, &context_value) {
+            match render_json_strings(manifest_val, &spec_context_value) {
                 Ok(rendered_manifest) => {
                     spec_obj.insert("manifest".to_string(), rendered_manifest);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to render action_spec manifest templates: {:#}", e);
+                    let msg = format!("Failed to render manifest template: {:#}", e);
+                    return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
                 }
             }
         }
@@ -456,27 +480,28 @@ pub async fn claim_job(
         if !image_str.contains("{{") {
             break 'render_image step.action_image.clone();
         }
-        // Build context (same as spec rendering above)
-        let mut img_context = serde_json::Map::new();
-        if let Some(ref input_val) = rendered_input {
-            img_context.insert("input".to_string(), input_val.clone());
-        }
-        if let Some(ref workspace) = ws_config {
-            if !workspace.secrets.is_empty() {
-                let secrets_value = serde_json::to_value(&workspace.secrets).unwrap_or_default();
-                img_context.insert("secret".to_string(), secrets_value);
-            }
-        }
-        let context_value = serde_json::Value::Object(img_context);
         let img_opt = Some(image_str.clone());
-        match render_string_opt(&img_opt, &context_value) {
+        match render_string_opt(&img_opt, &spec_context_value) {
             Ok(rendered) => rendered,
             Err(e) => {
-                tracing::warn!("Failed to render action_image template: {:#}", e);
-                step.action_image.clone()
+                let msg = format!("Failed to render image template: {:#}", e);
+                return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
             }
         }
     };
+
+    // Persist rendered input to DB so the job detail API can return it.
+    // Done after all rendering succeeds — avoids writing rendered input for steps that fail.
+    if let Err(e) = JobStepRepo::update_input(
+        &state.pool,
+        step.job_id,
+        &step.step_name,
+        rendered_input.clone(),
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist rendered input: {:#}", e);
+    }
 
     Json(ClaimResponse {
         workspace: Some(job.workspace),

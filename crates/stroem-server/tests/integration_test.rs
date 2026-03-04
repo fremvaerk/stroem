@@ -2892,18 +2892,47 @@ async fn test_dependency_with_null_output() -> Result<()> {
     assert_eq!(response.status(), 200);
 
     // Claim shout step - template {{ greet.output.greeting }} can't resolve
-    // because greet has no output. Should fall back to raw stored input.
+    // because greet has no output. The step should be failed immediately
+    // with a clear error instead of passing raw template strings to the worker.
     let response = router
+        .clone()
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
             json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
         ))
         .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "Claim should return 422 when input template rendering fails"
+    );
     let body = body_json(response).await;
-    assert_eq!(body["step_name"].as_str().unwrap(), "shout");
-    // The step should still be claimable (fallback to raw input, not a crash)
-    assert!(body["input"].is_object() || body["input"].is_null());
+    assert!(
+        body["error"].as_str().unwrap().contains("render"),
+        "Error should mention rendering: {:?}",
+        body["error"]
+    );
+
+    // The step should be marked as failed in the DB
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let shout_step = steps.iter().find(|s| s.step_name == "shout").unwrap();
+    assert_eq!(shout_step.status, "failed");
+    assert!(
+        shout_step
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("render"),
+        "Step error should mention rendering"
+    );
+
+    // The job should reach terminal (failed) state via orchestration
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "Job should be failed after render failure"
+    );
 
     Ok(())
 }
@@ -3284,6 +3313,888 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
     // Verify cmd was rendered
     let action_spec = &body["action_spec"];
     assert_eq!(action_spec["cmd"], "pg_dump -h myhost.local");
+
+    Ok(())
+}
+
+// ─── Test 37b: Cmd rendering failure fails step at claim time ─────────
+
+#[tokio::test]
+async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Create a job with a step whose cmd references a non-existent variable
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        Some(json!({})),
+        "api",
+        Some("test/cmd-render-fail"),
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "run".to_string(),
+            action_name: "test-action".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"cmd": "echo {{ input.nonexistent_var }}"})),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        }],
+    )
+    .await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    // Claim should fail with 422 because cmd template can't render
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "Claim should return 422 when cmd template rendering fails"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("render"),
+        "Error should mention rendering: {:?}",
+        body["error"]
+    );
+
+    // Step should be failed in DB
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_deref()
+        .unwrap_or("")
+        .contains("render"));
+
+    // Note: job terminal state is not asserted here because this test creates
+    // a raw DB job with a task name that doesn't exist in the workspace config,
+    // so orchestration can't resolve the task definition. Job terminal state
+    // after render failure is tested by test_render_failure_propagates_to_downstream_steps
+    // and test_on_error_hook_fires_after_render_failure using real workflows.
+
+    Ok(())
+}
+
+// ─── Test 37c: Env rendering failure fails step at claim time ─────────
+
+#[tokio::test]
+async fn test_env_rendering_failure_fails_step() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Create a job with a step whose env references a non-existent variable
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        Some(json!({})),
+        "api",
+        Some("test/env-render-fail"),
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "run".to_string(),
+            action_name: "test-action".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"env": {"MY_VAR": "{{ input.missing_key }}"}})),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        }],
+    )
+    .await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "Claim should return 422 when env template rendering fails"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("render"),
+        "Error should mention rendering: {:?}",
+        body["error"]
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_deref()
+        .unwrap_or("")
+        .contains("render"));
+
+    Ok(())
+}
+
+// ─── Test 37d: Script rendering failure fails step at claim time ───────
+
+#[tokio::test]
+async fn test_script_rendering_failure_fails_step() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        Some(json!({})),
+        "api",
+        Some("test/script-render-fail"),
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "run".to_string(),
+            action_name: "test-action".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"script": "#!/bin/bash\necho {{ input.undefined_var }}"})),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        }],
+    )
+    .await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "Claim should return 422 when script template rendering fails"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("render"),
+        "Error should mention rendering: {:?}",
+        body["error"]
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_deref()
+        .unwrap_or("")
+        .contains("render"));
+
+    Ok(())
+}
+
+// ─── Test 37e: Manifest rendering failure fails step at claim time ─────
+
+#[tokio::test]
+async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        Some(json!({})),
+        "api",
+        Some("test/manifest-render-fail"),
+    )
+    .await?;
+    // A pod-type step with a manifest containing a template referencing a missing key
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "run".to_string(),
+            action_name: "test-action".to_string(),
+            action_type: "pod".to_string(),
+            action_image: Some("alpine:latest".to_string()),
+            action_spec: Some(json!({
+                "manifest": {
+                    "spec": {
+                        "serviceAccountName": "{{ input.undefined_sa }}"
+                    }
+                }
+            })),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "pod".to_string(),
+        }],
+    )
+    .await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "Claim should return 422 when manifest template rendering fails"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("render"),
+        "Error should mention rendering: {:?}",
+        body["error"]
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_deref()
+        .unwrap_or("")
+        .contains("render"));
+
+    Ok(())
+}
+
+// ─── Test 37f: Image rendering failure fails step at claim time ────────
+
+#[tokio::test]
+async fn test_image_rendering_failure_fails_step() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "test-task",
+        "distributed",
+        Some(json!({})),
+        "api",
+        Some("test/image-render-fail"),
+    )
+    .await?;
+    // A docker-type step whose image tag is a template referencing a missing key
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "run".to_string(),
+            action_name: "test-action".to_string(),
+            action_type: "docker".to_string(),
+            action_image: Some("myrepo/myapp:{{ input.image_tag }}".to_string()),
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "none".to_string(),
+        }],
+    )
+    .await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "Claim should return 422 when image template rendering fails"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("render"),
+        "Error should mention rendering: {:?}",
+        body["error"]
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_deref()
+        .unwrap_or("")
+        .contains("render"));
+
+    Ok(())
+}
+
+// ─── Test 37g: Render failure causes downstream steps to be skipped ────
+//
+// When the first step in a linear chain fails at render time, the orchestrator
+// should mark downstream steps as skipped (or failed), and the job itself
+// should reach a terminal state.
+
+#[tokio::test]
+async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Execute greet-and-shout: greet (no output) → shout (depends on greet.output.greeting)
+    // We complete greet with NO output so that shout's template can't resolve.
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/greet-and-shout/execute",
+            json!({"input": {"name": "RenderPropagation"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    // Claim and complete greet with no output
+    router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+
+    // Claim shout — should fail at render time with 422
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 422);
+
+    // The shout step should be failed in the DB
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let shout_step = steps.iter().find(|s| s.step_name == "shout").unwrap();
+    assert_eq!(shout_step.status, "failed");
+
+    // The job itself should have reached a terminal state (failed) since
+    // the only remaining step has now failed.
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "Job should be terminal after the only remaining step render-failed: got {}",
+        job.status
+    );
+
+    Ok(())
+}
+
+// ─── Test 37h: on_error hook fires after render failure makes job terminal
+
+#[tokio::test]
+async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = tempfile::TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Build a workspace with a task that has an on_error hook and a step
+    // whose cmd uses an undefined template variable.
+    let mut workspace = WorkspaceConfig::default();
+
+    // Action: notify (the hook target)
+    workspace.actions.insert(
+        "notify".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("echo {{ input.message }}".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    // Action: broken (step whose cmd will fail to render)
+    workspace.actions.insert(
+        "broken".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("echo {{ input.undefined_var }}".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    let mut hook_input = HashMap::new();
+    hook_input.insert("message".to_string(), json!("job failed"));
+
+    let mut task_flow = HashMap::new();
+    task_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "broken".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "broken-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: task_flow,
+            on_success: vec![],
+            on_error: vec![HookDef {
+                action: "notify".to_string(),
+                input: hook_input,
+            }],
+        },
+    );
+
+    let config = stroem_server::config::ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: stroem_server::config::DbConfig { url },
+        log_storage: stroem_server::config::LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            stroem_server::config::WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = stroem_server::log_storage::LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = stroem_server::web::build_router(state);
+
+    // Trigger the broken-task
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/broken-task/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    // Claim the broken step — should fail at render time with 422
+    let resp = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 422, "Render failure should return 422");
+
+    // The job should now be terminal (failed) because its only step failed
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "Job should be terminal after render failure: got {}",
+        job.status
+    );
+
+    // An on_error hook job should have been created
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("on_error hook job should have been created after render failure");
+    assert_eq!(hook_job.task_name, "_hook:notify");
+
+    // The hook step should be ready for a worker to pick up
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    assert_eq!(hook_steps.len(), 1);
+    assert_eq!(hook_steps[0].status, "ready");
+
+    Ok(())
+}
+
+// ─── Test 37i: Parent step updated after child job's step render-fails ─
+//
+// When a child job (spawned via type: task) has its only step fail at render
+// time, the parent step should be updated to "failed" and the parent job
+// should reach a terminal state.
+
+#[tokio::test]
+async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = tempfile::TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Workspace: parent task has one task-action step; child task has a broken step
+    let mut workspace = WorkspaceConfig::default();
+
+    // Child action: broken cmd template
+    workspace.actions.insert(
+        "broken-action".to_string(),
+        ActionDef {
+            action_type: "shell".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("echo {{ input.nonexistent }}".to_string()),
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    // Task: child-task (one step with a broken template)
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "broken-step".to_string(),
+        FlowStep {
+            action: "broken-action".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "child-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: child_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    // Action: run-child (type: task → child-task)
+    workspace.actions.insert(
+        "run-child".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            name: None,
+            description: None,
+            task: Some("child-task".to_string()),
+            cmd: None,
+            script: None,
+            runner: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    // Task: parent-task (single task-action step)
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "delegate".to_string(),
+        FlowStep {
+            action: "run-child".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "parent-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: parent_flow,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let config = stroem_server::config::ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: stroem_server::config::DbConfig { url },
+        log_storage: stroem_server::config::LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            stroem_server::config::WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = stroem_server::log_storage::LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = stroem_server::web::build_router(state);
+
+    // Execute parent-task
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent-task/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let parent_job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    // The parent "delegate" step is a task-action, so it is dispatched server-side
+    // immediately on job creation. Verify the child job exists.
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let child_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "task")
+        .expect("Child job should be created by task-action dispatch");
+    let child_job_id = child_job.job_id;
+
+    // Register a worker and claim the child's broken-step
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "test-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+    )
+    .await?;
+
+    let resp = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 422, "Child step render should fail with 422");
+
+    // Child job's broken-step should be failed
+    let child_steps = JobStepRepo::get_steps_for_job(&pool, child_job_id).await?;
+    let broken = child_steps
+        .iter()
+        .find(|s| s.step_name == "broken-step")
+        .unwrap();
+    assert_eq!(broken.status, "failed");
+
+    // Child job itself should be terminal
+    let child_job_row = JobRepo::get(&pool, child_job_id).await?.unwrap();
+    assert_eq!(
+        child_job_row.status, "failed",
+        "Child job should be terminal after render failure: got {}",
+        child_job_row.status
+    );
+
+    // Parent step "delegate" should be marked failed (propagated from child)
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let delegate_step = parent_steps
+        .iter()
+        .find(|s| s.step_name == "delegate")
+        .unwrap();
+    assert_eq!(
+        delegate_step.status, "failed",
+        "Parent step should be failed after child job's render failure: got {}",
+        delegate_step.status
+    );
+
+    // Parent job should also be terminal
+    let parent_job = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(
+        parent_job.status, "failed",
+        "Parent job should be terminal after child job failed: got {}",
+        parent_job.status
+    );
 
     Ok(())
 }
