@@ -26,14 +26,14 @@ pub fn ready_steps(flow: &HashMap<String, FlowStep>, completed: &HashSet<String>
 /// Validates the DAG and returns a topological ordering of step names
 /// Returns an error if there are cycles or invalid dependencies
 pub fn validate_dag(flow: &HashMap<String, FlowStep>) -> Result<Vec<String>> {
-    // Build adjacency list and in-degree map
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
-    let mut adj_list: HashMap<String, Vec<String>> = HashMap::new();
+    // Build adjacency list and in-degree map using borrowed keys to avoid cloning
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut adj_list: HashMap<&str, Vec<&str>> = HashMap::new();
 
     // Initialize all steps
     for step_name in flow.keys() {
-        in_degree.insert(step_name.clone(), 0);
-        adj_list.insert(step_name.clone(), Vec::new());
+        in_degree.insert(step_name.as_str(), 0);
+        adj_list.insert(step_name.as_str(), Vec::new());
     }
 
     // Build graph
@@ -50,38 +50,38 @@ pub fn validate_dag(flow: &HashMap<String, FlowStep>) -> Result<Vec<String>> {
 
             // Add edge from dep -> step_name
             adj_list
-                .get_mut(dep)
+                .get_mut(dep.as_str())
                 .expect("dep key was inserted during initialization")
-                .push(step_name.clone());
+                .push(step_name.as_str());
             *in_degree
-                .get_mut(step_name)
+                .get_mut(step_name.as_str())
                 .expect("step_name key was inserted during initialization") += 1;
         }
     }
 
     // Kahn's algorithm for topological sort
-    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
     let mut result: Vec<String> = Vec::new();
 
     // Start with nodes that have no dependencies
     for (step_name, &degree) in &in_degree {
         if degree == 0 {
-            queue.push_back(step_name.clone());
+            queue.push_back(step_name);
         }
     }
 
     while let Some(step_name) = queue.pop_front() {
-        result.push(step_name.clone());
+        result.push(step_name.to_string());
 
         // Process all dependents
-        if let Some(dependents) = adj_list.get(&step_name) {
+        if let Some(dependents) = adj_list.get(step_name) {
             for dependent in dependents {
                 let degree = in_degree
                     .get_mut(dependent)
                     .expect("dependent key was inserted during initialization");
                 *degree -= 1;
                 if *degree == 0 {
-                    queue.push_back(dependent.clone());
+                    queue.push_back(dependent);
                 }
             }
         }

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use flate2::read::GzDecoder;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tar::Archive;
 
 use crate::client::ServerClient;
@@ -8,14 +10,19 @@ use crate::client::ServerClient;
 /// Caches workspace tarballs locally, extracting them on demand.
 /// Each workspace gets its own directory under `base_dir/{name}/`.
 /// A `.revision` file tracks the current revision to enable ETag-based caching.
+///
+/// Thread-safe: concurrent extractions for the same workspace are serialized via
+/// per-workspace locks; different workspaces can be extracted concurrently.
 pub struct WorkspaceCache {
     base_dir: PathBuf,
+    per_workspace_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl WorkspaceCache {
     pub fn new(base_dir: &str) -> Self {
         Self {
             base_dir: PathBuf::from(base_dir),
+            per_workspace_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -30,26 +37,55 @@ impl WorkspaceCache {
         std::fs::read_to_string(rev_file).ok()
     }
 
-    /// Extract a tarball into the workspace directory and write the revision file
+    fn workspace_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        self.per_workspace_locks
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Extract a tarball into the workspace directory and write the revision file.
+    ///
+    /// Uses a temp-dir + atomic rename pattern so that concurrent readers always
+    /// see a consistent workspace state.  Concurrent calls for the *same* workspace
+    /// are serialized via a per-workspace `Mutex`.
     pub fn extract_tarball(&self, name: &str, data: &[u8], revision: &str) -> Result<()> {
+        let lock = self.workspace_lock(name);
+        let _guard = lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        self.extract_tarball_locked(name, data, revision)
+    }
+
+    /// Inner extraction logic — caller must hold the per-workspace lock.
+    fn extract_tarball_locked(&self, name: &str, data: &[u8], revision: &str) -> Result<()> {
         let ws_dir = self.workspace_dir(name);
+        let tmp_dir = self.base_dir.join(format!("{}.tmp", name));
 
-        // Remove old contents if they exist
-        if ws_dir.exists() {
-            std::fs::remove_dir_all(&ws_dir).context("Failed to remove old workspace directory")?;
+        // Extract to a temporary directory first
+        if tmp_dir.exists() {
+            std::fs::remove_dir_all(&tmp_dir).context("Failed to remove temp directory")?;
         }
-        std::fs::create_dir_all(&ws_dir).context("Failed to create workspace directory")?;
+        std::fs::create_dir_all(&tmp_dir).context("Failed to create temp directory")?;
 
-        // Extract tarball
         let decoder = GzDecoder::new(data);
         let mut archive = Archive::new(decoder);
         archive
-            .unpack(&ws_dir)
+            .unpack(&tmp_dir)
             .context("Failed to extract workspace tarball")?;
 
-        // Write revision file
-        let rev_file = ws_dir.join(".revision");
+        // Write revision file into the temp dir
+        let rev_file = tmp_dir.join(".revision");
         std::fs::write(&rev_file, revision).context("Failed to write revision file")?;
+
+        // Atomic swap: remove old workspace dir, rename temp into place
+        if ws_dir.exists() {
+            std::fs::remove_dir_all(&ws_dir)
+                .context("Failed to remove old workspace directory")?;
+        }
+        std::fs::rename(&tmp_dir, &ws_dir)
+            .context("Failed to rename temp to workspace directory")?;
 
         tracing::info!(
             "Extracted workspace '{}' (revision: {}) to {}",
@@ -81,11 +117,21 @@ impl WorkspaceCache {
             Some((data, revision)) => {
                 // New version available — extract it in a blocking thread to avoid
                 // stalling the async runtime during fs ops and tar decompression.
+                // Acquire the per-workspace lock here and pass it into the blocking
+                // task so concurrent async callers are also serialized.
+                let lock = self.workspace_lock(workspace);
                 let base_dir = self.base_dir.clone();
                 let workspace_owned = workspace.to_owned();
                 tokio::task::spawn_blocking(move || {
-                    let cache = WorkspaceCache { base_dir };
-                    cache.extract_tarball(&workspace_owned, &data, &revision)
+                    let _guard = lock
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+                    // Construct a minimal cache handle for the blocking task
+                    let cache = WorkspaceCache {
+                        base_dir,
+                        per_workspace_locks: Arc::new(DashMap::new()),
+                    };
+                    cache.extract_tarball_locked(&workspace_owned, &data, &revision)
                 })
                 .await
                 .context("tarball extraction task panicked")??;
@@ -354,5 +400,68 @@ mod tests {
 
         // current_revision should return None (read_to_string fails on invalid UTF-8)
         assert_eq!(cache.current_revision("test-ws"), None);
+    }
+
+    #[test]
+    fn test_concurrent_extraction_same_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(WorkspaceCache::new(dir.path().to_str().unwrap()));
+        let tarball1 = build_tarball_with_files(&[("v1.txt", b"version 1")]);
+        let tarball2 = build_tarball_with_files(&[("v2.txt", b"version 2")]);
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let cache = Arc::clone(&cache);
+                let data = if i % 2 == 0 {
+                    tarball1.clone()
+                } else {
+                    tarball2.clone()
+                };
+                let rev = format!("rev{}", i);
+                std::thread::spawn(move || {
+                    cache.extract_tarball("shared-ws", &data, &rev).unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After all extractions, workspace should be valid (not corrupted)
+        let ws_dir = cache.workspace_dir("shared-ws");
+        assert!(ws_dir.exists());
+        let rev = cache.current_revision("shared-ws");
+        assert!(rev.is_some());
+    }
+
+    #[test]
+    fn test_concurrent_extraction_different_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(WorkspaceCache::new(dir.path().to_str().unwrap()));
+        let tarball = build_test_tarball();
+
+        // Different workspaces can extract concurrently without blocking each other
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                let cache = Arc::clone(&cache);
+                let data = tarball.clone();
+                let ws_name = format!("workspace-{}", i);
+                std::thread::spawn(move || {
+                    cache.extract_tarball(&ws_name, &data, "rev1").unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All workspaces should exist with correct revisions
+        for i in 0..5 {
+            let ws_name = format!("workspace-{}", i);
+            assert!(cache.workspace_dir(&ws_name).exists());
+            assert_eq!(cache.current_revision(&ws_name), Some("rev1".to_string()));
+        }
     }
 }

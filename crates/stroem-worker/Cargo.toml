@@ -19,6 +19,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 clap.workspace = true
 config.workspace = true
+dashmap.workspace = true
 flate2.workspace = true
 tar.workspace = true
 rustls = { workspace = true, optional = true }
