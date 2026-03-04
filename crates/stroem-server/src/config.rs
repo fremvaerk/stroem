@@ -3,12 +3,14 @@ use std::collections::HashMap;
 
 /// Database configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DbConfig {
     pub url: String,
 }
 
 /// S3 configuration for log archival
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct S3Config {
     pub bucket: String,
     pub region: String,
@@ -19,6 +21,7 @@ pub struct S3Config {
 
 /// Log storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogStorageConfig {
     pub local_dir: String,
     pub s3: Option<S3Config>,
@@ -26,6 +29,7 @@ pub struct LogStorageConfig {
 
 /// Git auth configuration for workspace sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitAuthConfig {
     #[serde(rename = "type")]
     pub auth_type: String, // "ssh_key" | "token"
@@ -79,6 +83,7 @@ pub enum WorkspaceSourceDef {
 
 /// OIDC/internal provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub provider_type: String, // "internal" or "oidc"
     pub display_name: Option<String>,
@@ -89,6 +94,7 @@ pub struct ProviderConfig {
 
 /// Initial user to seed on startup
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InitialUserConfig {
     pub email: String,
     pub password: String,
@@ -96,6 +102,7 @@ pub struct InitialUserConfig {
 
 /// Auth configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     pub jwt_secret: String,
     pub refresh_secret: String,
@@ -107,6 +114,7 @@ pub struct AuthConfig {
 
 /// Recovery configuration for detecting stale workers and recovering stuck steps
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryConfig {
     /// Seconds without heartbeat before a worker is considered stale (default: 120)
     #[serde(default = "default_heartbeat_timeout")]
@@ -134,6 +142,7 @@ impl Default for RecoveryConfig {
 
 /// Server configuration - loaded from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub listen: String, // "0.0.0.0:8080"
     pub db: DbConfig,
@@ -152,6 +161,29 @@ pub struct ServerConfig {
     pub recovery: RecoveryConfig,
 }
 
+impl ServerConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.worker_token.len() < 32 {
+            anyhow::bail!("worker_token must be at least 32 characters");
+        }
+        if let Some(ref auth) = self.auth {
+            if auth.jwt_secret.len() < 32 {
+                anyhow::bail!("jwt_secret must be at least 32 characters");
+            }
+            if auth.refresh_secret.len() < 32 {
+                anyhow::bail!("refresh_secret must be at least 32 characters");
+            }
+        }
+        if self.recovery.heartbeat_timeout_secs < 10 {
+            anyhow::bail!("heartbeat_timeout_secs must be at least 10");
+        }
+        if self.recovery.sweep_interval_secs < 5 {
+            anyhow::bail!("sweep_interval_secs must be at least 5");
+        }
+        Ok(())
+    }
+}
+
 /// Load server config from a YAML file with STROEM__ env var overrides.
 pub fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
     use anyhow::Context;
@@ -166,6 +198,7 @@ pub fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
         .with_context(|| format!("Failed to build config from: {}", path))?
         .try_deserialize()
         .with_context(|| format!("Failed to deserialize config from: {}", path))?;
+    config.validate()?;
     Ok(config)
 }
 
@@ -889,7 +922,7 @@ db:
 log_storage:
   local_dir: "./logs"
 workspaces: {}
-worker_token: "yaml-token"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 "#;
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -899,7 +932,10 @@ worker_token: "yaml-token"
         // SAFETY: test-only, serialized by ENV_MUTEX
         unsafe {
             std::env::set_var("STROEM__DB__URL", "postgres://overridden:5432/stroem");
-            std::env::set_var("STROEM__WORKER_TOKEN", "env-token");
+            std::env::set_var(
+                "STROEM__WORKER_TOKEN",
+                "env-token-that-is-long-enough-for-validation",
+            );
         }
 
         let config = load_config(file.path().to_str().unwrap()).unwrap();
@@ -910,7 +946,10 @@ worker_token: "yaml-token"
         }
 
         assert_eq!(config.db.url, "postgres://overridden:5432/stroem");
-        assert_eq!(config.worker_token, "env-token");
+        assert_eq!(
+            config.worker_token,
+            "env-token-that-is-long-enough-for-validation"
+        );
         // Non-overridden values preserved from YAML
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.log_storage.local_dir, "./logs");
@@ -926,7 +965,7 @@ db:
 log_storage:
   local_dir: "./logs"
 workspaces: {}
-worker_token: "token"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 "#;
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -1055,6 +1094,119 @@ worker_token: "token"
         let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.libraries.is_empty());
         assert!(config.git_auth.is_empty());
+    }
+
+    fn valid_32char_token() -> &'static str {
+        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+    }
+
+    #[test]
+    fn test_server_config_deny_unknown_fields() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "token"
+unknown_field: "should fail"
+"#;
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
+        assert!(result.is_err(), "Unknown fields should be rejected");
+    }
+
+    #[test]
+    fn test_server_config_validate_short_worker_token() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "short"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("worker_token"),
+            "Error should mention worker_token: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_server_config_validate_short_jwt_secret() {
+        let token = valid_32char_token();
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{token}"
+auth:
+  jwt_secret: "short"
+  refresh_secret: "{token}"
+"#
+        );
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("jwt_secret"),
+            "Error should mention jwt_secret: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_server_config_validate_short_refresh_secret() {
+        let token = valid_32char_token();
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{token}"
+auth:
+  jwt_secret: "{token}"
+  refresh_secret: "short"
+"#
+        );
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("refresh_secret"),
+            "Error should mention refresh_secret: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_server_config_validate_valid() {
+        let token = valid_32char_token();
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{token}"
+auth:
+  jwt_secret: "{token}"
+  refresh_secret: "{token}"
+"#
+        );
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
     }
 
     #[test]
