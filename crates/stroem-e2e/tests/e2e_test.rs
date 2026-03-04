@@ -246,9 +246,7 @@ async fn test_job_cancellation() {
         .expect("Step did not reach running status");
 
     // Cancel the job
-    env.cancel_job(job_id)
-        .await
-        .expect("Failed to cancel job");
+    env.cancel_job(job_id).await.expect("Failed to cancel job");
 
     // Wait for the job to reach "cancelled"
     let status = env
@@ -395,7 +393,9 @@ async fn test_task_action_sub_job() {
         .get_job(child_rows[0].0)
         .await
         .expect("Failed to get child job");
-    let child_steps = child_job["steps"].as_array().expect("Child should have steps");
+    let child_steps = child_job["steps"]
+        .as_array()
+        .expect("Child should have steps");
     assert_eq!(child_steps.len(), 1);
     assert_eq!(child_steps[0]["status"].as_str(), Some("completed"));
 

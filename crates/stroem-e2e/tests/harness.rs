@@ -329,12 +329,7 @@ impl TestEnv {
     }
 
     /// Execute a task, returns the job ID.
-    pub async fn execute_task(
-        &self,
-        workspace: &str,
-        task: &str,
-        input: Value,
-    ) -> Result<Uuid> {
+    pub async fn execute_task(&self, workspace: &str, task: &str, input: Value) -> Result<Uuid> {
         let url = format!(
             "{}/api/workspaces/{}/tasks/{}/execute",
             self.server_url, workspace, task
@@ -347,7 +342,10 @@ impl TestEnv {
             .await
             .context("Failed to POST execute")?;
         let status = resp.status();
-        let body: Value = resp.json().await.context("Failed to parse execute response")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("Failed to parse execute response")?;
         if !status.is_success() {
             anyhow::bail!("Execute failed ({}): {}", status, body);
         }
@@ -388,10 +386,7 @@ impl TestEnv {
             .await
             .context("Failed to GET job")?;
         let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .context("Failed to parse job response")?;
+        let body: Value = resp.json().await.context("Failed to parse job response")?;
         if !status.is_success() {
             anyhow::bail!("GET job {} failed ({}): {}", job_id, status, body);
         }
@@ -463,10 +458,9 @@ impl TestEnv {
                 );
             }
             let steps = self.get_steps(job_id).await?;
-            if let Some(step) =
-                steps
-                    .iter()
-                    .find(|s| s["step_name"].as_str() == Some(step_name))
+            if let Some(step) = steps
+                .iter()
+                .find(|s| s["step_name"].as_str() == Some(step_name))
             {
                 if step["status"].as_str() == Some(target_status) {
                     return Ok(());
@@ -488,8 +482,7 @@ impl TestEnv {
     /// Clean shutdown: cancel all tasks, await handles.
     pub async fn shutdown(&mut self) {
         self.cancel_token.cancel();
-        let _ =
-            tokio::time::timeout(Duration::from_secs(10), &mut self.server_handle).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), &mut self.server_handle).await;
         if let Some(mut handle) = self.worker_handle.take() {
             let _ = tokio::time::timeout(Duration::from_secs(10), &mut handle).await;
         }
