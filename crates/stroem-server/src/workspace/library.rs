@@ -1247,7 +1247,7 @@ tasks:
         );
 
         // Full validation with library references enabled — must return Ok
-        let workflow_config = workspace_config_to_workflow_config(config);
+        let workflow_config = workspace_config_to_workflow_config((*config).clone());
         let result = validate_workflow_config_with_libraries(&workflow_config);
         assert!(
             result.is_ok(),
@@ -1361,7 +1361,7 @@ tasks:
             "'common.nonexistent-action' must NOT be in the merged config"
         );
 
-        let workflow_config = workspace_config_to_workflow_config(config);
+        let workflow_config = workspace_config_to_workflow_config((*config).clone());
         let result = validate_workflow_config_with_libraries(&workflow_config);
         assert!(
             result.is_err(),

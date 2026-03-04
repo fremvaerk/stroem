@@ -6122,7 +6122,7 @@ async fn setup_multi_workspace() -> Result<(
     entries.insert(
         "default".to_string(),
         WorkspaceEntry {
-            config: Arc::new(RwLock::new(ws_default)),
+            config: Arc::new(RwLock::new(Arc::new(ws_default))),
             source: src_default,
             name: "default".to_string(),
             source_path: PathBuf::from("/dev/null"),
@@ -6131,7 +6131,7 @@ async fn setup_multi_workspace() -> Result<(
     entries.insert(
         "ops".to_string(),
         WorkspaceEntry {
-            config: Arc::new(RwLock::new(ws_ops)),
+            config: Arc::new(RwLock::new(Arc::new(ws_ops))),
             source: src_ops,
             name: "ops".to_string(),
             source_path: PathBuf::from("/dev/null"),

@@ -81,8 +81,7 @@ impl WorkspaceCache {
 
         // Atomic swap: remove old workspace dir, rename temp into place
         if ws_dir.exists() {
-            std::fs::remove_dir_all(&ws_dir)
-                .context("Failed to remove old workspace directory")?;
+            std::fs::remove_dir_all(&ws_dir).context("Failed to remove old workspace directory")?;
         }
         std::fs::rename(&tmp_dir, &ws_dir)
             .context("Failed to rename temp to workspace directory")?;

@@ -347,30 +347,120 @@ impl LogStorage {
 
     /// Get log lines for a specific step within a job.
     ///
-    /// Parses each line as JSON and filters by the `step` field.
-    /// Non-JSON lines (legacy format) are skipped.
+    /// Reads local files line-by-line to avoid loading the entire log into
+    /// memory. Falls back to S3 when no local file is found.
     pub async fn get_step_log(
         &self,
         job_id: Uuid,
         step_name: &str,
         meta: &JobLogMeta,
     ) -> Result<String> {
-        let full_log = self.get_log(job_id, meta).await?;
-        let filtered: Vec<&str> = full_log
-            .lines()
-            .filter(|line| {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
-                    parsed.get("step").and_then(|s| s.as_str()) == Some(step_name)
-                } else {
-                    false
-                }
-            })
-            .collect();
-        Ok(if filtered.is_empty() {
-            String::new()
+        let path = self.log_path(job_id);
+        if path.exists() {
+            return self.filter_step_from_file(&path, step_name).await;
+        }
+
+        let legacy_path = self.legacy_log_path(job_id);
+        if legacy_path.exists() {
+            return self.filter_step_from_file(&legacy_path, step_name).await;
+        }
+
+        #[cfg(feature = "s3")]
+        if let Some(result) = self.get_step_log_from_s3(job_id, step_name, meta).await? {
+            return Ok(result);
+        }
+
+        Ok(String::new())
+    }
+
+    /// Read a local file line-by-line, collecting only lines matching `step_name`.
+    async fn filter_step_from_file(&self, path: &Path, step_name: &str) -> Result<String> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let file = fs::File::open(path)
+            .await
+            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+        let mut result = String::new();
+
+        while let Some(line) = lines.next_line().await.context("Failed to read log line")? {
+            if Self::line_matches_step(&line, step_name) {
+                result.push_str(&line);
+                result.push('\n');
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Check if a JSONL line belongs to the given step.
+    fn line_matches_step(line: &str, step_name: &str) -> bool {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+            parsed.get("step").and_then(|s| s.as_str()) == Some(step_name)
         } else {
-            filtered.join("\n") + "\n"
-        })
+            false
+        }
+    }
+
+    /// Stream-decompress an S3 gzip object and return only lines matching `step_name`.
+    #[cfg(feature = "s3")]
+    async fn get_step_log_from_s3(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        meta: &JobLogMeta,
+    ) -> Result<Option<String>> {
+        let Some(ref s3) = self.s3 else {
+            return Ok(None);
+        };
+
+        let key = self.s3_key(job_id, meta);
+        match s3
+            .client
+            .get_object()
+            .bucket(&s3.bucket)
+            .key(&key)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let bytes = output
+                    .body
+                    .collect()
+                    .await
+                    .context("Failed to read S3 object body")?
+                    .into_bytes();
+
+                use flate2::read::GzDecoder;
+                use std::io::{BufRead, BufReader};
+
+                let decoder = GzDecoder::new(&bytes[..]);
+                let reader = BufReader::new(decoder);
+                let mut result = String::new();
+
+                for line_result in reader.lines() {
+                    let line = line_result.context("Failed to read gzip line")?;
+                    if Self::line_matches_step(&line, step_name) {
+                        result.push_str(&line);
+                        result.push('\n');
+                    }
+                }
+
+                Ok(Some(result))
+            }
+            Err(sdk_err) => {
+                if let aws_sdk_s3::error::SdkError::ServiceError(ref service_err) = sdk_err {
+                    if service_err.err().is_no_such_key() {
+                        return Ok(None);
+                    }
+                }
+                Err(anyhow::anyhow!(
+                    "Failed to get step log from S3: {}",
+                    sdk_err
+                ))
+            }
+        }
     }
 
     /// Get the log file path as a string (for storing in database).

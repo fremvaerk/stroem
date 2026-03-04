@@ -59,11 +59,11 @@ Last updated: 2026-03-04.
 - [ ] No validation of `worker_token` length, `jwt_secret` strength, or timeout minimums
 - [ ] `get_step_log` reads entire file into memory to filter by step name
 - [ ] S3 download reads entire object into memory for decompression
-- [ ] LogBroadcast channels grow unbounded — no cleanup for zero-subscriber channels
+- [x] LogBroadcast channels grow unbounded — bounded broadcast + DashMap cleanup already in place
 - [ ] K8s pod logs fetched only after termination — no live streaming during execution
 - [ ] Missing `#[serde(deny_unknown_fields)]` on config types — typos silently ignored
 - [ ] `validate_dag` clones all step names into HashMap keys — use `&str` references
-- [ ] `Vec::remove(0)` in topological sort — use VecDeque
+- [x] `Vec::remove(0)` in topological sort — already uses VecDeque
 - [ ] Workspace cache race on concurrent extraction — add per-workspace Mutex
 
 ## Performance
