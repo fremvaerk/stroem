@@ -3010,4 +3010,255 @@ tasks:
             warnings
         );
     }
+
+    // --- validate_workflow_config_with_libraries tests ---
+
+    #[test]
+    fn test_validate_with_libraries_rejects_missing_library_action() {
+        // Task step references a library action that is NOT in config.actions.
+        // In server mode (libraries_resolved = true) this must be an error.
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: common.slack-notify
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(result.is_err(), "Expected Err for missing library action");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent action"),
+            "Error should mention 'non-existent action', got: {err}"
+        );
+        assert!(
+            err.contains("common.slack-notify"),
+            "Error should mention the action name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_accepts_present_library_action() {
+        // Library action is defined in config.actions AND referenced by a task step.
+        // Validation must succeed with no errors.
+        let yaml = r#"
+actions:
+  common.slack-notify:
+    type: shell
+    cmd: "echo notify"
+tasks:
+  test:
+    flow:
+      step1:
+        action: common.slack-notify
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok for present library action, got: {:?}",
+            result.unwrap_err()
+        );
+        let warnings = result.unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_rejects_missing_library_task_ref() {
+        // A type:task action references a library task that is NOT in config.tasks.
+        // In server mode this must be an error.
+        let yaml = r#"
+actions:
+  deploy:
+    type: task
+    task: common.deploy-service
+tasks:
+  caller:
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(result.is_err(), "Expected Err for missing library task ref");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent task"),
+            "Error should mention 'non-existent task', got: {err}"
+        );
+        assert!(
+            err.contains("common.deploy-service"),
+            "Error should mention the task name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_accepts_present_library_task_ref() {
+        // A type:task action references a library task that IS in config.tasks.
+        // The child task itself uses a local action.
+        let yaml = r#"
+actions:
+  deploy:
+    type: task
+    task: common.deploy-service
+  run-step:
+    type: shell
+    cmd: "echo running"
+tasks:
+  common.deploy-service:
+    flow:
+      build:
+        action: run-step
+  caller:
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok when library task ref is present, got: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_rejects_missing_hook_action() {
+        // A task on_error hook references a library action that is NOT in config.actions.
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "echo build"
+tasks:
+  test:
+    flow:
+      step1:
+        action: build
+    on_error:
+      - action: common.alert
+        input:
+          message: "build failed"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(result.is_err(), "Expected Err for missing hook action");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent action"),
+            "Error should mention 'non-existent action', got: {err}"
+        );
+        assert!(
+            err.contains("common.alert"),
+            "Error should mention the action name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_accepts_present_hook_action() {
+        // Library alert action is in config.actions; task on_error hook references it.
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "echo build"
+  common.alert:
+    type: shell
+    cmd: "echo alert"
+tasks:
+  test:
+    flow:
+      step1:
+        action: build
+    on_error:
+      - action: common.alert
+        input:
+          message: "build failed"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok when hook action is present, got: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_rejects_missing_workspace_hook_action() {
+        // Workspace-level on_error hook references a library action not in config.actions.
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "echo build"
+tasks:
+  test:
+    flow:
+      step1:
+        action: build
+on_error:
+  - action: common.notify
+    input:
+      message: "workspace job failed"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(
+            result.is_err(),
+            "Expected Err for missing workspace-level hook action"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent action"),
+            "Error should mention 'non-existent action', got: {err}"
+        );
+        assert!(
+            err.contains("common.notify"),
+            "Error should mention the action name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_mixed_local_and_library_actions() {
+        // Both a local action and a fully-resolved library action are defined.
+        // A task uses both in its flow steps. Validation must succeed with no warnings.
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "echo build"
+  common.deploy:
+    type: shell
+    cmd: "echo deploy"
+tasks:
+  release:
+    flow:
+      step-build:
+        action: build
+      step-deploy:
+        action: common.deploy
+        depends_on:
+          - step-build
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok for mixed local and library actions, got: {:?}",
+            result.unwrap_err()
+        );
+        let warnings = result.unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
+    }
 }

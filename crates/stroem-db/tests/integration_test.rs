@@ -902,6 +902,386 @@ async fn test_claim_with_capability_filter() -> Result<()> {
     Ok(())
 }
 
+// ─── Tag containment edge-case claim tests ────────────────────────────
+
+#[tokio::test]
+async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Worker has a superset of tags: ["shell", "docker", "gpu"]
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "gpu-worker",
+        &["shell".to_string(), "docker".to_string(), "gpu".to_string()],
+        &["shell".to_string(), "docker".to_string(), "gpu".to_string()],
+        None,
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "superset-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step only requires "docker" — a strict subset of the worker's tags
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "docker-only".to_string(),
+            action_name: "build".to_string(),
+            action_type: "docker".to_string(),
+            action_image: Some("alpine:latest".to_string()),
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["docker".to_string()],
+            runner: "none".to_string(),
+        }],
+    )
+    .await?;
+
+    // A superset worker must be able to claim a subset-tagged step
+    let claimed = JobStepRepo::claim_ready_step(
+        &pool,
+        &["shell".to_string(), "docker".to_string(), "gpu".to_string()],
+        worker_id,
+    )
+    .await?;
+
+    let claimed = claimed.expect("Superset worker should claim subset-tagged step");
+    assert_eq!(claimed.step_name, "docker-only");
+    assert_eq!(claimed.status, "running");
+    assert_eq!(claimed.worker_id, Some(worker_id));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Worker registered with no tags at all
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(&pool, worker_id, "tagless-worker", &[], &[], None).await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "empty-tags-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step requires "shell" — the empty-tag worker cannot satisfy this
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "needs-shell".to_string(),
+            action_name: "run".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(serde_json::json!({"cmd": "echo hi"})),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["shell".to_string()],
+            runner: "local".to_string(),
+        }],
+    )
+    .await?;
+
+    // An empty-tag worker must not claim a tagged step
+    let claimed = JobStepRepo::claim_ready_step(&pool, &[], worker_id).await?;
+    assert!(
+        claimed.is_none(),
+        "Empty-tag worker must not claim a tagged step"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Worker has only "shell"
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "shell-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+        None,
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "no-tags-step-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step has no required tags — the empty set is a subset of every set
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "untagged-step".to_string(),
+            action_name: "anything".to_string(),
+            action_type: "shell".to_string(),
+            action_image: None,
+            action_spec: Some(serde_json::json!({"cmd": "echo ok"})),
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec![],
+            runner: "local".to_string(),
+        }],
+    )
+    .await?;
+
+    // Any worker (regardless of its tags) should be able to claim a step with no required tags
+    let claimed = JobStepRepo::claim_ready_step(&pool, &["shell".to_string()], worker_id).await?;
+    let claimed = claimed.expect("Any worker should claim a step with empty required_tags");
+    assert_eq!(claimed.step_name, "untagged-step");
+    assert_eq!(claimed.status, "running");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "multi-tag-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step requires both "docker" and "gpu"
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "gpu-docker-step".to_string(),
+            action_name: "train".to_string(),
+            action_type: "docker".to_string(),
+            action_image: Some("pytorch/pytorch:latest".to_string()),
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec!["docker".to_string(), "gpu".to_string()],
+            runner: "none".to_string(),
+        }],
+    )
+    .await?;
+
+    // Worker A only has "docker" — missing "gpu"
+    let worker_a = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_a,
+        "docker-only-worker",
+        &["docker".to_string()],
+        &["docker".to_string()],
+        None,
+    )
+    .await?;
+
+    let claimed_a = JobStepRepo::claim_ready_step(&pool, &["docker".to_string()], worker_a).await?;
+    assert!(
+        claimed_a.is_none(),
+        "Worker missing 'gpu' tag must not claim step requiring both 'docker' and 'gpu'"
+    );
+
+    // Worker B has both "docker" and "gpu"
+    let worker_b = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_b,
+        "gpu-docker-worker",
+        &["docker".to_string(), "gpu".to_string()],
+        &["docker".to_string(), "gpu".to_string()],
+        None,
+    )
+    .await?;
+
+    let claimed_b =
+        JobStepRepo::claim_ready_step(&pool, &["docker".to_string(), "gpu".to_string()], worker_b)
+            .await?;
+    let claimed_b = claimed_b.expect("Worker with both tags should claim the step");
+    assert_eq!(claimed_b.step_name, "gpu-docker-step");
+    assert_eq!(claimed_b.status, "running");
+    assert_eq!(claimed_b.worker_id, Some(worker_b));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "skip-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Two steps in the same job: one needs "kubernetes", one needs "shell"
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            NewJobStep {
+                job_id,
+                step_name: "k8s-step".to_string(),
+                action_name: "deploy".to_string(),
+                action_type: "shell".to_string(),
+                action_image: None,
+                action_spec: Some(serde_json::json!({"cmd": "kubectl apply -f ."})),
+                input: None,
+                status: "ready".to_string(),
+                required_tags: vec!["kubernetes".to_string()],
+                runner: "local".to_string(),
+            },
+            NewJobStep {
+                job_id,
+                step_name: "shell-step".to_string(),
+                action_name: "greet".to_string(),
+                action_type: "shell".to_string(),
+                action_image: None,
+                action_spec: Some(serde_json::json!({"cmd": "echo hello"})),
+                input: None,
+                status: "ready".to_string(),
+                required_tags: vec!["shell".to_string()],
+                runner: "local".to_string(),
+            },
+        ],
+    )
+    .await?;
+
+    // Worker only has "shell" — must skip "k8s-step" and claim "shell-step"
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "shell-only-worker",
+        &["shell".to_string()],
+        &["shell".to_string()],
+        None,
+    )
+    .await?;
+
+    let claimed = JobStepRepo::claim_ready_step(&pool, &["shell".to_string()], worker_id).await?;
+    let claimed = claimed.expect("Worker should claim the matching step");
+    assert_eq!(
+        claimed.step_name, "shell-step",
+        "Worker with 'shell' tag should skip 'k8s-step' and claim 'shell-step'"
+    );
+    assert_eq!(claimed.status, "running");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_claim_task_type_never_claimed() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "task-type-test",
+        "distributed",
+        None,
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step is action_type "task" with no required tags and status "ready"
+    JobStepRepo::create_steps(
+        &pool,
+        &[NewJobStep {
+            job_id,
+            step_name: "sub-task".to_string(),
+            action_name: "child-task".to_string(),
+            action_type: "task".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            status: "ready".to_string(),
+            required_tags: vec![],
+            runner: "none".to_string(),
+        }],
+    )
+    .await?;
+
+    // Worker has the most permissive tags possible — still must not claim a "task" step
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "omnipotent-worker",
+        &[
+            "shell".to_string(),
+            "docker".to_string(),
+            "kubernetes".to_string(),
+        ],
+        &[
+            "shell".to_string(),
+            "docker".to_string(),
+            "kubernetes".to_string(),
+        ],
+        None,
+    )
+    .await?;
+
+    let claimed = JobStepRepo::claim_ready_step(
+        &pool,
+        &[
+            "shell".to_string(),
+            "docker".to_string(),
+            "kubernetes".to_string(),
+        ],
+        worker_id,
+    )
+    .await?;
+
+    assert!(
+        claimed.is_none(),
+        "Steps with action_type 'task' must never be claimed by workers (server-dispatched only)"
+    );
+
+    Ok(())
+}
+
 // ─── Worker list tests ────────────────────────────────────────────────
 
 #[tokio::test]

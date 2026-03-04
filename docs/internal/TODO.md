@@ -128,13 +128,13 @@ Last updated: 2026-03-04.
 - [ ] Live DockerRunner execution tests
 - [ ] Live KubeRunner execution tests
 - [ ] Runner error path tests (Docker daemon unavailable, image not found)
-- [ ] `render_connections()` unit test
-- [ ] `resolve_connection_inputs()` unit test
-- [ ] `validate_workflow_config_with_libraries()` dedicated tests
-- [ ] Model deserialization edge cases (TriggerDef accessors, ConnectionDef flatten)
-- [ ] Tag-containment edge cases in `claim_ready_step`
+- [x] `render_connections()` unit test (13 tests in workflow.rs)
+- [x] `resolve_connection_inputs()` unit test (17 tests in template.rs)
+- [x] `validate_workflow_config_with_libraries()` dedicated tests (8 tests in validation.rs)
+- [x] Model deserialization edge cases (TriggerDef accessors, ConnectionDef flatten) — 50+ tests in workflow.rs + validation.rs
+- [x] Tag-containment edge cases in `claim_ready_step` (6 tests in stroem-db integration_test.rs)
 - [ ] Migration idempotency test
-- [ ] Auth middleware helper function unit tests
+- [x] Auth middleware helper function unit tests (14 unit + 30+ integration tests)
 - [ ] Webhook sync-mode timeout test
 - [ ] Scheduler `fire_trigger` → job creation test
 - [ ] `propagate_to_parent` unit test
