@@ -30,3 +30,4 @@ kubernetes = ["stroem-runner/kubernetes", "rustls"]
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock = "0.6"

@@ -387,4 +387,56 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("still-running"));
     }
+
+    #[tokio::test]
+    async fn test_nonexistent_workdir() {
+        let runner = ShellRunner::new();
+        let config = RunConfig {
+            cmd: Some("echo hi".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/nonexistent/path/12345".to_string(),
+            action_type: "shell".to_string(),
+            image: None,
+            runner_mode: crate::RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+        // spawn will fail because the working directory doesn't exist, or return non-zero
+        let result = runner.execute(config, None, CancellationToken::new()).await;
+        match result {
+            Err(_) => {} // IO error from spawn
+            Ok(run_result) => assert_ne!(run_result.exit_code, 0),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_command_binary() {
+        let runner = ShellRunner::new();
+        // sh -c with an unknown binary returns exit code 127
+        let config = shell_config(
+            Some("this_binary_does_not_exist_12345"),
+            None,
+            HashMap::new(),
+        );
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_ne!(result.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_script_file_not_found() {
+        let runner = ShellRunner::new();
+        // script mode directly spawns the path as a binary, so spawn fails
+        let config = shell_config(None, Some("/tmp/no_such_script_12345.sh"), HashMap::new());
+        let result = runner.execute(config, None, CancellationToken::new()).await;
+        assert!(
+            result.is_err(),
+            "expected error when script file is missing"
+        );
+    }
 }

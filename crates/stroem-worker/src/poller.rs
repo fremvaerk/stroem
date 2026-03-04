@@ -55,7 +55,7 @@ fn drain_log_buffer(buffer: &Mutex<Vec<serde_json::Value>>) -> Vec<serde_json::V
 ///
 /// This function owns the claimed step and drives the full execution lifecycle. It is spawned as
 /// a `tokio::spawn` task by [`run_worker`] so each step runs concurrently.
-async fn execute_claimed_step(
+pub(crate) async fn execute_claimed_step(
     client: Arc<ServerClient>,
     executor: Arc<StepExecutor>,
     ws_cache: Arc<WorkspaceCache>,
@@ -660,5 +660,212 @@ mod tests {
         let lines = drain_log_buffer(&mutex);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["line"], "after");
+    }
+
+    // --- execute_claimed_step integration tests (using wiremock) ---
+
+    #[cfg(test)]
+    mod execute_step_tests {
+        use super::super::*;
+        use crate::client::{ClaimedStep, ServerClient};
+        use crate::executor::StepExecutor;
+        use crate::workspace_cache::WorkspaceCache;
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use uuid::Uuid;
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// Build a minimal valid gzipped tarball containing a single shell script.
+        fn create_test_tarball() -> Vec<u8> {
+            let buf = Vec::new();
+            let encoder = GzEncoder::new(buf, Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+
+            let data = b"#!/bin/sh\necho hello-from-workspace\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "run.sh", &data[..])
+                .unwrap();
+
+            let encoder = archive.into_inner().unwrap();
+            encoder.finish().unwrap()
+        }
+
+        /// Mount common server mocks (start, logs, complete, cancel check).
+        async fn mount_common_mocks(mock_server: &MockServer) {
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/start"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(mock_server)
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path("/worker/jobs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(mock_server)
+                .await;
+
+            // Catch-all for log push (path: /worker/jobs/{id}/logs)
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/logs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(mock_server)
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/complete"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(mock_server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path_regex(r"/worker/jobs/.+/cancelled"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"cancelled": false})),
+                )
+                .mount(mock_server)
+                .await;
+        }
+
+        fn make_step(job_id: Uuid, cmd: &str) -> ClaimedStep {
+            ClaimedStep {
+                job_id,
+                workspace: "default".to_string(),
+                task_name: "test-task".to_string(),
+                step_name: "test-step".to_string(),
+                action_name: "test-action".to_string(),
+                action_type: "shell".to_string(),
+                action_image: None,
+                action_spec: Some(serde_json::json!({"cmd": cmd})),
+                input: None,
+                runner: Some("local".to_string()),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_execute_claimed_step_happy_path() {
+            let mock_server = MockServer::start().await;
+
+            // Workspace tarball endpoint
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-1"),
+                )
+                .mount(&mock_server)
+                .await;
+
+            mount_common_mocks(&mock_server).await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            // Create the cache base dir so workspace extraction works
+            std::fs::create_dir_all(temp_dir.path()).unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap()));
+
+            let job_id = Uuid::new_v4();
+            let step = make_step(job_id, "echo hello");
+
+            // Should complete without panicking
+            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+
+            // Verify the complete endpoint was called (mock will fail test if not matched
+            // when verify_received_requests is configured; here we rely on no panic)
+        }
+
+        #[tokio::test]
+        async fn test_execute_claimed_step_workspace_download_failure() {
+            let mock_server = MockServer::start().await;
+
+            // Workspace endpoint returns 500
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+                .mount(&mock_server)
+                .await;
+
+            // Log push (error message pushed before complete)
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/logs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+
+            // Complete endpoint must be called with error
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/complete"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap()));
+
+            let job_id = Uuid::new_v4();
+            let step = make_step(job_id, "echo hello");
+
+            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+
+            // wiremock asserts `expect(1)` is satisfied on drop
+        }
+
+        #[tokio::test]
+        async fn test_execute_claimed_step_command_failure() {
+            let mock_server = MockServer::start().await;
+
+            // Workspace tarball
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-2"),
+                )
+                .mount(&mock_server)
+                .await;
+
+            mount_common_mocks(&mock_server).await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap()));
+
+            let job_id = Uuid::new_v4();
+            // "exit 1" causes non-zero exit code
+            let step = make_step(job_id, "exit 1");
+
+            // Should complete without panicking even on command failure
+            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+        }
     }
 }

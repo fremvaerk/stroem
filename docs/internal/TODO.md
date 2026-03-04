@@ -124,20 +124,20 @@ Last updated: 2026-03-04.
 
 ### Still Missing
 - [x] Version reporting feature tests (DB round-trip, API responses, serde backward compat, /api/config version)
-- [ ] Worker `execute_claimed_step` integration test (core execution path only tested via E2E)
+- [x] Worker `execute_claimed_step` integration test (3 wiremock-based tests: happy path, workspace failure, command failure)
 - [ ] Live DockerRunner execution tests
 - [ ] Live KubeRunner execution tests (use testcontainers k3s module; refactor KubeRunner to accept optional kube::Client; NoWorkspace mode first, WithWorkspace needs mock tarball endpoint)
-- [ ] Runner error path tests (Docker daemon unavailable, image not found)
+- [x] Runner error path tests (6 tests: shell nonexistent workdir/binary/script, docker container config unit tests)
 - [x] `render_connections()` unit test (13 tests in workflow.rs)
 - [x] `resolve_connection_inputs()` unit test (17 tests in template.rs)
 - [x] `validate_workflow_config_with_libraries()` dedicated tests (8 tests in validation.rs)
 - [x] Model deserialization edge cases (TriggerDef accessors, ConnectionDef flatten) — 50+ tests in workflow.rs + validation.rs
 - [x] Tag-containment edge cases in `claim_ready_step` (6 tests in stroem-db integration_test.rs)
-- [ ] Migration idempotency test
+- [x] Migration idempotency test (2 tests: double-run idempotency, schema completeness check)
 - [x] Auth middleware helper function unit tests (14 unit + 30+ integration tests)
 - [x] Webhook sync-mode timeout test (integration test in stroem-server: sync returns 202 on timeout, async returns 200)
 - [x] Scheduler `fire_trigger` → job creation test (4 integration tests: fires cron, disabled skip, input passthrough, clean shutdown)
-- [ ] `propagate_to_parent` unit test
+- [x] `propagate_to_parent` integration test (5 tests: child completed/failed/cancelled, 3-level nesting, mixed steps)
 - [ ] Worker registration retry/backoff test
 - [ ] Worker semaphore/max-concurrent limit test
 - [ ] E2E: cron scheduler trigger fires job

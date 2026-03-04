@@ -548,6 +548,84 @@ mod tests {
         assert!(container_config.cmd.is_none());
     }
 
+    #[test]
+    fn test_build_container_config_env_formatting() {
+        // Verify multiple env vars are formatted as KEY=VALUE strings
+        let mut env = HashMap::new();
+        env.insert("KEY_A".to_string(), "value_a".to_string());
+        env.insert("KEY_B".to_string(), "value=with=equals".to_string());
+        let config = RunConfig {
+            cmd: Some("env".to_string()),
+            script: None,
+            env,
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let env_vec = container_config.env.unwrap();
+        assert!(env_vec.contains(&"KEY_A=value_a".to_string()));
+        assert!(env_vec.contains(&"KEY_B=value=with=equals".to_string()));
+    }
+
+    #[test]
+    fn test_build_container_config_empty_workdir_no_bind() {
+        // Empty workdir string should produce no workspace bind mount
+        let config = RunConfig {
+            cmd: Some("ls".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: String::new(),
+            action_type: "shell".to_string(),
+            image: None,
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let binds = container_config.host_config.unwrap().binds.unwrap();
+        // Only the startup.d bind should be present — no workspace bind for empty workdir
+        assert!(!binds.iter().any(|b| b.contains(":/workspace:ro")));
+        assert!(binds
+            .iter()
+            .any(|b| b == "/etc/stroem/startup.d:/etc/stroem/startup.d:ro"));
+    }
+
+    #[test]
+    fn test_build_container_config_no_workspace_env_present() {
+        // NoWorkspace mode should still pass env vars through
+        let mut env = HashMap::new();
+        env.insert("TOKEN".to_string(), "secret123".to_string());
+        let config = RunConfig {
+            cmd: None,
+            script: None,
+            env,
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let env_vec = container_config.env.unwrap();
+        assert!(env_vec.contains(&"TOKEN=secret123".to_string()));
+        // No workspace bind mounts in NoWorkspace mode
+        assert!(container_config.host_config.is_none());
+    }
+
     /// Integration test: requires Docker daemon running.
     /// Run with: cargo test -p stroem-runner --features docker -- --ignored test_docker_echo
     #[tokio::test]
