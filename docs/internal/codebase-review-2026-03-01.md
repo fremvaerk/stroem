@@ -25,12 +25,12 @@
 - ~~**No rate limiting** on login, refresh, API key, and worker endpoints — brute-force risk~~ **FIXED** (per-IP rate limiting via `tower-governor`)
 - ~~**OIDC state cookie missing `Secure` flag** — PKCE verifier transmitted over plain HTTP~~ **FIXED** (conditional `; Secure` when base_url is HTTPS)
 - ~~**Refresh token in localStorage** — accessible to XSS; should be HttpOnly cookie~~ **FIXED** (HttpOnly cookie with SameSite=Strict, Path=/api/auth)
-- **Pod manifest overrides** can set `privileged: true`, `hostPath`, etc. — no blocklist
+- ~~**Pod manifest overrides** can set `privileged: true`, `hostPath`, etc. — no blocklist~~ **FIXED** (blocklist rejects privileged, hostNetwork/PID/IPC, hostPath, Docker socket mounts)
 
 ### Architecture
 - **Single-server bottleneck**: scheduler, recovery sweeper, log broadcast are all in-process with no leader election — prevents horizontal scaling
 - ~~**No graceful shutdown on worker** — SIGTERM kills in-flight step executions~~ **FIXED** (CancellationToken + semaphore drain)
-- **No runner cancellation mechanism** — stuck pods/containers run indefinitely (KubeRunner busy-polls forever with no timeout)
+- ~~**No runner cancellation mechanism** — stuck pods/containers run indefinitely (KubeRunner busy-polls forever with no timeout)~~ **FIXED** (CancellationToken on Runner::execute, active kill for shell/docker/k8s)
 - ~~**No request timeouts on worker HTTP client** — hung server blocks worker indefinitely~~ **FIXED** (configurable connect + request timeouts)
 
 ### Code Quality
@@ -40,22 +40,22 @@
 
 ### Performance
 - ~~**Missing partial GIN index** on `job_step(status='ready', action_type!='task')`~~ **FIXED** (migration 009)
-- **N+1 queries in orchestration**: `promote_ready_steps` fetches ALL steps then updates one-by-one
-- **Log file opened/closed on every append** (`log_storage.rs:129-146`) — 4 syscalls per chunk with 100 concurrent steps
+- ~~**N+1 queries in orchestration**: `promote_ready_steps` fetches ALL steps then updates one-by-one~~ **FIXED** (batch `UPDATE ... WHERE step_name = ANY($2)`)
+- ~~**Log file opened/closed on every append** (`log_storage.rs:129-146`) — 4 syscalls per chunk with 100 concurrent steps~~ **FIXED** (DashMap file handle cache + close_log flush)
 - ~~**`get_workspace` called 4 times in single `claim_job` handler**~~ **FIXED** (consolidated to single call)
 
 ### Frontend
 - ~~**No error boundaries** — any render error crashes entire app to blank screen~~ **FIXED** (per-page error boundaries + top-level catch-all)
-- **`useAsyncData` has no cancellation** — stale responses overwrite fresh state
-- **`useWorkerNames` fires separate HTTP request from every component** that imports it
-- **Dashboard fetches 100 jobs every 5s but uses only 10**; stat counts are wrong when >100 jobs exist
+- ~~**`useAsyncData` has no cancellation** — stale responses overwrite fresh state~~ **FIXED** (requestIdRef stale-response guard + error state)
+- ~~**`useWorkerNames` fires separate HTTP request from every component** that imports it~~ **FIXED** (module-level singleton cache with 60s TTL)
+- ~~**Dashboard fetches 100 jobs every 5s but uses only 10**; stat counts are wrong when >100 jobs exist~~ **FIXED** (server-side GET /api/stats endpoint)
 
 ### Test Coverage
 - ~~**Orchestrator has zero unit tests**~~ **FIXED** (9 integration tests covering DAG promotion, failures, continue_on_failure, diamond joins)
 - **Worker `execute_claimed_step` has no integration test** — core execution path tested only by shell E2E
 - ~~**CLI has zero tests**~~ **FIXED** (35 unit tests covering arg parsing, URL construction, validation, response checking)
 - **No live DockerRunner or KubeRunner execution tests**
-- **No frontend unit tests** (no Vitest setup) — token refresh race, WebSocket sequencing untested
+- ~~**No frontend unit tests** (no Vitest setup) — token refresh race, WebSocket sequencing untested~~ **FIXED** (119 Vitest tests: StatusBadge, useAsyncData, api.ts, formatting utils)
 
 ---
 
@@ -100,20 +100,20 @@
 
 ### Test Coverage
 - No test for `render_connections()` or `resolve_connection_inputs()` in template.rs
-- No DB-level test for `mark_failed`/`mark_skipped`, transaction rollback, or parent/child columns
+- ~~No DB-level test for `mark_failed`/`mark_skipped`, transaction rollback, or parent/child columns~~ **PARTIALLY FIXED** (mark_failed, mark_skipped, transaction rollback, parent/child tests added; mark_cancelled added)
 - No webhook sync-mode timeout test
 - No test for workspace-level hook fallback behavior
 - No Playwright test for Settings page (API key management)
-- No E2E test for worker recovery or cron scheduler triggers
+- ~~No E2E test for worker recovery or cron scheduler triggers~~ **FIXED** (E2E integration tests added)
 
 ### Frontend
 - ~~Duplicated functions: `formatTime`/`formatDuration`/`formatRelativeTime` in `task-detail.tsx`~~ **FIXED** (extracted to `ui/src/lib/formatting.ts`)
 - ~~Worker status badge styling duplicated across `workers.tsx` and `worker-detail.tsx`~~ **FIXED** (shared `WorkerStatusBadge` component)
 - Loading spinner duplicated 10 times instead of using `LoadingSpinner` component
 - `task-detail.tsx` at 877 lines — should extract `InputFieldRow` and `ComboboxField`
-- `useAsyncData` doesn't reset data when fetcher changes — shows stale rows during loading
+- ~~`useAsyncData` doesn't reset data when fetcher changes — shows stale rows during loading~~ **FIXED** (resets data to null in effect when fetcher changes)
 - ~~`apiFetch` calls `res.json()` on 204 No Content — throws unhandled error~~ **FIXED**
-- `useAsyncData` silently swallows all errors — no `error` state exposed
+- ~~`useAsyncData` silently swallows all errors — no `error` state exposed~~ **FIXED** (error state exposed via `result.current.error`)
 - ~~`sonner` and `next-themes` bundled but `<Toaster>` never mounted~~ **FIXED** (removed from deps)
 
 ### Accessibility
@@ -154,10 +154,10 @@
 21. Convert stringly-typed fields to enums (`ActionType`, `JobStatus`, `SourceType`)
 22. Add leader election (pg advisory locks) for scheduler/recovery
 23. Add `/metrics` and `/healthz` endpoints
-24. Cache log file handles to avoid open/close per append
-25. Implement runner cancellation (prerequisite for step timeouts)
+24. ~~Cache log file handles to avoid open/close per append~~ **DONE** (DashMap file handle cache)
+25. ~~Implement runner cancellation (prerequisite for step timeouts)~~ **DONE** (full job cancellation with active kill)
 26. Add live Docker/K8s runner integration tests
-27. Set up Vitest for frontend unit tests
+27. ~~Set up Vitest for frontend unit tests~~ **DONE** (119 tests across 4 files)
 28. Add log retention / cleanup policy
 29. Generate OpenAPI spec with `utoipa`
 30. Add `#[serde(deny_unknown_fields)]` to config types
@@ -232,12 +232,12 @@ No `AuthUser` extractor on the WebSocket handler. Combined with `allow_origin(An
 
 **Fix:** Add `AuthUser` or `Option<AuthUser>` extractor; reject with 401 if auth enabled and no valid token.
 
-#### FINDING 7: Pod Manifest Overrides Can Escalate Privileges (Medium)
+#### FINDING 7: Pod Manifest Overrides Can Escalate Privileges (Medium) — FIXED
 **File:** `crates/stroem-runner/src/kubernetes.rs:252-255`
 
 `merge_json` applies arbitrary overrides including `privileged: true`, `hostPath` volumes, `hostNetwork`.
 
-**Fix:** Blocklist dangerous fields or document reliance on K8s admission controllers (OPA/Kyverno).
+~~**Fix:** Blocklist dangerous fields or document reliance on K8s admission controllers (OPA/Kyverno).~~ **DONE** (`validate_pod_overrides` blocklist with 19 unit tests)
 
 #### FINDING 8: Secrets Passed as Environment Variables to Containers (Medium)
 **Files:** `docker.rs:40`, `kubernetes.rs:190-199`
@@ -312,12 +312,12 @@ CREATE INDEX idx_job_step_ready_tags
   WHERE status = 'ready' AND action_type != 'task';
 ```
 
-#### 1.3 N+1 Queries in Orchestration Hot Path — High
+#### 1.3 N+1 Queries in Orchestration Hot Path — High — FIXED
 **File:** `job_step.rs:361-469`, `orchestrator.rs:28-35`
 
 `promote_ready_steps` fetches ALL steps, builds status map, then issues one UPDATE per promotable step. `skip_unreachable_steps` does the same fetch again. Worst case: 10-step linear DAG issues ~10 fetch-all + ~10 individual UPDATEs.
 
-**Fix:** Batch UPDATEs: `UPDATE ... WHERE step_name = ANY($1)` for all promotable steps.
+~~**Fix:** Batch UPDATEs: `UPDATE ... WHERE step_name = ANY($1)` for all promotable steps.~~ **DONE**
 
 #### 1.4 Redundant `get_workspace` in `claim_job` — Medium
 **File:** `web/worker_api/jobs.rs:224-351`
@@ -342,12 +342,12 @@ PgPool::connect_with(opts.pool_options().max_connections(20).min_connections(5).
 #### 2.2 Worker Poll No Backoff — Medium
 No exponential backoff on empty queue. 50 idle workers × 1s interval = 50 unnecessary round-trips/sec.
 
-#### 3.1 Log File Opened/Closed on Every Append — High
+#### 3.1 Log File Opened/Closed on Every Append — High — FIXED
 **File:** `log_storage.rs:129-146`
 
 Open + write + flush + close per chunk. `ensure_dir()` stat call every time.
 
-**Fix:** Cache open file handles in `DashMap<Uuid, Arc<Mutex<BufWriter<File>>>>`.
+~~**Fix:** Cache open file handles in `DashMap<Uuid, Arc<Mutex<BufWriter<File>>>>`.~~ **DONE** (DashMap cache + AtomicBool for dir check + close_log flush)
 
 #### 3.2 S3 Upload Reads Entire Log Into Memory — Medium
 **File:** `log_storage.rs:151-192`
@@ -423,14 +423,14 @@ Good router separation (api, worker_api, hooks). Worker auth uses constant-time 
 Semaphore concurrency control correct. Exponential backoff on registration. Panic recovery. Poisoned mutex handling.
 
 **Concerns:**
-- No graceful shutdown (infinite loop, no CancellationToken)
+- ~~No graceful shutdown (infinite loop, no CancellationToken)~~ **FIXED**
 - No step-level timeout
 - No heartbeat failure → re-registration logic
 
 #### Runner Abstraction — Appropriate
 `Runner` trait minimal and correct. Feature gating proper. `LogCallback` as `Box<dyn Fn>` correct for object safety.
 
-**Concern:** No cancellation mechanism. Prerequisite for timeouts and job cancellation (DB has `cancelled` status but unimplemented).
+~~**Concern:** No cancellation mechanism. Prerequisite for timeouts and job cancellation (DB has `cancelled` status but unimplemented).~~ **FIXED** (full job cancellation: API, worker cancel-checker, CancellationToken on runners, active kill for shell/docker/k8s)
 
 #### Database Layer — Functional with structural debt
 `SELECT FOR UPDATE SKIP LOCKED` correct. Column constants reduce drift.
@@ -448,7 +448,7 @@ Semaphore concurrency control correct. Exponential backoff on registration. Pani
 **Concerns:**
 - `auth_type: String` instead of enum — invalid values silently accepted
 - No minimum security requirements for `worker_token`, `jwt_secret`
-- Worker HTTP client has no timeouts
+- ~~Worker HTTP client has no timeouts~~ **FIXED**
 
 #### Scalability — Single-server ceiling
 Scheduler, recovery, log broadcast, workspace configs all in-process. No leader election. Local filesystem logs.
@@ -466,7 +466,7 @@ Scheduler, recovery, log broadcast, workspace configs all in-process. No leader 
 #### Resilience — Good foundation with gaps
 Recovery sweeper correct. "Fail don't retry" appropriate. Worker re-activation on heartbeat.
 
-**Missing:** Circuit breaker for worker→server, retry for final log flush, S3 upload retry, job cancellation.
+**Missing:** Circuit breaker for worker→server, retry for final log flush, S3 upload retry. ~~Job cancellation~~ **FIXED**.
 
 #### API Design — Pragmatic but inconsistent
 Clear namespace separation. Workspace-scoped routes. Pagination consistent.
@@ -483,14 +483,14 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - OIDC callback has `unwrap()` on cookie parsing — malformed cookie panics on public endpoint
 
 #### Async Patterns
-- **KubeRunner busy-polling with no timeout** (`kubernetes.rs:373-412`) — pod stuck in Pending loops forever. Add `tokio::time::timeout`.
-- **Worker heartbeat task has no graceful shutdown** (`poller.rs:231-241`) — no `CancellationToken`, orphaned on shutdown
-- **Worker main loop never exits** (`poller.rs:253-304`) — no signal handling, no drain
-- **Blocking `std::fs` in async context** (`workspace_cache.rs:34-61`) — wrap in `spawn_blocking`
+- ~~**KubeRunner busy-polling with no timeout** (`kubernetes.rs:373-412`) — pod stuck in Pending loops forever. Add `tokio::time::timeout`.~~ **FIXED** (CancellationToken + active pod deletion on cancel)
+- ~~**Worker heartbeat task has no graceful shutdown** (`poller.rs:231-241`) — no `CancellationToken`, orphaned on shutdown~~ **FIXED**
+- ~~**Worker main loop never exits** (`poller.rs:253-304`) — no signal handling, no drain~~ **FIXED** (CancellationToken + semaphore drain)
+- ~~**Blocking `std::fs` in async context** (`workspace_cache.rs:34-61`) — wrap in `spawn_blocking`~~ **FIXED**
 
 #### Resource Management
 - LogBroadcast channels grow unbounded — channels for jobs with zero subscribers never cleaned up
-- Log file handles opened/closed on every append
+- ~~Log file handles opened/closed on every append~~ **FIXED** (DashMap file handle cache)
 - K8s pod logs fetched only after termination — no live streaming during execution
 
 #### Code Duplication
@@ -503,8 +503,8 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - Add `validate()` method on `ServerConfig`, fail fast at startup
 
 #### Concurrency
-- Log file append has no file locking — POSIX atomic only for writes < PIPE_BUF
-- TOCTOU in `ensure_dir` — remove `exists()` check, `create_dir_all` is idempotent
+- ~~Log file append has no file locking — POSIX atomic only for writes < PIPE_BUF~~ **FIXED** (Mutex-protected BufWriter per job)
+- ~~TOCTOU in `ensure_dir` — remove `exists()` check, `create_dir_all` is idempotent~~ **FIXED** (AtomicBool + create_dir_all)
 - Workspace cache race on concurrent extraction — add per-workspace `Mutex`
 
 #### Memory
@@ -532,9 +532,9 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - `TaskDef::mode: String` — should be enum (`Distributed`, `Local`)
 
 #### Async
-- `log_handle.abort()` without `.await` (`poller.rs:134`) — race on final drain
+- ~~`log_handle.abort()` without `.await` (`poller.rs:134`) — race on final drain~~ **FIXED**
 - `Mutex<Vec>` for log buffer on hot path — consider `mpsc::unbounded_channel`
-- Workspace watchers spawn with no cancellation token
+- ~~Workspace watchers spawn with no cancellation token~~ **FIXED**
 
 #### Serde
 - Missing `#[serde(deny_unknown_fields)]` on config types — typos silently ignored
@@ -560,10 +560,10 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - ~~**C-3:** Client-side status filter with server-side pagination (`jobs.tsx:32-42`) — pass filter to API~~ **FIXED**
 
 #### High
-- **H-1:** No error boundaries — blank screen on render error
-- **H-2:** `useAsyncData` no cancellation — stale responses overwrite fresh state
-- **H-3:** `useWorkerNames` fires independent HTTP request from every consumer — needs shared cache/context
-- **H-4:** Dashboard fetches 100 jobs, uses 10, wrong stat counts — fetch 10, add `/api/stats` endpoint
+- ~~**H-1:** No error boundaries — blank screen on render error~~ **FIXED** (per-page error boundaries + top-level catch-all)
+- ~~**H-2:** `useAsyncData` no cancellation — stale responses overwrite fresh state~~ **FIXED** (requestIdRef stale-response guard)
+- ~~**H-3:** `useWorkerNames` fires independent HTTP request from every consumer — needs shared cache/context~~ **FIXED** (module-level singleton cache with 60s TTL)
+- ~~**H-4:** Dashboard fetches 100 jobs, uses 10, wrong stat counts — fetch 10, add `/api/stats` endpoint~~ **FIXED** (server-side stats endpoint)
 - **H-5:** `listAllTasks` is N+1 (one request per workspace) — add cross-workspace endpoint
 - **H-6:** Token refresh deduplication has fragile invariants — encapsulate in class
 
@@ -573,7 +573,7 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - **M-3:** Loading spinner inlined 10 times — use `LoadingSpinner` component
 - **M-4:** `[key: string]: unknown` on `StepNodeData` defeats type safety
 - **M-5:** `useJobLogs` REST overwrite discards WS content on job completion
-- **M-6:** `useAsyncData` doesn't reset data on fetcher change — stale rows shown
+- ~~**M-6:** `useAsyncData` doesn't reset data on fetcher change — stale rows shown~~ **FIXED**
 - **M-7:** `WorkflowDag` recalculates layout on every `selectedStep` change — separate layout from selection
 - **M-8:** Array index as React key for log lines (`log-viewer.tsx:88`)
 - **M-9:** `login-callback.tsx` uses `window.location.href` — full page reload loses in-memory token
@@ -586,7 +586,7 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - **L-4:** Workspace page links to flat `/tasks` instead of workspace-scoped view
 - **L-5:** `apiFetch` calls `res.json()` on 204 No Content — throws error
 - **L-6:** `task-detail.tsx` at 877 lines — extract `InputFieldRow` and `ComboboxField`
-- **L-7:** `useAsyncData` silently swallows all errors — no `error` state
+- ~~**L-7:** `useAsyncData` silently swallows all errors — no `error` state~~ **FIXED**
 - **L-8:** `vite.config.ts` suppresses proxy errors silently
 
 #### Accessibility
@@ -611,7 +611,7 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 | 1 | Orchestrator has zero unit tests (Gap 16) | High — most critical state machine |
 | 2 | Worker `execute_claimed_step` no integration test (Gap 20) | High — core execution path |
 | 3 | CLI has zero tests (Gaps 23-25) | Medium — user-facing binary |
-| 4 | No frontend unit tests / Vitest setup (Gap 30) | High — auth + WS races |
+| ~~4~~ | ~~No frontend unit tests / Vitest setup (Gap 30)~~ | ~~High~~ **FIXED** |
 | 5 | No live Docker/K8s runner tests (Gap 10) | Medium — config tests pass, execution untested |
 
 #### stroem-common Gaps
@@ -654,14 +654,14 @@ Clear namespace separation. Workspace-scoped routes. Pagination consistent.
 - No OIDC login flow test (Gap 27)
 - No webhook trigger display test (Gap 28)
 - No Dashboard content test (Gap 29)
-- No unit tests at all — no Vitest setup (Gap 30)
+- ~~No unit tests at all — no Vitest setup (Gap 30)~~ **FIXED** (119 tests: StatusBadge, useAsyncData, api.ts, formatting)
 
 #### Integration / E2E Gaps
 - Full library loading pipeline not integration-tested (Gap 31)
 - Git workspace source auth failure not tested (Gap 32)
-- No E2E test for worker recovery (Gap 33)
-- No E2E test for cron scheduler triggers (Gap 34)
-- No E2E test for multi-workspace scenarios (Gap 35)
+- ~~No E2E test for worker recovery (Gap 33)~~ **FIXED** (E2E integration tests added)
+- ~~No E2E test for cron scheduler triggers (Gap 34)~~ **FIXED** (E2E integration tests added)
+- ~~No E2E test for multi-workspace scenarios (Gap 35)~~ **FIXED** (E2E integration tests added)
 
 ---
 
@@ -672,6 +672,6 @@ The codebase is architecturally sound with clean crate boundaries, good test cov
 1. ~~**Security gaps** in auth enforcement and secret handling (WebSocket auth, CORS, K8s token exposure)~~ **FIXED** — WS auth, CORS restriction, K8s token in env
 2. **Single-server scaling limitations** (no leader election, local log storage, in-process background tasks)
 3. ~~**Absence of database transactions** (orphan jobs, TOCTOU races)~~ **PARTIALLY FIXED** — job+steps creation transactional
-4. ~~**Frontend state management races** (REST/WS overwrite, stale async data, no error boundaries)~~ **PARTIALLY FIXED** — REST/WS race fixed, status filter server-side; error boundaries and stale data remain
+4. ~~**Frontend state management races** (REST/WS overwrite, stale async data, no error boundaries)~~ **FIXED** — REST/WS race, status filter, error boundaries, stale data guard, error state all addressed
 
-The Rust code quality is high — the issues found are refinements rather than fundamental problems. The 7 critical issues have been addressed (commit `ac79ae8`), along with review follow-ups (WebSocket cleanup race, CORS warning log, status validation, dead code removal).
+The Rust code quality is high — the issues found are refinements rather than fundamental problems. The 7 critical issues have been addressed (commit `ac79ae8`), along with review follow-ups (WebSocket cleanup race, CORS warning log, status validation, dead code removal). Job cancellation added (commit `d0fcc5b`). High-severity performance, security, and frontend fixes applied (commit `8893825`).
