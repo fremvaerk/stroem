@@ -40,7 +40,7 @@ pub trait WorkspaceSource: Send + Sync {
 
 /// A loaded workspace entry with its source and cached config
 pub struct WorkspaceEntry {
-    pub config: Arc<RwLock<WorkspaceConfig>>,
+    pub config: Arc<RwLock<Arc<WorkspaceConfig>>>,
     pub source: Arc<dyn WorkspaceSource>,
     pub name: String,
     pub source_path: PathBuf,
@@ -153,7 +153,7 @@ impl WorkspaceManager {
                     entries.insert(
                         name.clone(),
                         WorkspaceEntry {
-                            config: Arc::new(RwLock::new(config)),
+                            config: Arc::new(RwLock::new(Arc::new(config))),
                             source,
                             name: name.clone(),
                             source_path,
@@ -193,7 +193,7 @@ impl WorkspaceManager {
         entries.insert(
             name.to_string(),
             WorkspaceEntry {
-                config: Arc::new(RwLock::new(config)),
+                config: Arc::new(RwLock::new(Arc::new(config))),
                 source: source as Arc<dyn WorkspaceSource>,
                 name: name.to_string(),
                 source_path: PathBuf::from("/dev/null"),
@@ -207,11 +207,10 @@ impl WorkspaceManager {
     }
 
     /// Get the workspace config for a given name
-    pub async fn get_config(&self, name: &str) -> Option<WorkspaceConfig> {
-        match self.entries.get(name) {
-            Some(entry) => Some(entry.config.read().await.clone()),
-            None => None,
-        }
+    pub async fn get_config(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {
+        let entry = self.entries.get(name)?;
+        let config = entry.config.read().await;
+        Some(Arc::clone(&config))
     }
 
     /// Get the filesystem path for a workspace
@@ -278,7 +277,7 @@ impl WorkspaceManager {
         }
 
         let mut config = entry.config.write().await;
-        *config = new_config;
+        *config = Arc::new(new_config);
         Ok(())
     }
 
@@ -356,7 +355,7 @@ impl WorkspaceManager {
 
                             let new_revision = source.revision();
                             let mut config = config_lock.write().await;
-                            *config = new_config;
+                            *config = Arc::new(new_config);
                             tracing::info!(
                                 "Workspace '{}' reloaded (revision: {:?} -> {:?})",
                                 ws_name,

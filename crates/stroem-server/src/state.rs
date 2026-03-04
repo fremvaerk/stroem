@@ -47,7 +47,7 @@ impl AppState {
     }
 
     /// Get the workspace config for a given workspace name
-    pub async fn get_workspace(&self, name: &str) -> Option<WorkspaceConfig> {
+    pub async fn get_workspace(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {
         self.workspaces.get_config(name).await
     }
 

@@ -151,7 +151,7 @@ pub fn default_limit() -> i64 {
 pub async fn get_workspace_or_error(
     state: &std::sync::Arc<AppState>,
     ws: &str,
-) -> Result<stroem_common::models::workflow::WorkspaceConfig, Response> {
+) -> Result<std::sync::Arc<stroem_common::models::workflow::WorkspaceConfig>, Response> {
     state.get_workspace(ws).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
