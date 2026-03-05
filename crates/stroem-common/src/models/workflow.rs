@@ -86,7 +86,7 @@ pub struct ResourceDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDef {
     #[serde(rename = "type")]
-    pub action_type: String, // "shell", "docker", "pod", "task"
+    pub action_type: String, // "script", "docker", "pod", "task"
 
     /// Human-readable display name for this action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,9 +105,24 @@ pub struct ActionDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>, // for shell (alternative to cmd)
 
-    // Runner field (for shell actions: "local", "docker", "pod")
+    // Runner field (for script actions: "local", "docker", "pod")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
+
+    /// Script language (for type: script). Defaults to "shell" when absent.
+    /// Valid values: "shell", "python", "javascript", "typescript", "go"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+
+    /// Dependencies to install before running the script.
+    /// For Python+uv: passed as --with args. For JS: bun/npm install.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
+
+    /// Override auto-detected interpreter binary (e.g., "python3.12", "/usr/local/bin/deno").
+    /// When set, skips toolchain preference resolution and uses this binary directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpreter: Option<String>,
 
     // Tags for worker routing
     #[serde(default)]
@@ -136,7 +151,7 @@ pub struct ActionDef {
     pub output: Option<OutputDef>,
 
     /// Raw Kubernetes pod manifest overrides — deep-merged into the generated pod spec.
-    /// Only valid on `type: pod` and `type: shell` + `runner: pod`.
+    /// Only valid on `type: pod` and `type: script` + `runner: pod`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<serde_json::Value>,
 }
@@ -153,7 +168,7 @@ pub struct HookDef {
 ///
 /// Supports two forms:
 /// - **Reference**: `action: <name>` — references a named action
-/// - **Inline**: `type: shell`, `cmd: ...` etc. — defines the action inline
+/// - **Inline**: `type: script`, `cmd: ...` etc. — defines the action inline
 ///
 /// Inline actions are automatically hoisted to the config's actions map during
 /// `WorkflowConfig` deserialization.
@@ -662,7 +677,7 @@ mod tests {
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello {{ input.name }}"
     input:
       name:
@@ -687,7 +702,7 @@ tasks:
         assert_eq!(config.tasks.len(), 1);
 
         let greet = config.actions.get("greet").unwrap();
-        assert_eq!(greet.action_type, "shell");
+        assert_eq!(greet.action_type, "script");
         assert_eq!(greet.cmd.as_ref().unwrap(), "echo Hello {{ input.name }}");
 
         let task = config.tasks.get("hello-world").unwrap();
@@ -802,7 +817,7 @@ triggers:
             r#"
 actions:
   action1:
-    type: shell
+    type: script
     cmd: "echo test"
 tasks:
   task1:
@@ -817,7 +832,7 @@ tasks:
             r#"
 actions:
   action2:
-    type: shell
+    type: script
     cmd: "echo test2"
 tasks:
   task2:
@@ -935,7 +950,7 @@ secrets:
 
 actions:
   backup:
-    type: shell
+    type: script
     cmd: "pg_dump"
     env:
       DB_PASSWORD: "{{ secret.db_password }}"
@@ -989,7 +1004,7 @@ secrets:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: docker
     cmd: "npm test"
 "#;
@@ -1003,7 +1018,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: docker
     tags: ["node-20", "gpu"]
     cmd: "npm test"
@@ -1040,7 +1055,7 @@ actions:
         let yaml = r#"
 actions:
   simple:
-    type: shell
+    type: script
     cmd: "echo test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -1059,7 +1074,7 @@ actions:
     task: cleanup-resources
 
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 
 tasks:
@@ -1120,7 +1135,7 @@ secrets:
   db_password: "ref+awsssm:///prod/db/password"
 actions:
   action1:
-    type: shell
+    type: script
     cmd: "echo test"
 "#,
         )
@@ -1132,7 +1147,7 @@ secrets:
   api_key: "ref+vault://secret/data/api#key"
 actions:
   action2:
-    type: shell
+    type: script
     cmd: "echo test2"
 "#,
         )
@@ -1153,10 +1168,10 @@ actions:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "make deploy"
   notify:
-    type: shell
+    type: script
     cmd: "curl $WEBHOOK"
     input:
       message:
@@ -1275,7 +1290,7 @@ actions:
         let yaml = r#"
 actions:
   notify:
-    type: shell
+    type: script
     cmd: "curl $WEBHOOK"
 
 on_success:
@@ -1307,7 +1322,7 @@ on_error:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -1321,7 +1336,7 @@ actions:
             r#"
 actions:
   notify:
-    type: shell
+    type: script
     cmd: "curl $WEBHOOK"
 on_success:
   - action: notify
@@ -1468,7 +1483,7 @@ on_error:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
     input:
       env:
@@ -1486,7 +1501,7 @@ actions:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
     input:
       api_key:
@@ -2043,7 +2058,7 @@ tasks:
   hello:
     flow:
       say-hi:
-        type: shell
+        type: script
         cmd: "echo Hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2051,7 +2066,7 @@ tasks:
         // Action should be auto-hoisted during parse
         assert_eq!(config.actions.len(), 1);
         let action = config.actions.get("_inline:hello:say-hi").unwrap();
-        assert_eq!(action.action_type, "shell");
+        assert_eq!(action.action_type, "script");
         assert_eq!(action.cmd.as_deref(), Some("echo Hello"));
 
         // Step should reference the synthetic name
@@ -2071,7 +2086,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
 
 tasks:
@@ -2080,7 +2095,7 @@ tasks:
       ref-step:
         action: greet
       inline-step:
-        type: shell
+        type: script
         cmd: "echo Inline"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2105,10 +2120,10 @@ tasks:
   pipeline:
     flow:
       first:
-        type: shell
+        type: script
         cmd: "echo first"
       second:
-        type: shell
+        type: script
         cmd: "echo {{ input.msg }}"
         depends_on: [first]
         input:
@@ -2162,7 +2177,7 @@ tasks:
   deploy:
     flow:
       cleanup:
-        type: shell
+        type: script
         cmd: "rm -rf tmp"
         continue_on_failure: true
 "#;
@@ -2206,7 +2221,7 @@ tasks:
     flow:
       oops:
         action: greet
-        type: shell
+        type: script
         cmd: "echo oops"
 "#;
         let result = serde_yaml::from_str::<WorkflowConfig>(yaml);
@@ -2227,7 +2242,7 @@ tasks:
   child-task:
     flow:
       step1:
-        type: shell
+        type: script
         cmd: "echo child"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2244,7 +2259,7 @@ tasks:
   test:
     flow:
       run-tests:
-        type: shell
+        type: script
         runner: docker
         cmd: "npm test"
         tags: ["node-20"]
@@ -2252,7 +2267,7 @@ tasks:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
 
         let action = config.actions.get("_inline:test:run-tests").unwrap();
-        assert_eq!(action.action_type, "shell");
+        assert_eq!(action.action_type, "script");
         assert_eq!(action.runner.as_deref(), Some("docker"));
         assert_eq!(action.tags, vec!["node-20"]);
     }
@@ -2268,7 +2283,7 @@ tasks:
       env: { type: string, default: "staging" }
     flow:
       build:
-        type: shell
+        type: script
         cmd: "make build"
       test:
         type: docker
@@ -2276,7 +2291,7 @@ tasks:
         command: ["npm", "test"]
         depends_on: [build]
       deploy:
-        type: shell
+        type: script
         runner: docker
         cmd: "deploy.sh {{ input.env }}"
         depends_on: [test]
@@ -2297,13 +2312,13 @@ tasks:
     fn test_inline_invalid_action_caught_by_validation() {
         use crate::validation::validate_workflow_config;
 
-        // type: shell without cmd or script parses OK but fails validation
+        // type: script without cmd or script parses OK but fails validation
         let yaml = r#"
 tasks:
   bad:
     flow:
       oops:
-        type: shell
+        type: script
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
 
@@ -2321,7 +2336,7 @@ actions:
   greet:
     name: Greet User
     description: Sends a greeting message to the user
-    type: shell
+    type: script
     cmd: "echo Hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2338,7 +2353,7 @@ actions:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
 tasks:
   hello:
@@ -2362,7 +2377,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
     input:
       name:
@@ -2417,7 +2432,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
 tasks:
   hello:
@@ -2441,7 +2456,7 @@ tasks:
   hello:
     flow:
       say-hi:
-        type: shell
+        type: script
         cmd: "echo Hello"
         name: Say Hello
         description: Greet the user
@@ -2462,7 +2477,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
     input:
       name:
@@ -2593,6 +2608,41 @@ tasks:
         let datetime_field = task.input.get("scheduled_at").unwrap();
         assert_eq!(datetime_field.field_type, "datetime");
         assert_eq!(datetime_field.description.as_deref(), Some("When to run"));
+    }
+
+    #[test]
+    fn test_action_def_new_fields_deserialization() {
+        let yaml = r#"
+actions:
+  analyse:
+    type: script
+    cmd: "python analyse.py"
+    language: python
+    dependencies:
+      - requests
+      - click
+    interpreter: "python3.12"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("analyse").unwrap();
+        assert_eq!(action.language.as_deref(), Some("python"));
+        assert_eq!(action.dependencies, vec!["requests", "click"]);
+        assert_eq!(action.interpreter.as_deref(), Some("python3.12"));
+    }
+
+    #[test]
+    fn test_action_def_defaults_for_new_fields() {
+        let yaml = r#"
+actions:
+  simple:
+    type: script
+    cmd: "echo hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("simple").unwrap();
+        assert!(action.language.is_none());
+        assert!(action.dependencies.is_empty());
+        assert!(action.interpreter.is_none());
     }
 
     #[test]

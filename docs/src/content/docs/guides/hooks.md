@@ -73,7 +73,7 @@ You can define `on_success` and `on_error` hooks at the top level of your workfl
 ```yaml
 actions:
   notify-slack:
-    type: shell
+    type: script
     cmd: 'curl -X POST "$WEBHOOK_URL" -d "{\"text\": \"$MESSAGE\"}"'
     input:
       message:

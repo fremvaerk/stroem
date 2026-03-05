@@ -412,7 +412,7 @@ mod tests {
             r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   hello:
@@ -453,7 +453,7 @@ tasks:
             r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   deploy:
@@ -540,13 +540,16 @@ tasks:
         config.actions.insert(
             "test-action".to_string(),
             ActionDef {
-                action_type: "shell".to_string(),
+                action_type: "script".to_string(),
                 name: None,
                 description: None,
                 task: None,
                 cmd: Some("echo test".to_string()),
                 script: None,
                 runner: None,
+                language: None,
+                dependencies: vec![],
+                interpreter: None,
                 tags: vec![],
                 image: None,
                 command: None,
@@ -610,13 +613,16 @@ tasks:
         config1.actions.insert(
             "action1".to_string(),
             ActionDef {
-                action_type: "shell".to_string(),
+                action_type: "script".to_string(),
                 name: None,
                 description: None,
                 task: None,
                 cmd: Some("echo 1".to_string()),
                 script: None,
                 runner: None,
+                language: None,
+                dependencies: vec![],
+                interpreter: None,
                 tags: vec![],
                 image: None,
                 command: None,
@@ -664,13 +670,16 @@ tasks:
         config2.actions.insert(
             "action2".to_string(),
             ActionDef {
-                action_type: "shell".to_string(),
+                action_type: "script".to_string(),
                 name: None,
                 description: None,
                 task: None,
                 cmd: Some("echo 2".to_string()),
                 script: None,
                 runner: None,
+                language: None,
+                dependencies: vec![],
+                interpreter: None,
                 tags: vec![],
                 image: None,
                 command: None,
@@ -794,7 +803,7 @@ tasks:
             r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo goodbye"
 tasks:
   hello:
@@ -852,10 +861,10 @@ tasks:
             r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
   deploy:
-    type: shell
+    type: script
     cmd: "make deploy"
 tasks:
   ci:
@@ -945,7 +954,7 @@ tasks:
             r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello
     # Missing closing quote - invalid YAML
 "#,
@@ -979,7 +988,7 @@ actions:
             r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   hello:
@@ -1008,10 +1017,10 @@ tasks:
             r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   hello:
@@ -1040,7 +1049,7 @@ tasks:
         fs::create_dir(&workflows_dir).unwrap();
         fs::write(
             workflows_dir.join("test.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo v1\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo v1\n",
         )
         .unwrap();
 
@@ -1057,7 +1066,7 @@ tasks:
         // Modify content
         fs::write(
             workflows_dir.join("test.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo v2\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo v2\n",
         )
         .unwrap();
 
@@ -1095,7 +1104,7 @@ tasks:
             r#"
 actions:
   action1:
-    type: shell
+    type: script
     cmd: "echo 1"
 tasks:
   task1:
@@ -1112,7 +1121,7 @@ tasks:
             r#"
 actions:
   action2:
-    type: shell
+    type: script
     cmd: "echo 2"
 tasks:
   task2:

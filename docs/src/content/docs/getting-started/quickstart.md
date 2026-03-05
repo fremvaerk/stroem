@@ -68,13 +68,13 @@ The hello-world task is defined in `workspace/.workflows/hello.yaml`:
 ```yaml
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
       name: { type: string, required: true }
 
   shout:
-    type: shell
+    type: script
     cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
       message: { type: string, required: true }
@@ -129,11 +129,11 @@ docker compose down -v
 ```
 
 - **Server**: Loads workflows from workspaces, manages jobs and steps in PostgreSQL, orchestrates DAG execution, streams logs via WebSocket, serves the embedded web UI.
-- **Worker**: Polls the server for ready steps, dispatches to the appropriate runner (shell, Docker, or Kubernetes), streams logs back.
+- **Worker**: Polls the server for ready steps, dispatches to the appropriate runner (script, Docker, or Kubernetes), streams logs back.
 - **CLI**: HTTP client for triggering tasks, checking status, validating workflows, and viewing logs.
 
 ## Next steps
 
 - [Configuration](/getting-started/configuration/) — server and worker config files
 - [Workflow Basics](/guides/workflow-basics/) — YAML structure in depth
-- [Action Types](/guides/action-types/) — shell, Docker, Kubernetes, and task actions
+- [Action Types](/guides/action-types/) — script, Docker, Kubernetes, and task actions

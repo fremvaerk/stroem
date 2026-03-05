@@ -31,7 +31,7 @@ Multi-arch images (amd64 + arm64) are published to GHCR:
 ```bash
 docker pull ghcr.io/fremvaerk/stroem-server:latest
 docker pull ghcr.io/fremvaerk/stroem-worker:latest
-docker pull ghcr.io/fremvaerk/stroem-runner:latest  # base image for shell-in-container steps
+docker pull ghcr.io/fremvaerk/stroem-runner:latest  # base image for script-in-container steps
 ```
 
 ## Quickstart (Docker Compose)
@@ -158,7 +158,7 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
-  - shell
+  - script
 
 # Optional: enable Docker runner (requires Docker daemon access)
 # docker: {}
@@ -173,7 +173,7 @@ Workers download workspace files from the server as tarballs and cache them loca
 
 #### Container Runners
 
-By default, the worker only supports `type: shell` actions (runs directly on the host). To run actions inside **Docker containers** or **Kubernetes pods**, enable the respective runners:
+By default, the worker only supports `type: script` actions (runs directly on the host). To run actions inside **Docker containers** or **Kubernetes pods**, enable the respective runners:
 
 **Docker runner** — Build the worker with the `docker` feature and add `docker: {}` to the worker config. The worker needs access to a Docker daemon (local socket or DinD sidecar in K8s).
 
@@ -193,7 +193,7 @@ Both features can be enabled simultaneously:
 cargo build -p stroem-worker --features docker,kubernetes
 ```
 
-See the [Runners guide](https://fremvaerk.github.io/stroem/guides/runners/) for how to write workflows using `type: docker` and `type: pod` actions.
+See the [Runners guide](https://fremvaerk.github.io/stroem/guides/runners/) for how to write workflows using `type: docker`, `type: pod`, and multi-language `type: script` actions.
 
 ## CLI
 
@@ -289,13 +289,13 @@ Workflows are defined in YAML files under `workspace/.workflows/`. See the [docu
 ```yaml
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
       name: { type: string, required: true }
 
   shout:
-    type: shell
+    type: script
     cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
       message: { type: string, required: true }
@@ -318,7 +318,7 @@ tasks:
 ```
 
 Key concepts:
-- **Actions** are reusable execution units (shell commands, scripts)
+- **Actions** are reusable execution units (scripts in shell, Python, JS/TS, Go)
 - **Tasks** compose actions into a DAG (directed acyclic graph) of steps
 - **Steps** can pass data via `OUTPUT: {json}` lines in stdout
 - **Templating** uses Tera syntax (`{{ variable }}`) for dynamic values

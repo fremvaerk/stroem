@@ -62,7 +62,7 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: /var/stroem/workspace-cache
 capabilities:
-  - shell
+  - script
 ```
 
 ### Custom workflows

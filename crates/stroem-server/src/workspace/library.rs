@@ -406,13 +406,16 @@ mod tests {
 
     fn make_shell_action(cmd: &str) -> ActionDef {
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some(cmd.to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -435,6 +438,9 @@ mod tests {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -771,10 +777,10 @@ mod tests {
             r#"
 actions:
   slack-notify:
-    type: shell
+    type: script
     cmd: "echo notify"
   pagerduty-alert:
-    type: shell
+    type: script
     cmd: "echo alert"
 tasks:
   full-deploy:
@@ -860,7 +866,7 @@ connections:
             r#"
 actions:
   slack-notify:
-    type: shell
+    type: script
     cmd: "echo notify"
 tasks:
   deploy:
@@ -901,7 +907,7 @@ tasks:
         // Build a tree with .workflows directory
         let yaml_content = r#"actions:
   slack-notify:
-    type: shell
+    type: script
     cmd: echo notify
 tasks:
   deploy:
@@ -1027,7 +1033,7 @@ tasks:
         fs::create_dir(&workflows_dir).unwrap();
         fs::write(
             workflows_dir.join("actions.yaml"),
-            "actions:\n  notify:\n    type: shell\n    cmd: echo hi\n",
+            "actions:\n  notify:\n    type: script\n    cmd: echo hi\n",
         )
         .unwrap();
 
@@ -1130,10 +1136,10 @@ tasks:
             r#"
 actions:
   slack-notify:
-    type: shell
+    type: script
     cmd: "echo notifying"
   run-deploy:
-    type: shell
+    type: script
     cmd: "echo deploying"
 tasks:
   deploy-pipeline:
@@ -1165,7 +1171,7 @@ connection_types:
             r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "echo building"
 tasks:
   ci-pipeline:
@@ -1286,10 +1292,10 @@ tasks:
             r#"
 actions:
   slack-notify:
-    type: shell
+    type: script
     cmd: "echo notifying"
   run-deploy:
-    type: shell
+    type: script
     cmd: "echo deploying"
 tasks:
   deploy-pipeline:
@@ -1321,7 +1327,7 @@ connection_types:
             r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "echo building"
 tasks:
   broken-pipeline:

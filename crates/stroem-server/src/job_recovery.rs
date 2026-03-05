@@ -393,7 +393,7 @@ mod tests {
             job_id: Uuid::new_v4(),
             step_name: "hook".to_string(),
             action_name: "notify".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: None,
             input: None,

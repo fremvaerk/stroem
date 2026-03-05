@@ -1,3 +1,4 @@
+use crate::script_exec;
 use crate::traits::{
     parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode,
 };
@@ -11,6 +12,7 @@ use bollard::query_parameters::{
 };
 use bollard::Docker;
 use futures_util::StreamExt;
+use stroem_common::language::ScriptLanguage;
 use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::DEFAULT_RUNNER_IMAGE;
@@ -48,10 +50,39 @@ impl DockerRunner {
                     .unwrap_or(DEFAULT_RUNNER_IMAGE)
                     .to_string();
 
+                let lang = ScriptLanguage::from_str_opt(config.language.as_deref());
                 let cmd = if let Some(ref command) = config.cmd {
-                    vec!["sh".to_string(), "-c".to_string(), command.clone()]
+                    if lang.is_shell()
+                        && config.dependencies.is_empty()
+                        && config.interpreter.is_none()
+                    {
+                        vec!["sh".to_string(), "-c".to_string(), command.clone()]
+                    } else {
+                        script_exec::build_container_script_cmd(
+                            command,
+                            lang,
+                            &config.dependencies,
+                            config.interpreter.as_deref(),
+                        )
+                    }
                 } else if let Some(ref script) = config.script {
-                    vec!["sh".to_string(), "-c".to_string(), script.clone()]
+                    // `script` is already an absolute path resolved by the executor
+                    // (e.g. "/workspace/actions/hello.py").
+                    if lang.is_shell()
+                        && config.dependencies.is_empty()
+                        && config.interpreter.is_none()
+                    {
+                        vec!["sh".to_string(), "-c".to_string(), script.clone()]
+                    } else {
+                        // Non-shell language or deps/interpreter specified: invoke the correct
+                        // interpreter on the file rather than running it with sh.
+                        script_exec::build_container_file_cmd(
+                            script,
+                            lang,
+                            &config.dependencies,
+                            config.interpreter.as_deref(),
+                        )
+                    }
                 } else {
                     vec!["echo".to_string(), "No command specified".to_string()]
                 };
@@ -89,13 +120,25 @@ impl DockerRunner {
                 let entrypoint = config.entrypoint.clone();
 
                 // Determine cmd: explicit command > cmd > image defaults (None)
+                let lang = ScriptLanguage::from_str_opt(config.language.as_deref());
                 let cmd = if let Some(ref command) = config.command {
                     Some(command.clone())
                 } else {
-                    config
-                        .cmd
-                        .as_ref()
-                        .map(|c| vec!["sh".to_string(), "-c".to_string(), c.clone()])
+                    config.cmd.as_ref().map(|c| {
+                        if lang.is_shell()
+                            && config.dependencies.is_empty()
+                            && config.interpreter.is_none()
+                        {
+                            vec!["sh".to_string(), "-c".to_string(), c.clone()]
+                        } else {
+                            script_exec::build_container_script_cmd(
+                                c,
+                                lang,
+                                &config.dependencies,
+                                config.interpreter.as_deref(),
+                            )
+                        }
+                    })
                 };
 
                 ContainerCreateBody {
@@ -354,6 +397,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -394,6 +440,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -414,6 +463,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -424,6 +476,105 @@ mod tests {
                 "-c".to_string(),
                 "/workspace/deploy.sh".to_string()
             ])
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_with_python_script() {
+        // Non-shell script files must be invoked with the correct interpreter,
+        // not wrapped in `sh -c <path>` which would fail for .py files.
+        let config = RunConfig {
+            cmd: None,
+            script: Some("/workspace/actions/hello.py".to_string()),
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        // Must use interpreter detection, NOT sh -c <path>
+        assert!(
+            cmd[2].contains("command -v uv") || cmd[2].contains("command -v python"),
+            "expected interpreter detection chain, got: {}",
+            cmd[2]
+        );
+        assert!(
+            cmd[2].contains("/workspace/actions/hello.py"),
+            "must reference the script file, got: {}",
+            cmd[2]
+        );
+        // Must NOT just execute the file as a shell script
+        assert_ne!(
+            cmd[2], "/workspace/actions/hello.py",
+            "must not use bare sh -c <path> for non-shell scripts"
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_with_python_script_and_deps() {
+        let config = RunConfig {
+            cmd: None,
+            script: Some("/workspace/actions/fetch.py".to_string()),
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec!["requests".to_string()],
+            interpreter: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        assert!(
+            cmd[2].contains("/workspace/actions/fetch.py"),
+            "must reference the script file"
+        );
+        assert!(cmd[2].contains("requests"), "must include the dependency");
+    }
+
+    #[test]
+    fn test_build_container_config_with_python_script_interpreter_override() {
+        let config = RunConfig {
+            cmd: None,
+            script: Some("/workspace/actions/run.py".to_string()),
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: Some("python3.12".to_string()),
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        assert!(
+            cmd[2].contains("python3.12 /workspace/actions/run.py"),
+            "must use the interpreter override: {}",
+            cmd[2]
         );
     }
 
@@ -441,6 +592,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -471,6 +625,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -506,6 +663,9 @@ mod tests {
             entrypoint: Some(vec!["/app/run".to_string()]),
             command: Some(vec!["--env".to_string(), "prod".to_string()]),
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -535,6 +695,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -566,6 +729,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -582,13 +748,16 @@ mod tests {
             script: None,
             env: HashMap::new(),
             workdir: String::new(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             image: None,
             runner_mode: RunnerMode::WithWorkspace,
             runner_image: None,
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -617,12 +786,99 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
         let env_vec = container_config.env.unwrap();
         assert!(env_vec.contains(&"TOKEN=secret123".to_string()));
         // No workspace bind mounts in NoWorkspace mode
+        assert!(container_config.host_config.is_none());
+    }
+
+    #[test]
+    fn test_build_container_config_with_python_cmd() {
+        // WithWorkspace mode: language=python, cmd set → must route through
+        // build_container_script_cmd (heredoc) rather than plain `sh -c`.
+        let config = RunConfig {
+            cmd: Some("print('hello')".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/workspace".to_string(),
+            action_type: "shell".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        // Must use heredoc (build_container_script_cmd path), not plain `sh -c <cmd>`.
+        assert!(
+            cmd[2].contains("STROEM_EOF_"),
+            "python cmd must use heredoc; got: {}",
+            cmd[2]
+        );
+        assert!(
+            cmd[2].contains("print('hello')"),
+            "heredoc must embed the cmd content; got: {}",
+            cmd[2]
+        );
+        // Must probe for a Python interpreter
+        assert!(
+            cmd[2].contains("command -v uv") || cmd[2].contains("command -v python"),
+            "must include interpreter detection; got: {}",
+            cmd[2]
+        );
+    }
+
+    #[test]
+    fn test_build_container_config_no_workspace_with_python_cmd() {
+        // NoWorkspace mode: language=python, cmd set → must also route through
+        // build_container_script_cmd, not the plain `sh -c` path.
+        let config = RunConfig {
+            cmd: Some("print('hello from nows')".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        // Must use heredoc path (build_container_script_cmd), not plain `sh -c <cmd>`.
+        assert!(
+            cmd[2].contains("STROEM_EOF_"),
+            "python cmd in NoWorkspace must use heredoc; got: {}",
+            cmd[2]
+        );
+        assert!(
+            cmd[2].contains("print('hello from nows')"),
+            "heredoc must embed the cmd content; got: {}",
+            cmd[2]
+        );
+        // No workspace bind mount in NoWorkspace mode
         assert!(container_config.host_config.is_none());
     }
 
@@ -644,6 +900,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let result = runner
@@ -672,6 +931,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let token = CancellationToken::new();

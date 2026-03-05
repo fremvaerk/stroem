@@ -35,7 +35,7 @@ use uuid::Uuid;
 fn test_workspace() -> WorkspaceConfig {
     let mut workspace = WorkspaceConfig::default();
 
-    // Action: greet (shell)
+    // Action: greet (script)
     let mut greet_input = HashMap::new();
     greet_input.insert(
         "name".to_string(),
@@ -54,13 +54,16 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo Hello $NAME".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -74,17 +77,20 @@ fn test_workspace() -> WorkspaceConfig {
         },
     );
 
-    // Action: shout (shell)
+    // Action: shout (script)
     workspace.actions.insert(
         "shout".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo $MSG | tr a-z A-Z".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -109,6 +115,9 @@ fn test_workspace() -> WorkspaceConfig {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: Some("docker:latest".to_string()),
             command: Some(vec![
@@ -534,7 +543,7 @@ fn test_workspace() -> WorkspaceConfig {
         },
     );
 
-    // Action: db-backup (shell with env templates)
+    // Action: db-backup (script with env templates)
     let mut db_input = HashMap::new();
     db_input.insert(
         "host".to_string(),
@@ -565,13 +574,16 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "db-backup".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("pg_dump -h {{ input.host }}".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -645,7 +657,7 @@ fn test_workspace() -> WorkspaceConfig {
         }),
     );
 
-    // Action: transform (shell with output)
+    // Action: transform (script with output)
     let mut transform_input = HashMap::new();
     transform_input.insert(
         "data".to_string(),
@@ -664,7 +676,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "transform".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
@@ -674,6 +686,9 @@ fn test_workspace() -> WorkspaceConfig {
             ),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -687,7 +702,7 @@ fn test_workspace() -> WorkspaceConfig {
         },
     );
 
-    // Action: summarize (shell with output)
+    // Action: summarize (script with output)
     let mut summarize_input = HashMap::new();
     summarize_input.insert(
         "value".to_string(),
@@ -706,7 +721,7 @@ fn test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "summarize".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
@@ -716,6 +731,9 @@ fn test_workspace() -> WorkspaceConfig {
             ),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -945,8 +963,8 @@ async fn register_test_worker(pool: &PgPool) -> Uuid {
         pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await
@@ -1089,12 +1107,12 @@ async fn test_worker_register_and_claim() -> Result<()> {
         job_id,
         step_name: "greet".to_string(),
         action_name: "greet".to_string(),
-        action_type: "shell".to_string(),
+        action_type: "script".to_string(),
         action_image: None,
         action_spec: Some(json!({"cmd": "echo Hello"})),
         input: Some(json!({"name": "{{ input.name }}"})),
         status: "ready".to_string(),
-        required_tags: vec!["shell".to_string()],
+        required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
     }];
@@ -1106,7 +1124,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "worker-1", "capabilities": ["shell"]}),
+            json!({"name": "worker-1", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -1118,7 +1136,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -1155,8 +1173,8 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -1167,7 +1185,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -1193,7 +1211,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -1293,8 +1311,8 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -1302,7 +1320,7 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -1567,7 +1585,7 @@ async fn test_worker_auth_required() -> Result<()> {
         .uri("/worker/register")
         .header("Content-Type", "application/json")
         .body(Body::from(
-            serde_json::to_string(&json!({"name": "bad", "capabilities": ["shell"]})).unwrap(),
+            serde_json::to_string(&json!({"name": "bad", "capabilities": ["script"]})).unwrap(),
         ))
         .unwrap();
 
@@ -1589,7 +1607,7 @@ async fn test_worker_auth_invalid_token() -> Result<()> {
         .header("Content-Type", "application/json")
         .header("Authorization", "Bearer wrong-token")
         .body(Body::from(
-            serde_json::to_string(&json!({"name": "bad", "capabilities": ["shell"]})).unwrap(),
+            serde_json::to_string(&json!({"name": "bad", "capabilities": ["script"]})).unwrap(),
         ))
         .unwrap();
 
@@ -1712,12 +1730,12 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         job_id,
         step_name: "step1".to_string(),
         action_name: "greet".to_string(),
-        action_type: "shell".to_string(),
+        action_type: "script".to_string(),
         action_image: None,
         action_spec: Some(json!({"cmd": "exit 1"})),
         input: None,
         status: "ready".to_string(),
-        required_tags: vec!["shell".to_string()],
+        required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
     }];
@@ -1808,12 +1826,12 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -1821,12 +1839,12 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -1834,12 +1852,12 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 3"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -1994,17 +2012,20 @@ async fn test_task_detail_connections() -> Result<()> {
         },
     );
 
-    // Action: run-query (shell)
+    // Action: run-query (script)
     workspace.actions.insert(
         "run-query".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo querying".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -2294,7 +2315,7 @@ async fn test_worker_heartbeat() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "hb-worker", "capabilities": ["shell"]}),
+            json!({"name": "hb-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2340,7 +2361,7 @@ async fn test_worker_start_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "start-worker", "capabilities": ["shell"]}),
+            json!({"name": "start-worker", "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2352,7 +2373,7 @@ async fn test_worker_start_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2421,7 +2442,7 @@ async fn test_job_started_at_visible_in_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "timing-worker", "capabilities": ["shell"]}),
+            json!({"name": "timing-worker", "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2433,7 +2454,7 @@ async fn test_job_started_at_visible_in_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2547,7 +2568,7 @@ async fn test_docker_action_type_flow() -> Result<()> {
     Ok(())
 }
 
-// ─── Test 22: Capability mismatch - shell worker can't claim docker ───
+// ─── Test 22: Capability mismatch - script worker can't claim docker ───
 
 #[tokio::test]
 async fn test_capability_mismatch_no_claim() -> Result<()> {
@@ -2564,24 +2585,24 @@ async fn test_capability_mismatch_no_claim() -> Result<()> {
         .await?;
     assert_eq!(response.status(), 200);
 
-    // Register shell-only worker
+    // Register script-only worker
     let response = router
         .clone()
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "shell-only", "capabilities": ["shell"]}),
+            json!({"name": "script-only", "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
     let worker_id = body["worker_id"].as_str().unwrap().to_string();
 
-    // Try to claim with shell capability - should get null (no matching docker step)
+    // Try to claim with script capability - should get null (no matching docker step)
     let response = router
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2597,7 +2618,7 @@ async fn test_capability_mismatch_no_claim() -> Result<()> {
 async fn test_multi_capability_worker() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup().await?;
 
-    // Create one shell job and one docker job
+    // Create one script job and one docker job
     let response = router
         .clone()
         .oneshot(api_request(
@@ -2624,7 +2645,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-worker", "capabilities": ["shell", "docker"]}),
+            json!({"name": "multi-worker", "capabilities": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2636,7 +2657,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell", "docker"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2649,7 +2670,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell", "docker"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2659,14 +2680,14 @@ async fn test_multi_capability_worker() -> Result<()> {
     // Both types should have been claimed
     let mut types = vec![first_type, second_type];
     types.sort();
-    assert_eq!(types, vec!["docker", "shell"]);
+    assert_eq!(types, vec!["docker", "script"]);
 
     // No more steps
     let response = router
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell", "docker"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2815,8 +2836,8 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -2827,7 +2848,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2849,7 +2870,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2886,8 +2907,8 @@ async fn test_first_step_template_rendering() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -2896,7 +2917,7 @@ async fn test_first_step_template_rendering() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2932,8 +2953,8 @@ async fn test_dependency_with_null_output() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -2944,7 +2965,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
 
@@ -2967,7 +2988,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3052,7 +3073,7 @@ async fn test_auth_no_bearer_prefix() -> Result<()> {
         .header("Content-Type", "application/json")
         .header("Authorization", "Token test-token-secret")
         .body(Body::from(
-            serde_json::to_string(&json!({"name": "bad", "capabilities": ["shell"]})).unwrap(),
+            serde_json::to_string(&json!({"name": "bad", "capabilities": ["script"]})).unwrap(),
         ))
         .unwrap();
 
@@ -3217,8 +3238,8 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3227,7 +3248,7 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3265,8 +3286,8 @@ async fn test_secret_reference_in_env() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3275,7 +3296,7 @@ async fn test_secret_reference_in_env() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3311,8 +3332,8 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3321,7 +3342,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3367,8 +3388,8 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3377,7 +3398,7 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3412,12 +3433,12 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo {{ input.nonexistent_var }}"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -3429,8 +3450,8 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3440,7 +3461,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3497,12 +3518,12 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"env": {"MY_VAR": "{{ input.missing_key }}"}})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -3514,8 +3535,8 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3524,7 +3545,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3573,12 +3594,12 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             job_id,
             step_name: "run".to_string(),
             action_name: "test-action".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"script": "#!/bin/bash\necho {{ input.undefined_var }}"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -3590,8 +3611,8 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3600,7 +3621,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3661,7 +3682,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             })),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "pod".to_string(),
             timeout_secs: None,
         }],
@@ -3673,8 +3694,8 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3683,7 +3704,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3738,7 +3759,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "none".to_string(),
             timeout_secs: None,
         }],
@@ -3750,8 +3771,8 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3760,7 +3781,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3816,8 +3837,8 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -3828,7 +3849,7 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let resp = router
@@ -3847,7 +3868,7 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 422);
@@ -3891,13 +3912,16 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
     workspace.actions.insert(
         "notify".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo {{ input.message }}".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -3915,13 +3939,16 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
     workspace.actions.insert(
         "broken".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo {{ input.undefined_var }}".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -4015,8 +4042,8 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -4026,7 +4053,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 422, "Render failure should return 422");
@@ -4080,13 +4107,16 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
     workspace.actions.insert(
         "broken-action".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo {{ input.nonexistent }}".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -4142,6 +4172,9 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -4239,8 +4272,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -4249,7 +4282,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 422, "Child step render should fail with 422");
@@ -4316,8 +4349,8 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -4326,7 +4359,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -4970,12 +5003,12 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -4983,12 +5016,12 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5075,12 +5108,12 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5088,12 +5121,12 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5194,12 +5227,12 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5207,12 +5240,12 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 2"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5220,12 +5253,12 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo 3"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5350,12 +5383,12 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         job_id,
         step_name: "doom".to_string(),
         action_name: "greet".to_string(),
-        action_type: "shell".to_string(),
+        action_type: "script".to_string(),
         action_image: None,
         action_spec: Some(json!({"cmd": "exit 1"})),
         input: None,
         status: "ready".to_string(),
-        required_tags: vec!["shell".to_string()],
+        required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
     }];
@@ -5481,12 +5514,12 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             job_id,
             step_name: "step-ok".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5494,12 +5527,12 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             job_id,
             step_name: "step-fail".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5609,12 +5642,12 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5622,12 +5655,12 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5716,12 +5749,12 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5729,12 +5762,12 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5830,12 +5863,12 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5843,12 +5876,12 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5943,12 +5976,12 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -5956,12 +5989,12 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -6063,12 +6096,12 @@ async fn test_cascading_skip() -> Result<()> {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "exit 1"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -6076,12 +6109,12 @@ async fn test_cascading_skip() -> Result<()> {
             job_id,
             step_name: "step2".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -6089,12 +6122,12 @@ async fn test_cascading_skip() -> Result<()> {
             job_id,
             step_name: "step3".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo ok"})),
             input: None,
             status: "pending".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         },
@@ -6129,13 +6162,16 @@ fn test_workspace_ops() -> WorkspaceConfig {
     workspace.actions.insert(
         "deploy".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo deploying...".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -6470,12 +6506,12 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         job_id,
         step_name: "run-deploy".to_string(),
         action_name: "deploy".to_string(),
-        action_type: "shell".to_string(),
+        action_type: "script".to_string(),
         action_image: None,
         action_spec: Some(json!({"cmd": "echo deploying..."})),
         input: None,
         status: "ready".to_string(),
-        required_tags: vec!["shell".to_string()],
+        required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
     }];
@@ -6487,7 +6523,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "w1", "capabilities": ["shell"]}),
+            json!({"name": "w1", "capabilities": ["script"]}),
         ))
         .await?;
     let reg_body = body_json(resp).await;
@@ -6498,7 +6534,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -6581,7 +6617,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
     std::fs::create_dir_all(&workflows_dir)?;
     std::fs::write(
         workflows_dir.join("test.yaml"),
-        "actions:\n  greet:\n    type: shell\n    cmd: echo hi\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+        "actions:\n  greet:\n    type: script\n    cmd: echo hi\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
     )?;
 
     let config = ServerConfig {
@@ -6744,7 +6780,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
     std::fs::create_dir_all(&workflows_dir)?;
     std::fs::write(
         workflows_dir.join("test.yaml"),
-        "actions:\n  greet:\n    type: shell\n    cmd: echo hi\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+        "actions:\n  greet:\n    type: script\n    cmd: echo hi\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
     )?;
 
     let config = ServerConfig {
@@ -6825,7 +6861,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
     std::fs::create_dir_all(&workflows_dir)?;
     std::fs::write(
         workflows_dir.join("test.yaml"),
-        "actions:\n  a:\n    type: shell\n    cmd: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+        "actions:\n  a:\n    type: script\n    cmd: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
     )?;
 
     let config = ServerConfig {
@@ -6920,7 +6956,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
     let yaml_path = workflows_dir.join("test.yaml");
     std::fs::write(
         &yaml_path,
-        "actions:\n  greet:\n    type: shell\n    cmd: echo v1\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+        "actions:\n  greet:\n    type: script\n    cmd: echo v1\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
     )?;
 
     let ws_path_str = ws_dir.path().to_string_lossy().to_string();
@@ -6982,7 +7018,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
     // Modify workspace content — change the YAML
     std::fs::write(
         &yaml_path,
-        "actions:\n  greet:\n    type: shell\n    cmd: echo v2\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+        "actions:\n  greet:\n    type: script\n    cmd: echo v2\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
     )?;
 
     // Reload the workspace so revision updates
@@ -7054,7 +7090,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
     std::fs::create_dir_all(&workflows_dir)?;
     std::fs::write(
         workflows_dir.join("test.yaml"),
-        "actions:\n  a:\n    type: shell\n    cmd: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+        "actions:\n  a:\n    type: script\n    cmd: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
     )?;
 
     let config = ServerConfig {
@@ -7271,12 +7307,12 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             job_id: job_id_default,
             step_name: "greet".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo Hello"})),
             input: Some(json!({"name": "Test"})),
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -7301,12 +7337,12 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             job_id: job_id_ops,
             step_name: "run-deploy".to_string(),
             action_name: "deploy".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo deploying..."})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -7319,7 +7355,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-ws-worker", "capabilities": ["shell"]}),
+            json!({"name": "multi-ws-worker", "capabilities": ["script"]}),
         ))
         .await?;
     let reg_body = body_json(resp).await;
@@ -7331,7 +7367,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": &worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": &worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -7362,7 +7398,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": &worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": &worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -7383,7 +7419,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": &worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": &worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -8016,17 +8052,20 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
 fn hook_test_workspace() -> WorkspaceConfig {
     let mut workspace = WorkspaceConfig::default();
 
-    // Action: deploy (shell)
+    // Action: deploy (script)
     workspace.actions.insert(
         "deploy".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo deploying".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -8040,17 +8079,20 @@ fn hook_test_workspace() -> WorkspaceConfig {
         },
     );
 
-    // Action: crash (shell, always fails)
+    // Action: crash (script, always fails)
     workspace.actions.insert(
         "crash".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("exit 1".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -8083,13 +8125,16 @@ fn hook_test_workspace() -> WorkspaceConfig {
     workspace.actions.insert(
         "notify".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo {{ input.message }}".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -9041,17 +9086,20 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
 fn task_action_test_workspace() -> WorkspaceConfig {
     let mut workspace = WorkspaceConfig::default();
 
-    // Action: greet (shell)
+    // Action: greet (script)
     workspace.actions.insert(
         "greet".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo hello".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -9076,6 +9124,9 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -9244,7 +9295,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
     let child_steps = JobStepRepo::get_steps_for_job(&pool, child_job.job_id).await?;
     assert_eq!(child_steps.len(), 1);
     assert_eq!(child_steps[0].step_name, "clean");
-    assert_eq!(child_steps[0].action_type, "shell");
+    assert_eq!(child_steps[0].action_type, "script");
     assert_eq!(child_steps[0].status, "ready");
 
     Ok(())
@@ -9403,7 +9454,7 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
 
     // Register a worker and try to claim
     let worker_id = register_test_worker(&pool).await;
-    let claimed = JobStepRepo::claim_ready_step(&pool, &["shell".to_string()], worker_id).await?;
+    let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], worker_id).await?;
 
     // Worker should NOT claim the task-type step
     assert!(claimed.is_none(), "Worker should not claim task-type steps");
@@ -9432,6 +9483,9 @@ async fn test_task_action_input_rendered() -> Result<()> {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -9608,7 +9662,7 @@ async fn test_task_action_in_hook() -> Result<()> {
     let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
     assert_eq!(hook_steps.len(), 1);
     assert_eq!(hook_steps[0].step_name, "clean");
-    assert_eq!(hook_steps[0].action_type, "shell");
+    assert_eq!(hook_steps[0].action_type, "script");
     assert_eq!(hook_steps[0].status, "ready");
 
     Ok(())
@@ -9621,7 +9675,7 @@ async fn test_task_action_self_reference_rejected() -> Result<()> {
     let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
   run-self:
     type: task
@@ -9696,6 +9750,9 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -9942,7 +9999,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
 
     // Register worker and claim step
     let worker_id = register_test_worker(&pool).await;
-    let tags = vec!["shell".to_string()];
+    let tags = vec!["script".to_string()];
     let step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id)
         .await?
         .expect("Should claim step");
@@ -9995,7 +10052,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
 
     // Claim step1
     let worker_id = register_test_worker(&pool).await;
-    let tags = vec!["shell".to_string()];
+    let tags = vec!["script".to_string()];
     let step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id)
         .await?
         .expect("Should claim step1");
@@ -10096,7 +10153,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
 
     // First, complete the "build" step so "run-cleanup" (task step) gets promoted
     let worker_id = register_test_worker(&pool).await;
-    let tags = vec!["shell".to_string()];
+    let tags = vec!["script".to_string()];
     let build_step = JobStepRepo::claim_ready_step(&pool, &tags, worker_id)
         .await?
         .expect("Should claim build step");
@@ -11822,13 +11879,16 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
     workspace.actions.insert(
         "execute-query".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo running query".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -11928,8 +11988,8 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;
@@ -11938,7 +11998,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -11984,19 +12044,22 @@ async fn setup_sync_webhook() -> Result<(
     let log_dir = temp_dir.path().join("logs");
     std::fs::create_dir_all(&log_dir)?;
 
-    // Minimal workspace: one shell action, one task, one sync webhook trigger.
+    // Minimal workspace: one script action, one task, one sync webhook trigger.
     let mut workspace = WorkspaceConfig::new();
 
     workspace.actions.insert(
         "noop".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("true".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -12203,7 +12266,7 @@ async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "stale-worker", "capabilities": ["shell"]}),
+            json!({"name": "stale-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12217,7 +12280,7 @@ async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12290,7 +12353,7 @@ async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "active-worker", "capabilities": ["shell"]}),
+            json!({"name": "active-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12303,7 +12366,7 @@ async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12358,7 +12421,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-worker", "capabilities": ["shell"]}),
+            json!({"name": "multi-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12372,7 +12435,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12395,7 +12458,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12455,7 +12518,7 @@ async fn test_recovery_worker_reactivation_on_heartbeat_via_api() -> Result<()> 
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "reactivate-worker", "capabilities": ["shell"]}),
+            json!({"name": "reactivate-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12501,13 +12564,16 @@ async fn setup_scheduler_workspace(
     workspace.actions.insert(
         "echo-action".to_string(),
         ActionDef {
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             name: None,
             description: None,
             task: None,
             cmd: Some("echo hello".to_string()),
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -12910,12 +12976,12 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             job_id: job_id_default,
             step_name: "say-hello".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo Hello"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -12939,12 +13005,12 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             job_id: job_id_ops,
             step_name: "run-deploy".to_string(),
             action_name: "deploy".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(json!({"cmd": "echo deploying"})),
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["shell".to_string()],
+            required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
         }],
@@ -12957,7 +13023,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-ws-worker", "capabilities": ["shell"]}),
+            json!({"name": "multi-ws-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -12970,7 +13036,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -13002,7 +13068,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["shell"]}),
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -13121,11 +13187,11 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
     for (dir, yaml) in [
         (
             ws_default_dir.path(),
-            "actions:\n  greet:\n    type: shell\n    cmd: echo hi\ntasks:\n  hello-world:\n    flow:\n      s1:\n        action: greet\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo hi\ntasks:\n  hello-world:\n    flow:\n      s1:\n        action: greet\n",
         ),
         (
             ws_ops_dir.path(),
-            "actions:\n  deploy:\n    type: shell\n    cmd: echo deploying\ntasks:\n  deploy-app:\n    flow:\n      run-deploy:\n        action: deploy\n",
+            "actions:\n  deploy:\n    type: script\n    cmd: echo deploying\ntasks:\n  deploy-app:\n    flow:\n      run-deploy:\n        action: deploy\n",
         ),
     ] {
         let wf_dir = dir.join(".workflows");
@@ -13269,7 +13335,7 @@ async fn test_worker_register_with_version_stored_in_db() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "versioned-worker", "capabilities": ["shell"], "version": "0.5.9"}),
+            json!({"name": "versioned-worker", "capabilities": ["script"], "version": "0.5.9"}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -13294,7 +13360,7 @@ async fn test_worker_register_without_version_stores_null() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "legacy-worker", "capabilities": ["shell"]}),
+            json!({"name": "legacy-worker", "capabilities": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -13320,7 +13386,7 @@ async fn test_list_workers_response_includes_version() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "v-worker", "capabilities": ["shell"], "version": "1.2.3"}),
+            json!({"name": "v-worker", "capabilities": ["script"], "version": "1.2.3"}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);

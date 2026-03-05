@@ -148,7 +148,7 @@ impl std::str::FromStr for SourceType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionType {
-    Shell,
+    Script,
     Docker,
     Pod,
     Task,
@@ -163,7 +163,7 @@ impl fmt::Display for ActionType {
 impl AsRef<str> for ActionType {
     fn as_ref(&self) -> &str {
         match self {
-            Self::Shell => "shell",
+            Self::Script => "script",
             Self::Docker => "docker",
             Self::Pod => "pod",
             Self::Task => "task",
@@ -175,7 +175,7 @@ impl std::str::FromStr for ActionType {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "shell" => Ok(Self::Shell),
+            "script" => Ok(Self::Script),
             "docker" => Ok(Self::Docker),
             "pod" => Ok(Self::Pod),
             "task" => Ok(Self::Task),
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_action_type_display() {
-        assert_eq!(ActionType::Shell.to_string(), "shell");
+        assert_eq!(ActionType::Script.to_string(), "script");
         assert_eq!(ActionType::Docker.to_string(), "docker");
         assert_eq!(ActionType::Pod.to_string(), "pod");
         assert_eq!(ActionType::Task.to_string(), "task");
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_action_type_from_str() {
-        assert_eq!("shell".parse::<ActionType>().unwrap(), ActionType::Shell);
+        assert_eq!("script".parse::<ActionType>().unwrap(), ActionType::Script);
         assert_eq!("docker".parse::<ActionType>().unwrap(), ActionType::Docker);
         assert_eq!("pod".parse::<ActionType>().unwrap(), ActionType::Pod);
         assert_eq!("task".parse::<ActionType>().unwrap(), ActionType::Task);
@@ -393,9 +393,9 @@ mod tests {
 
     #[test]
     fn test_action_type_serde_roundtrip() {
-        let action_type = ActionType::Shell;
+        let action_type = ActionType::Script;
         let json = serde_json::to_string(&action_type).unwrap();
-        assert_eq!(json, r#""shell""#);
+        assert_eq!(json, r#""script""#);
         let parsed: ActionType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, action_type);
     }
@@ -452,7 +452,7 @@ mod tests {
             job_id,
             step_name: "step1".to_string(),
             action_name: "greet".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: Some(serde_json::json!({"cmd": "echo hello"})),
             input: Some(serde_json::json!({"name": "world"})),
@@ -466,7 +466,7 @@ mod tests {
 
         assert_eq!(step.job_id, job_id);
         assert_eq!(step.step_name, "step1");
-        assert_eq!(step.action_type, "shell");
+        assert_eq!(step.action_type, "script");
         assert_eq!(step.status, StepStatus::Pending);
     }
 

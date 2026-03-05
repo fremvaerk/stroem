@@ -831,7 +831,7 @@ mod tests {
                 task_name: "test-task".to_string(),
                 step_name: "test-step".to_string(),
                 action_name: "test-action".to_string(),
-                action_type: "shell".to_string(),
+                action_type: "script".to_string(),
                 action_image: None,
                 action_spec: Some(serde_json::json!({"cmd": cmd})),
                 input: None,

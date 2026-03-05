@@ -88,10 +88,10 @@ workspace_cache_dir: /tmp/stroem-workspace
 
 # Tags declare what this worker can run
 tags:
-  - shell
+  - script
   - docker
 
-# Default image for Type 2 shell-in-container execution
+# Default image for Type 2 script-in-container execution
 # runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
 
 # Optional: Docker runner
@@ -113,7 +113,7 @@ tags:
 | `max_concurrent` | No | Max concurrent step executions (default: 4) |
 | `poll_interval_secs` | No | Poll frequency in seconds (default: 2) |
 | `workspace_cache_dir` | No | Local cache for workspace tarballs |
-| `tags` | No | Tags for step routing (default: `["shell"]`) |
+| `tags` | No | Tags for step routing (default: `["script"]`) |
 | `runner_image` | No | Default Docker image for Type 2 container steps |
 | `docker` | No | Enable Docker runner (empty object `{}`) |
 | `kubernetes` | No | Kubernetes runner config |

@@ -1,3 +1,4 @@
+use crate::script_exec;
 use crate::traits::{
     parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner, RunnerMode,
 };
@@ -10,6 +11,7 @@ use kube::Client;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use stroem_common::language::ScriptLanguage;
 use tokio_util::sync::CancellationToken;
 
 use stroem_common::constants::{DEFAULT_INIT_IMAGE, DEFAULT_RUNNER_IMAGE};
@@ -64,10 +66,33 @@ impl KubeRunner {
         image: &str,
         env: &[serde_json::Value],
     ) -> serde_json::Value {
+        let lang = ScriptLanguage::from_str_opt(config.language.as_deref());
         let cmd = if let Some(ref command) = config.cmd {
-            vec!["sh".to_string(), "-c".to_string(), command.clone()]
+            if lang.is_shell() && config.dependencies.is_empty() && config.interpreter.is_none() {
+                vec!["sh".to_string(), "-c".to_string(), command.clone()]
+            } else {
+                script_exec::build_container_script_cmd(
+                    command,
+                    lang,
+                    &config.dependencies,
+                    config.interpreter.as_deref(),
+                )
+            }
         } else if let Some(ref script) = config.script {
-            vec!["sh".to_string(), "-c".to_string(), script.clone()]
+            // `script` is already an absolute path resolved by the executor
+            // (e.g. "/workspace/actions/hello.py").
+            if lang.is_shell() && config.dependencies.is_empty() && config.interpreter.is_none() {
+                vec!["sh".to_string(), "-c".to_string(), script.clone()]
+            } else {
+                // Non-shell language or deps/interpreter specified: invoke the correct
+                // interpreter on the file rather than running it with sh.
+                script_exec::build_container_file_cmd(
+                    script,
+                    lang,
+                    &config.dependencies,
+                    config.interpreter.as_deref(),
+                )
+            }
         } else {
             vec!["echo".to_string(), "No command specified".to_string()]
         };
@@ -145,14 +170,26 @@ impl KubeRunner {
         }
 
         // Set cmd/command args
+        let lang = ScriptLanguage::from_str_opt(config.language.as_deref());
         if let Some(ref command) = config.command {
             container["args"] = serde_json::json!(command);
         } else if let Some(ref cmd) = config.cmd {
             // If entrypoint is set, pass cmd as args
             if config.entrypoint.is_some() {
                 container["args"] = serde_json::json!([cmd]);
-            } else {
+            } else if lang.is_shell()
+                && config.dependencies.is_empty()
+                && config.interpreter.is_none()
+            {
                 container["command"] = serde_json::json!(["sh", "-c", cmd]);
+            } else {
+                let script_cmd = script_exec::build_container_script_cmd(
+                    cmd,
+                    lang,
+                    &config.dependencies,
+                    config.interpreter.as_deref(),
+                );
+                container["command"] = serde_json::json!(script_cmd);
             }
         }
         // If nothing is set, image default entrypoint/cmd runs
@@ -1091,6 +1128,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let mut labels = HashMap::new();
@@ -1160,6 +1200,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let mut labels = HashMap::new();
@@ -1206,6 +1249,9 @@ mod tests {
             entrypoint: Some(vec!["/app/run".to_string()]),
             command: Some(vec!["--verbose".to_string()]),
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let mut labels = HashMap::new();
@@ -1225,6 +1271,140 @@ mod tests {
 
     fn containers_image(containers: &[k8s_openapi::api::core::v1::Container]) -> &str {
         containers[0].image.as_deref().unwrap_or("")
+    }
+
+    #[test]
+    fn test_build_pod_spec_with_python_cmd() {
+        // WithWorkspace mode: language=python, cmd set → the step container command
+        // must use the interpreter detection chain, not a plain `sh -c <cmd>`.
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: Some("print('hello')".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "shell".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "stroem-step".to_string());
+
+        let pod = runner
+            .build_pod_spec("test-pod-py-cmd", &config, "default", labels)
+            .unwrap();
+
+        let spec = pod.spec.unwrap();
+        let step_container = &spec.containers[0];
+        assert_eq!(step_container.name, "step");
+
+        // The command must be the sh -c <heredoc> wrapper.
+        let container_cmd = step_container
+            .command
+            .as_ref()
+            .expect("command must be set");
+        assert_eq!(container_cmd[0], "sh");
+        assert_eq!(container_cmd[1], "-c");
+        // Must use heredoc path, not plain `sh -c <cmd>`.
+        assert!(
+            container_cmd[2].contains("STROEM_EOF_"),
+            "python cmd must use heredoc; got: {}",
+            container_cmd[2]
+        );
+        assert!(
+            container_cmd[2].contains("print('hello')"),
+            "heredoc must embed the cmd content; got: {}",
+            container_cmd[2]
+        );
+        // Must include interpreter detection
+        assert!(
+            container_cmd[2].contains("command -v uv")
+                || container_cmd[2].contains("command -v python"),
+            "must include interpreter detection; got: {}",
+            container_cmd[2]
+        );
+    }
+
+    #[test]
+    fn test_build_pod_spec_no_workspace_with_python_cmd() {
+        // NoWorkspace mode: language=python, cmd set → must also use
+        // build_container_script_cmd (interpreter detection chain).
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: Some("print('hello from nows')".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), "stroem-step".to_string());
+
+        let pod = runner
+            .build_pod_spec("test-pod-nows-py", &config, "default", labels)
+            .unwrap();
+
+        let spec = pod.spec.unwrap();
+
+        // No init container in NoWorkspace mode
+        assert!(
+            spec.init_containers.is_none() || spec.init_containers.as_ref().unwrap().is_empty(),
+            "NoWorkspace must have no init containers"
+        );
+
+        let step_container = &spec.containers[0];
+        let container_cmd = step_container
+            .command
+            .as_ref()
+            .expect("command must be set");
+        assert_eq!(container_cmd[0], "sh");
+        assert_eq!(container_cmd[1], "-c");
+        // Must use heredoc (build_container_script_cmd path), not plain `sh -c <cmd>`.
+        assert!(
+            container_cmd[2].contains("STROEM_EOF_"),
+            "python cmd in NoWorkspace must use heredoc; got: {}",
+            container_cmd[2]
+        );
+        assert!(
+            container_cmd[2].contains("print('hello from nows')"),
+            "heredoc must embed the cmd content; got: {}",
+            container_cmd[2]
+        );
+        // Must include interpreter detection
+        assert!(
+            container_cmd[2].contains("command -v uv")
+                || container_cmd[2].contains("command -v python"),
+            "must include interpreter detection; got: {}",
+            container_cmd[2]
+        );
     }
 
     /// Integration test: requires a Kubernetes cluster.
@@ -1255,6 +1435,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let result = runner
@@ -1285,6 +1468,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -1320,6 +1506,151 @@ mod tests {
             .find(|e| e["name"] == "STROEM_WORKER_TOKEN")
             .expect("STROEM_WORKER_TOKEN env var should exist");
         assert_eq!(token_env["value"], "super-secret-token");
+    }
+
+    // --- script file handling tests ---
+
+    #[test]
+    fn test_build_pod_json_with_workspace_python_script() {
+        // Non-shell script files must invoke the correct interpreter, not sh -c <path>.
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: None,
+            script: Some("/workspace/actions/hello.py".to_string()),
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let pod_json = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "default",
+            &HashMap::new(),
+            "python:3.12",
+            &[],
+        );
+
+        let cmd = &pod_json["spec"]["containers"][0]["command"];
+        let cmd_str = cmd.to_string();
+        // The command array should be ["sh", "-c", "<script>"]
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        // Must contain interpreter detection chain, not a bare path
+        assert!(
+            cmd_str.contains("command -v uv") || cmd_str.contains("command -v python"),
+            "expected interpreter detection chain, got: {}",
+            cmd_str
+        );
+        assert!(
+            cmd_str.contains("/workspace/actions/hello.py"),
+            "must reference the script file, got: {}",
+            cmd_str
+        );
+        // Must NOT be the heredoc form (no STROEM_EOF delimiter)
+        assert!(
+            !cmd_str.contains("STROEM_EOF"),
+            "must not use heredoc for file scripts, got: {}",
+            cmd_str
+        );
+    }
+
+    #[test]
+    fn test_build_pod_json_with_workspace_shell_script_unchanged() {
+        // Shell scripts should still use the simple sh -c path form.
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: None,
+            script: Some("/workspace/deploy.sh".to_string()),
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None, // default shell
+            dependencies: vec![],
+            interpreter: None,
+        };
+
+        let pod_json = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "default",
+            &HashMap::new(),
+            "alpine:latest",
+            &[],
+        );
+
+        let cmd = &pod_json["spec"]["containers"][0]["command"];
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert_eq!(cmd[2], "/workspace/deploy.sh");
+    }
+
+    #[test]
+    fn test_build_pod_json_with_workspace_python_script_with_deps() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: None,
+            script: Some("/workspace/actions/fetch.py".to_string()),
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec!["requests".to_string()],
+            interpreter: None,
+        };
+
+        let pod_json = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "default",
+            &HashMap::new(),
+            "python:3.12",
+            &[],
+        );
+
+        let cmd = &pod_json["spec"]["containers"][0]["command"];
+        let cmd_str = cmd.to_string();
+        assert!(
+            cmd_str.contains("/workspace/actions/fetch.py"),
+            "must reference the script file"
+        );
+        assert!(cmd_str.contains("requests"), "must include the dependency");
     }
 
     // --- merge_json tests ---
@@ -1392,6 +1723,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: overrides,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         }
     }
 
@@ -1532,6 +1866,9 @@ mod tests {
                     "serviceAccountName": "my-sa"
                 }
             })),
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -1653,6 +1990,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -1703,6 +2043,9 @@ mod tests {
                     }]
                 }
             })),
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2503,6 +2846,9 @@ mod tests {
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
 
         let token = CancellationToken::new();

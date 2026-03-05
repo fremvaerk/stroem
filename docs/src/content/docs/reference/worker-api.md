@@ -24,8 +24,8 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 ```json
 {
   "name": "worker-1",
-  "capabilities": ["shell"],
-  "tags": ["shell", "docker"]
+  "capabilities": ["script"],
+  "tags": ["script", "docker"]
 }
 ```
 
@@ -72,8 +72,8 @@ Claims the next ready step that matches the worker's tags. Uses `SELECT FOR UPDA
 ```json
 {
   "worker_id": "w1w2w3w4-...",
-  "capabilities": ["shell"],
-  "tags": ["shell", "docker"]
+  "capabilities": ["script"],
+  "tags": ["script", "docker"]
 }
 ```
 
@@ -87,7 +87,7 @@ A step is only claimed if all of its `required_tags` are present in the worker's
   "workspace": "default",
   "step_name": "say-hello",
   "action_name": "greet",
-  "action_type": "shell",
+  "action_type": "script",
   "action_image": null,
   "runner": "local",
   "action_spec": {

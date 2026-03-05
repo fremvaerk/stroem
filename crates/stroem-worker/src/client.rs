@@ -441,7 +441,7 @@ mod tests {
             "workspace": "default",
             "step_name": "build",
             "action_name": "run",
-            "action_type": "shell",
+            "action_type": "script",
             "runner": "local"
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();
@@ -456,7 +456,7 @@ mod tests {
             "task_name": "deploy-api",
             "step_name": "build",
             "action_name": "run",
-            "action_type": "shell",
+            "action_type": "script",
             "runner": "local"
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();
@@ -471,7 +471,7 @@ mod tests {
             "task_name": null,
             "step_name": "build",
             "action_name": "run",
-            "action_type": "shell",
+            "action_type": "script",
             "runner": "local"
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();

@@ -199,7 +199,7 @@ mod tests {
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
 
 tasks:
@@ -230,7 +230,7 @@ tasks:
             r#"
 actions:
   action1:
-    type: shell
+    type: script
     cmd: "echo 1"
 tasks:
   task1:
@@ -247,7 +247,7 @@ tasks:
             r#"
 actions:
   action2:
-    type: shell
+    type: script
     cmd: "echo 2"
 tasks:
   task2:
@@ -280,7 +280,7 @@ tasks:
             r#"
 actions:
   test:
-    type: shell
+    type: script
     cmd: "echo test"
 "#,
         )
@@ -304,7 +304,7 @@ actions:
             r#"
 actions:
   test:
-    type: shell
+    type: script
     cmd: "echo test"
 "#,
         )
@@ -331,7 +331,7 @@ actions:
             r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 "#,
         )
@@ -349,7 +349,7 @@ actions:
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("test.yaml"),
-            "actions:\n  greet:\n    type: shell\n    cmd: echo hi\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo hi\n",
         )
         .unwrap();
 
@@ -366,14 +366,14 @@ actions:
 
         fs::write(
             &yaml_path,
-            "actions:\n  greet:\n    type: shell\n    cmd: echo v1\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo v1\n",
         )
         .unwrap();
         let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
 
         fs::write(
             &yaml_path,
-            "actions:\n  greet:\n    type: shell\n    cmd: echo v2\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo v2\n",
         )
         .unwrap();
         let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
@@ -389,14 +389,14 @@ actions:
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("a.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo a\n",
         )
         .unwrap();
         let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
 
         fs::write(
             temp_dir.path().join("b.yaml"),
-            "actions:\n  b:\n    type: shell\n    cmd: echo b\n",
+            "actions:\n  b:\n    type: script\n    cmd: echo b\n",
         )
         .unwrap();
         let rev2 = FolderSource::compute_revision(temp_dir.path()).unwrap();
@@ -409,13 +409,13 @@ actions:
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("a.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo a\n",
         )
         .unwrap();
         let b_path = temp_dir.path().join("b.yaml");
         fs::write(
             &b_path,
-            "actions:\n  b:\n    type: shell\n    cmd: echo b\n",
+            "actions:\n  b:\n    type: script\n    cmd: echo b\n",
         )
         .unwrap();
         let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
@@ -431,7 +431,7 @@ actions:
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("test.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo a\n",
         )
         .unwrap();
         let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
@@ -453,7 +453,7 @@ actions:
         fs::create_dir(&workflows_dir).unwrap();
         fs::write(
             workflows_dir.join("test.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo a\n",
         )
         .unwrap();
 
@@ -474,7 +474,7 @@ actions:
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("test.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo a\n",
         )
         .unwrap();
         let rev1 = FolderSource::compute_revision(temp_dir.path()).unwrap();
@@ -511,7 +511,7 @@ actions:
         // Initial load with one action
         fs::write(
             &yaml_path,
-            "actions:\n  greet:\n    type: shell\n    cmd: echo v1\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo v1\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
         )
         .unwrap();
 
@@ -525,7 +525,7 @@ actions:
         // Modify file: add another action
         fs::write(
             &yaml_path,
-            "actions:\n  greet:\n    type: shell\n    cmd: echo v2\n  build:\n    type: shell\n    cmd: make\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo v2\n  build:\n    type: script\n    cmd: make\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
         )
         .unwrap();
 
@@ -546,7 +546,7 @@ actions:
         let temp_dir = TempDir::new().unwrap();
         fs::write(
             temp_dir.path().join("test.yaml"),
-            "actions:\n  a:\n    type: shell\n    cmd: echo a\n",
+            "actions:\n  a:\n    type: script\n    cmd: echo a\n",
         )
         .unwrap();
 
@@ -570,14 +570,14 @@ actions:
         // Add a regular file so the workspace isn't empty
         fs::write(
             temp_dir.path().join("regular.yaml"),
-            "actions:\n  test:\n    type: shell\n    cmd: echo hi\n",
+            "actions:\n  test:\n    type: script\n    cmd: echo hi\n",
         )
         .unwrap();
 
         // Add a file named *.sops.yaml — this triggers the SOPS code path
         fs::write(
             temp_dir.path().join("secrets.sops.yaml"),
-            "actions:\n  secret:\n    type: shell\n    cmd: echo secret\n",
+            "actions:\n  secret:\n    type: script\n    cmd: echo secret\n",
         )
         .unwrap();
 
@@ -605,7 +605,7 @@ actions:
         // Also add a real workflow so we can verify it loads
         fs::write(
             temp_dir.path().join("workflow.yaml"),
-            "actions:\n  greet:\n    type: shell\n    cmd: echo hi\n",
+            "actions:\n  greet:\n    type: script\n    cmd: echo hi\n",
         )
         .unwrap();
 
@@ -629,7 +629,7 @@ tasks:
   hello:
     flow:
       say-hi:
-        type: shell
+        type: script
         cmd: "echo Hello"
       say-bye:
         type: docker
@@ -661,7 +661,7 @@ tasks:
 
         // Action content should be correct
         let hi = workspace.actions.get("_inline:hello:say-hi").unwrap();
-        assert_eq!(hi.action_type, "shell");
+        assert_eq!(hi.action_type, "script");
         assert_eq!(hi.cmd.as_deref(), Some("echo Hello"));
 
         let bye = workspace.actions.get("_inline:hello:say-bye").unwrap();
@@ -677,7 +677,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
 
 tasks:
@@ -686,7 +686,7 @@ tasks:
       ref-step:
         action: greet
       inline-step:
-        type: shell
+        type: script
         cmd: "echo Inline"
 "#;
         fs::write(&workflow_path, yaml).unwrap();

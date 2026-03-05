@@ -37,8 +37,8 @@ async fn register_worker(pool: &PgPool) -> Uuid {
         pool,
         id,
         "test-worker",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await
@@ -67,12 +67,12 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         job_id,
         step_name: name.to_string(),
         action_name: "noop".to_string(),
-        action_type: "shell".to_string(),
+        action_type: "script".to_string(),
         action_image: None,
         action_spec: Some(json!({"cmd": "true"})),
         input: None,
         status: status.to_string(),
-        required_tags: vec!["shell".to_string()],
+        required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
     }

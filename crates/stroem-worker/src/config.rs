@@ -79,7 +79,7 @@ pub struct KubeRunnerConfig {
 }
 
 fn default_capabilities() -> Vec<String> {
-    vec!["shell".to_string()]
+    vec!["script".to_string()]
 }
 
 pub fn load_config(path: &str) -> Result<WorkerConfig> {
@@ -114,7 +114,7 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
-  - shell
+  - script
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
@@ -124,7 +124,7 @@ capabilities:
         assert_eq!(config.max_concurrent, 4);
         assert_eq!(config.poll_interval_secs, 2);
         assert_eq!(config.workspace_cache_dir, "/tmp/stroem-workspace");
-        assert_eq!(config.capabilities, vec!["shell"]);
+        assert_eq!(config.capabilities, vec!["script"]);
     }
 
     #[test]
@@ -139,7 +139,7 @@ workspace_cache_dir: "/tmp/stroem-workspace"
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.capabilities, vec!["shell"]);
+        assert_eq!(config.capabilities, vec!["script"]);
     }
 
     #[test]
@@ -215,16 +215,16 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
-  - shell
+  - script
 tags:
-  - shell
+  - script
   - docker
   - node-20
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         // When tags is set, effective_tags() returns tags (not capabilities)
-        assert_eq!(config.effective_tags(), &["shell", "docker", "node-20"]);
+        assert_eq!(config.effective_tags(), &["script", "docker", "node-20"]);
     }
 
     #[test]
@@ -237,14 +237,14 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 capabilities:
-  - shell
+  - script
   - docker
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         // When tags is not set, effective_tags() falls back to capabilities
         assert!(config.tags.is_none());
-        assert_eq!(config.effective_tags(), &["shell", "docker"]);
+        assert_eq!(config.effective_tags(), &["script", "docker"]);
     }
 
     #[test]
@@ -257,7 +257,7 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
 tags:
-  - shell
+  - script
   - docker
   - gpu
 runner_image: "ghcr.io/myorg/stroem-runner:latest"
@@ -267,7 +267,7 @@ runner_image: "ghcr.io/myorg/stroem-runner:latest"
         assert_eq!(
             config.tags,
             Some(vec![
-                "shell".to_string(),
+                "script".to_string(),
                 "docker".to_string(),
                 "gpu".to_string()
             ])
@@ -276,7 +276,7 @@ runner_image: "ghcr.io/myorg/stroem-runner:latest"
             config.runner_image,
             Some("ghcr.io/myorg/stroem-runner:latest".to_string())
         );
-        assert_eq!(config.effective_tags(), &["shell", "docker", "gpu"]);
+        assert_eq!(config.effective_tags(), &["script", "docker", "gpu"]);
     }
 
     /// Serialize access to env vars in tests to avoid races between parallel tests

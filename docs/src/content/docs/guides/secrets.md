@@ -74,7 +74,7 @@ secrets:
 
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "deploy --token {{ secret.API_TOKEN }}"
     env:
       DB_PASSWORD: "{{ secret.DB_PASSWORD }}"

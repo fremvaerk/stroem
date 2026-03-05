@@ -1,10 +1,10 @@
 actions:
   check-status:
-    type: shell
+    type: script
     cmd: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
 
   deploy:
-    type: shell
+    type: script
     script: actions/deploy.sh
     input:
       env:
@@ -12,7 +12,7 @@ actions:
         default: "staging"
 
   notify:
-    type: shell
+    type: script
     cmd: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}' && echo 'OUTPUT: {\"notified\": true}'"
     input:
       env:

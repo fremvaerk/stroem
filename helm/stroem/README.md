@@ -190,7 +190,7 @@ worker:
     poll_interval_secs: 2
     workspace_cache_dir: /var/stroem/workspace-cache
     capabilities:
-      - shell
+      - script
       - docker
   dind:
     enabled: true
@@ -212,7 +212,7 @@ worker:
     poll_interval_secs: 2
     workspace_cache_dir: /var/stroem/workspace-cache
     capabilities:
-      - shell
+      - script
       - kubernetes
     kubernetes:
       namespace: stroem-jobs

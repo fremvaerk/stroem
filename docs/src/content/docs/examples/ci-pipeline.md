@@ -12,7 +12,7 @@ Create `workspace/.workflows/ci.yaml`:
 ```yaml
 actions:
   lint:
-    type: shell
+    type: script
     runner: docker
     cmd: |
       cd /workspace
@@ -20,7 +20,7 @@ actions:
       npm run lint
 
   test:
-    type: shell
+    type: script
     runner: docker
     cmd: |
       cd /workspace
@@ -28,7 +28,7 @@ actions:
       npm test
 
   build:
-    type: shell
+    type: script
     runner: docker
     cmd: |
       cd /workspace
@@ -37,7 +37,7 @@ actions:
       echo "OUTPUT: {\"artifact\": \"dist/app.tar.gz\"}"
 
   notify-ci:
-    type: shell
+    type: script
     cmd: |
       echo "CI result: {{ input.status }} for {{ input.ref }}"
       # In production, call Slack/Teams/GitHub API here

@@ -365,13 +365,16 @@ mod tests {
         config.actions.insert(
             "greet".to_string(),
             ActionDef {
-                action_type: "shell".to_string(),
+                action_type: "script".to_string(),
                 name: None,
                 description: None,
                 task: None,
                 cmd: Some("echo hello".to_string()),
                 script: None,
                 runner: None,
+                language: None,
+                dependencies: vec![],
+                interpreter: None,
                 tags: vec![],
                 image: None,
                 command: None,

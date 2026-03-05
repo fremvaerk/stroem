@@ -360,7 +360,7 @@ mod tests {
             job_id,
             step_name: name.to_string(),
             action_name: name.to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: None,
             input: None,

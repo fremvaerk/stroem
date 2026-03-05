@@ -576,39 +576,41 @@ fn check_task_self_reference(
 /// Validates a single action definition. Dispatches to a per-type helper.
 fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>> {
     match action.action_type.as_str() {
-        "shell" => validate_shell_action(action, action_name),
+        "script" => validate_script_action(action, action_name),
         "docker" => validate_docker_action(action, action_name),
         "pod" => validate_pod_action(action, action_name),
         "task" => validate_task_action(action, action_name),
         other => bail!(
-            "Action '{}' has invalid type '{}' (expected: shell, docker, pod, task)",
+            "Action '{}' has invalid type '{}' (expected: script, docker, pod, task)",
             action_name,
             other
         ),
     }
 }
 
-fn validate_shell_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
-    // Shell actions must have either cmd or script
+fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+
+    // Script actions must have either cmd or script
     if action.cmd.is_none() && action.script.is_none() {
         bail!(
-            "Action '{}' is type 'shell' but has neither 'cmd' nor 'script'",
+            "Action '{}' is type 'script' but has neither 'cmd' nor 'script'",
             action_name
         );
     }
 
-    // Shell actions should not have both cmd and script
+    // Script actions should not have both cmd and script
     if action.cmd.is_some() && action.script.is_some() {
         bail!(
-            "Action '{}' is type 'shell' but has both 'cmd' and 'script' - use only one",
+            "Action '{}' is type 'script' but has both 'cmd' and 'script' - use only one",
             action_name
         );
     }
 
-    // Shell actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
+    // Script actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
     if action.image.is_some() {
         bail!(
-            "Action '{}' is type 'shell' but has 'image' field. Use type: docker for container images, or runner: docker for shell-in-container",
+            "Action '{}' is type 'script' but has 'image' field. Use type: docker for container images, or runner: docker for shell-in-container",
             action_name
         );
     }
@@ -625,15 +627,15 @@ fn validate_shell_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
         }
     }
 
-    // Shell actions must not have entrypoint
+    // Script actions must not have entrypoint
     if action.entrypoint.is_some() {
         bail!(
-            "Action '{}' is type 'shell' but has 'entrypoint' field (only valid for docker/pod)",
+            "Action '{}' is type 'script' but has 'entrypoint' field (only valid for docker/pod)",
             action_name
         );
     }
 
-    // Manifest is only valid on shell + runner: pod
+    // Manifest is only valid on script + runner: pod
     if let Some(ref manifest) = action.manifest {
         let runner = action.runner.as_deref().unwrap_or("local");
         if runner != "pod" {
@@ -651,7 +653,86 @@ fn validate_shell_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
         }
     }
 
-    Ok(vec![])
+    // Validate language field if present
+    if let Some(ref lang) = action.language {
+        if !crate::language::VALID_LANGUAGE_NAMES.contains(&lang.as_str()) {
+            bail!(
+                "Action '{}' has invalid language '{}' (expected: {})",
+                action_name,
+                lang,
+                crate::language::VALID_LANGUAGE_NAMES.join(", ")
+            );
+        }
+    }
+
+    // Validate interpreter field - reject shell metacharacters
+    if let Some(ref interp) = action.interpreter {
+        if interp.is_empty() {
+            bail!("Action '{}' has empty 'interpreter' field", action_name);
+        }
+        if !interp
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-/+".contains(c))
+        {
+            bail!(
+                "Action '{}' has invalid 'interpreter' value '{}': only alphanumeric characters, dots, dashes, underscores, slashes, and plus signs are allowed",
+                action_name, interp
+            );
+        }
+    }
+
+    // Validate dependencies - reject shell metacharacters
+    for dep in &action.dependencies {
+        if dep.is_empty() {
+            bail!("Action '{}' has empty dependency entry", action_name);
+        }
+        // Allow typical package specifier chars: alphanumeric, dots, dashes, underscores,
+        // brackets, comparison operators, commas, at-signs, slashes, colons, tildes, spaces
+        // Reject shell metacharacters: ; & | $ ` ( ) { } > < \ newlines quotes
+        let has_shell_metachar = dep.chars().any(|c| {
+            matches!(
+                c,
+                ';' | '&'
+                    | '|'
+                    | '$'
+                    | '`'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '\\'
+                    | '\n'
+                    | '\r'
+                    | '\''
+                    | '"'
+            )
+        });
+        if has_shell_metachar {
+            bail!(
+                "Action '{}' has dependency '{}' containing shell metacharacters",
+                action_name,
+                dep
+            );
+        }
+    }
+
+    // Warn if dependencies set without explicit language
+    if !action.dependencies.is_empty() && action.language.is_none() {
+        warnings.push(format!(
+            "Action '{}' has 'dependencies' but no 'language' set (dependencies require a non-shell language)",
+            action_name
+        ));
+    }
+
+    // Warn if interpreter set without explicit language
+    if action.interpreter.is_some() && action.language.is_none() {
+        warnings.push(format!(
+            "Action '{}' has 'interpreter' but no 'language' set",
+            action_name
+        ));
+    }
+
+    Ok(warnings)
 }
 
 fn validate_docker_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
@@ -666,7 +747,7 @@ fn validate_docker_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
     // Docker actions must not have runner
     if action.runner.is_some() {
         bail!(
-            "Action '{}' is type 'docker' but has 'runner' field (runner is only for shell actions)",
+            "Action '{}' is type 'docker' but has 'runner' field (runner is only for script actions)",
             action_name
         );
     }
@@ -687,6 +768,26 @@ fn validate_docker_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
         );
     }
 
+    // Docker actions must not have language, dependencies, or interpreter
+    if action.language.is_some() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'language' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if !action.dependencies.is_empty() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'dependencies' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if action.interpreter.is_some() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'interpreter' field (only valid for script actions)",
+            action_name
+        );
+    }
+
     Ok(vec![])
 }
 
@@ -702,7 +803,7 @@ fn validate_pod_action(action: &ActionDef, action_name: &str) -> Result<Vec<Stri
     // Pod actions must not have runner
     if action.runner.is_some() {
         bail!(
-            "Action '{}' is type 'pod' but has 'runner' field (runner is only for shell actions)",
+            "Action '{}' is type 'pod' but has 'runner' field (runner is only for script actions)",
             action_name
         );
     }
@@ -723,6 +824,26 @@ fn validate_pod_action(action: &ActionDef, action_name: &str) -> Result<Vec<Stri
                 action_name
             );
         }
+    }
+
+    // Pod actions must not have language, dependencies, or interpreter
+    if action.language.is_some() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'language' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if !action.dependencies.is_empty() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'dependencies' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if action.interpreter.is_some() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'interpreter' field (only valid for script actions)",
+            action_name
+        );
     }
 
     Ok(vec![])
@@ -769,6 +890,26 @@ fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<Str
         );
     }
 
+    // Task actions must not have language, dependencies, or interpreter
+    if action.language.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'language' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if !action.dependencies.is_empty() {
+        bail!(
+            "Action '{}' is type 'task' but has 'dependencies' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if action.interpreter.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'interpreter' field (only valid for script actions)",
+            action_name
+        );
+    }
+
     Ok(vec![])
 }
 
@@ -797,14 +938,14 @@ pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
     }
 
     let base_tag = match action.action_type.as_str() {
-        "shell" => match action.runner.as_deref() {
+        "script" => match action.runner.as_deref() {
             Some("docker") => "docker",
             Some("pod") => "kubernetes",
-            _ => "shell",
+            _ => "script",
         },
         "docker" => "docker",
         "pod" => "kubernetes",
-        _ => "shell",
+        _ => "script",
     };
 
     let mut tags = vec![base_tag.to_string()];
@@ -820,7 +961,7 @@ pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
 /// Returns "local", "docker", "pod", or "none".
 pub fn derive_runner(action: &ActionDef) -> String {
     match action.action_type.as_str() {
-        "shell" => action.runner.as_deref().unwrap_or("local").to_string(),
+        "script" => action.runner.as_deref().unwrap_or("local").to_string(),
         "docker" | "pod" => "none".to_string(),
         "task" => "none".to_string(),
         _ => "local".to_string(),
@@ -838,7 +979,7 @@ mod tests {
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello"
   build:
     type: docker
@@ -869,7 +1010,7 @@ triggers:
         let yaml = r#"
 actions:
   bad:
-    type: shell
+    type: script
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -885,7 +1026,7 @@ actions:
         let yaml = r#"
 actions:
   bad:
-    type: shell
+    type: script
     cmd: "echo test"
     script: "test.sh"
 "#;
@@ -943,7 +1084,7 @@ actions:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo test"
 
 tasks:
@@ -966,7 +1107,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo test"
 
 tasks:
@@ -990,7 +1131,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo test"
 
 tasks:
@@ -1137,7 +1278,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     script: actions/deploy.sh
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -1150,7 +1291,7 @@ actions:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     image: node:20
     cmd: "npm run build"
 "#;
@@ -1168,10 +1309,10 @@ actions:
         let yaml = r#"
 actions:
   checkout:
-    type: shell
+    type: script
     cmd: "git clone repo"
   build:
-    type: shell
+    type: script
     runner: docker
     cmd: "npm run build"
   deploy:
@@ -1291,7 +1432,7 @@ secrets:
 
 actions:
   backup:
-    type: shell
+    type: script
     cmd: "pg_dump"
     env:
       DB_PASSWORD: "{{ secret.db_password }}"
@@ -1316,7 +1457,7 @@ secrets:
 
 actions:
   backup:
-    type: shell
+    type: script
     cmd: "pg_dump"
     env:
       DB_PASSWORD: "{{ secret.db.password }}"
@@ -1337,7 +1478,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: docker
     cmd: "npm test"
 "#;
@@ -1351,7 +1492,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: invalid
     cmd: "npm test"
 "#;
@@ -1366,7 +1507,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     cmd: "echo hi"
     entrypoint: ["/bin/sh"]
 "#;
@@ -1440,7 +1581,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: docker
     tags: ["node-20"]
     cmd: "npm test"
@@ -1451,24 +1592,24 @@ actions:
     }
 
     #[test]
-    fn test_compute_required_tags_shell_local() {
+    fn test_compute_required_tags_script_local() {
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 cmd: "echo test"
 "#,
         )
         .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["shell"]);
+        assert_eq!(compute_required_tags(&action), vec!["script"]);
     }
 
     #[test]
-    fn test_compute_required_tags_shell_docker() {
+    fn test_compute_required_tags_script_docker() {
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 runner: docker
 cmd: "npm test"
 "#,
@@ -1478,11 +1619,11 @@ cmd: "npm test"
     }
 
     #[test]
-    fn test_compute_required_tags_shell_docker_with_tags() {
+    fn test_compute_required_tags_script_docker_with_tags() {
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 runner: docker
 tags: ["node-20"]
 cmd: "npm test"
@@ -1533,11 +1674,11 @@ tags: ["gpu"]
     }
 
     #[test]
-    fn test_compute_required_tags_shell_pod() {
+    fn test_compute_required_tags_script_pod() {
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 runner: pod
 cmd: "npm test"
 "#,
@@ -1599,7 +1740,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: pod
     cmd: "npm test"
 "#;
@@ -1613,7 +1754,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: local
     cmd: "echo test"
 "#;
@@ -1627,7 +1768,7 @@ actions:
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 cmd: "echo test"
 "#,
         )
@@ -1640,7 +1781,7 @@ cmd: "echo test"
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 runner: docker
 cmd: "npm test"
 "#,
@@ -1654,7 +1795,7 @@ cmd: "npm test"
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
             r#"
-type: shell
+type: script
 runner: pod
 cmd: "npm test"
 "#,
@@ -1694,10 +1835,10 @@ image: alpine:latest
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "make deploy"
   notify:
-    type: shell
+    type: script
     cmd: "curl $WEBHOOK"
 
 tasks:
@@ -1724,7 +1865,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "make deploy"
 
 tasks:
@@ -1748,7 +1889,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "make deploy"
 
 tasks:
@@ -1769,7 +1910,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
   run-cleanup:
     type: task
@@ -1878,7 +2019,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
   run-self:
     type: task
@@ -1903,7 +2044,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
   run-self:
     type: task
@@ -1955,7 +2096,7 @@ task: other-task
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     cmd: "echo hi"
     manifest:
       spec:
@@ -1972,7 +2113,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: docker
     cmd: "echo hi"
     manifest:
@@ -2045,7 +2186,7 @@ actions:
         let yaml = r#"
 actions:
   test:
-    type: shell
+    type: script
     runner: pod
     cmd: "echo hi"
     manifest:
@@ -2097,7 +2238,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci:
@@ -2124,7 +2265,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci:
@@ -2150,7 +2291,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci:
@@ -2212,7 +2353,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci-pipeline:
@@ -2247,7 +2388,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci-pipeline:
@@ -2271,7 +2412,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci-pipeline:
@@ -2298,7 +2439,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci-pipeline:
@@ -2325,7 +2466,7 @@ triggers:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 tasks:
   ci-pipeline:
@@ -2376,7 +2517,7 @@ triggers:
         let yaml = r#"
 actions:
   notify:
-    type: shell
+    type: script
     cmd: "curl $WEBHOOK"
 
 on_success:
@@ -2398,7 +2539,7 @@ on_error:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 
 on_success:
@@ -2417,7 +2558,7 @@ on_success:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 
 on_error:
@@ -2587,7 +2728,7 @@ connection_types:
 
 actions:
   run-migration:
-    type: shell
+    type: script
     cmd: "migrate"
 
 tasks:
@@ -2611,7 +2752,7 @@ tasks:
         let yaml = r#"
 actions:
   run-migration:
-    type: shell
+    type: script
     cmd: "migrate"
 
 tasks:
@@ -2636,7 +2777,7 @@ tasks:
         let yaml = r#"
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo hello"
 
 tasks:
@@ -2668,7 +2809,7 @@ tasks:
         let yaml = r#"
 actions:
   run-query:
-    type: shell
+    type: script
     cmd: "echo hello"
     input:
       query:
@@ -2695,7 +2836,7 @@ tasks:
         let yaml = r#"
 actions:
   generate:
-    type: shell
+    type: script
     cmd: "echo report"
 tasks:
   report:
@@ -2730,7 +2871,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
     input:
       api_key:
@@ -2761,7 +2902,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
     input:
       password:
@@ -2792,7 +2933,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -2820,7 +2961,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
     input:
       env:
@@ -2850,7 +2991,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
     input:
       env:
@@ -2878,7 +3019,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -2904,7 +3045,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -2932,7 +3073,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -2959,7 +3100,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -2988,7 +3129,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -3014,7 +3155,7 @@ tasks:
         let yaml = r#"
 actions:
   deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   test:
@@ -3072,7 +3213,7 @@ tasks:
         let yaml = r#"
 actions:
   common.slack-notify:
-    type: shell
+    type: script
     cmd: "echo notify"
 tasks:
   test:
@@ -3134,7 +3275,7 @@ actions:
     type: task
     task: common.deploy-service
   run-step:
-    type: shell
+    type: script
     cmd: "echo running"
 tasks:
   common.deploy-service:
@@ -3161,7 +3302,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "echo build"
 tasks:
   test:
@@ -3193,10 +3334,10 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "echo build"
   common.alert:
-    type: shell
+    type: script
     cmd: "echo alert"
 tasks:
   test:
@@ -3223,7 +3364,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "echo build"
 tasks:
   test:
@@ -3259,10 +3400,10 @@ on_error:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "echo build"
   common.deploy:
-    type: shell
+    type: script
     cmd: "echo deploy"
 tasks:
   release:
@@ -3294,7 +3435,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   deploy:
@@ -3317,7 +3458,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   deploy:
@@ -3340,7 +3481,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   deploy:
@@ -3363,7 +3504,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   deploy:
@@ -3386,7 +3527,7 @@ tasks:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make build"
 tasks:
   deploy:
@@ -3419,7 +3560,7 @@ triggers:
         let yaml = r#"
 actions:
   etl:
-    type: shell
+    type: script
     cmd: "python etl.py"
 tasks:
   pipeline:
@@ -3446,7 +3587,7 @@ triggers:
         let yaml = r#"
 actions:
   build:
-    type: shell
+    type: script
     cmd: "make"
 tasks:
   ci:
@@ -3465,5 +3606,277 @@ triggers:
             trigger.concurrency(),
             crate::models::workflow::ConcurrencyPolicy::Allow
         );
+    }
+
+    // --- script action language / interpreter / dependency validation tests ---
+
+    #[test]
+    fn test_validate_script_action_invalid_language() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "ruby script.rb"
+    language: ruby
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid language"));
+    }
+
+    #[test]
+    fn test_validate_script_action_valid_languages() {
+        for lang in &["python", "javascript", "typescript", "go", "js", "ts"] {
+            let yaml = format!(
+                r#"
+actions:
+  run:
+    type: script
+    cmd: "echo hello"
+    language: {lang}
+"#
+            );
+            let config: WorkflowConfig = serde_yaml::from_str(&yaml).unwrap();
+            let result = validate_workflow_config(&config);
+            assert!(
+                result.is_ok(),
+                "language '{lang}' should be valid, got: {:?}",
+                result.unwrap_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_script_action_deps_without_language_warns() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "python script.py"
+    dependencies:
+      - requests
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "Should not error, got: {:?}", result);
+        let warnings = result.unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("dependencies") && w.contains("language")),
+            "Expected warning about dependencies without language, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_script_action_interpreter_without_language_warns() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "script.py"
+    interpreter: "python3.12"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "Should not error, got: {:?}", result);
+        let warnings = result.unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("interpreter") && w.contains("language")),
+            "Expected warning about interpreter without language, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_script_action_full_valid() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "python script.py"
+    language: python
+    dependencies:
+      - requests
+    interpreter: "python3.12"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+        let warnings = result.unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_script_action_interpreter_shell_metachar() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "script.py"
+    language: python
+    interpreter: "python3; rm -rf /"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid 'interpreter' value"));
+    }
+
+    #[test]
+    fn test_validate_script_action_interpreter_empty() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "script.py"
+    language: python
+    interpreter: ""
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("empty 'interpreter'"));
+    }
+
+    #[test]
+    fn test_validate_script_action_deps_shell_metachar() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "script.py"
+    language: python
+    dependencies:
+      - "requests; evil"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("shell metacharacters"));
+    }
+
+    #[test]
+    fn test_validate_script_action_deps_empty_entry() {
+        let yaml = r#"
+actions:
+  run:
+    type: script
+    cmd: "script.py"
+    language: python
+    dependencies:
+      - ""
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("empty dependency entry"));
+    }
+
+    #[test]
+    fn test_validate_docker_action_rejects_language() {
+        let yaml = r#"
+actions:
+  run:
+    type: docker
+    image: python:3.12
+    language: python
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'language' field"));
+    }
+
+    #[test]
+    fn test_validate_docker_action_rejects_dependencies() {
+        let yaml = r#"
+actions:
+  run:
+    type: docker
+    image: python:3.12
+    dependencies:
+      - requests
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("'dependencies' field"));
+    }
+
+    #[test]
+    fn test_validate_docker_action_rejects_interpreter() {
+        let yaml = r#"
+actions:
+  run:
+    type: docker
+    image: python:3.12
+    interpreter: "python3.12"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("'interpreter' field"));
+    }
+
+    #[test]
+    fn test_validate_pod_action_rejects_language() {
+        let yaml = r#"
+actions:
+  run:
+    type: pod
+    image: python:3.12
+    language: python
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'language' field"));
+    }
+
+    #[test]
+    fn test_validate_task_action_rejects_language() {
+        let yaml = r#"
+actions:
+  run-child:
+    type: task
+    task: other
+    language: python
+tasks:
+  other:
+    flow:
+      s:
+        action: run-child
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'language' field"));
     }
 }

@@ -30,12 +30,12 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         job_id,
         step_name: step_name.to_string(),
         action_name: "test-action".to_string(),
-        action_type: "shell".to_string(),
+        action_type: "script".to_string(),
         action_image: None,
         action_spec: None,
         input: None,
         status: status.to_string(),
-        required_tags: vec!["shell".to_string()],
+        required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
     }
@@ -404,8 +404,8 @@ async fn test_step_transition_ready_to_running_to_failed() -> Result<()> {
         &pool,
         worker_id,
         "worker-1",
-        &["shell".to_string()],
-        &["shell".to_string()],
+        &["script".to_string()],
+        &["script".to_string()],
         None,
     )
     .await?;

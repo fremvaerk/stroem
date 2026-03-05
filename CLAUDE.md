@@ -16,7 +16,7 @@ Phase 7: AI agent actions & MCP integration.
 
 - **stroem-common**: Shared types, models, DAG walker, Tera templating, validation
 - **stroem-db**: PostgreSQL layer via sqlx (runtime queries), migrations, repositories
-- **stroem-runner**: Execution backends (ShellRunner, DockerRunner via bollard, KubeRunner via kube). All runners enabled by default.
+- **stroem-runner**: Execution backends (ShellRunner, DockerRunner via bollard, KubeRunner via kube). ShellRunner handles multi-language scripts (shell, Python, JS/TS, Go). All runners enabled by default.
 - **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed
 - **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs
 - **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs, workspaces)
@@ -142,18 +142,20 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Action Types and Runners (Type 1 / Type 2 Split)
 - **Type 1 (Container)**: `type: docker` or `type: pod` — runs user's prepared image as-is, no workspace mounting
-- **Type 2 (Shell)**: `type: shell` + `runner: local|docker|pod` — shell commands in a runner environment with workspace files
+- **Type 2 (Script)**: `type: script` + `runner: local|docker|pod` — scripts in a runner environment with workspace files. Supports multiple languages via the `language` field: `shell` (default), `python`, `javascript`, `typescript`, `go`. Optional `dependencies` (package list) and `interpreter` (override auto-detected binary) fields.
 - **Type 3 (Sub-job)**: `type: task` — references another task, server creates a child job (see Task Actions below)
-- `type: shell` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: shell` + `runner: docker` (Type 2) instead.
-- **Pod manifest overrides**: `type: pod` and `type: shell` + `runner: pod` support a `manifest` field — a raw JSON/YAML object deep-merged into the generated pod spec (service accounts, node selectors, tolerations, resource limits, annotations, sidecars, etc.). See `docs/src/content/docs/guides/action-types.md` for details.
+- `type: script` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
+- **Toolchain preferences**: `uv > python3 > python`, `bun > node` (JS), `bun > deno` (TS), `bash > sh`
+- **DB migration**: `014_script_type.sql` renames existing `'shell'` action_type rows to `'script'`
+- **Pod manifest overrides**: `type: pod` and `type: script` + `runner: pod` support a `manifest` field — a raw JSON/YAML object deep-merged into the generated pod spec (service accounts, node selectors, tolerations, resource limits, annotations, sidecars, etc.). See `docs/src/content/docs/guides/action-types.md` for details.
 
 ### Runner Architecture
 - `RunConfig` carries `action_type`, `image`, `runner_mode`, `runner_image`, `entrypoint`, `command`
 - `RunnerMode` enum: `WithWorkspace` (Type 2) or `NoWorkspace` (Type 1)
 - `StepExecutor::select_runner()` dispatches on `(action_type, runner_field)`:
-  - `("shell", "local")` → ShellRunner
-  - `("shell", "docker")` or `("docker", _)` → DockerRunner
-  - `("shell", "pod")` or `("pod", _)` → KubeRunner
+  - `("script", "local")` → ShellRunner
+  - `("script", "docker")` or `("docker", _)` → DockerRunner
+  - `("script", "pod")` or `("pod", _)` → KubeRunner
 - **DockerRunner** (`crates/stroem-runner/src/docker.rs`): Uses `bollard` crate. Dual mode: `WithWorkspace` bind-mounts workspace at `/workspace:ro`; `NoWorkspace` runs image standalone with optional entrypoint/command.
 - **KubeRunner** (`crates/stroem-runner/src/kubernetes.rs`): Uses `kube` + `k8s-openapi`. Dual mode: `WithWorkspace` has init container + workspace volume; `NoWorkspace` runs image directly.
 - All runners enabled by default via cargo features (`docker`, `kubernetes` on stroem-runner/stroem-worker)
@@ -161,7 +163,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Startup scripts**: Worker and runner images use `docker/entrypoint.sh` which sources `*.sh` from `/etc/stroem/startup.d/` before the main process. DockerRunner always bind-mounts this path (WithWorkspace mode). KubeRunner injects a ConfigMap volume when `runner_startup_configmap` is set in worker config. Helm chart provides `startupScript`, `worker.startupScript`, and `runner.startupScript` values.
 
 ### Tags and Step Claiming
-- Workers declare `tags` (replaces `capabilities`) — e.g. `["shell", "docker", "gpu"]`
+- Workers declare `tags` (replaces `capabilities`) — e.g. `["script", "docker", "gpu"]`
 - Steps compute `required_tags` from action type/runner + explicit tags
 - Claim SQL: `required_tags <@ worker_tags::jsonb` (all required tags must be in worker's tag set)
 - GIN index on `job_step.required_tags` for efficient containment queries
@@ -256,7 +258,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Task Actions (type: task — Sub-Job Execution)
 - `ActionDef.task: Option<String>` — references another task by name
-- `type: task` actions cannot have `cmd`, `script`, `image`, or `runner`
+- `type: task` actions cannot have `cmd`, `script`, `image`, `runner`, or `language`
 - Server-side dispatch: workers never claim task-type steps (filtered in claim SQL `action_type != 'task'`)
 - `job_creator.rs` — `handle_task_steps()` finds ready task steps, renders input, creates child jobs
 - `create_job_for_task_inner()` uses `Box::pin` for recursive async (task → child task → grandchild task)

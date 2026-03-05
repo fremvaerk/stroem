@@ -1,8 +1,10 @@
+use crate::script_exec;
 use crate::traits::{
     parse_output_line, LogCallback, LogLine, LogStream, RunConfig, RunResult, Runner,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
+use stroem_common::language::ScriptLanguage;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -29,13 +31,98 @@ impl Runner for ShellRunner {
         log_callback: Option<LogCallback>,
         cancel_token: CancellationToken,
     ) -> Result<RunResult> {
+        let lang = ScriptLanguage::from_str_opt(config.language.as_deref());
+
+        // Track temp script file for cleanup
+        let mut temp_script_path: Option<std::path::PathBuf> = None;
+
         // Build command
-        let mut cmd = if let Some(ref command) = config.cmd {
-            let mut c = tokio::process::Command::new("sh");
-            c.arg("-c").arg(command);
+        let mut cmd = if lang.is_shell() {
+            // Shell language — use the original sh -c path
+            if let Some(ref command) = config.cmd {
+                let mut c = tokio::process::Command::new("sh");
+                c.arg("-c").arg(command);
+                c
+            } else if let Some(ref script) = config.script {
+                tokio::process::Command::new(script)
+            } else {
+                anyhow::bail!("RunConfig must have either cmd or script");
+            }
+        } else if let Some(ref inline_cmd) = config.cmd {
+            // Non-shell language with inline cmd — write to temp file, execute with interpreter
+            let workdir = std::path::Path::new(&config.workdir);
+            let script_path = script_exec::write_temp_script(workdir, inline_cmd, lang)?;
+            // Register for cleanup immediately so any subsequent failure cleans up the file.
+            temp_script_path = Some(script_path.clone());
+
+            let (binary, args) = script_exec::build_script_command(
+                lang,
+                &script_path,
+                &config.dependencies,
+                config.interpreter.as_deref(),
+            )?;
+
+            // Handle non-uv deps that need a prefix install command.
+            // Reuse `binary` from build_script_command to avoid a second PATH probe.
+            if !config.dependencies.is_empty() {
+                if let Some(install_cmd) =
+                    script_exec::build_dep_install_prefix(lang, &binary, &config.dependencies)
+                {
+                    // Run dep install as a separate process first
+                    let install_status = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&install_cmd)
+                        .current_dir(&config.workdir)
+                        .envs(&config.env)
+                        .status()
+                        .await;
+
+                    match install_status {
+                        Ok(status) if !status.success() => {
+                            if let Some(ref path) = temp_script_path {
+                                script_exec::cleanup_temp_script(path);
+                            }
+                            bail!(
+                                "Dependency installation failed (exit code {}): {}",
+                                status.code().unwrap_or(-1),
+                                install_cmd
+                            );
+                        }
+                        Err(e) => {
+                            if let Some(ref path) = temp_script_path {
+                                script_exec::cleanup_temp_script(path);
+                            }
+                            bail!(
+                                "Failed to run dependency installation command '{}': {}",
+                                install_cmd,
+                                e
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut c = tokio::process::Command::new(&binary);
+            for arg in &args {
+                c.arg(arg);
+            }
             c
         } else if let Some(ref script) = config.script {
-            tokio::process::Command::new(script)
+            // Non-shell language with script file path — execute with interpreter
+            let script_path = std::path::Path::new(script);
+            let (binary, args) = script_exec::build_script_command(
+                lang,
+                script_path,
+                &config.dependencies,
+                config.interpreter.as_deref(),
+            )?;
+
+            let mut c = tokio::process::Command::new(&binary);
+            for arg in &args {
+                c.arg(arg);
+            }
+            c
         } else {
             anyhow::bail!("RunConfig must have either cmd or script");
         };
@@ -129,7 +216,7 @@ impl Runner for ShellRunner {
             result = &mut streams_future => Outcome::Streams(result),
         };
 
-        match outcome {
+        let result = match outcome {
             Outcome::Cancelled => {
                 // Kill the child process — this causes the stream readers to EOF
                 if let Err(e) = child.kill().await {
@@ -205,7 +292,14 @@ impl Runner for ShellRunner {
                     output: parsed_output,
                 })
             }
+        };
+
+        // Clean up temp script file if we created one
+        if let Some(ref path) = temp_script_path {
+            script_exec::cleanup_temp_script(path);
         }
+
+        result
     }
 }
 
@@ -224,13 +318,16 @@ mod tests {
             script: script.map(|s| s.to_string()),
             env,
             workdir: "/tmp".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             image: None,
             runner_mode: crate::RunnerMode::WithWorkspace,
             runner_image: None,
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         }
     }
 
@@ -396,13 +493,16 @@ mod tests {
             script: None,
             env: HashMap::new(),
             workdir: "/nonexistent/path/12345".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             image: None,
             runner_mode: crate::RunnerMode::WithWorkspace,
             runner_image: None,
             entrypoint: None,
             command: None,
             pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
         };
         // spawn will fail because the working directory doesn't exist, or return non-zero
         let result = runner.execute(config, None, CancellationToken::new()).await;

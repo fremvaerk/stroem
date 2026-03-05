@@ -281,6 +281,9 @@ mod tests {
             cmd: None,
             script: None,
             runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
             tags: vec![],
             image: None,
             command: None,
@@ -312,7 +315,7 @@ mod tests {
             job_id: Uuid::nil(),
             step_name: step_name.to_string(),
             action_name: "test-action".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec: None,
             input,
@@ -744,7 +747,7 @@ mod tests {
     fn test_prepare_step_action_input_merges_missing_job_input_fields() {
         // When a flow step doesn't map a field but the job input has it,
         // and the action's schema declares it, it should be merged in.
-        let mut action = make_action("shell");
+        let mut action = make_action("script");
         action
             .input
             .insert("sql".to_string(), make_input_field("string"));

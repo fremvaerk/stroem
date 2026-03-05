@@ -40,7 +40,7 @@ pub struct RunConfig {
     pub env: HashMap<String, String>,
     /// Working directory
     pub workdir: String,
-    /// Action type: "shell", "docker", or "pod"
+    /// Action type: "script", "docker", or "pod"
     pub action_type: String,
     /// Container image (e.g. "python:3.12") — used by docker and pod runners
     pub image: Option<String>,
@@ -54,6 +54,12 @@ pub struct RunConfig {
     pub command: Option<Vec<String>>,
     /// Raw pod manifest overrides (deep-merged into generated pod JSON)
     pub pod_manifest_overrides: Option<serde_json::Value>,
+    /// Script language (for type: script). Defaults to "shell" when absent.
+    pub language: Option<String>,
+    /// Dependencies to install before running the script.
+    pub dependencies: Vec<String>,
+    /// Override auto-detected interpreter binary.
+    pub interpreter: Option<String>,
 }
 
 /// A callback for receiving log lines as they're produced

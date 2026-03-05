@@ -29,13 +29,13 @@ const HEADER = `# Strøm — Workflow YAML Reference
 When generating Strøm workflow YAML, these constraints are enforced at parse time:
 
 **Action types:**
-- \`type: shell\` — requires \`cmd\` or \`script\`. Cannot have \`image\`.
+- \`type: script\` — requires \`cmd\` or \`script\`. Cannot have \`image\`. Supports \`language\` field: \`shell\` (default), \`python\`, \`javascript\`, \`typescript\`, \`go\`. Optional \`dependencies\` (package list) and \`interpreter\` (override auto-detected binary).
 - \`type: docker\` — requires \`image\`. Runs container as-is (no workspace mount).
 - \`type: pod\` — requires \`image\`. Runs as Kubernetes pod (no workspace mount).
-- \`type: shell\` + \`runner: docker\` — shell commands inside a Docker container with workspace at \`/workspace\`.
-- \`type: shell\` + \`runner: pod\` — shell commands inside a Kubernetes pod with workspace.
-- \`type: task\` — requires \`task\` field. Cannot have \`cmd\`, \`script\`, \`image\`, or \`runner\`.
-- \`type: shell\` + \`image\` is **rejected** — use \`type: docker\` or \`runner: docker\` instead.
+- \`type: script\` + \`runner: docker\` — scripts inside a Docker container with workspace at \`/workspace\`.
+- \`type: script\` + \`runner: pod\` — scripts inside a Kubernetes pod with workspace.
+- \`type: task\` — requires \`task\` field. Cannot have \`cmd\`, \`script\`, \`image\`, \`runner\`, or \`language\`.
+- \`type: script\` + \`image\` is **rejected** — use \`type: docker\` or \`runner: docker\` instead.
 
 **Task actions:**
 - \`task\` field must reference an existing task in the same workspace.
@@ -62,7 +62,7 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - Template context: \`input.*\`, \`<step_name>.output.*\`, \`secret.*\`.
 
 **Pod manifest overrides:**
-- \`manifest\` field is only valid on \`type: pod\` and \`type: shell\` + \`runner: pod\`.
+- \`manifest\` field is only valid on \`type: pod\` and \`type: script\` + \`runner: pod\`.
 - Must be a JSON/YAML object (not array or scalar).
 
 **Connections:**

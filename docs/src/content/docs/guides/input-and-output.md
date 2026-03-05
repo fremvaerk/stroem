@@ -207,7 +207,7 @@ Actions can declare environment variables. Values support templating:
 ```yaml
 actions:
   deploy:
-    type: shell
+    type: script
     script: actions/deploy.sh
     env:
       DEPLOY_ENV: "{{ input.env }}"

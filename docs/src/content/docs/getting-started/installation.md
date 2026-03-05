@@ -30,7 +30,7 @@ Multi-arch images (amd64 + arm64) are published to GHCR:
 ```bash
 docker pull ghcr.io/fremvaerk/stroem-server:latest
 docker pull ghcr.io/fremvaerk/stroem-worker:latest
-docker pull ghcr.io/fremvaerk/stroem-runner:latest  # base image for shell-in-container steps
+docker pull ghcr.io/fremvaerk/stroem-runner:latest  # base image for script-in-container steps
 ```
 
 ## Build from source

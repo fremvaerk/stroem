@@ -12,13 +12,13 @@ Create `workspace/.workflows/hello.yaml`:
 ```yaml
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
       name: { type: string, required: true }
 
   shout:
-    type: shell
+    type: script
     cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
       message: { type: string, required: true }

@@ -32,6 +32,7 @@ Last updated: 2026-03-04.
 - [x] Terminal job handling consolidated into `run_terminal_job_actions`
 - [x] `blocking_read()` in async fn fixed — uses async `read().await`
 - [x] `block_in_place` in spawned tasks — uses `spawn_blocking`
+- [x] Multi-language inline scripts: `type: shell` → `type: script` with `language`, `dependencies`, `interpreter` fields (Python, JS, TS, Go)
 - [ ] Single-server bottleneck: scheduler, recovery, log broadcast in-process — no leader election
 - [ ] No metrics/Prometheus endpoint — capacity planning blind
 - [ ] No proper health check (`/api/config` probe doesn't verify DB/background tasks)

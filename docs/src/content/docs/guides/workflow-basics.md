@@ -20,7 +20,7 @@ actions:
   <action-name>:
     name: Human-Readable Name    # optional display name
     description: What it does    # optional description
-    type: shell
+    type: script
     cmd: "..."
     input:
       <param-name>:
@@ -48,7 +48,7 @@ tasks:
           <param>: "{{ input.param }}"
       # Or define the action inline:
       <step-name>:
-        type: shell
+        type: script
         cmd: "..."
         name: Human-Readable Step Name  # optional
         depends_on: [<other-step>]
@@ -65,7 +65,7 @@ actions:
   greet:
     name: Greet User
     description: Sends a greeting message to the specified user
-    type: shell
+    type: script
     cmd: "echo Hello {{ input.name }}"
     input:
       name:
@@ -110,7 +110,7 @@ tasks:
   hello:
     flow:
       say-hi:
-        type: shell
+        type: script
         cmd: "echo Hello, World!"
 ```
 
@@ -119,7 +119,7 @@ This is equivalent to defining a separate action and referencing it:
 ```yaml
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello, World!"
 
 tasks:
@@ -142,14 +142,14 @@ tasks:
         image: node:20
         command: ["npm", "run", "build"]
       deploy:
-        type: shell
+        type: script
         runner: docker
         cmd: "deploy.sh {{ input.env }}"
         depends_on: [build]
         input:
           env: "{{ input.env }}"
       notify:
-        type: shell
+        type: script
         cmd: "echo Done"
         depends_on: [deploy]
         continue_on_failure: true
@@ -308,7 +308,7 @@ stroem validate workspace/.workflows/
 
 The validator checks:
 - YAML syntax and structure
-- Action type validity (`shell` needs `cmd` or `script`; `docker`/`pod` need `image`; `task` needs `task`)
+- Action type validity (`script` needs `cmd` or `script`; `docker`/`pod` need `image`; `task` needs `task`)
 - Runner field validity (`local`, `docker`, `pod`)
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow

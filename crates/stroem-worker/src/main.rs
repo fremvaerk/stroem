@@ -44,6 +44,10 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
+    // Detect available script toolchains (informational)
+    let toolchains = stroem_worker::toolchain::Toolchains::detect();
+    toolchains.log_summary();
+
     // Build executor with optional runners
     #[allow(unused_mut)]
     let mut executor = StepExecutor::new();

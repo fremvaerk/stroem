@@ -215,7 +215,7 @@ Returns job metadata and all steps with statuses.
     {
       "step_name": "say-hello",
       "action_name": "greet",
-      "action_type": "shell",
+      "action_type": "script",
       "runner": "local",
       "input": { "name": "World" },
       "output": { "greeting": "Hello World" },

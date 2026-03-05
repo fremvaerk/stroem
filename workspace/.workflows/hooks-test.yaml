@@ -1,6 +1,6 @@
 actions:
   python-crash:
-    type: shell
+    type: script
     cmd: |
       python3 -c "
       import sys
@@ -16,7 +16,7 @@ actions:
       "
 
   log-hook-result:
-    type: shell
+    type: script
     cmd: |
       echo "HOOK_FIRED"
       echo "workspace={{ input.workspace }}"

@@ -75,7 +75,7 @@ When a task input field's `type` matches a connection type name, the system trea
 ```yaml
 actions:
   run-migration:
-    type: shell
+    type: script
     cmd: "migrate --host {{ input.db.host }} --port {{ input.db.port }} --db {{ input.db.database }}"
 
 tasks:

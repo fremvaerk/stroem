@@ -44,7 +44,7 @@ impl Drop for TestEnv {
 const WORKFLOW_YAML: &str = r#"
 actions:
   echo-greeting:
-    type: shell
+    type: script
     cmd: |
       echo "Hello {{ input.name }}!"
       echo 'OUTPUT: {"greeting": "Hello {{ input.name }}!"}'
@@ -52,7 +52,7 @@ actions:
       name: { type: string, default: "World" }
 
   echo-upper:
-    type: shell
+    type: script
     cmd: |
       MSG="{{ input.msg }}"
       echo "${MSG}" | tr a-z A-Z
@@ -62,17 +62,17 @@ actions:
       msg: { type: string, required: true }
 
   fail-action:
-    type: shell
+    type: script
     cmd: |
       echo "About to fail"
       exit 1
 
   slow-action:
-    type: shell
+    type: script
     cmd: sleep 300
 
   hook-notify:
-    type: shell
+    type: script
     cmd: |
       echo "Hook fired: status={{ input.status }}, task={{ input.task_name }}"
       echo 'OUTPUT: {"notified": true}'
@@ -81,7 +81,7 @@ actions:
       task_name: { type: string, default: "" }
 
   success-notify:
-    type: shell
+    type: script
     cmd: |
       echo "Success hook fired: task={{ input.task_name }}"
       echo 'OUTPUT: {"success_notified": true}'
@@ -270,8 +270,8 @@ impl TestEnv {
             max_concurrent: 4,
             poll_interval_secs: 1,
             workspace_cache_dir: workspace_cache_dir.to_string_lossy().to_string(),
-            capabilities: vec!["shell".to_string()],
-            tags: Some(vec!["shell".to_string()]),
+            capabilities: vec!["script".to_string()],
+            tags: Some(vec!["script".to_string()]),
             runner_image: None,
             docker: None,
             kubernetes: None,

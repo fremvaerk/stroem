@@ -1,3 +1,4 @@
+pub mod script_exec;
 pub mod shell;
 pub mod traits;
 

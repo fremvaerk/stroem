@@ -164,7 +164,7 @@ server:
 worker:
   config:
     tags:
-      - shell
+      - script
       - docker
     docker: {}
   dind:
@@ -181,7 +181,7 @@ worker:
 worker:
   config:
     tags:
-      - shell
+      - script
       - kubernetes
     kubernetes:
       namespace: stroem-jobs

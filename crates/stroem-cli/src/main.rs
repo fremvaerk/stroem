@@ -885,7 +885,7 @@ tasks:
         action: greet
 actions:
   greet:
-    type: shell
+    type: script
     cmd: echo hello
 "#
         )
@@ -946,7 +946,7 @@ tasks:
         action: a1
 actions:
   a1:
-    type: shell
+    type: script
     cmd: echo ok
 "#,
         )

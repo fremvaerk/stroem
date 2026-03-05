@@ -1,6 +1,6 @@
 ---
 title: Action Types
-description: Shell, Docker, Kubernetes, and task action types
+description: Script, Docker, Kubernetes, and task action types
 ---
 
 Actions are the smallest execution unit in Strøm. Each action defines what runs and how.
@@ -18,15 +18,15 @@ Actions are split into two execution modes:
 
 Type 1 actions require `image`. The image's default entrypoint/cmd runs unless overridden. Use this when you have a self-contained image (e.g., DB migrations, deploy tools).
 
-### Type 2 — Shell (commands in a runner environment)
+### Type 2 — Script (commands in a runner environment)
 
 | Type | Runner | Description |
 |------|--------|-------------|
-| `shell` | `local` (default) | Runs directly on the worker host |
-| `shell` + `runner: docker` | Runs in a Docker container with workspace at `/workspace` |
-| `shell` + `runner: pod` | Runs as a Kubernetes pod with workspace via init container |
+| `script` | `local` (default) | Runs directly on the worker host |
+| `script` + `runner: docker` | Runs in a Docker container with workspace at `/workspace` |
+| `script` + `runner: pod` | Runs as a Kubernetes pod with workspace via init container |
 
-Type 2 actions require `cmd` or `script`. The workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code.
+Type 2 actions require `cmd` or `script`. The workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code. Script actions support multiple languages via the `language` field.
 
 ### Type 3 — Task (sub-job execution)
 
@@ -37,17 +37,19 @@ Type 2 actions require `cmd` or `script`. The workspace files are available at `
 Task actions are dispatched entirely server-side — workers never see them.
 
 :::note
-`type: shell` with an `image` field is **rejected** by validation. Use `type: docker` (Type 1) or `type: shell` + `runner: docker` (Type 2) instead.
+`type: script` with an `image` field is **rejected** by validation. Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
 :::
 
-## Shell actions
+## Script actions
+
+Script actions run commands or scripts in a runner environment. By default, scripts run as shell commands, but you can use the `language` field to write inline scripts in Python, JavaScript, TypeScript, or Go.
 
 ### Inline command
 
 ```yaml
 actions:
   greet:
-    type: shell
+    type: script
     cmd: "echo Hello {{ input.name }}"
     input:
       name: { type: string, required: true }
@@ -60,7 +62,7 @@ Scripts are relative to the workspace root:
 ```yaml
 actions:
   deploy:
-    type: shell
+    type: script
     script: actions/deploy.sh
     input:
       env: { type: string, default: "staging" }
@@ -73,13 +75,120 @@ Actions can declare environment variables. Values support templating:
 ```yaml
 actions:
   deploy:
-    type: shell
+    type: script
     script: actions/deploy.sh
     env:
       DEPLOY_ENV: "{{ input.env }}"
       API_KEY: "{{ secret.api_key }}"
     input:
       env: { type: string }
+```
+
+### Multi-language scripts
+
+Use the `language` field to write inline scripts in languages other than shell. When `language` is set, the `cmd` content is written to a temporary file and executed with the appropriate interpreter.
+
+| Language | Value | Toolchain preference |
+|----------|-------|---------------------|
+| Shell | `shell` (default) | `bash > sh` |
+| Python | `python` | `uv > python3 > python` |
+| JavaScript | `javascript` | `bun > node` |
+| TypeScript | `typescript` | `bun > deno` |
+| Go | `go` | `go run` |
+
+**Python example:**
+
+```yaml
+actions:
+  analyze-data:
+    type: script
+    language: python
+    dependencies:
+      - pandas
+      - requests
+    cmd: |
+      import pandas as pd
+      import requests
+
+      resp = requests.get("https://api.example.com/data")
+      df = pd.DataFrame(resp.json())
+      print(f"Rows: {len(df)}")
+      print(f'OUTPUT: {{"count": {len(df)}}}')
+    input:
+      url: { type: string }
+```
+
+**JavaScript example:**
+
+```yaml
+actions:
+  fetch-status:
+    type: script
+    language: javascript
+    cmd: |
+      const resp = await fetch("https://api.example.com/status");
+      const data = await resp.json();
+      console.log(`Status: ${data.status}`);
+      console.log(`OUTPUT: ${JSON.stringify(data)}`);
+```
+
+**TypeScript example:**
+
+```yaml
+actions:
+  generate-report:
+    type: script
+    language: typescript
+    dependencies:
+      - zod
+    cmd: |
+      import { z } from "zod";
+      const Schema = z.object({ name: z.string() });
+      const result = Schema.parse({ name: "test" });
+      console.log(result);
+```
+
+**Go example:**
+
+```yaml
+actions:
+  compute:
+    type: script
+    language: go
+    cmd: |
+      package main
+
+      import "fmt"
+
+      func main() {
+          fmt.Println("OUTPUT: {\"result\": 42}")
+      }
+```
+
+### Dependencies
+
+The `dependencies` field installs packages before running the script. It requires a `language` other than `shell`.
+
+| Language | Install command |
+|----------|----------------|
+| Python | `uv pip install --system <deps>` or `pip install <deps>` |
+| JavaScript | `bun install <deps>` or `npm install <deps>` |
+| TypeScript | `bun install <deps>` or `npm install <deps>` |
+| Go | Dependencies are resolved automatically by `go run` |
+
+### Interpreter override
+
+Use the `interpreter` field to override the auto-detected binary:
+
+```yaml
+actions:
+  legacy-python:
+    type: script
+    language: python
+    interpreter: python3.11
+    cmd: |
+      import sys
+      print(f"Using Python {sys.version}")
 ```
 
 ## Docker actions (Type 1)
@@ -120,31 +229,41 @@ actions:
     tags: ["gpu"]
 ```
 
-## Shell in Docker (Type 2)
+## Script in Docker (Type 2)
 
-Runs shell commands in a Docker container with the workspace mounted at `/workspace` (read-only):
+Runs scripts in a Docker container with the workspace mounted at `/workspace` (read-only):
 
 ```yaml
 actions:
   lint-python:
-    type: shell
+    type: script
     runner: docker
     cmd: "pip install ruff && ruff check /workspace"
 
   run-tests:
-    type: shell
+    type: script
     runner: docker
     cmd: "cd /workspace && npm ci && npm test"
+
+  analyze:
+    type: script
+    runner: docker
+    language: python
+    dependencies: [pandas]
+    cmd: |
+      import pandas as pd
+      df = pd.read_csv("/workspace/data.csv")
+      print(f"OUTPUT: {{\"rows\": {len(df)}}}")
 ```
 
-## Shell in Kubernetes (Type 2)
+## Script in Kubernetes (Type 2)
 
-Runs shell commands as a Kubernetes pod with the workspace downloaded via an init container:
+Runs scripts as a Kubernetes pod with the workspace downloaded via an init container:
 
 ```yaml
 actions:
   gpu-test:
-    type: shell
+    type: script
     runner: pod
     tags: ["gpu"]
     cmd: "python /workspace/test_gpu.py"
@@ -205,7 +324,7 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 
 ## Pod manifest overrides
 
-Actions that run as Kubernetes pods (`type: pod` or `type: shell` + `runner: pod`) support a `manifest` field for injecting arbitrary pod configuration. The value is deep-merged into the generated pod manifest.
+Actions that run as Kubernetes pods (`type: pod` or `type: script` + `runner: pod`) support a `manifest` field for injecting arbitrary pod configuration. The value is deep-merged into the generated pod manifest.
 
 ### Merge rules
 
@@ -288,7 +407,7 @@ actions:
                 value: test
 ```
 
-The `manifest` field is rejected on `type: docker`, `type: task`, and `type: shell` with `runner: local` or `runner: docker`.
+The `manifest` field is rejected on `type: docker`, `type: task`, and `type: script` with `runner: local` or `runner: docker`.
 
 ## Structured output
 

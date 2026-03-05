@@ -12,17 +12,17 @@ Create `workspace/.workflows/deploy.yaml`:
 ```yaml
 actions:
   check-status:
-    type: shell
+    type: script
     cmd: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
 
   deploy:
-    type: shell
+    type: script
     script: actions/deploy.sh
     input:
       env: { type: string, default: "staging" }
 
   notify:
-    type: shell
+    type: script
     cmd: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}'"
     input:
       env: { type: string }

@@ -28,7 +28,7 @@ Container runners are optional features that allow steps to execute inside Docke
 
 ```yaml
 tags:
-  - shell
+  - script
   - docker
 docker: {}
 runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
@@ -50,7 +50,7 @@ runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
 
 ```yaml
 tags:
-  - shell
+  - script
   - kubernetes
 kubernetes:
   namespace: stroem-jobs
@@ -69,7 +69,7 @@ max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: /var/stroem/workspace-cache
 tags:
-  - shell
+  - script
   - docker
   - kubernetes
 runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
@@ -84,9 +84,9 @@ Tags control which steps a worker can claim. Each step computes `required_tags` 
 
 | Action | Runner | Required tags |
 |--------|--------|--------------|
-| `shell` | `local` (default) | `["shell"]` |
-| `shell` | `docker` | `["docker"]` |
-| `shell` | `pod` | `["kubernetes"]` |
+| `script` | `local` (default) | `["script"]` |
+| `script` | `docker` | `["docker"]` |
+| `script` | `pod` | `["kubernetes"]` |
 | `docker` | — | `["docker"]` |
 | `pod` | — | `["kubernetes"]` |
 | `task` | — | `[]` (server-dispatched) |
@@ -131,7 +131,7 @@ The official runner image (`ghcr.io/fremvaerk/stroem-runner`) and worker image s
 ```yaml
 actions:
   analyze:
-    type: shell
+    type: script
     runner: docker
     cmd: |
       uv pip install pandas requests --system
@@ -143,7 +143,7 @@ actions:
 ```yaml
 actions:
   generate-report:
-    type: shell
+    type: script
     runner: docker
     cmd: |
       cd /workspace

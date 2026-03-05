@@ -10,18 +10,18 @@ fn test_full_workflow_ci_pipeline() {
     let yaml = r#"
 actions:
   checkout:
-    type: shell
+    type: script
     cmd: "git clone --depth=1 {{ input.repo }} /workspace/src"
     input:
       repo: { type: string, required: true }
 
   install:
-    type: shell
+    type: script
     runner: docker
     cmd: "cd /workspace/src && npm ci"
 
   test:
-    type: shell
+    type: script
     runner: docker
     cmd: "cd /workspace/src && npm test"
 
@@ -208,7 +208,7 @@ actions:
       db_host: { type: string, required: true }
 
   notify:
-    type: shell
+    type: script
     cmd: "echo 'Backup completed for {{ input.db_host }}'"
     input:
       db_host: { type: string, required: true }
@@ -252,7 +252,7 @@ triggers:
     assert!(backup.resources.is_some());
 
     let notify = config.actions.get("notify").unwrap();
-    assert_eq!(notify.action_type, "shell");
+    assert_eq!(notify.action_type, "script");
 
     // Check task
     let task = config.tasks.get("nightly-backup").unwrap();
@@ -283,13 +283,13 @@ fn test_parallel_workflow() {
     let yaml = r#"
 actions:
   test1:
-    type: shell
+    type: script
     cmd: "echo test1"
   test2:
-    type: shell
+    type: script
     cmd: "echo test2"
   merge:
-    type: shell
+    type: script
     cmd: "echo merge"
 
 tasks:

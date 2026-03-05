@@ -565,8 +565,8 @@ mod tests {
             job_id: Some("abc-123".to_string()),
             task_name: Some("deploy-api".to_string()),
             step_name: Some("build".to_string()),
-            action_name: Some("shell".to_string()),
-            action_type: Some("shell".to_string()),
+            action_name: Some("deploy".to_string()),
+            action_type: Some("script".to_string()),
             action_image: None,
             action_spec: None,
             input: None,
@@ -581,7 +581,7 @@ mod tests {
     fn test_register_request_deserializes_version() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "capabilities": ["shell"],
+            "capabilities": ["script"],
             "version": "0.5.9"
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
@@ -592,7 +592,7 @@ mod tests {
     fn test_register_request_version_absent_is_none() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "capabilities": ["shell"]
+            "capabilities": ["script"]
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
         assert!(req.version.is_none());
@@ -602,7 +602,7 @@ mod tests {
     fn test_register_request_version_null_is_none() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "capabilities": ["shell"],
+            "capabilities": ["script"],
             "version": null
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();

@@ -60,8 +60,8 @@ impl StepExecutor {
     fn select_runner(&self, step: &ClaimedStep) -> Result<&dyn Runner> {
         let runner_field = step.runner.as_deref().unwrap_or("local");
         match (step.action_type.as_str(), runner_field) {
-            ("shell", "local") => Ok(&self.shell_runner),
-            ("shell", "docker") | ("docker", _) => {
+            ("script", "local") => Ok(&self.shell_runner),
+            ("script", "docker") | ("docker", _) => {
                 #[cfg(feature = "docker")]
                 {
                     self.docker_runner
@@ -74,7 +74,7 @@ impl StepExecutor {
                     anyhow::bail!("Docker runner not available. Build the worker with the 'docker' feature enabled.")
                 }
             }
-            ("shell", "pod") | ("pod", _) => {
+            ("script", "pod") | ("pod", _) => {
                 #[cfg(feature = "kubernetes")]
                 {
                     self.kube_runner
@@ -154,7 +154,7 @@ impl StepExecutor {
             .context("Missing action_spec in claimed step")?;
 
         let runner_field = step.runner.as_deref().unwrap_or("local");
-        let is_type2 = step.action_type == ActionType::Shell.as_ref(); // Type 2: shell with workspace
+        let is_type2 = step.action_type == ActionType::Script.as_ref(); // Type 2: script with workspace
         let runner_mode = if is_type2 {
             RunnerMode::WithWorkspace
         } else {
@@ -204,7 +204,7 @@ impl StepExecutor {
             })
         });
 
-        // Type 2 (shell) requires cmd or script; Type 1 (docker/pod) allows empty (image defaults)
+        // Type 2 (script) requires cmd or script; Type 1 (docker/pod) allows empty (image defaults)
         if is_type2 && cmd.is_none() && script.is_none() {
             anyhow::bail!("Action spec must contain either 'cmd' or 'script'");
         }
@@ -239,6 +239,27 @@ impl StepExecutor {
         // Extract pod manifest overrides (raw JSON for deep-merge into pod spec)
         let pod_manifest_overrides = action_spec.get("manifest").cloned();
 
+        // Extract script language fields from action_spec
+        let language = action_spec
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let dependencies = action_spec
+            .get("dependencies")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let interpreter = action_spec
+            .get("interpreter")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         Ok(RunConfig {
             cmd,
             script,
@@ -251,6 +272,9 @@ impl StepExecutor {
             entrypoint,
             command,
             pod_manifest_overrides,
+            language,
+            dependencies,
+            interpreter,
         })
     }
 }
@@ -267,7 +291,7 @@ mod tests {
             task_name: "test-task".to_string(),
             step_name: "test-step".to_string(),
             action_name: "test-action".to_string(),
-            action_type: "shell".to_string(),
+            action_type: "script".to_string(),
             action_image: None,
             action_spec,
             input: None,
@@ -786,7 +810,7 @@ mod tests {
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
-        assert_eq!(config.action_type, "shell");
+        assert_eq!(config.action_type, "script");
     }
 
     #[test]
