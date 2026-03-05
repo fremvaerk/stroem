@@ -1,6 +1,11 @@
 -- Rename action_type 'shell' to 'script' and update related JSONB tag columns.
 
--- Phase 1: Data updates (no locks needed beyond row-level)
+-- Phase 1: Drop the old CHECK constraint first so the UPDATE can set 'script'.
+SET lock_timeout = '5s';
+ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check;
+RESET lock_timeout;
+
+-- Phase 2: Data updates
 UPDATE job_step SET action_type = 'script' WHERE action_type = 'shell';
 
 UPDATE job_step
@@ -17,16 +22,12 @@ UPDATE worker
   )
   WHERE tags @> '["shell"]';
 
--- Phase 2: DDL with lock timeout to avoid blocking production traffic.
--- If the timeout is hit the migration will fail and can be retried during a quieter window.
+-- Phase 3: Add new constraint and update default.
 SET lock_timeout = '5s';
-
-ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check;
 ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check
   CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task'));
 ALTER TABLE job_step ALTER COLUMN action_type SET DEFAULT 'script';
-
 RESET lock_timeout;
 
--- Phase 3: Refresh planner statistics for the partial GIN index on required_tags.
+-- Phase 4: Refresh planner statistics for the partial GIN index on required_tags.
 ANALYZE job_step;
