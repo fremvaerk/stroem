@@ -19,7 +19,7 @@ poll_interval_secs: 2
 # Directory where steps will be executed
 workspace_dir: "/tmp/stroem-workspace"
 
-# List of capabilities this worker supports
-# Currently supported: ["shell"]
-capabilities:
-  - shell
+# Worker tags for step routing
+# Determines which steps this worker can claim
+tags:
+  - script

@@ -135,7 +135,6 @@ async fn test_create_steps_and_claim() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -248,7 +247,6 @@ async fn test_claim_concurrency() -> Result<()> {
                 worker_id,
                 &format!("worker-{}", i),
                 &["script".to_string()],
-                &["script".to_string()],
                 None,
             )
             .await
@@ -301,7 +299,6 @@ async fn test_step_lifecycle() -> Result<()> {
         &pool,
         worker_id,
         "test-worker",
-        &["script".to_string()],
         &["script".to_string()],
         None,
     )
@@ -560,18 +557,10 @@ async fn test_worker_register_and_heartbeat() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let worker_id = Uuid::new_v4();
-    let capabilities = vec!["script".to_string(), "docker".to_string()];
+    let tags = vec!["script".to_string(), "docker".to_string()];
 
     // Register
-    WorkerRepo::register(
-        &pool,
-        worker_id,
-        "test-worker",
-        &capabilities,
-        &capabilities,
-        None,
-    )
-    .await?;
+    WorkerRepo::register(&pool, worker_id, "test-worker", &tags, None).await?;
 
     // Get
     let worker = WorkerRepo::get(&pool, worker_id)
@@ -792,7 +781,6 @@ async fn test_job_status_transitions() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -885,7 +873,6 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         script_worker,
         "script-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -902,7 +889,6 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         &pool,
         docker_worker,
         "docker-worker",
-        &["docker".to_string()],
         &["docker".to_string()],
         None,
     )
@@ -934,11 +920,6 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
         &pool,
         worker_id,
         "gpu-worker",
-        &[
-            "script".to_string(),
-            "docker".to_string(),
-            "gpu".to_string(),
-        ],
         &[
             "script".to_string(),
             "docker".to_string(),
@@ -1004,7 +985,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
 
     // Worker registered with no tags at all
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "tagless-worker", &[], &[], None).await?;
+    WorkerRepo::register(&pool, worker_id, "tagless-worker", &[], None).await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -1056,7 +1037,6 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
         &pool,
         worker_id,
         "script-worker",
-        &["script".to_string()],
         &["script".to_string()],
         None,
     )
@@ -1142,7 +1122,6 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
         worker_a,
         "docker-only-worker",
         &["docker".to_string()],
-        &["docker".to_string()],
         None,
     )
     .await?;
@@ -1159,7 +1138,6 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
         &pool,
         worker_b,
         "gpu-docker-worker",
-        &["docker".to_string(), "gpu".to_string()],
         &["docker".to_string(), "gpu".to_string()],
         None,
     )
@@ -1232,7 +1210,6 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
         worker_id,
         "script-only-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -1293,11 +1270,6 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             "docker".to_string(),
             "kubernetes".to_string(),
         ],
-        &[
-            "script".to_string(),
-            "docker".to_string(),
-            "kubernetes".to_string(),
-        ],
         None,
     )
     .await?;
@@ -1333,22 +1305,13 @@ async fn test_worker_list() -> Result<()> {
         &pool,
         w1,
         "worker-alpha",
-        &["script".to_string()],
         &["script".to_string(), "docker".to_string()],
         None,
     )
     .await?;
 
     let w2 = Uuid::new_v4();
-    WorkerRepo::register(
-        &pool,
-        w2,
-        "worker-beta",
-        &["script".to_string()],
-        &["script".to_string()],
-        None,
-    )
-    .await?;
+    WorkerRepo::register(&pool, w2, "worker-beta", &["script".to_string()], None).await?;
 
     // List all workers
     let workers = WorkerRepo::list(&pool, 50, 0).await?;
@@ -2028,7 +1991,6 @@ async fn test_cancel_job_running() -> Result<()> {
         worker_id,
         "cancel-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -2188,7 +2150,6 @@ async fn test_cancel_pending_steps() -> Result<()> {
         worker_id,
         "cancel-steps-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -2281,7 +2242,6 @@ async fn test_get_running_steps() -> Result<()> {
         &pool,
         worker_id,
         "running-steps-worker",
-        &["script".to_string()],
         &["script".to_string()],
         None,
     )
@@ -2404,7 +2364,6 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
         worker_id,
         "mark-cancelled-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -2502,7 +2461,6 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
         &pool,
         worker_id,
         "empty-cancel-worker",
-        &["script".to_string()],
         &["script".to_string()],
         None,
     )
@@ -2604,15 +2562,7 @@ async fn test_get_status_counts() -> Result<()> {
 
     // Mark one job as completed and one as failed
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(
-        &pool,
-        worker_id,
-        "w1",
-        &["script".to_string()],
-        &["script".to_string()],
-        None,
-    )
-    .await?;
+    WorkerRepo::register(&pool, worker_id, "w1", &["script".to_string()], None).await?;
 
     let job_ids: Vec<Uuid> = JobRepo::list(&pool, None, None, 10, 0)
         .await?
@@ -2655,7 +2605,6 @@ async fn test_worker_register_stores_version() -> Result<()> {
         worker_id,
         "versioned-worker",
         &["script".to_string()],
-        &["script".to_string()],
         Some("0.5.9"),
     )
     .await?;
@@ -2671,7 +2620,6 @@ async fn test_worker_register_stores_version() -> Result<()> {
         &pool,
         legacy_id,
         "legacy-worker",
-        &["script".to_string()],
         &["script".to_string()],
         None,
     )
@@ -2694,7 +2642,6 @@ async fn test_worker_list_includes_version() -> Result<()> {
         &pool,
         worker_id,
         "versioned-worker",
-        &["script".to_string()],
         &["script".to_string()],
         Some("1.2.3"),
     )
@@ -2749,7 +2696,6 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
                 &pool_clone,
                 worker_id,
                 &format!("worker-{}", i),
-                &["script".to_string()],
                 &["script".to_string()],
                 None,
             )

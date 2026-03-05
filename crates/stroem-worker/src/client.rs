@@ -48,8 +48,7 @@ struct ClaimResponse {
 #[derive(Debug, Serialize)]
 struct RegisterRequest {
     name: String,
-    capabilities: Vec<String>,
-    tags: Option<Vec<String>>,
+    tags: Vec<String>,
     version: Option<String>,
 }
 
@@ -66,8 +65,7 @@ struct HeartbeatRequest {
 #[derive(Debug, Serialize)]
 struct ClaimRequest {
     worker_id: Uuid,
-    capabilities: Vec<String>,
-    tags: Option<Vec<String>>,
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,15 +115,13 @@ impl ServerClient {
     pub async fn register(
         &self,
         name: &str,
-        capabilities: &[String],
-        tags: Option<&[String]>,
+        tags: &[String],
         version: Option<&str>,
     ) -> Result<Uuid> {
         let url = format!("{}/worker/register", self.base_url);
         let req = RegisterRequest {
             name: name.to_string(),
-            capabilities: capabilities.to_vec(),
-            tags: tags.map(|t| t.to_vec()),
+            tags: tags.to_vec(),
             version: version.map(|v| v.to_string()),
         };
 
@@ -172,14 +168,12 @@ impl ServerClient {
     pub async fn claim_step(
         &self,
         worker_id: Uuid,
-        capabilities: &[String],
-        tags: Option<&[String]>,
+        tags: &[String],
     ) -> Result<Option<ClaimedStep>> {
         let url = format!("{}/worker/jobs/claim", self.base_url);
         let req = ClaimRequest {
             worker_id,
-            capabilities: capabilities.to_vec(),
-            tags: tags.map(|t| t.to_vec()),
+            tags: tags.to_vec(),
         };
 
         let response = self

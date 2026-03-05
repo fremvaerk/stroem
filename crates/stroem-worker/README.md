@@ -22,8 +22,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_dir: "/tmp/stroem-workspace"
-capabilities:
-  - shell
+tags:
+  - script
 ```
 
 ### Configuration Options
@@ -34,7 +34,7 @@ capabilities:
 - `max_concurrent`: Maximum number of steps to execute concurrently
 - `poll_interval_secs`: How often to poll for new jobs when no work is available
 - `workspace_dir`: Directory where step execution will take place
-- `capabilities`: List of action types this worker can execute (currently `["shell"]`)
+- `tags`: List of tags this worker supports (e.g., `["script", "docker", "kubernetes"]`)
 
 ## Running
 

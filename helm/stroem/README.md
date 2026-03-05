@@ -189,7 +189,7 @@ worker:
     max_concurrent: 4
     poll_interval_secs: 2
     workspace_cache_dir: /var/stroem/workspace-cache
-    capabilities:
+    tags:
       - script
       - docker
   dind:
@@ -211,7 +211,7 @@ worker:
     max_concurrent: 4
     poll_interval_secs: 2
     workspace_cache_dir: /var/stroem/workspace-cache
-    capabilities:
+    tags:
       - script
       - kubernetes
     kubernetes:

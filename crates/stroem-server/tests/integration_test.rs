@@ -964,7 +964,6 @@ async fn register_test_worker(pool: &PgPool) -> Uuid {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await
@@ -1124,7 +1123,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "worker-1", "capabilities": ["script"]}),
+            json!({"name": "worker-1", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -1136,7 +1135,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -1174,7 +1173,6 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -1185,7 +1183,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -1211,7 +1209,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -1312,7 +1310,6 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -1320,7 +1317,7 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -1585,7 +1582,7 @@ async fn test_worker_auth_required() -> Result<()> {
         .uri("/worker/register")
         .header("Content-Type", "application/json")
         .body(Body::from(
-            serde_json::to_string(&json!({"name": "bad", "capabilities": ["script"]})).unwrap(),
+            serde_json::to_string(&json!({"name": "bad", "tags": ["script"]})).unwrap(),
         ))
         .unwrap();
 
@@ -1607,7 +1604,7 @@ async fn test_worker_auth_invalid_token() -> Result<()> {
         .header("Content-Type", "application/json")
         .header("Authorization", "Bearer wrong-token")
         .body(Body::from(
-            serde_json::to_string(&json!({"name": "bad", "capabilities": ["script"]})).unwrap(),
+            serde_json::to_string(&json!({"name": "bad", "tags": ["script"]})).unwrap(),
         ))
         .unwrap();
 
@@ -2315,7 +2312,7 @@ async fn test_worker_heartbeat() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "hb-worker", "capabilities": ["script"]}),
+            json!({"name": "hb-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2361,7 +2358,7 @@ async fn test_worker_start_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "start-worker", "capabilities": ["script"]}),
+            json!({"name": "start-worker", "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2373,7 +2370,7 @@ async fn test_worker_start_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2442,7 +2439,7 @@ async fn test_job_started_at_visible_in_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "timing-worker", "capabilities": ["script"]}),
+            json!({"name": "timing-worker", "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2454,7 +2451,7 @@ async fn test_job_started_at_visible_in_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2546,7 +2543,7 @@ async fn test_docker_action_type_flow() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "docker-worker", "capabilities": ["docker"]}),
+            json!({"name": "docker-worker", "tags": ["docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2556,7 +2553,7 @@ async fn test_docker_action_type_flow() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["docker"]}),
+            json!({"worker_id": worker_id, "tags": ["docker"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2591,7 +2588,7 @@ async fn test_capability_mismatch_no_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "script-only", "capabilities": ["script"]}),
+            json!({"name": "script-only", "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2602,7 +2599,7 @@ async fn test_capability_mismatch_no_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), 200);
@@ -2645,7 +2642,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-worker", "capabilities": ["script", "docker"]}),
+            json!({"name": "multi-worker", "tags": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2657,7 +2654,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script", "docker"]}),
+            json!({"worker_id": worker_id, "tags": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2670,7 +2667,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script", "docker"]}),
+            json!({"worker_id": worker_id, "tags": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2687,7 +2684,7 @@ async fn test_multi_capability_worker() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script", "docker"]}),
+            json!({"worker_id": worker_id, "tags": ["script", "docker"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2837,7 +2834,6 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -2848,7 +2844,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2870,7 +2866,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2908,7 +2904,6 @@ async fn test_first_step_template_rendering() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -2917,7 +2912,7 @@ async fn test_first_step_template_rendering() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -2954,7 +2949,6 @@ async fn test_dependency_with_null_output() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -2965,7 +2959,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
 
@@ -2988,7 +2982,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3073,7 +3067,7 @@ async fn test_auth_no_bearer_prefix() -> Result<()> {
         .header("Content-Type", "application/json")
         .header("Authorization", "Token test-token-secret")
         .body(Body::from(
-            serde_json::to_string(&json!({"name": "bad", "capabilities": ["script"]})).unwrap(),
+            serde_json::to_string(&json!({"name": "bad", "tags": ["script"]})).unwrap(),
         ))
         .unwrap();
 
@@ -3239,7 +3233,6 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3248,7 +3241,7 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3287,7 +3280,6 @@ async fn test_secret_reference_in_env() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3296,7 +3288,7 @@ async fn test_secret_reference_in_env() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3333,7 +3325,6 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3342,7 +3333,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3389,7 +3380,6 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3398,7 +3388,7 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -3451,7 +3441,6 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3461,7 +3450,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3536,7 +3525,6 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3545,7 +3533,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3612,7 +3600,6 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3621,7 +3608,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3695,7 +3682,6 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3704,7 +3690,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3772,7 +3758,6 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3781,7 +3766,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(
@@ -3838,7 +3823,6 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -3849,7 +3833,7 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let resp = router
@@ -3868,7 +3852,7 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 422);
@@ -4043,7 +4027,6 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -4053,7 +4036,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 422, "Render failure should return 422");
@@ -4273,7 +4256,6 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -4282,7 +4264,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 422, "Child step render should fail with 422");
@@ -4350,7 +4332,6 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -4359,7 +4340,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -6523,7 +6504,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "w1", "capabilities": ["script"]}),
+            json!({"name": "w1", "tags": ["script"]}),
         ))
         .await?;
     let reg_body = body_json(resp).await;
@@ -6534,7 +6515,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -7355,7 +7336,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-ws-worker", "capabilities": ["script"]}),
+            json!({"name": "multi-ws-worker", "tags": ["script"]}),
         ))
         .await?;
     let reg_body = body_json(resp).await;
@@ -7367,7 +7348,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": &worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": &worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -7398,7 +7379,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": &worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": &worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -7419,7 +7400,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": &worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": &worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -11989,7 +11970,6 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
-        &["script".to_string()],
         None,
     )
     .await?;
@@ -11998,7 +11978,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
         ))
         .await?;
     let body = body_json(response).await;
@@ -12266,7 +12246,7 @@ async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "stale-worker", "capabilities": ["script"]}),
+            json!({"name": "stale-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12280,7 +12260,7 @@ async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id_str, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12353,7 +12333,7 @@ async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "active-worker", "capabilities": ["script"]}),
+            json!({"name": "active-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12366,7 +12346,7 @@ async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id_str, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12421,7 +12401,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-worker", "capabilities": ["script"]}),
+            json!({"name": "multi-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12435,7 +12415,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id_str, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12458,7 +12438,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id_str, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id_str, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -12518,7 +12498,7 @@ async fn test_recovery_worker_reactivation_on_heartbeat_via_api() -> Result<()> 
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "reactivate-worker", "capabilities": ["script"]}),
+            json!({"name": "reactivate-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -13023,7 +13003,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "multi-ws-worker", "capabilities": ["script"]}),
+            json!({"name": "multi-ws-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -13036,7 +13016,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -13068,7 +13048,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
-            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+            json!({"worker_id": worker_id, "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(resp.status(), 200);
@@ -13335,7 +13315,7 @@ async fn test_worker_register_with_version_stored_in_db() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "versioned-worker", "capabilities": ["script"], "version": "0.5.9"}),
+            json!({"name": "versioned-worker", "tags": ["script"], "version": "0.5.9"}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -13360,7 +13340,7 @@ async fn test_worker_register_without_version_stores_null() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "legacy-worker", "capabilities": ["script"]}),
+            json!({"name": "legacy-worker", "tags": ["script"]}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -13386,7 +13366,7 @@ async fn test_list_workers_response_includes_version() -> Result<()> {
         .oneshot(worker_request(
             "POST",
             "/worker/register",
-            json!({"name": "v-worker", "capabilities": ["script"], "version": "1.2.3"}),
+            json!({"name": "v-worker", "tags": ["script"], "version": "1.2.3"}),
         ))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);

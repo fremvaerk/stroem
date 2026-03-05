@@ -336,7 +336,7 @@ File: `crates/stroem-db/migrations/001_initial.sql`
 CREATE TABLE worker (
     worker_id UUID PRIMARY KEY,
     name TEXT NOT NULL,
-    capabilities JSONB NOT NULL DEFAULT '["shell"]',  -- e.g. ["shell", "docker", "kubernetes"]
+    tags JSONB NOT NULL DEFAULT '["shell"]',  -- e.g. ["shell", "docker", "kubernetes"]
     last_heartbeat TIMESTAMPTZ,
     registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive'))
@@ -452,7 +452,7 @@ CREATE TABLE api_key (
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/worker/register` | Register worker with capabilities, get worker_id |
+| POST | `/worker/register` | Register worker with tags, get worker_id |
 | POST | `/worker/heartbeat` | Worker heartbeat |
 | POST | `/worker/jobs/claim` | Claim next available job/step |
 | POST | `/worker/jobs/{id}/steps/{step}/start` | Mark step as running |
@@ -471,30 +471,30 @@ CREATE TABLE api_key (
 
 ## 5. Key Architectural Components
 
-### Worker capabilities & runner dispatch
+### Worker tags & runner dispatch
 
-Workers advertise their capabilities on registration:
+Workers advertise their tags on registration:
 
 ```
 POST /worker/register
 {
   "name": "worker-1",
-  "capabilities": ["shell", "docker"]
+  "tags": ["shell", "docker"]
 }
 ```
 
-Capabilities are derived from the worker's configured runners:
+Tags are derived from the worker's configured runners:
 - `shell` runner -> advertises `["shell"]`
 - `docker` runner -> advertises `["shell", "docker"]` (docker can run shell+image too)
 - `kubernetes` runner -> advertises `["shell", "docker", "pod"]` (k8s can run everything)
 
-Each job step carries `action_type` and `action_image` (derived from the action definition). The claim endpoint filters by capability match:
+Each job step carries `action_type` and `action_image` (derived from the action definition). The claim endpoint filters by tag match:
 
 ```sql
--- Claim query filters by capability match
+-- Claim query filters by tag match
 SELECT ... FROM job_step
 WHERE status = 'ready'
-  AND action_type = ANY($1)  -- $1 = worker's capabilities array
+  AND action_type = ANY($1)  -- $1 = worker's tags array
 ORDER BY ...
 FOR UPDATE SKIP LOCKED
 LIMIT 1;
@@ -646,17 +646,17 @@ max_concurrent: 4
 poll_interval: 2s
 workspace_dir: /tmp/stroem-workspace
 
-# Multiple runners -- worker advertises capabilities based on what's configured
+# Multiple runners -- worker advertises tags based on what's configured
 runners:
   - type: shell                     # always available, runs in worker process
 
   # Docker runner (uncomment to enable)
-  # Adds capabilities: ["shell", "docker"] (handles shell+image via docker run)
+  # Adds tags: ["shell", "docker"] (handles shell+image via docker run)
   # - type: docker
   #   socket: /var/run/docker.sock
 
   # Kubernetes runner -- creates Pods for container-based actions
-  # Adds capabilities: ["shell", "docker", "pod"]
+  # Adds tags: ["shell", "docker", "pod"]
   # - type: kubernetes
   #   namespace: stroem-jobs
   #   service_account: stroem-runner
@@ -667,9 +667,9 @@ runners:
   #   workspace_storage_size: 5Gi
 ```
 
-**Capability derivation examples:**
+**Tag derivation examples:**
 
-| Configured runners | Advertised capabilities | Notes |
+| Configured runners | Advertised tags | Notes |
 |-------------------|------------------------|-------|
 | `[shell]` | `["shell"]` | MVP default. Only in-worker shell commands. |
 | `[shell, docker]` | `["shell", "docker"]` | Shell in-worker + Docker containers. shell+image runs via `docker run`. |
@@ -761,7 +761,7 @@ Goal: End-to-end execution of a simple workflow via CLI/API.
 **Step 5 -- Server API**
 - Public API: `GET /api/workspaces/{ws}/tasks`, `GET /api/workspaces/{ws}/tasks/{name}`, `POST /api/workspaces/{ws}/tasks/{name}/execute`
 - Public API: `GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/logs`
-- Worker API: `POST /worker/register` (with capabilities), `POST /worker/jobs/claim` (filtered by capability), `POST /worker/jobs/{id}/steps/{step}/start`, `POST /worker/jobs/{id}/steps/{step}/complete`, `POST /worker/jobs/{id}/logs`, `POST /worker/jobs/{id}/complete`
+- Worker API: `POST /worker/register` (with tags), `POST /worker/jobs/claim` (filtered by tags), `POST /worker/jobs/{id}/steps/{step}/start`, `POST /worker/jobs/{id}/steps/{step}/complete`, `POST /worker/jobs/{id}/logs`, `POST /worker/jobs/{id}/complete`
 - Worker auth: simple bearer token check (from config)
 - No user auth in MVP -- add in Phase 2
 

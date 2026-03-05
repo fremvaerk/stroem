@@ -93,8 +93,6 @@ Tags control which steps a worker can claim. Each step computes `required_tags` 
 
 Actions can add extra tags via the `tags` field (e.g., `tags: ["gpu"]`). A worker claims a step only when all required tags are present in the worker's tag set.
 
-For backward compatibility, `capabilities` still works — if `tags` is not set, `capabilities` is used as the tag set.
-
 ## Pre-installed tools
 
 The official runner image (`ghcr.io/fremvaerk/stroem-runner`) and worker image ship with these tools pre-installed:

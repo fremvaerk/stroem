@@ -24,7 +24,6 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 ```json
 {
   "name": "worker-1",
-  "capabilities": ["script"],
   "tags": ["script", "docker"]
 }
 ```
@@ -32,8 +31,7 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Worker display name |
-| `capabilities` | string[] | Legacy capability list (used if `tags` not set) |
-| `tags` | string[] | Worker tags for step routing (overrides `capabilities`) |
+| `tags` | string[] | Worker tags for step routing |
 
 **Response:**
 
@@ -72,12 +70,11 @@ Claims the next ready step that matches the worker's tags. Uses `SELECT FOR UPDA
 ```json
 {
   "worker_id": "w1w2w3w4-...",
-  "capabilities": ["script"],
   "tags": ["script", "docker"]
 }
 ```
 
-A step is only claimed if all of its `required_tags` are present in the worker's effective tag set.
+A step is only claimed if all of its `required_tags` are present in the worker's tag set.
 
 **Response (step available):**
 

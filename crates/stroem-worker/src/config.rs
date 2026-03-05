@@ -13,10 +13,9 @@ pub struct WorkerConfig {
     /// Each workspace gets a subdirectory: `{workspace_cache_dir}/{workspace_name}/`
     #[serde(alias = "workspace_dir")]
     pub workspace_cache_dir: String,
-    #[serde(default = "default_capabilities")]
-    pub capabilities: Vec<String>,
-    /// Worker tags for step routing (replaces capabilities). If not set, falls back to capabilities.
-    pub tags: Option<Vec<String>>,
+    /// Worker tags for step routing (e.g. `["script", "docker", "gpu"]`).
+    #[serde(default = "default_tags")]
+    pub tags: Vec<String>,
     /// Default runner image for Type 2 (shell-in-container) execution
     pub runner_image: Option<String>,
     /// Docker runner configuration (requires `docker` feature)
@@ -30,11 +29,6 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
-    /// Returns tags if set, otherwise falls back to capabilities
-    pub fn effective_tags(&self) -> &[String] {
-        self.tags.as_deref().unwrap_or(&self.capabilities)
-    }
-
     /// Validate config values after deserialization
     pub fn validate(&self) -> Result<()> {
         if self.worker_token.len() < 32 {
@@ -78,7 +72,7 @@ pub struct KubeRunnerConfig {
     pub runner_startup_configmap: Option<String>,
 }
 
-fn default_capabilities() -> Vec<String> {
+fn default_tags() -> Vec<String> {
     vec!["script".to_string()]
 }
 
@@ -113,7 +107,7 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
-capabilities:
+tags:
   - script
 "#;
 
@@ -124,11 +118,11 @@ capabilities:
         assert_eq!(config.max_concurrent, 4);
         assert_eq!(config.poll_interval_secs, 2);
         assert_eq!(config.workspace_cache_dir, "/tmp/stroem-workspace");
-        assert_eq!(config.capabilities, vec!["script"]);
+        assert_eq!(config.tags, vec!["script"]);
     }
 
     #[test]
-    fn test_default_capabilities() {
+    fn test_default_tags() {
         let yaml = r#"
 server_url: "http://localhost:8080"
 worker_token: "test-token"
@@ -139,7 +133,7 @@ workspace_cache_dir: "/tmp/stroem-workspace"
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.capabilities, vec!["script"]);
+        assert_eq!(config.tags, vec!["script"]);
     }
 
     #[test]
@@ -206,7 +200,7 @@ kubernetes:
     }
 
     #[test]
-    fn test_effective_tags_with_tags_set() {
+    fn test_config_with_multiple_tags() {
         let yaml = r#"
 server_url: "http://localhost:8080"
 worker_token: "test-token"
@@ -214,8 +208,6 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
-capabilities:
-  - script
 tags:
   - script
   - docker
@@ -223,28 +215,7 @@ tags:
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        // When tags is set, effective_tags() returns tags (not capabilities)
-        assert_eq!(config.effective_tags(), &["script", "docker", "node-20"]);
-    }
-
-    #[test]
-    fn test_effective_tags_without_tags() {
-        let yaml = r#"
-server_url: "http://localhost:8080"
-worker_token: "test-token"
-worker_name: "worker-1"
-max_concurrent: 4
-poll_interval_secs: 2
-workspace_cache_dir: "/tmp/stroem-workspace"
-capabilities:
-  - script
-  - docker
-"#;
-
-        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        // When tags is not set, effective_tags() falls back to capabilities
-        assert!(config.tags.is_none());
-        assert_eq!(config.effective_tags(), &["script", "docker"]);
+        assert_eq!(config.tags, vec!["script", "docker", "node-20"]);
     }
 
     #[test]
@@ -264,19 +235,30 @@ runner_image: "ghcr.io/myorg/stroem-runner:latest"
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.tags,
-            Some(vec![
-                "script".to_string(),
-                "docker".to_string(),
-                "gpu".to_string()
-            ])
-        );
+        assert_eq!(config.tags, vec!["script", "docker", "gpu"]);
         assert_eq!(
             config.runner_image,
             Some("ghcr.io/myorg/stroem-runner:latest".to_string())
         );
-        assert_eq!(config.effective_tags(), &["script", "docker", "gpu"]);
+    }
+
+    #[test]
+    fn test_config_with_old_capabilities_key_is_rejected() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
+"#;
+        let result = serde_yaml::from_str::<WorkerConfig>(yaml);
+        assert!(
+            result.is_err(),
+            "Old capabilities key must be rejected by deny_unknown_fields"
+        );
     }
 
     /// Serialize access to env vars in tests to avoid races between parallel tests

@@ -163,11 +163,10 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Startup scripts**: Worker and runner images use `docker/entrypoint.sh` which sources `*.sh` from `/etc/stroem/startup.d/` before the main process. DockerRunner always bind-mounts this path (WithWorkspace mode). KubeRunner injects a ConfigMap volume when `runner_startup_configmap` is set in worker config. Helm chart provides `startupScript`, `worker.startupScript`, and `runner.startupScript` values.
 
 ### Tags and Step Claiming
-- Workers declare `tags` (replaces `capabilities`) — e.g. `["script", "docker", "gpu"]`
+- Workers declare `tags` — e.g. `["script", "docker", "gpu"]`
 - Steps compute `required_tags` from action type/runner + explicit tags
 - Claim SQL: `required_tags <@ worker_tags::jsonb` (all required tags must be in worker's tag set)
 - GIN index on `job_step.required_tags` for efficient containment queries
-- Backward compatible: `capabilities` still works if `tags` not set
 
 ### Multi-Workspace
 - Server config uses `workspaces:` map with named entries (folder or git source)

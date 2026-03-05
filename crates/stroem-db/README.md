@@ -31,7 +31,7 @@ Auth tables (user, user_auth_link, refresh_token, api_key) are commented out for
 Worker registration and heartbeat management:
 
 ```rust
-WorkerRepo::register(pool, worker_id, name, &capabilities).await?;
+WorkerRepo::register(pool, worker_id, name, &tags, None).await?;
 WorkerRepo::heartbeat(pool, worker_id).await?;
 WorkerRepo::get(pool, worker_id).await?;
 ```
@@ -72,7 +72,7 @@ Step-level operations for distributed execution:
 JobStepRepo::create_steps(pool, &steps).await?;
 
 // Claim a ready step (concurrency-safe)
-let step = JobStepRepo::claim_ready_step(pool, &capabilities, worker_id).await?;
+let step = JobStepRepo::claim_ready_step(pool, &worker_tags, worker_id).await?;
 
 // Update step state
 JobStepRepo::mark_running(pool, job_id, step_name, worker_id).await?;

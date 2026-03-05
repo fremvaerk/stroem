@@ -400,15 +400,7 @@ async fn test_step_transition_ready_to_running_to_failed() -> Result<()> {
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "work", "ready")]).await?;
 
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(
-        &pool,
-        worker_id,
-        "worker-1",
-        &["script".to_string()],
-        &["script".to_string()],
-        None,
-    )
-    .await?;
+    WorkerRepo::register(&pool, worker_id, "worker-1", &["script".to_string()], None).await?;
 
     // ready → running
     JobStepRepo::mark_running(&pool, job_id, "work", worker_id).await?;

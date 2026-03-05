@@ -229,16 +229,9 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
 /// Register a worker (needed for `mark_running` FK checks).
 async fn register_worker(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
-    WorkerRepo::register(
-        pool,
-        id,
-        "test-worker",
-        &["script".to_string()],
-        &["script".to_string()],
-        None,
-    )
-    .await
-    .expect("worker registration");
+    WorkerRepo::register(pool, id, "test-worker", &["script".to_string()], None)
+        .await
+        .expect("worker registration");
     id
 }
 

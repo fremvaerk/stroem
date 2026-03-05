@@ -16,8 +16,7 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub name: String,
-    pub capabilities: Vec<String>,
-    pub tags: Option<Vec<String>>,
+    pub tags: Vec<String>,
     pub version: Option<String>,
 }
 
@@ -34,8 +33,7 @@ pub struct HeartbeatRequest {
 #[derive(Debug, Deserialize)]
 pub struct ClaimRequest {
     pub worker_id: String,
-    pub capabilities: Vec<String>,
-    pub tags: Option<Vec<String>>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,13 +98,11 @@ pub async fn register_worker(
 ) -> impl IntoResponse {
     let worker_id = Uuid::new_v4();
 
-    let effective_tags = req.tags.as_deref().unwrap_or(&req.capabilities);
     match WorkerRepo::register(
         &state.pool,
         worker_id,
         &req.name,
-        &req.capabilities,
-        effective_tags,
+        &req.tags,
         req.version.as_deref(),
     )
     .await
@@ -214,8 +210,7 @@ pub async fn claim_job(
         }
     };
 
-    let effective_tags = req.tags.as_deref().unwrap_or(&req.capabilities);
-    let step = match JobStepRepo::claim_ready_step(&state.pool, effective_tags, worker_id).await {
+    let step = match JobStepRepo::claim_ready_step(&state.pool, &req.tags, worker_id).await {
         Ok(Some(step)) => step,
         Ok(None) => {
             return Json(ClaimResponse {
@@ -581,7 +576,7 @@ mod tests {
     fn test_register_request_deserializes_version() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "capabilities": ["script"],
+            "tags": ["script"],
             "version": "0.5.9"
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
@@ -592,7 +587,7 @@ mod tests {
     fn test_register_request_version_absent_is_none() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "capabilities": ["script"]
+            "tags": ["script"]
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
         assert!(req.version.is_none());
@@ -602,11 +597,35 @@ mod tests {
     fn test_register_request_version_null_is_none() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "capabilities": ["script"],
+            "tags": ["script"],
             "version": null
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
         assert!(req.version.is_none());
+    }
+
+    #[test]
+    fn test_register_request_missing_tags_fails_deserialization() {
+        let json = serde_json::json!({"name": "worker-1"});
+        let result = serde_json::from_value::<RegisterRequest>(json);
+        assert!(result.is_err(), "missing tags must fail deserialization");
+    }
+
+    #[test]
+    fn test_claim_request_missing_tags_fails_deserialization() {
+        let json = serde_json::json!({"worker_id": "abc"});
+        let result = serde_json::from_value::<ClaimRequest>(json);
+        assert!(result.is_err(), "missing tags must fail deserialization");
+    }
+
+    #[test]
+    fn test_register_request_with_only_capabilities_fails() {
+        let json = serde_json::json!({"name": "old-worker", "capabilities": ["script"]});
+        let result = serde_json::from_value::<RegisterRequest>(json);
+        assert!(
+            result.is_err(),
+            "old payload with capabilities but no tags must fail"
+        );
     }
 
     #[test]

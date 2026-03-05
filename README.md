@@ -157,7 +157,7 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
-capabilities:
+tags:
   - script
 
 # Optional: enable Docker runner (requires Docker daemon access)
