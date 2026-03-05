@@ -139,6 +139,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: hello_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -166,6 +167,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: task_input,
             flow: hello_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -184,6 +187,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: greet_step_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -198,6 +202,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["greet".to_string()],
             input: shout_step_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -225,6 +230,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: gs_task_input,
             flow: gs_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -241,6 +248,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -253,6 +261,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -265,6 +274,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -277,6 +287,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: l3_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -293,6 +305,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -305,6 +318,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -317,6 +331,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -329,6 +344,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["step2".to_string(), "step3".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -341,6 +357,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: d_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -357,6 +375,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -369,6 +388,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: dbt_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -387,6 +408,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: mi_greet_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -403,6 +425,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["greet".to_string()],
             input: mi_process_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -430,6 +453,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: mi_task_input,
             flow: mi_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -446,6 +471,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -458,6 +484,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -470,6 +497,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -486,6 +514,7 @@ fn test_workspace() -> WorkspaceConfig {
             ],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -498,6 +527,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: wfi_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -567,6 +598,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: bt_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -594,6 +626,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: bt_task_input,
             flow: bt_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -708,6 +742,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: dp_transform_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -722,6 +757,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec!["transform".to_string()],
             input: dp_summarize_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -749,6 +785,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: None,
             input: dp_task_input,
             flow: dp_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -765,6 +803,7 @@ fn test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -777,6 +816,8 @@ fn test_workspace() -> WorkspaceConfig {
             folder: Some("deploy/staging".to_string()),
             input: HashMap::new(),
             flow: ds_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -790,6 +831,7 @@ fn test_workspace() -> WorkspaceConfig {
             task: "hello-world".to_string(),
             input: HashMap::from([("name".to_string(), json!("nightly"))]),
             enabled: true,
+            concurrency: Default::default(),
         },
     );
 
@@ -801,6 +843,7 @@ fn test_workspace() -> WorkspaceConfig {
             task: "backup-task".to_string(),
             input: HashMap::from([("host".to_string(), json!("db.prod"))]),
             enabled: false,
+            concurrency: Default::default(),
         },
     );
 
@@ -1053,6 +1096,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         status: "ready".to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1635,6 +1679,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -1646,6 +1691,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -1672,6 +1719,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         status: "ready".to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1700,6 +1748,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -1712,6 +1761,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -1724,6 +1774,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             depends_on: vec!["step2".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -1735,6 +1786,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -1762,6 +1815,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -1774,6 +1828,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -1786,6 +1841,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2030,6 +2086,7 @@ async fn test_task_detail_connections() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -2042,6 +2099,8 @@ async fn test_task_detail_connections() -> Result<()> {
             folder: None,
             input: conn_task_input,
             flow: conn_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -2073,6 +2132,7 @@ async fn test_task_detail_connections() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -2085,6 +2145,8 @@ async fn test_task_detail_connections() -> Result<()> {
             folder: None,
             input: prim_task_input,
             flow: prim_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -3357,6 +3419,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -3441,6 +3504,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -3516,6 +3580,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -3598,6 +3663,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "pod".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -3674,6 +3740,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "none".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -3881,6 +3948,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -3894,6 +3962,8 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: task_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![HookDef {
                 action: "notify".to_string(),
@@ -4041,6 +4111,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -4053,6 +4124,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: child_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -4093,6 +4166,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -4105,6 +4179,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: parent_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -4847,6 +4923,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -4859,6 +4936,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -4870,6 +4948,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -4897,6 +4977,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -4909,6 +4990,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -4946,6 +5028,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -4958,6 +5041,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -4969,6 +5053,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -4996,6 +5082,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5008,6 +5095,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5046,6 +5134,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -5058,6 +5147,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -5070,6 +5160,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             depends_on: vec!["step1".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -5081,6 +5172,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -5108,6 +5201,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5120,6 +5214,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5132,6 +5227,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5261,6 +5357,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         status: "ready".to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -5337,6 +5434,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5349,6 +5447,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 depends_on: vec!["step-ok".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5359,6 +5458,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         }
@@ -5387,6 +5488,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5399,6 +5501,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5459,6 +5562,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5471,6 +5575,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5481,6 +5586,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         }
@@ -5509,6 +5616,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5521,6 +5629,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5560,6 +5669,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5572,6 +5682,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: true,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5582,6 +5693,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         }
@@ -5610,6 +5723,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5622,6 +5736,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5668,6 +5783,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: true,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5680,6 +5796,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5690,6 +5807,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         }
@@ -5718,6 +5837,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5730,6 +5850,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5775,6 +5896,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: true,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5787,6 +5909,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5797,6 +5920,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         }
@@ -5825,6 +5950,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5837,6 +5963,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5876,6 +6003,7 @@ async fn test_cascading_skip() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5888,6 +6016,7 @@ async fn test_cascading_skip() -> Result<()> {
                 depends_on: vec!["step1".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5900,6 +6029,7 @@ async fn test_cascading_skip() -> Result<()> {
                 depends_on: vec!["step2".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -5910,6 +6040,8 @@ async fn test_cascading_skip() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         }
@@ -5938,6 +6070,7 @@ async fn test_cascading_skip() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5950,6 +6083,7 @@ async fn test_cascading_skip() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
         NewJobStep {
             job_id,
@@ -5962,6 +6096,7 @@ async fn test_cascading_skip() -> Result<()> {
             status: "pending".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6024,6 +6159,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -6036,6 +6172,8 @@ fn test_workspace_ops() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -6339,6 +6477,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         status: "ready".to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -7139,6 +7278,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -7168,6 +7308,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -7458,6 +7599,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -7470,6 +7612,8 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -8009,6 +8153,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8026,6 +8171,8 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![HookDef {
                 action: "notify".to_string(),
                 input: hook_input,
@@ -8116,6 +8263,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8133,6 +8281,8 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![HookDef {
                 action: "notify".to_string(),
@@ -8206,6 +8356,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8218,6 +8369,8 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![HookDef {
                 action: "notify".to_string(),
                 input: HashMap::new(),
@@ -8277,6 +8430,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8294,6 +8448,8 @@ async fn test_hook_input_contains_context() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![HookDef {
                 action: "notify".to_string(),
                 input: hook_input,
@@ -8364,6 +8520,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8376,6 +8533,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8390,6 +8548,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![HookDef {
                 action: "notify".to_string(),
@@ -8488,6 +8648,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8500,6 +8661,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: true,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8516,6 +8678,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![HookDef {
                 action: "notify".to_string(),
                 input: hook_input,
@@ -8608,6 +8772,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8623,6 +8788,8 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![HookDef {
                 action: "notify".to_string(),
@@ -8718,6 +8885,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8732,6 +8900,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![HookDef {
                 action: "notify".to_string(),
@@ -8822,6 +8992,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -8833,6 +9004,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         folder: None,
         input: HashMap::new(),
         flow: hook_flow,
+        timeout: None,
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -8927,6 +9100,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8939,6 +9113,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: cleanup_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -8955,6 +9131,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8967,6 +9144,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             depends_on: vec!["build".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -8979,6 +9157,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: deploy_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -9010,6 +9190,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -9022,6 +9203,8 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -9214,6 +9397,7 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         status: "ready".to_string(),
         required_tags: vec![],
         runner: "none".to_string(),
+        timeout_secs: None,
     };
     JobStepRepo::create_steps(&pool, &[step]).await?;
 
@@ -9274,6 +9458,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             depends_on: vec![],
             input: step_input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -9301,6 +9486,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
             folder: None,
             input: task_input,
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -9352,6 +9539,7 @@ async fn test_task_action_in_hook() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -9364,6 +9552,8 @@ async fn test_task_action_in_hook() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![HookDef {
                 action: "run-cleanup".to_string(),
@@ -9475,6 +9665,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -9487,6 +9678,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: fail_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -9527,6 +9720,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -9539,6 +9733,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: parent_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -11689,6 +11885,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             // Only map `sql`; `db` is NOT mapped here
             input: HashMap::from([("sql".to_string(), json!("{{ input.sql }}"))]),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -11702,6 +11899,8 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             folder: None,
             input: task_input,
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -11821,6 +12020,7 @@ async fn setup_sync_webhook() -> Result<(
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -11833,6 +12033,8 @@ async fn setup_sync_webhook() -> Result<(
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -12329,6 +12531,7 @@ async fn setup_scheduler_workspace(
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -12341,6 +12544,8 @@ async fn setup_scheduler_workspace(
             folder: None,
             input: HashMap::new(),
             flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -12353,6 +12558,7 @@ async fn setup_scheduler_workspace(
             task: task_name.to_string(),
             input: trigger_input,
             enabled,
+            concurrency: Default::default(),
         },
     );
 
@@ -12375,10 +12581,32 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         true,
     )
     .await;
-    let mgr = std::sync::Arc::new(WorkspaceManager::from_config("default", workspace));
+    let mgr = WorkspaceManager::from_config("default", workspace);
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let handle = stroem_server::scheduler::start(pool.clone(), mgr, cancel.clone());
+    let sched_config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url: url.clone() },
+        log_storage: LogStorageConfig {
+            local_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+    let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
+    let sched_state = AppState::new(
+        pool.clone(),
+        mgr,
+        sched_config,
+        sched_log_storage,
+        HashMap::new(),
+    );
+    let handle = stroem_server::scheduler::start(sched_state, cancel.clone());
 
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     cancel.cancel();
@@ -12387,7 +12615,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -12432,10 +12660,32 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         false,
     )
     .await;
-    let mgr = std::sync::Arc::new(WorkspaceManager::from_config("default", workspace));
+    let mgr = WorkspaceManager::from_config("default", workspace);
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let handle = stroem_server::scheduler::start(pool.clone(), mgr, cancel.clone());
+    let sched_config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url: url.clone() },
+        log_storage: LogStorageConfig {
+            local_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+    let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
+    let sched_state = AppState::new(
+        pool.clone(),
+        mgr,
+        sched_config,
+        sched_log_storage,
+        HashMap::new(),
+    );
+    let handle = stroem_server::scheduler::start(sched_state, cancel.clone());
 
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     cancel.cancel();
@@ -12471,10 +12721,32 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         true,
     )
     .await;
-    let mgr = std::sync::Arc::new(WorkspaceManager::from_config("default", workspace));
+    let mgr = WorkspaceManager::from_config("default", workspace);
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let handle = stroem_server::scheduler::start(pool.clone(), mgr, cancel.clone());
+    let sched_config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url: url.clone() },
+        log_storage: LogStorageConfig {
+            local_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+    let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
+    let sched_state = AppState::new(
+        pool.clone(),
+        mgr,
+        sched_config,
+        sched_log_storage,
+        HashMap::new(),
+    );
+    let handle = stroem_server::scheduler::start(sched_state, cancel.clone());
 
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     cancel.cancel();
@@ -12483,7 +12755,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name FROM job WHERE source_type = $1 LIMIT 1",
+         parent_job_id, parent_step_name, timeout_secs FROM job WHERE source_type = $1 LIMIT 1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -12512,13 +12784,30 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_scheduler_clean_shutdown() -> Result<()> {
     let workspace = WorkspaceConfig::default();
-    let mgr = std::sync::Arc::new(WorkspaceManager::from_config("default", workspace));
+    let mgr = WorkspaceManager::from_config("default", workspace);
 
     let cancel = tokio_util::sync::CancellationToken::new();
     // No triggers, so fire_trigger is never called — pool is never used.
     let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db")?;
-
-    let handle = stroem_server::scheduler::start(pool, mgr, cancel.clone());
+    let sched_config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://invalid:5432/db".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token".to_string(),
+        auth: None,
+        recovery: Default::default(),
+    };
+    let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
+    let sched_state = AppState::new(pool, mgr, sched_config, sched_log_storage, HashMap::new());
+    let handle = stroem_server::scheduler::start(sched_state, cancel.clone());
 
     cancel.cancel();
 
@@ -12628,6 +12917,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -12656,6 +12946,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             status: "ready".to_string(),
             required_tags: vec!["shell".to_string()],
             runner: "local".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;

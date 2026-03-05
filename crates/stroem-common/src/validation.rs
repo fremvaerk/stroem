@@ -108,6 +108,29 @@ fn validate_workflow_config_inner(
                     );
                 }
             }
+
+            // Validate step timeout (max 24h = 86400s)
+            if let Some(ref timeout) = step.timeout {
+                if timeout.as_secs() > 86400 {
+                    bail!(
+                        "Task '{}' step '{}' timeout {}s exceeds maximum of 86400s (24h)",
+                        task_name,
+                        step_name,
+                        timeout.as_secs()
+                    );
+                }
+            }
+        }
+
+        // Validate task/job timeout (max 7d = 604800s)
+        if let Some(ref timeout) = task.timeout {
+            if timeout.as_secs() > 604800 {
+                bail!(
+                    "Task '{}' timeout {}s exceeds maximum of 604800s (7d)",
+                    task_name,
+                    timeout.as_secs()
+                );
+            }
         }
 
         // Validate DAG (no cycles)
@@ -1016,6 +1039,7 @@ triggers:
                 folder: None,
                 input: HashMap::new(),
                 flow: HashMap::new(),
+                timeout: None,
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -1027,6 +1051,7 @@ triggers:
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -1050,6 +1075,7 @@ triggers:
                 folder: None,
                 input: HashMap::new(),
                 flow: HashMap::new(),
+                timeout: None,
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -1061,6 +1087,7 @@ triggers:
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -3259,6 +3286,184 @@ tasks:
             warnings.is_empty(),
             "Expected no warnings, got: {:?}",
             warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_step_timeout_within_limit() {
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "make build"
+tasks:
+  deploy:
+    flow:
+      build:
+        action: build
+        timeout: 10m
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok, got: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_step_timeout_exceeds_limit() {
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "make build"
+tasks:
+  deploy:
+    flow:
+      build:
+        action: build
+        timeout: 86401
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum of 86400s"));
+    }
+
+    #[test]
+    fn test_validate_task_timeout_within_limit() {
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "make build"
+tasks:
+  deploy:
+    timeout: 30m
+    flow:
+      build:
+        action: build
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok, got: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_task_timeout_exceeds_limit() {
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "make build"
+tasks:
+  deploy:
+    timeout: 604801
+    flow:
+      build:
+        action: build
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum of 604800s"));
+    }
+
+    #[test]
+    fn test_validate_concurrency_policy_deserializes() {
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "make build"
+tasks:
+  deploy:
+    flow:
+      build:
+        action: build
+triggers:
+  hourly:
+    type: scheduler
+    cron: "0 * * * *"
+    task: deploy
+    concurrency: skip
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Expected Ok, got: {:?}",
+            result.unwrap_err()
+        );
+        let trigger = config.triggers.get("hourly").unwrap();
+        assert_eq!(
+            trigger.concurrency(),
+            crate::models::workflow::ConcurrencyPolicy::Skip
+        );
+    }
+
+    #[test]
+    fn test_validate_concurrency_policy_cancel_previous() {
+        let yaml = r#"
+actions:
+  etl:
+    type: shell
+    cmd: "python etl.py"
+tasks:
+  pipeline:
+    flow:
+      run:
+        action: etl
+triggers:
+  hourly:
+    type: scheduler
+    cron: "0 * * * *"
+    task: pipeline
+    concurrency: cancel_previous
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("hourly").unwrap();
+        assert_eq!(
+            trigger.concurrency(),
+            crate::models::workflow::ConcurrencyPolicy::CancelPrevious
+        );
+    }
+
+    #[test]
+    fn test_validate_concurrency_default_is_allow() {
+        let yaml = r#"
+actions:
+  build:
+    type: shell
+    cmd: "make"
+tasks:
+  ci:
+    flow:
+      build:
+        action: build
+triggers:
+  every_min:
+    type: scheduler
+    cron: "* * * * *"
+    task: ci
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("every_min").unwrap();
+        assert_eq!(
+            trigger.concurrency(),
+            crate::models::workflow::ConcurrencyPolicy::Allow
         );
     }
 }

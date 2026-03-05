@@ -202,6 +202,19 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Clean shutdown via `tokio_util::sync::CancellationToken` (SIGINT/SIGTERM)
 - Jobs created by triggers have `source_type = "trigger"`, `source_id = "{workspace}/{trigger_name}"`
 - Cron validation at YAML parse time in `validation.rs` (CLI `validate` catches bad expressions)
+- **Concurrency policy**: `ConcurrencyPolicy` enum (`Allow`/`Skip`/`CancelPrevious`) on `TriggerDef::Scheduler`
+  - `skip`: `count_active_by_source() > 0` → skip trigger fire
+  - `cancel_previous`: `get_active_by_source()` → cancel all active → create new job
+  - `allow`: (default) no check
+
+### Timeouts
+- **Step timeout**: `FlowStep.timeout: Option<HumanDuration>` — kills step after duration (max 24h)
+- **Task/job timeout**: `TaskDef.timeout: Option<HumanDuration>` — cancels entire job after duration (max 7d)
+- `HumanDuration` in `crates/stroem-common/src/duration.rs` — parses `"30s"`, `"5m"`, `"1h30m"`, or plain integer (seconds)
+- DB: `timeout_secs INTEGER` nullable columns on `job` and `job_step` tables (migration `012_timeouts.sql`)
+- **Server-side enforcement**: `recovery.rs` sweep Phase 2 (`get_timed_out_steps`) and Phase 3 (`get_timed_out_jobs`)
+- **Worker-side enforcement**: `poller.rs` wraps step execution in `tokio::time::timeout` with abort handle
+- `ClaimResponse` includes `timeout_secs` so workers know the step's timeout
 
 ### Webhook Triggers
 - `TriggerDef` is a tagged enum (`#[serde(tag = "type")]`) with `Scheduler` and `Webhook` variants

@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -27,6 +27,7 @@ pub struct JobStepRow {
     pub error_message: Option<String>,
     pub required_tags: JsonValue,
     pub runner: String,
+    pub timeout_secs: Option<i32>,
 }
 
 /// New job step for creation
@@ -42,6 +43,7 @@ pub struct NewJobStep {
     pub status: String, // 'pending' or 'ready'
     pub required_tags: Vec<String>,
     pub runner: String,
+    pub timeout_secs: Option<i32>,
 }
 
 /// A stale running step with its job info for recovery.
@@ -49,7 +51,7 @@ pub struct NewJobStep {
 pub struct StaleStepInfo {
     pub job_id: Uuid,
     pub step_name: String,
-    pub worker_id: Uuid,
+    pub worker_id: Option<Uuid>,
 }
 
 /// Repository for job step operations
@@ -76,7 +78,7 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs)
             VALUES
             "#,
         );
@@ -93,14 +95,15 @@ impl JobStepRepo {
             String,
             JsonValue,
             String,
+            Option<i32>,
         )> = Vec::new();
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 10;
+            let base = i * 11;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -110,7 +113,8 @@ impl JobStepRepo {
                 base + 7,
                 base + 8,
                 base + 9,
-                base + 10
+                base + 10,
+                base + 11
             ));
             let required_tags_json = serde_json::to_value(&step.required_tags).unwrap_or_default();
             bindings.push((
@@ -124,6 +128,7 @@ impl JobStepRepo {
                 step.status.clone(),
                 required_tags_json,
                 step.runner.clone(),
+                step.timeout_secs,
             ));
         }
 
@@ -139,7 +144,8 @@ impl JobStepRepo {
                 .bind(binding.6)
                 .bind(binding.7)
                 .bind(binding.8)
-                .bind(binding.9);
+                .bind(binding.9)
+                .bind(binding.10);
         }
 
         q.execute(executor)
@@ -577,6 +583,19 @@ impl JobStepRepo {
         .fetch_all(pool)
         .await
         .context("Failed to get running steps for workers")?;
+        Ok(rows)
+    }
+
+    /// Return running steps whose `timeout_secs` deadline has elapsed.
+    pub async fn get_timed_out_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {
+        let rows = sqlx::query_as::<_, StaleStepInfo>(
+            "SELECT job_id, step_name, worker_id FROM job_step \
+             WHERE status = 'running' AND timeout_secs IS NOT NULL \
+               AND started_at + make_interval(secs => timeout_secs::double precision) < NOW()",
+        )
+        .fetch_all(pool)
+        .await
+        .context("get_timed_out_steps")?;
         Ok(rows)
     }
 }

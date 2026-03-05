@@ -205,6 +205,44 @@ flow:
     # test waits for both checkout AND setup-db
 ```
 
+### Timeouts
+
+You can set timeouts at the step level and the task level. Timeouts accept a human-readable duration string (e.g. `"30s"`, `"5m"`, `"1h30m"`) or a plain integer (seconds).
+
+**Step timeout** — kills a single step if it runs too long (max 24h):
+
+```yaml
+flow:
+  build:
+    action: build-app
+    timeout: 10m
+  deploy:
+    action: deploy-k8s
+    timeout: 15m
+    depends_on: [build]
+```
+
+When a step times out, it is marked as `failed` with the error "Step timed out". Downstream steps that depend on it are skipped (unless they have `continue_on_failure: true`). The worker also enforces the timeout client-side by cancelling the running process.
+
+**Task timeout** — cancels the entire job if it runs too long (max 7d):
+
+```yaml
+tasks:
+  deploy:
+    timeout: 30m
+    flow:
+      build:
+        action: build-app
+        timeout: 10m
+      deploy:
+        action: deploy-k8s
+        depends_on: [build]
+```
+
+When a task times out, all running steps are cancelled and the job is marked as `cancelled`. Note that the job timeout clock starts when the job is created, not when execution begins — queue wait time counts against the timeout.
+
+Both timeouts are enforced server-side by the recovery sweeper (periodic check) and, for step timeouts, also client-side by the worker process for immediate enforcement.
+
 ### Handling step failures
 
 By default, when a step fails, all downstream steps that depend on it are automatically **skipped**. The job is marked as `failed` once all steps reach a terminal state.

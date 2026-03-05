@@ -50,6 +50,8 @@ pub struct ClaimResponse {
     pub action_spec: Option<serde_json::Value>,
     pub input: Option<serde_json::Value>,
     pub runner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +229,7 @@ pub async fn claim_job(
                 action_spec: None,
                 input: None,
                 runner: None,
+                timeout_secs: None,
             })
             .into_response();
         }
@@ -373,6 +376,7 @@ pub async fn claim_job(
         action_spec: rendered_action_spec,
         input: rendered_input,
         runner: Some(step.runner),
+        timeout_secs: step.timeout_secs,
     })
     .into_response()
 }
@@ -567,6 +571,7 @@ mod tests {
             action_spec: None,
             input: None,
             runner: Some("local".to_string()),
+            timeout_secs: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -617,6 +622,7 @@ mod tests {
             action_spec: None,
             input: None,
             runner: None,
+            timeout_secs: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());

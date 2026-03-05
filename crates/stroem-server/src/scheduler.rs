@@ -1,11 +1,12 @@
 use crate::job_creator::create_job_for_task;
+use crate::state::AppState;
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
 use croner::parser::{CronParser, Seconds};
 use croner::Cron;
-use sqlx::PgPool;
 use std::collections::HashMap;
-use std::sync::Arc;
+use stroem_common::models::workflow::ConcurrencyPolicy;
+use stroem_db::JobRepo;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +21,7 @@ struct TriggerState {
     task: String,
     input: HashMap<String, serde_json::Value>,
     trigger_name: String,
+    concurrency: ConcurrencyPolicy,
     last_run: Option<DateTime<Utc>>,
     next_run: Option<DateTime<Utc>>,
 }
@@ -29,20 +31,17 @@ struct TriggerState {
 /// Iterates triggers across all workspaces, computes smart sleep intervals,
 /// and fires jobs at the correct time. Supports config hot-reload (preserving
 /// last_run state for unchanged triggers) and clean shutdown via CancellationToken.
-pub fn start(
-    pool: PgPool,
-    workspaces: Arc<WorkspaceManager>,
-    cancel: CancellationToken,
-) -> JoinHandle<()> {
+pub fn start(state: AppState, cancel: CancellationToken) -> JoinHandle<()> {
     tokio::spawn(async move {
-        run_loop(pool, workspaces, cancel).await;
+        run_loop(state, cancel).await;
     })
 }
 
-async fn run_loop(pool: PgPool, workspaces: Arc<WorkspaceManager>, cancel: CancellationToken) {
+async fn run_loop(state: AppState, cancel: CancellationToken) {
+    let workspaces = &state.workspaces;
     tracing::info!("Scheduler started");
 
-    let mut triggers = load_triggers(&workspaces, None).await;
+    let mut triggers = load_triggers(workspaces, None).await;
     tracing::info!("Scheduler loaded {} trigger(s)", triggers.len());
 
     loop {
@@ -50,12 +49,12 @@ async fn run_loop(pool: PgPool, workspaces: Arc<WorkspaceManager>, cancel: Cance
 
         // Compute next_run for triggers that need it, and collect keys to fire
         let mut to_fire = Vec::new();
-        for (key, state) in triggers.iter_mut() {
-            if state.next_run.is_none() {
-                state.next_run = compute_next_run(&state.cron, state.last_run, now);
+        for (key, tstate) in triggers.iter_mut() {
+            if tstate.next_run.is_none() {
+                tstate.next_run = compute_next_run(&tstate.cron, tstate.last_run, now);
             }
 
-            if let Some(next) = state.next_run {
+            if let Some(next) = tstate.next_run {
                 if now >= next {
                     to_fire.push(key.clone());
                 }
@@ -64,17 +63,17 @@ async fn run_loop(pool: PgPool, workspaces: Arc<WorkspaceManager>, cancel: Cance
 
         // Fire due triggers
         for key in &to_fire {
-            let state = triggers
+            let tstate = triggers
                 .get(key)
                 .expect("key came from iterating the triggers map");
-            fire_trigger(&pool, &workspaces, state).await;
+            fire_trigger(&state, workspaces, tstate).await;
 
-            let state = triggers
+            let tstate = triggers
                 .get_mut(key)
                 .expect("key came from iterating the triggers map");
             let now = Utc::now();
-            state.last_run = Some(now);
-            state.next_run = compute_next_run(&state.cron, Some(now), now);
+            tstate.last_run = Some(now);
+            tstate.next_run = compute_next_run(&tstate.cron, Some(now), now);
         }
 
         // Determine sleep duration: minimum time until next trigger fires
@@ -100,7 +99,7 @@ async fn run_loop(pool: PgPool, workspaces: Arc<WorkspaceManager>, cancel: Cance
         }
 
         // Hot-reload: re-scan workspace configs, preserving state for unchanged triggers
-        triggers = load_triggers(&workspaces, Some(&triggers)).await;
+        triggers = load_triggers(workspaces, Some(&triggers)).await;
     }
 }
 
@@ -122,13 +121,14 @@ async fn load_triggers(
 
         for (trigger_name, trigger_def) in &config.triggers {
             // Only process enabled scheduler triggers
-            let (cron_expr, task, input) = match trigger_def {
+            let (cron_expr, task, input, concurrency) = match trigger_def {
                 stroem_common::models::workflow::TriggerDef::Scheduler {
                     cron,
                     task,
                     input,
                     enabled,
-                } if *enabled => (cron.clone(), task.clone(), input.clone()),
+                    concurrency,
+                } if *enabled => (cron.clone(), task.clone(), input.clone(), *concurrency),
                 _ => continue,
             };
 
@@ -170,6 +170,7 @@ async fn load_triggers(
                     task,
                     input,
                     trigger_name: trigger_name.clone(),
+                    concurrency,
                     last_run,
                     next_run,
                 },
@@ -202,22 +203,83 @@ fn compute_next_run(
 }
 
 /// Fire a trigger by creating a job via the shared job_creator.
-async fn fire_trigger(pool: &PgPool, workspaces: &WorkspaceManager, state: &TriggerState) {
-    let source_id = format!("{}/{}", state.workspace, state.trigger_name);
-    let input = serde_json::to_value(&state.input).unwrap_or_default();
+///
+/// Applies concurrency policy before creating the job:
+/// - `Allow`: no check (default, existing behavior)
+/// - `Skip`: if there's an active job from this trigger, skip firing
+/// - `CancelPrevious`: cancel any active jobs from this trigger, then fire
+async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstate: &TriggerState) {
+    let source_id = format!("{}/{}", tstate.workspace, tstate.trigger_name);
+    let input = serde_json::to_value(&tstate.input).unwrap_or_default();
+
+    // Apply concurrency policy
+    match tstate.concurrency {
+        ConcurrencyPolicy::Skip => {
+            match JobRepo::count_active_by_source(&app_state.pool, "trigger", &source_id).await {
+                Ok(count) if count > 0 => {
+                    tracing::info!(
+                        "Trigger '{}': skipping (concurrency=skip, {} active job(s))",
+                        source_id,
+                        count
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Trigger '{}': failed to check active jobs: {:#}",
+                        source_id,
+                        e
+                    );
+                    // Proceed anyway — fail-open is safer than skipping silently
+                }
+                _ => {}
+            }
+        }
+        ConcurrencyPolicy::CancelPrevious => {
+            match JobRepo::get_active_job_ids_by_source(&app_state.pool, "trigger", &source_id)
+                .await
+            {
+                Ok(active_job_ids) => {
+                    for job_id in &active_job_ids {
+                        tracing::info!(
+                            "Trigger '{}': cancelling previous job {} (concurrency=cancel_previous)",
+                            source_id,
+                            job_id
+                        );
+                        if let Err(e) = crate::cancellation::cancel_job(app_state, *job_id).await {
+                            tracing::warn!(
+                                "Failed to cancel job {} for trigger '{}': {:#}",
+                                job_id,
+                                source_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Trigger '{}': failed to get active jobs for cancellation: {:#}",
+                        source_id,
+                        e
+                    );
+                }
+            }
+        }
+        ConcurrencyPolicy::Allow => {} // No check needed
+    }
 
     tracing::info!(
         "Scheduler firing trigger '{}' -> task '{}'",
         source_id,
-        state.task
+        tstate.task
     );
 
-    let config = match workspaces.get_config(&state.workspace).await {
+    let config = match workspaces.get_config(&tstate.workspace).await {
         Some(c) => c,
         None => {
             tracing::error!(
                 "Workspace '{}' not found when firing trigger '{}'",
-                state.workspace,
+                tstate.workspace,
                 source_id
             );
             return;
@@ -225,10 +287,10 @@ async fn fire_trigger(pool: &PgPool, workspaces: &WorkspaceManager, state: &Trig
     };
 
     match create_job_for_task(
-        pool,
+        &app_state.pool,
         &config,
-        &state.workspace,
-        &state.task,
+        &tstate.workspace,
+        &tstate.task,
         input,
         "trigger",
         Some(&source_id),
@@ -333,6 +395,7 @@ mod tests {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -345,6 +408,7 @@ mod tests {
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                timeout: None,
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -356,6 +420,7 @@ mod tests {
                 task: "hello".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -384,6 +449,7 @@ mod tests {
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: false,
+                concurrency: Default::default(),
             },
         );
 
@@ -427,6 +493,7 @@ mod tests {
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -470,6 +537,7 @@ mod tests {
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -491,6 +559,7 @@ mod tests {
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -513,6 +582,7 @@ mod tests {
                 task: "test".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -537,6 +607,7 @@ mod tests {
                 task: "task-a".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
         config.triggers.insert(
@@ -546,6 +617,7 @@ mod tests {
                 task: "task-b".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
         // This one should be skipped (disabled)
@@ -556,6 +628,7 @@ mod tests {
                 task: "task-c".to_string(),
                 input: HashMap::new(),
                 enabled: false,
+                concurrency: Default::default(),
             },
         );
 
@@ -587,6 +660,7 @@ mod tests {
                 task: "deploy-task".to_string(),
                 input: input.clone(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -602,22 +676,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_cancellation() {
-        use std::sync::Arc;
+        use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, ServerConfig};
+        use crate::log_storage::LogStorage;
         use tokio_util::sync::CancellationToken;
 
         // Create a workspace with no triggers so the scheduler sleeps for 60s
-        let config = WorkspaceConfig::new();
-        let mgr = Arc::new(WorkspaceManager::from_config("default", config));
+        let ws_config = WorkspaceConfig::new();
+        let mgr = WorkspaceManager::from_config("default", ws_config);
 
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        // We need a pool but won't actually use it — create a dummy connection string.
-        // Since there are no triggers, fire_trigger is never called.
-        // Use a pool that will fail on connect — it's never used without triggers.
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".to_string(),
+            db: DbConfig {
+                url: "postgres://invalid:5432/db".to_string(),
+            },
+            log_storage: LogStorageConfig {
+                local_dir: "/tmp/test-logs".to_string(),
+                s3: None,
+            },
+            workspaces: HashMap::new(),
+            libraries: HashMap::new(),
+            git_auth: HashMap::new(),
+            worker_token: "test".to_string(),
+            auth: None,
+            recovery: RecoveryConfig {
+                heartbeat_timeout_secs: 120,
+                sweep_interval_secs: 60,
+            },
+        };
+        let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
+        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
 
-        let handle = start(pool, mgr, cancel.clone());
+        let handle = start(state, cancel.clone());
 
         // Cancel after a short delay
         tokio::spawn(async move {

@@ -456,6 +456,7 @@ mod tests {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         }
     }
@@ -495,6 +496,7 @@ mod tests {
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                timeout: None,
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -556,6 +558,8 @@ mod tests {
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                timeout: None,
+
                 on_success: vec![HookDef {
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
@@ -593,6 +597,8 @@ mod tests {
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                timeout: None,
+
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -672,6 +678,8 @@ mod tests {
                 folder: None,
                 input: task_input,
                 flow,
+                timeout: None,
+
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -709,6 +717,7 @@ mod tests {
                 task: "deploy".to_string(),
                 input: HashMap::new(),
                 enabled: true,
+                concurrency: Default::default(),
             },
         );
 
@@ -738,6 +747,8 @@ mod tests {
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                timeout: None,
+
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -1092,6 +1103,7 @@ tasks:
             actions: ws.actions,
             tasks: ws.tasks,
             triggers: ws.triggers,
+
             on_success: ws.on_success,
             on_error: ws.on_error,
         }

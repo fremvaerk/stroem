@@ -302,6 +302,7 @@ mod tests {
             depends_on: vec![],
             input,
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         }
     }
@@ -323,6 +324,7 @@ mod tests {
             error_message: None,
             required_tags: json!([]),
             runner: "local".to_string(),
+            timeout_secs: None,
         }
     }
 
@@ -355,6 +357,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -388,6 +391,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -422,6 +426,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -455,6 +460,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -492,6 +498,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -528,6 +535,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -707,6 +715,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };
@@ -750,6 +759,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success: vec![],
             on_error: vec![],
         };

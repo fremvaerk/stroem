@@ -26,6 +26,7 @@ pub struct ClaimedStep {
     pub action_spec: Option<serde_json::Value>,
     pub input: Option<serde_json::Value>,
     pub runner: Option<String>,
+    pub timeout_secs: Option<i32>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -41,6 +42,7 @@ struct ClaimResponse {
     pub action_spec: Option<serde_json::Value>,
     pub input: Option<serde_json::Value>,
     pub runner: Option<String>,
+    pub timeout_secs: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,6 +223,7 @@ impl ServerClient {
             action_spec: resp.action_spec,
             input: resp.input,
             runner: resp.runner,
+            timeout_secs: resp.timeout_secs,
         };
 
         Ok(Some(step))

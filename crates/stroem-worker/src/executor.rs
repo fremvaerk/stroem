@@ -272,6 +272,7 @@ mod tests {
             action_spec,
             input: None,
             runner: None,
+            timeout_secs: None,
         }
     }
 

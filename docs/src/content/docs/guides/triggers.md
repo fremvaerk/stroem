@@ -46,6 +46,27 @@ Extended features (via the `croner` library):
 - Jobs created by triggers have `source_type: "trigger"` and `source_id: "{workspace}/{trigger_name}"` for audit trail.
 - If the server was down when a trigger was due, it fires on the next startup.
 
+### Concurrency policy
+
+Control what happens when a trigger fires while a previous run is still active:
+
+```yaml
+triggers:
+  hourly-etl:
+    type: scheduler
+    cron: "0 * * * *"
+    task: etl-pipeline
+    concurrency: skip        # skip | allow | cancel_previous
+```
+
+| Policy | Behavior |
+|--------|----------|
+| `allow` | (default) Always create a new job, even if previous runs are still active. |
+| `skip` | Skip the trigger if there is already an active job from this trigger. Logs an info message. |
+| `cancel_previous` | Cancel all active jobs from this trigger, then create a new job. |
+
+The concurrency check uses the trigger's `source_type` and `source_id` (`"{workspace}/{trigger_name}"`) to identify related jobs.
+
 ### Scheduler fields
 
 | Field | Required | Description |
@@ -54,6 +75,7 @@ Extended features (via the `croner` library):
 | `cron` | Yes | Cron expression (5 or 6 fields) |
 | `task` | Yes | Name of the task to execute |
 | `input` | No | Input values passed to the task |
+| `concurrency` | No | What to do when previous runs are active: `allow` (default), `skip`, `cancel_previous` |
 | `enabled` | No | Whether the trigger is active (default: `true`) |
 
 ## Webhook triggers

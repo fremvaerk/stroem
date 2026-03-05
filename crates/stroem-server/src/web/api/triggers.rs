@@ -101,6 +101,7 @@ mod tests {
                 task: "test-task".to_string(),
                 input: HashMap::new(),
                 enabled,
+                concurrency: Default::default(),
             },
             "webhook" => TriggerDef::Webhook {
                 name: "test-hook".to_string(),

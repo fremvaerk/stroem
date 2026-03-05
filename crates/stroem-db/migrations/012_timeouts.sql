@@ -1,0 +1,2 @@
+ALTER TABLE job ADD COLUMN timeout_secs INTEGER;
+ALTER TABLE job_step ADD COLUMN timeout_secs INTEGER;

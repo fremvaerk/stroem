@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name";
+const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs";
 
 /// Job row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -27,6 +27,7 @@ pub struct JobRow {
     pub log_path: Option<String>,
     pub parent_job_id: Option<Uuid>,
     pub parent_step_name: Option<String>,
+    pub timeout_secs: Option<i32>,
 }
 
 /// Repository for job operations
@@ -53,6 +54,7 @@ impl JobRepo {
             source_id,
             None,
             None,
+            None,
         )
         .await
     }
@@ -69,6 +71,7 @@ impl JobRepo {
         source_id: Option<&str>,
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
+        timeout_secs: Option<i32>,
     ) -> Result<Uuid> {
         Self::create_with_parent_tx(
             pool,
@@ -80,6 +83,7 @@ impl JobRepo {
             source_id,
             parent_job_id,
             parent_step_name,
+            timeout_secs,
         )
         .await
     }
@@ -100,6 +104,7 @@ impl JobRepo {
         source_id: Option<&str>,
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
+        timeout_secs: Option<i32>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -115,6 +120,7 @@ impl JobRepo {
             source_id,
             parent_job_id,
             parent_step_name,
+            timeout_secs,
         )
         .await
     }
@@ -132,14 +138,15 @@ impl JobRepo {
         source_id: Option<&str>,
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
+        timeout_secs: Option<i32>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(job_id)
@@ -151,6 +158,7 @@ impl JobRepo {
         .bind(source_id)
         .bind(parent_job_id)
         .bind(parent_step_name)
+        .bind(timeout_secs)
         .execute(executor)
         .await
         .context("Failed to create job")?;
@@ -519,5 +527,80 @@ impl JobRepo {
         .context("Failed to set job log path")?;
 
         Ok(())
+    }
+
+    /// Return IDs of pending/running jobs whose `timeout_secs` deadline has elapsed.
+    pub async fn get_timed_out_jobs(pool: &PgPool) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            "SELECT job_id FROM job \
+             WHERE status IN ('pending', 'running') \
+               AND timeout_secs IS NOT NULL \
+               AND created_at + make_interval(secs => timeout_secs::double precision) < NOW()",
+        )
+        .fetch_all(pool)
+        .await
+        .context("get_timed_out_jobs")?;
+        Ok(rows)
+    }
+
+    /// Count pending/running jobs matching the given `source_type` and `source_id`.
+    ///
+    /// Used to enforce cron concurrency limits before creating a new job.
+    pub async fn count_active_by_source(
+        pool: &PgPool,
+        source_type: &str,
+        source_id: &str,
+    ) -> Result<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM job \
+             WHERE source_type = $1 AND source_id = $2 \
+               AND status IN ('pending', 'running')",
+        )
+        .bind(source_type)
+        .bind(source_id)
+        .fetch_one(pool)
+        .await
+        .context("count_active_by_source")?;
+        Ok(count)
+    }
+
+    /// Return IDs of pending/running jobs matching the given `source_type` and `source_id`.
+    pub async fn get_active_job_ids_by_source(
+        pool: &PgPool,
+        source_type: &str,
+        source_id: &str,
+    ) -> Result<Vec<Uuid>> {
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            "SELECT job_id FROM job \
+             WHERE source_type = $1 AND source_id = $2 \
+               AND status IN ('pending', 'running')",
+        )
+        .bind(source_type)
+        .bind(source_id)
+        .fetch_all(pool)
+        .await
+        .context("get_active_job_ids_by_source")?;
+        Ok(rows)
+    }
+
+    /// Return all pending/running jobs matching the given `source_type` and `source_id`.
+    pub async fn get_active_by_source(
+        pool: &PgPool,
+        source_type: &str,
+        source_id: &str,
+    ) -> Result<Vec<JobRow>> {
+        let sql = format!(
+            "SELECT {} FROM job \
+             WHERE source_type = $1 AND source_id = $2 \
+               AND status IN ('pending', 'running')",
+            JOB_COLUMNS
+        );
+        let rows = sqlx::query_as::<_, JobRow>(&sql)
+            .bind(source_type)
+            .bind(source_id)
+            .fetch_all(pool)
+            .await
+            .context("get_active_by_source")?;
+        Ok(rows)
     }
 }

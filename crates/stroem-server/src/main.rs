@@ -149,11 +149,7 @@ async fn main() -> Result<()> {
     // Start background tasks
     let cancel_token = CancellationToken::new();
     state.workspaces.start_watchers(cancel_token.clone());
-    let _scheduler = stroem_server::scheduler::start(
-        state.pool.clone(),
-        state.workspaces.clone(),
-        cancel_token.clone(),
-    );
+    let _scheduler = stroem_server::scheduler::start(state.clone(), cancel_token.clone());
     let _recovery = stroem_server::recovery::start(state.clone(), cancel_token.clone());
 
     // Build router

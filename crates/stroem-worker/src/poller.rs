@@ -162,11 +162,51 @@ pub(crate) async fn execute_claimed_step(
             .await
     });
 
-    let result = match exec_handle.await {
-        Ok(inner_result) => inner_result,
-        Err(join_err) => {
-            let msg = extract_panic_message(join_err);
-            Err(anyhow::anyhow!(msg))
+    let result = if let Some(timeout_secs) = step
+        .timeout_secs
+        .and_then(|t| u64::try_from(t).ok())
+        .filter(|&t| t > 0)
+    {
+        // Save an abort handle before consuming exec_handle with the timeout future.
+        // If the timeout fires the JoinHandle is dropped (detached, not cancelled), so we
+        // interact with the still-running task via abort_handle only.
+        let abort_handle = exec_handle.abort_handle();
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), exec_handle).await
+        {
+            Ok(join_result) => match join_result {
+                Ok(r) => r,
+                Err(join_err) => {
+                    let msg = extract_panic_message(join_err);
+                    Err(anyhow::anyhow!(msg))
+                }
+            },
+            Err(_elapsed) => {
+                tracing::warn!(
+                    step = %step.step_name,
+                    timeout_secs,
+                    "Step timed out, cancelling"
+                );
+                step_cancel.cancel(); // signal runner to stop gracefully
+                                      // Give runner up to 10s to clean up (stop containers, delete pods) before
+                                      // hard-aborting the task.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                if !abort_handle.is_finished() {
+                    tracing::warn!(
+                        step = %step.step_name,
+                        "Runner did not stop within grace period, aborting"
+                    );
+                    abort_handle.abort();
+                }
+                Err(anyhow::anyhow!("Step timed out after {}s", timeout_secs))
+            }
+        }
+    } else {
+        match exec_handle.await {
+            Ok(inner_result) => inner_result,
+            Err(join_err) => {
+                let msg = extract_panic_message(join_err);
+                Err(anyhow::anyhow!(msg))
+            }
         }
     };
 
@@ -796,6 +836,7 @@ mod tests {
                 action_spec: Some(serde_json::json!({"cmd": cmd})),
                 input: None,
                 runner: Some("local".to_string()),
+                timeout_secs: None,
             }
         }
 

@@ -121,6 +121,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -135,6 +136,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -149,6 +151,8 @@ fn make_workspace_config() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: parent_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -162,6 +166,8 @@ fn make_workspace_config() -> WorkspaceConfig {
             folder: None,
             input: HashMap::new(),
             flow: child_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -174,6 +180,7 @@ fn make_workspace_config() -> WorkspaceConfig {
         secrets: HashMap::new(),
         connections: HashMap::new(),
         connection_types: HashMap::new(),
+
         on_success: vec![],
         on_error: vec![],
     }
@@ -192,6 +199,7 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
         status: "running".to_string(),
         required_tags: vec![],
         runner: "none".to_string(),
+        timeout_secs: None,
     }
 }
 
@@ -208,6 +216,7 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         status: status.to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }
 }
 
@@ -267,6 +276,7 @@ async fn child_completed_propagates_to_parent() -> Result<()> {
         Some(&format!("{}/run-child", parent_job_id)),
         Some(parent_job_id),
         Some("run-child"),
+        None,
     )
     .await?;
 
@@ -330,6 +340,7 @@ async fn child_failed_propagates_to_parent() -> Result<()> {
         Some(&format!("{}/run-child", parent_job_id)),
         Some(parent_job_id),
         Some("run-child"),
+        None,
     )
     .await?;
 
@@ -391,6 +402,7 @@ async fn child_cancelled_propagates_to_parent() -> Result<()> {
         Some(&format!("{}/run-child", parent_job_id)),
         Some(parent_job_id),
         Some("run-child"),
+        None,
     )
     .await?;
 
@@ -493,6 +505,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -505,6 +518,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: gp_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -520,6 +535,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -532,6 +548,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: p_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -547,6 +565,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -559,6 +578,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: c_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -571,6 +592,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         secrets: HashMap::new(),
         connections: HashMap::new(),
         connection_types: HashMap::new(),
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -600,6 +622,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         Some(&format!("{}/run-parent", gp_job_id)),
         Some(gp_job_id),
         Some("run-parent"),
+        None,
     )
     .await?;
 
@@ -614,6 +637,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         Some(&format!("{}/run-child", p_job_id)),
         Some(p_job_id),
         Some("run-child"),
+        None,
     )
     .await?;
 
@@ -632,6 +656,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             status: "running".to_string(),
             required_tags: vec![],
             runner: "none".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -650,6 +675,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             status: "running".to_string(),
             required_tags: vec![],
             runner: "none".to_string(),
+            timeout_secs: None,
         }],
     )
     .await?;
@@ -757,6 +783,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -769,6 +796,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             depends_on: vec!["shell-step".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -783,6 +811,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -797,6 +826,8 @@ async fn parent_with_mixed_steps() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: parent_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -810,6 +841,8 @@ async fn parent_with_mixed_steps() -> Result<()> {
             folder: None,
             input: HashMap::new(),
             flow: child_flow,
+            timeout: None,
+
             on_success: vec![],
             on_error: vec![],
         },
@@ -822,6 +855,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
         secrets: HashMap::new(),
         connections: HashMap::new(),
         connection_types: HashMap::new(),
+
         on_success: vec![],
         on_error: vec![],
     };
@@ -856,6 +890,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
                 status: "pending".to_string(),
                 required_tags: vec![],
                 runner: "none".to_string(),
+                timeout_secs: None,
             },
         ],
     )
@@ -885,6 +920,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
         Some(&format!("{}/task-step", parent_job_id)),
         Some(parent_job_id),
         Some("task-step"),
+        None,
     )
     .await?;
 

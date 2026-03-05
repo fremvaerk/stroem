@@ -74,6 +74,7 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         status: status.to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }
 }
 
@@ -86,6 +87,7 @@ fn make_task(flow: HashMap<String, FlowStep>) -> TaskDef {
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
         on_success: vec![],
         on_error: vec![],
     }
@@ -100,6 +102,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         depends_on: depends_on.into_iter().map(str::to_string).collect(),
         input: HashMap::new(),
         continue_on_failure: false,
+        timeout: None,
         inline_action: None,
     }
 }

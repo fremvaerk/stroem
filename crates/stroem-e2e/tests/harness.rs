@@ -243,11 +243,7 @@ impl TestEnv {
         // 6. Start background tasks
         let cancel_token = CancellationToken::new();
         let _recovery = stroem_server::recovery::start(state.clone(), cancel_token.clone());
-        let _scheduler = stroem_server::scheduler::start(
-            state.pool.clone(),
-            state.workspaces.clone(),
-            cancel_token.clone(),
-        );
+        let _scheduler = stroem_server::scheduler::start(state.clone(), cancel_token.clone());
 
         // 7. Build router and bind to :0
         let app = build_router(state);

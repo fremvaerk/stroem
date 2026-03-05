@@ -312,6 +312,7 @@ async fn fire_single_hook(
         status: StepStatus::Ready.to_string(),
         required_tags,
         runner,
+        timeout_secs: None,
     };
 
     JobStepRepo::create_steps(pool, &[step])
@@ -563,6 +564,7 @@ mod tests {
             folder: None,
             input: HashMap::new(),
             flow: HashMap::new(),
+            timeout: None,
             on_success,
             on_error,
         }

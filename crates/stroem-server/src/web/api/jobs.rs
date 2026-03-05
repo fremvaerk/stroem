@@ -680,6 +680,7 @@ mod tests {
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -692,6 +693,7 @@ mod tests {
                 depends_on: vec!["build".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -704,6 +706,7 @@ mod tests {
                 depends_on: vec!["build".to_string(), "test".to_string()],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );

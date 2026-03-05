@@ -344,6 +344,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -355,6 +356,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
         folder: None,
         input: HashMap::new(),
         flow,
+        timeout: None,
         on_success: vec![],
         on_error: vec![],
     })
@@ -403,6 +405,7 @@ mod tests {
             error_message: error_message.map(String::from),
             required_tags: json!([]),
             runner: "local".to_string(),
+            timeout_secs: None,
         }
     }
 

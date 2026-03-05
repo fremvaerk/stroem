@@ -1,3 +1,4 @@
+use crate::duration::HumanDuration;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -171,6 +172,9 @@ pub struct FlowStep {
     pub input: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub continue_on_failure: bool,
+    /// Step-level timeout: kill this step after the specified duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<HumanDuration>,
     /// Temporary storage for inline action definitions during deserialization.
     /// Automatically moved to `config.actions` during `WorkflowConfig` deserialization.
     #[serde(skip)]
@@ -214,6 +218,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 input: HashMap<String, serde_json::Value>,
                 #[serde(default)]
                 continue_on_failure: bool,
+                #[serde(default)]
+                timeout: Option<HumanDuration>,
             }
             let ref_step: RefStep =
                 serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
@@ -225,6 +231,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 depends_on: ref_step.depends_on,
                 input: ref_step.input,
                 continue_on_failure: ref_step.continue_on_failure,
+                timeout: ref_step.timeout,
                 inline_action: None,
             })
         } else if has_type {
@@ -235,6 +242,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 "depends_on",
                 "input",
                 "continue_on_failure",
+                "timeout",
             ];
 
             let mut step_map = serde_yaml::Mapping::new();
@@ -283,6 +291,10 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .get(serde_yaml::Value::String("description".into()))
                 .and_then(|v| serde_yaml::from_value(v.clone()).ok());
 
+            let timeout: Option<HumanDuration> = step_map
+                .get(serde_yaml::Value::String("timeout".into()))
+                .and_then(|v| serde_yaml::from_value(v.clone()).ok());
+
             Ok(FlowStep {
                 action: String::new(), // placeholder — set by hoist_inline_actions()
                 name,
@@ -290,6 +302,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 depends_on,
                 input,
                 continue_on_failure,
+                timeout,
                 inline_action: Some(action_def),
             })
         } else {
@@ -316,6 +329,9 @@ pub struct TaskDef {
     #[serde(default)]
     pub input: HashMap<String, InputFieldDef>,
     pub flow: HashMap<String, FlowStep>,
+    /// Job-level timeout: cancel the entire job after the specified duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<HumanDuration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_success: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -324,6 +340,20 @@ pub struct TaskDef {
 
 fn default_mode() -> String {
     "distributed".to_string()
+}
+
+/// Concurrency policy for cron triggers — controls behavior when a new run
+/// is triggered while a previous run is still active.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyPolicy {
+    /// Allow multiple concurrent runs (default behavior).
+    #[default]
+    Allow,
+    /// Skip the new run if one is already active.
+    Skip,
+    /// Cancel the previous run(s) before starting the new one.
+    CancelPrevious,
 }
 
 /// Trigger definition - represents automated task execution
@@ -338,6 +368,8 @@ pub enum TriggerDef {
         input: HashMap<String, serde_json::Value>,
         #[serde(default = "default_true")]
         enabled: bool,
+        #[serde(default)]
+        concurrency: ConcurrencyPolicy,
     },
     #[serde(rename = "webhook")]
     Webhook {
@@ -388,6 +420,14 @@ impl TriggerDef {
         match self {
             TriggerDef::Scheduler { .. } => "scheduler",
             TriggerDef::Webhook { .. } => "webhook",
+        }
+    }
+
+    /// Get the concurrency policy (only meaningful for Scheduler triggers).
+    pub fn concurrency(&self) -> ConcurrencyPolicy {
+        match self {
+            TriggerDef::Scheduler { concurrency, .. } => *concurrency,
+            TriggerDef::Webhook { .. } => ConcurrencyPolicy::Allow,
         }
     }
 }

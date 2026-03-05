@@ -40,7 +40,7 @@ Last updated: 2026-03-04.
 - [ ] DB transactions only for job+steps creation; other paths still have TOCTOU races
 - [ ] `AppState` is a God Object — no compile-time capability enforcement
 - [ ] Error responses manually constructed with `json!({})` — define `AppError` enum implementing `IntoResponse`
-- [ ] No step-level timeout
+- [x] Step-level timeout, job-level timeout, and cron concurrency policy
 - [ ] No heartbeat failure → worker re-registration logic
 
 ## Code Quality / Rust

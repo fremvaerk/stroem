@@ -110,6 +110,9 @@ fn create_job_for_task_inner<'a>(
                 status: status.to_string(), // NewJobStep.status is String for DB compatibility
                 required_tags,
                 runner,
+                timeout_secs: flow_step
+                    .timeout
+                    .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
             });
         }
 
@@ -127,6 +130,8 @@ fn create_job_for_task_inner<'a>(
             source_id,
             parent_job_id,
             parent_step_name,
+            task.timeout
+                .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
         )
         .await
         .context("Failed to create job")?;
@@ -341,6 +346,7 @@ mod tests {
             log_path: None,
             parent_job_id: None,
             parent_step_name: None,
+            timeout_secs: None,
         }
     }
 
@@ -366,6 +372,7 @@ mod tests {
             error_message: None,
             required_tags: json!([]),
             runner: "local".to_string(),
+            timeout_secs: None,
         }
     }
 

@@ -37,6 +37,7 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         status: status.to_string(),
         required_tags: vec!["shell".to_string()],
         runner: "local".to_string(),
+        timeout_secs: None,
     }
 }
 
@@ -281,6 +282,7 @@ async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
         Some(&format!("{}/{}", parent_id, "dispatch-step")),
         Some(parent_id),
         Some("dispatch-step"),
+        None,
     )
     .await?;
 
@@ -352,6 +354,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         Some(root_id),
         Some("step-a"),
+        None,
     )
     .await?;
 
@@ -365,6 +368,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         Some(child_id),
         Some("step-b"),
+        None,
     )
     .await?;
 
@@ -495,6 +499,7 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -507,6 +512,7 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             depends_on: vec!["build".to_string()],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -548,6 +554,7 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -561,6 +568,7 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             input: HashMap::new(),
             // notify always runs, regardless of build outcome.
             continue_on_failure: true,
+            timeout: None,
             inline_action: None,
         },
     );
@@ -602,6 +610,7 @@ async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
         Some(&format!("{}/{}", parent_id, "spawn-step")),
         Some(parent_id),
         Some("spawn-step"),
+        None,
     )
     .await?;
 
@@ -648,6 +657,7 @@ async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> 
         None,
         Some(parent_id),
         Some("spawn-step"),
+        None,
     )
     .await?;
 

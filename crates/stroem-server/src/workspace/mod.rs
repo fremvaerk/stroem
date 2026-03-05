@@ -570,6 +570,7 @@ tasks:
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -583,6 +584,8 @@ tasks:
                 folder: None,
                 input: HashMap::new(),
                 flow,
+                timeout: None,
+
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -637,6 +640,7 @@ tasks:
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -649,6 +653,8 @@ tasks:
                 folder: None,
                 input: HashMap::new(),
                 flow: flow1,
+                timeout: None,
+
                 on_success: vec![],
                 on_error: vec![],
             },
@@ -688,6 +694,7 @@ tasks:
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                timeout: None,
                 inline_action: None,
             },
         );
@@ -700,6 +707,8 @@ tasks:
                 folder: None,
                 input: HashMap::new(),
                 flow: flow2,
+                timeout: None,
+
                 on_success: vec![],
                 on_error: vec![],
             },
