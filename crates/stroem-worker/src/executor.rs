@@ -161,13 +161,15 @@ impl StepExecutor {
             RunnerMode::NoWorkspace
         };
 
-        // Extract cmd or script from action_spec
+        // Extract inline code: prefer "script" key, fall back to "cmd" (backward compat)
         let cmd = action_spec
-            .get("cmd")
+            .get("script")
+            .or_else(|| action_spec.get("cmd"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let script = action_spec.get("script").and_then(|v| v.as_str()).map(|s| {
+        // Extract file path: "source" key (renamed from old "script" key)
+        let script = action_spec.get("source").and_then(|v| v.as_str()).map(|s| {
             let p = std::path::Path::new(s);
             if p.is_relative() {
                 // For library actions (name contains '.'), resolve scripts against
@@ -204,9 +206,9 @@ impl StepExecutor {
             })
         });
 
-        // Type 2 (script) requires cmd or script; Type 1 (docker/pod) allows empty (image defaults)
+        // Type 2 (script) requires inline code or source file; Type 1 (docker/pod) allows empty (image defaults)
         if is_type2 && cmd.is_none() && script.is_none() {
-            anyhow::bail!("Action spec must contain either 'cmd' or 'script'");
+            anyhow::bail!("Action spec must contain 'script', 'source', or 'cmd'");
         }
 
         // Determine image: Type 2 uses runner_image, Type 1 uses action image
@@ -321,11 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_with_script() {
+    fn test_build_run_config_with_source() {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "script": "/path/to/script.sh"
+            "source": "/path/to/script.sh"
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
@@ -336,11 +338,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_with_relative_script() {
+    fn test_build_run_config_with_relative_source() {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "script": "actions/deploy.sh"
+            "source": "actions/deploy.sh"
         })));
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
@@ -350,6 +352,20 @@ mod tests {
             config.script,
             Some("/workspace/actions/deploy.sh".to_string())
         );
+    }
+
+    #[test]
+    fn test_build_run_config_with_script_inline() {
+        let executor = StepExecutor::new();
+
+        // "script" key now means inline code, maps to RunConfig.cmd
+        let step = test_step(Some(serde_json::json!({
+            "script": "echo hello world"
+        })));
+
+        let config = executor.build_run_config(&step, "/tmp/test").unwrap();
+        assert_eq!(config.cmd, Some("echo hello world".to_string()));
+        assert_eq!(config.script, None);
     }
 
     #[test]
@@ -367,7 +383,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must contain either 'cmd' or 'script'"));
+            .contains("must contain 'script', 'source', or 'cmd'"));
     }
 
     #[test]
@@ -385,12 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_both_cmd_and_script() {
+    fn test_build_run_config_both_inline_and_source() {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo hello",
-            "script": "run.sh"
+            "script": "echo hello",
+            "source": "run.sh"
         })));
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
@@ -463,7 +479,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must contain either 'cmd' or 'script'"));
+            .contains("must contain 'script', 'source', or 'cmd'"));
     }
 
     #[test]
@@ -482,11 +498,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_relative_script_nested() {
+    fn test_build_run_config_relative_source_nested() {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "script": "actions/deploy/run.sh"
+            "source": "actions/deploy/run.sh"
         })));
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
@@ -851,15 +867,15 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_library_action_script_path() {
+    fn test_build_run_config_library_action_source_path() {
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({
-            "script": "scripts/notify.sh"
+            "source": "scripts/notify.sh"
         })));
         step.action_name = "common.slack-notify".to_string();
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
-        // Library action scripts resolve against _libraries/{lib_name}/
+        // Library action source files resolve against _libraries/{lib_name}/
         assert_eq!(
             config.script,
             Some("/workspace/_libraries/common/scripts/notify.sh".to_string())
@@ -867,10 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_library_action_absolute_script() {
+    fn test_build_run_config_library_action_absolute_source() {
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({
-            "script": "/absolute/path/script.sh"
+            "source": "/absolute/path/script.sh"
         })));
         step.action_name = "common.slack-notify".to_string();
 
@@ -880,15 +896,135 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_local_action_script_unchanged() {
+    fn test_build_run_config_local_action_source_unchanged() {
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({
-            "script": "scripts/deploy.sh"
+            "source": "scripts/deploy.sh"
         })));
         step.action_name = "local-action".to_string();
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
-        // Local actions resolve against workspace root (no _libraries/)
+        // Local actions resolve source against workspace root (no _libraries/)
+        assert_eq!(
+            config.script,
+            Some("/workspace/scripts/deploy.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_script_takes_precedence_over_cmd() {
+        // When both "script" and "cmd" are present, "script" wins (it is checked first).
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({
+            "script": "from-script",
+            "cmd": "from-cmd"
+        })));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.cmd, Some("from-script".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_empty_source_path() {
+        // An empty string source is relative, so it joins against workspace_dir producing
+        // "{workspace_dir}/".  This is an edge case — document the resulting behavior.
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({
+            "source": ""
+        })));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.script, Some("/workspace/".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_empty_script_value() {
+        // An empty inline script string is still accepted; the runner receives an empty cmd.
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({
+            "script": ""
+        })));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.cmd, Some("".to_string()));
+        assert!(config.script.is_none());
+    }
+
+    #[test]
+    fn test_build_run_config_round_trip_from_action_def() {
+        use stroem_common::models::workflow::ActionDef;
+
+        // Simulate what the server does: serialize ActionDef to JSON then hand it to the executor.
+        let action = ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo round-trip".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: Default::default(),
+            output: None,
+            manifest: None,
+        };
+        let action_spec = serde_json::to_value(&action).unwrap();
+
+        let executor = StepExecutor::new();
+        let step = test_step(Some(action_spec));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        // Inline "script" field maps to RunConfig.cmd (executor uses the "script" key)
+        assert_eq!(config.cmd, Some("echo round-trip".to_string()));
+        assert!(config.script.is_none());
+    }
+
+    #[test]
+    fn test_build_run_config_round_trip_source_from_action_def() {
+        use stroem_common::models::workflow::ActionDef;
+
+        // ActionDef with source field serialized to JSON → executor resolves path correctly.
+        let action = ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: None,
+            source: Some("scripts/deploy.sh".to_string()),
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: Default::default(),
+            output: None,
+            manifest: None,
+        };
+        let action_spec = serde_json::to_value(&action).unwrap();
+
+        let executor = StepExecutor::new();
+        let step = test_step(Some(action_spec));
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert!(config.cmd.is_none());
+        // Relative "source" path is resolved against workspace_dir
         assert_eq!(
             config.script,
             Some("/workspace/scripts/deploy.sh".to_string())

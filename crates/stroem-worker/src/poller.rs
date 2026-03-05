@@ -832,7 +832,7 @@ mod tests {
                 action_name: "test-action".to_string(),
                 action_type: "script".to_string(),
                 action_image: None,
-                action_spec: Some(serde_json::json!({"cmd": cmd})),
+                action_spec: Some(serde_json::json!({"script": cmd})),
                 input: None,
                 runner: Some("local".to_string()),
                 timeout_secs: None,

@@ -21,7 +21,7 @@ Inside a step's `input` templates, you have access to:
 actions:
   greet:
     type: script
-    cmd: "echo Hello {{ input.name }}"
+    script: "echo Hello {{ input.name }}"
     input:
       name: { type: string, required: true }
 ```
@@ -34,13 +34,13 @@ When a step emits structured output (via `OUTPUT: {json}`), downstream steps can
 actions:
   greet:
     type: script
-    cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
+    script: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
       name: { type: string, required: true }
 
   shout:
     type: script
-    cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
+    script: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
       message: { type: string, required: true }
 
@@ -77,11 +77,11 @@ Tera supports filters, conditionals, and more:
 
 ```yaml
 # Filters
-cmd: "echo {{ name | upper }}"
-cmd: "echo {{ name | default(value='World') }}"
+script: "echo {{ name | upper }}"
+script: "echo {{ name | default(value='World') }}"
 
 # Conditionals
-cmd: "{% if enabled %}echo Active{% else %}echo Inactive{% endif %}"
+script: "{% if enabled %}echo Active{% else %}echo Inactive{% endif %}"
 ```
 
 See the [Tera documentation](https://keats.github.io/tera/docs/) for the full feature set.

@@ -131,7 +131,7 @@ actions:
   analyze:
     type: script
     runner: docker
-    cmd: |
+    script: |
       uv pip install pandas requests --system
       uv run python /workspace/scripts/analyze.py
 ```
@@ -143,7 +143,7 @@ actions:
   generate-report:
     type: script
     runner: docker
-    cmd: |
+    script: |
       cd /workspace
       bun install
       bun run scripts/report.ts

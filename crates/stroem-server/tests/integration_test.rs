@@ -58,8 +58,9 @@ fn test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo Hello $NAME".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo Hello $NAME".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -85,8 +86,9 @@ fn test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo $MSG | tr a-z A-Z".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo $MSG | tr a-z A-Z".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -114,6 +116,7 @@ fn test_workspace() -> WorkspaceConfig {
             task: None,
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -578,8 +581,9 @@ fn test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("pg_dump -h {{ input.host }}".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("pg_dump -h {{ input.host }}".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -680,11 +684,12 @@ fn test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some(
+            cmd: None,
+            script: Some(
                 "echo Processing $DATA && echo 'OUTPUT: {\"result\": \"processed-'$DATA'\"}'"
                     .to_string(),
             ),
-            script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -725,11 +730,12 @@ fn test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some(
+            cmd: None,
+            script: Some(
                 "echo Summarizing $VALUE && echo 'OUTPUT: {\"summary\": \"'$VALUE' done\"}'"
                     .to_string(),
             ),
-            script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -2017,8 +2023,9 @@ async fn test_task_detail_connections() -> Result<()> {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo querying".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo querying".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -3362,7 +3369,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
 async fn test_cmd_rendering_at_claim() -> Result<()> {
     let (router, pool, _tmp, _container) = setup().await?;
 
-    // Execute backup-task - the action has cmd: "pg_dump -h {{ input.host }}"
+    // Execute backup-task - the action has script: "pg_dump -h {{ input.host }}"
     let response = router
         .clone()
         .oneshot(api_request(
@@ -3395,7 +3402,7 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
 
     // Verify cmd was rendered
     let action_spec = &body["action_spec"];
-    assert_eq!(action_spec["cmd"], "pg_dump -h myhost.local");
+    assert_eq!(action_spec["script"], "pg_dump -h myhost.local");
 
     Ok(())
 }
@@ -3900,8 +3907,9 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo {{ input.message }}".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo {{ input.message }}".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -3927,8 +3935,9 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo {{ input.undefined_var }}".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo {{ input.undefined_var }}".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -4094,8 +4103,9 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo {{ input.nonexistent }}".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo {{ input.nonexistent }}".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -4154,6 +4164,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             task: Some("child-task".to_string()),
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -4357,7 +4368,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
     assert_eq!(env["STATIC_VAR"], "no-template");
 
     // Verify cmd was rendered
-    assert_eq!(action_spec["cmd"], "pg_dump -h prod-db.internal");
+    assert_eq!(action_spec["script"], "pg_dump -h prod-db.internal");
 
     Ok(())
 }
@@ -6147,8 +6158,9 @@ fn test_workspace_ops() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo deploying...".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo deploying...".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -8041,8 +8053,9 @@ fn hook_test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo deploying".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo deploying".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -8068,8 +8081,9 @@ fn hook_test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("exit 1".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("exit 1".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -8110,8 +8124,9 @@ fn hook_test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo {{ input.message }}".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo {{ input.message }}".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -9076,8 +9091,9 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo hello".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo hello".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -9105,6 +9121,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             task: Some("cleanup".to_string()),
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -9464,6 +9481,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             task: Some("cleanup".to_string()),
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -9731,6 +9749,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             task: Some("failing-task".to_string()),
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -11867,8 +11886,9 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo running query".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo running query".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -12037,8 +12057,9 @@ async fn setup_sync_webhook() -> Result<(
             name: None,
             description: None,
             task: None,
-            cmd: Some("true".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("true".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -12551,8 +12572,9 @@ async fn setup_scheduler_workspace(
             name: None,
             description: None,
             task: None,
-            cmd: Some("echo hello".to_string()),
-            script: None,
+            cmd: None,
+            script: Some("echo hello".to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],

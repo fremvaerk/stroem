@@ -99,11 +99,16 @@ pub struct ActionDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
 
-    // Shell action fields
+    /// Inline command (for docker/pod `cmd:` field, or deprecated usage with type:script).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmd: Option<String>, // for shell
+    pub cmd: Option<String>,
+    /// Inline script content (for type:script actions). Replaces the old `cmd` field for scripts.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub script: Option<String>, // for shell (alternative to cmd)
+    pub script: Option<String>,
+    /// Path to a script file relative to workspace root (for type:script actions).
+    /// Renamed from the old `script` field — file paths now use `source`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 
     // Runner field (for script actions: "local", "docker", "pod")
     #[serde(skip_serializing_if = "Option::is_none")]

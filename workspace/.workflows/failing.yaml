@@ -1,11 +1,11 @@
 actions:
   always-fail:
     type: script
-    cmd: "echo 'About to fail' && echo 'Error details' >&2 && exit 1"
+    script: "echo 'About to fail' && echo 'Error details' >&2 && exit 1"
 
   simple-greet:
     type: script
-    cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
+    script: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
       name: { type: string, required: true }
 

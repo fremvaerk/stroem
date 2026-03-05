@@ -21,7 +21,7 @@ actions:
     name: Human-Readable Name    # optional display name
     description: What it does    # optional description
     type: script
-    cmd: "..."
+    script: "..."
     input:
       <param-name>:
         type: string
@@ -49,7 +49,7 @@ tasks:
       # Or define the action inline:
       <step-name>:
         type: script
-        cmd: "..."
+        script: "..."
         name: Human-Readable Step Name  # optional
         depends_on: [<other-step>]
 ```
@@ -66,7 +66,7 @@ actions:
     name: Greet User
     description: Sends a greeting message to the specified user
     type: script
-    cmd: "echo Hello {{ input.name }}"
+    script: "echo Hello {{ input.name }}"
     input:
       name:
         type: string
@@ -111,7 +111,7 @@ tasks:
     flow:
       say-hi:
         type: script
-        cmd: "echo Hello, World!"
+        script: "echo Hello, World!"
 ```
 
 This is equivalent to defining a separate action and referencing it:
@@ -120,7 +120,7 @@ This is equivalent to defining a separate action and referencing it:
 actions:
   greet:
     type: script
-    cmd: "echo Hello, World!"
+    script: "echo Hello, World!"
 
 tasks:
   hello:
@@ -129,7 +129,7 @@ tasks:
         action: greet
 ```
 
-Inline steps support all action fields (`type`, `cmd`, `script`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`):
+Inline steps support all action fields (`type`, `script`, `source`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`):
 
 ```yaml
 tasks:
@@ -144,13 +144,13 @@ tasks:
       deploy:
         type: script
         runner: docker
-        cmd: "deploy.sh {{ input.env }}"
+        script: "deploy.sh {{ input.env }}"
         depends_on: [build]
         input:
           env: "{{ input.env }}"
       notify:
         type: script
-        cmd: "echo Done"
+        script: "echo Done"
         depends_on: [deploy]
         continue_on_failure: true
 ```
@@ -308,7 +308,7 @@ stroem validate workspace/.workflows/
 
 The validator checks:
 - YAML syntax and structure
-- Action type validity (`script` needs `cmd` or `script`; `docker`/`pod` need `image`; `task` needs `task`)
+- Action type validity (`script` needs `script` or `source`; `docker`/`pod` need `image`; `task` needs `task`)
 - Runner field validity (`local`, `docker`, `pod`)
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow

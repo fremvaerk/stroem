@@ -11,19 +11,19 @@ fn test_full_workflow_ci_pipeline() {
 actions:
   checkout:
     type: script
-    cmd: "git clone --depth=1 {{ input.repo }} /workspace/src"
+    script: "git clone --depth=1 {{ input.repo }} /workspace/src"
     input:
       repo: { type: string, required: true }
 
   install:
     type: script
     runner: docker
-    cmd: "cd /workspace/src && npm ci"
+    script: "cd /workspace/src && npm ci"
 
   test:
     type: script
     runner: docker
-    cmd: "cd /workspace/src && npm test"
+    script: "cd /workspace/src && npm test"
 
   build-image:
     type: docker
@@ -209,7 +209,7 @@ actions:
 
   notify:
     type: script
-    cmd: "echo 'Backup completed for {{ input.db_host }}'"
+    script: "echo 'Backup completed for {{ input.db_host }}'"
     input:
       db_host: { type: string, required: true }
 
@@ -284,13 +284,13 @@ fn test_parallel_workflow() {
 actions:
   test1:
     type: script
-    cmd: "echo test1"
+    script: "echo test1"
   test2:
     type: script
-    cmd: "echo test2"
+    script: "echo test2"
   merge:
     type: script
-    cmd: "echo merge"
+    script: "echo merge"
 
 tasks:
   parallel-test:

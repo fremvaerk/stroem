@@ -13,7 +13,7 @@ Create `workspace/.workflows/deploy.yaml`:
 actions:
   check-status:
     type: script
-    cmd: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
+    script: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
 
   deploy:
     type: script
@@ -23,7 +23,7 @@ actions:
 
   notify:
     type: script
-    cmd: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}'"
+    script: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}'"
     input:
       env: { type: string }
       status: { type: string }

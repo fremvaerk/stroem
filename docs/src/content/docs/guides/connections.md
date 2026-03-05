@@ -76,7 +76,7 @@ When a task input field's `type` matches a connection type name, the system trea
 actions:
   run-migration:
     type: script
-    cmd: "migrate --host {{ input.db.host }} --port {{ input.db.port }} --db {{ input.db.database }}"
+    script: "migrate --host {{ input.db.host }} --port {{ input.db.port }} --db {{ input.db.database }}"
 
 tasks:
   deploy:

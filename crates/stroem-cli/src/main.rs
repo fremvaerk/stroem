@@ -886,7 +886,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: echo hello
+    script: echo hello
 "#
         )
         .unwrap();
@@ -947,7 +947,7 @@ tasks:
 actions:
   a1:
     type: script
-    cmd: echo ok
+    script: echo ok
 "#,
         )
         .unwrap();

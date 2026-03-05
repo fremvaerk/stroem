@@ -1,11 +1,11 @@
 actions:
   check-status:
     type: script
-    cmd: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
+    script: "echo 'Checking system status...' && sleep 1 && echo 'OUTPUT: {\"healthy\": true}'"
 
   deploy:
     type: script
-    script: actions/deploy.sh
+    source: actions/deploy.sh
     input:
       env:
         type: string
@@ -13,7 +13,7 @@ actions:
 
   notify:
     type: script
-    cmd: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}' && echo 'OUTPUT: {\"notified\": true}'"
+    script: "echo 'Notification: Deployment to {{ input.env }} completed with status={{ input.status }}' && echo 'OUTPUT: {\"notified\": true}'"
     input:
       env:
         type: string

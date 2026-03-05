@@ -107,7 +107,7 @@ pub fn prepare_step_action_input(
     Ok(Some(prepared))
 }
 
-/// Render action_spec templates (env, cmd, script, manifest).
+/// Render action_spec templates (env, cmd, script, source, manifest).
 ///
 /// Returns `None` if `action_spec` is `None`. Returns the spec unchanged if
 /// it is not a JSON object.
@@ -166,7 +166,7 @@ pub fn render_action_spec(
         }
     }
 
-    // Render script if present
+    // Render script (inline code) if present
     if let Some(script_val) = spec_obj.get("script") {
         if let Some(script_str) = script_val.as_str() {
             let script_opt = Some(script_str.to_string());
@@ -176,6 +176,21 @@ pub fn render_action_spec(
                 spec_obj.insert(
                     "script".to_string(),
                     serde_json::Value::String(rendered_script),
+                );
+            }
+        }
+    }
+
+    // Render source (file path) if present — may contain template expressions
+    if let Some(source_val) = spec_obj.get("source") {
+        if let Some(source_str) = source_val.as_str() {
+            let source_opt = Some(source_str.to_string());
+            if let Some(rendered_source) = render_string_opt(&source_opt, &spec_context)
+                .context("Failed to render source template")?
+            {
+                spec_obj.insert(
+                    "source".to_string(),
+                    serde_json::Value::String(rendered_source),
                 );
             }
         }
@@ -280,6 +295,7 @@ mod tests {
             task: None,
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],

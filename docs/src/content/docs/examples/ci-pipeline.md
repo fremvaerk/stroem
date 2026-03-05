@@ -14,7 +14,7 @@ actions:
   lint:
     type: script
     runner: docker
-    cmd: |
+    script: |
       cd /workspace
       npm ci
       npm run lint
@@ -22,7 +22,7 @@ actions:
   test:
     type: script
     runner: docker
-    cmd: |
+    script: |
       cd /workspace
       npm ci
       npm test
@@ -30,7 +30,7 @@ actions:
   build:
     type: script
     runner: docker
-    cmd: |
+    script: |
       cd /workspace
       npm ci
       npm run build
@@ -38,7 +38,7 @@ actions:
 
   notify-ci:
     type: script
-    cmd: |
+    script: |
       echo "CI result: {{ input.status }} for {{ input.ref }}"
       # In production, call Slack/Teams/GitHub API here
 

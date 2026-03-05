@@ -26,7 +26,7 @@ Type 1 actions require `image`. The image's default entrypoint/cmd runs unless o
 | `script` + `runner: docker` | Runs in a Docker container with workspace at `/workspace` |
 | `script` + `runner: pod` | Runs as a Kubernetes pod with workspace via init container |
 
-Type 2 actions require `cmd` or `script`. The workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code. Script actions support multiple languages via the `language` field.
+Type 2 actions require `script` or `source`. The workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code. Script actions support multiple languages via the `language` field.
 
 ### Type 3 — Task (sub-job execution)
 
@@ -38,6 +38,8 @@ Task actions are dispatched entirely server-side — workers never see them.
 
 :::note
 `type: script` with an `image` field is **rejected** by validation. Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
+
+For backward compatibility, `cmd:` is still accepted on `type: script` actions, but it is deprecated. Use `script:` for inline code and `source:` for file paths instead.
 :::
 
 ## Script actions
@@ -50,7 +52,7 @@ Script actions run commands or scripts in a runner environment. By default, scri
 actions:
   greet:
     type: script
-    cmd: "echo Hello {{ input.name }}"
+    script: "echo Hello {{ input.name }}"
     input:
       name: { type: string, required: true }
 ```
@@ -63,7 +65,7 @@ Scripts are relative to the workspace root:
 actions:
   deploy:
     type: script
-    script: actions/deploy.sh
+    source: actions/deploy.sh
     input:
       env: { type: string, default: "staging" }
 ```
@@ -76,7 +78,7 @@ Actions can declare environment variables. Values support templating:
 actions:
   deploy:
     type: script
-    script: actions/deploy.sh
+    source: actions/deploy.sh
     env:
       DEPLOY_ENV: "{{ input.env }}"
       API_KEY: "{{ secret.api_key }}"
@@ -86,7 +88,7 @@ actions:
 
 ### Multi-language scripts
 
-Use the `language` field to write inline scripts in languages other than shell. When `language` is set, the `cmd` content is written to a temporary file and executed with the appropriate interpreter.
+Use the `language` field to write inline scripts in languages other than shell. When `language` is set, the `script` content is written to a temporary file and executed with the appropriate interpreter.
 
 | Language | Value | Toolchain preference |
 |----------|-------|---------------------|
@@ -106,7 +108,7 @@ actions:
     dependencies:
       - pandas
       - requests
-    cmd: |
+    script: |
       import pandas as pd
       import requests
 
@@ -125,7 +127,7 @@ actions:
   fetch-status:
     type: script
     language: javascript
-    cmd: |
+    script: |
       const resp = await fetch("https://api.example.com/status");
       const data = await resp.json();
       console.log(`Status: ${data.status}`);
@@ -141,7 +143,7 @@ actions:
     language: typescript
     dependencies:
       - zod
-    cmd: |
+    script: |
       import { z } from "zod";
       const Schema = z.object({ name: z.string() });
       const result = Schema.parse({ name: "test" });
@@ -155,7 +157,7 @@ actions:
   compute:
     type: script
     language: go
-    cmd: |
+    script: |
       package main
 
       import "fmt"
@@ -186,7 +188,7 @@ actions:
     type: script
     language: python
     interpreter: python3.11
-    cmd: |
+    script: |
       import sys
       print(f"Using Python {sys.version}")
 ```
@@ -238,19 +240,19 @@ actions:
   lint-python:
     type: script
     runner: docker
-    cmd: "pip install ruff && ruff check /workspace"
+    script: "pip install ruff && ruff check /workspace"
 
   run-tests:
     type: script
     runner: docker
-    cmd: "cd /workspace && npm ci && npm test"
+    script: "cd /workspace && npm ci && npm test"
 
   analyze:
     type: script
     runner: docker
     language: python
     dependencies: [pandas]
-    cmd: |
+    script: |
       import pandas as pd
       df = pd.read_csv("/workspace/data.csv")
       print(f"OUTPUT: {{\"rows\": {len(df)}}}")
@@ -266,7 +268,7 @@ actions:
     type: script
     runner: pod
     tags: ["gpu"]
-    cmd: "python /workspace/test_gpu.py"
+    script: "python /workspace/test_gpu.py"
 ```
 
 ## Task actions (Type 3)
@@ -309,7 +311,7 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 ### Rules for task actions
 
 - Must have a `task` field referencing an existing task in the same workspace
-- Cannot have `cmd`, `script`, `image`, or `runner` fields
+- Cannot have `script`, `source`, `image`, or `runner` fields
 - No worker tags required — task steps are server-dispatched
 - Self-referencing tasks are rejected at validation time
 - Maximum nesting depth of 10 levels prevents infinite recursion

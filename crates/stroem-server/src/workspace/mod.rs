@@ -413,7 +413,7 @@ mod tests {
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   hello:
     flow:
@@ -544,8 +544,9 @@ tasks:
                 name: None,
                 description: None,
                 task: None,
-                cmd: Some("echo test".to_string()),
-                script: None,
+                cmd: None,
+                script: Some("echo test".to_string()),
+                source: None,
                 runner: None,
                 language: None,
                 dependencies: vec![],
@@ -617,8 +618,9 @@ tasks:
                 name: None,
                 description: None,
                 task: None,
-                cmd: Some("echo 1".to_string()),
-                script: None,
+                cmd: None,
+                script: Some("echo 1".to_string()),
+                source: None,
                 runner: None,
                 language: None,
                 dependencies: vec![],
@@ -674,8 +676,9 @@ tasks:
                 name: None,
                 description: None,
                 task: None,
-                cmd: Some("echo 2".to_string()),
-                script: None,
+                cmd: None,
+                script: Some("echo 2".to_string()),
+                source: None,
                 runner: None,
                 language: None,
                 dependencies: vec![],
@@ -804,7 +807,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo goodbye"
+    script: "echo goodbye"
 tasks:
   hello:
     flow:
@@ -955,7 +958,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo hello
+    script: "echo hello
     # Missing closing quote - invalid YAML
 "#,
         )
@@ -989,7 +992,7 @@ actions:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   hello:
     flow:
@@ -1018,7 +1021,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
   build:
     type: script
     cmd: "make build"
@@ -1049,7 +1052,7 @@ tasks:
         fs::create_dir(&workflows_dir).unwrap();
         fs::write(
             workflows_dir.join("test.yaml"),
-            "actions:\n  a:\n    type: script\n    cmd: echo v1\n",
+            "actions:\n  a:\n    type: script\n    script: echo v1\n",
         )
         .unwrap();
 
@@ -1066,7 +1069,7 @@ tasks:
         // Modify content
         fs::write(
             workflows_dir.join("test.yaml"),
-            "actions:\n  a:\n    type: script\n    cmd: echo v2\n",
+            "actions:\n  a:\n    type: script\n    script: echo v2\n",
         )
         .unwrap();
 
@@ -1105,7 +1108,7 @@ tasks:
 actions:
   action1:
     type: script
-    cmd: "echo 1"
+    script: "echo 1"
 tasks:
   task1:
     flow:
@@ -1122,7 +1125,7 @@ tasks:
 actions:
   action2:
     type: script
-    cmd: "echo 2"
+    script: "echo 2"
 tasks:
   task2:
     flow:

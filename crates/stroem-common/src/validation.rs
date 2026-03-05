@@ -591,20 +591,49 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>>
 fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
-    // Script actions must have either cmd or script
-    if action.cmd.is_none() && action.script.is_none() {
+    // Can't have both cmd and script (both are inline code fields)
+    if action.cmd.is_some() && action.script.is_some() {
         bail!(
-            "Action '{}' is type 'script' but has neither 'cmd' nor 'script'",
+            "Action '{}' has both 'cmd' and 'script' — use only 'script' (cmd is deprecated)",
             action_name
         );
     }
 
-    // Script actions should not have both cmd and script
-    if action.cmd.is_some() && action.script.is_some() {
+    // Reject empty string values — an empty field is not a valid script or path
+    if action.script.as_deref() == Some("") {
+        bail!("Action '{}' has empty 'script' field", action_name);
+    }
+    if action.source.as_deref() == Some("") {
+        bail!("Action '{}' has empty 'source' field", action_name);
+    }
+    if action.cmd.as_deref() == Some("") {
+        bail!("Action '{}' has empty 'cmd' field", action_name);
+    }
+
+    // Script actions accept inline code (script or deprecated cmd) or a source file path
+    let has_inline = action.script.is_some() || action.cmd.is_some();
+    let has_source = action.source.is_some();
+
+    if !has_inline && !has_source {
         bail!(
-            "Action '{}' is type 'script' but has both 'cmd' and 'script' - use only one",
+            "Action '{}' is type 'script' but missing 'script' or 'source' field",
             action_name
         );
+    }
+
+    if has_inline && has_source {
+        bail!(
+            "Action '{}' has both inline script and source file — use only one",
+            action_name
+        );
+    }
+
+    // Deprecation warning: cmd is accepted but script is preferred
+    if action.cmd.is_some() {
+        warnings.push(format!(
+            "Action '{}': 'cmd' is deprecated for script actions, use 'script' instead",
+            action_name
+        ));
     }
 
     // Script actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
@@ -752,10 +781,18 @@ fn validate_docker_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
         );
     }
 
-    // Docker actions must not have script
+    // Docker actions must not have script (inline code for type:script)
     if action.script.is_some() {
         bail!(
-            "Action '{}' is type 'docker' but has 'script' field (use cmd or entrypoint instead)",
+            "Action '{}' is type 'docker' but has 'script' field (script is for type:script actions, use cmd for docker)",
+            action_name
+        );
+    }
+
+    // Docker actions must not have source (file path for type:script)
+    if action.source.is_some() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'source' field (source is for type:script actions)",
             action_name
         );
     }
@@ -808,10 +845,18 @@ fn validate_pod_action(action: &ActionDef, action_name: &str) -> Result<Vec<Stri
         );
     }
 
-    // Pod actions must not have script
+    // Pod actions must not have script (inline code for type:script)
     if action.script.is_some() {
         bail!(
-            "Action '{}' is type 'pod' but has 'script' field (use cmd or entrypoint instead)",
+            "Action '{}' is type 'pod' but has 'script' field (script is for type:script actions, use cmd for pod)",
+            action_name
+        );
+    }
+
+    // Pod actions must not have source (file path for type:script)
+    if action.source.is_some() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'source' field (source is for type:script actions)",
             action_name
         );
     }
@@ -868,6 +913,12 @@ fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<Str
     if action.script.is_some() {
         bail!(
             "Action '{}' is type 'task' but has 'script' field (task actions only reference another task)",
+            action_name
+        );
+    }
+    if action.source.is_some() {
+        bail!(
+            "Action '{}' is type 'task' but has 'source' field (task actions only reference another task)",
             action_name
         );
     }
@@ -980,7 +1031,7 @@ mod tests {
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
   build:
     type: docker
     image: node:20
@@ -1018,7 +1069,7 @@ actions:
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("neither 'cmd' nor 'script'"));
+            .contains("missing 'script' or 'source'"));
     }
 
     #[test]
@@ -1037,6 +1088,164 @@ actions:
             .unwrap_err()
             .to_string()
             .contains("both 'cmd' and 'script'"));
+    }
+
+    #[test]
+    fn test_validate_action_script_with_script_field() {
+        let yaml = r#"
+actions:
+  greet:
+    type: script
+    script: "echo Hello"
+
+tasks:
+  test:
+    flow:
+      step1:
+        action: greet
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+        // No deprecation warning when using 'script' field
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_action_script_with_source_field() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    source: "deploy.sh"
+
+tasks:
+  test:
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_action_script_cmd_deprecated_warning() {
+        let yaml = r#"
+actions:
+  greet:
+    type: script
+    cmd: "echo Hello"
+
+tasks:
+  test:
+    flow:
+      step1:
+        action: greet
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert!(warnings.iter().any(|w| w.contains("'cmd' is deprecated")));
+    }
+
+    #[test]
+    fn test_validate_action_script_both_script_and_source() {
+        let yaml = r#"
+actions:
+  bad:
+    type: script
+    script: "echo hello"
+    source: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("both inline script and source file"));
+    }
+
+    #[test]
+    fn test_validate_docker_rejects_script_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: docker
+    image: node:20
+    script: "echo hello"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has 'script' field"));
+    }
+
+    #[test]
+    fn test_validate_docker_rejects_source_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: docker
+    image: node:20
+    source: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has 'source' field"));
+    }
+
+    #[test]
+    fn test_validate_pod_rejects_source_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: pod
+    image: node:20
+    source: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has 'source' field"));
+    }
+
+    #[test]
+    fn test_validate_task_rejects_source_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: task
+    task: other-task
+    source: "deploy.sh"
+
+tasks:
+  other-task:
+    flow:
+      s1:
+        action: bad
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("has 'source' field"));
     }
 
     #[test]
@@ -1085,7 +1294,7 @@ actions:
 actions:
   greet:
     type: script
-    cmd: "echo test"
+    script: "echo test"
 
 tasks:
   test:
@@ -1108,7 +1317,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo test"
+    script: "echo test"
 
 tasks:
   test:
@@ -1132,7 +1341,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo test"
+    script: "echo test"
 
 tasks:
   test:
@@ -1293,7 +1502,7 @@ actions:
   build:
     type: script
     image: node:20
-    cmd: "npm run build"
+    script: "npm run build"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1310,11 +1519,11 @@ actions:
 actions:
   checkout:
     type: script
-    cmd: "git clone repo"
+    script: "git clone repo"
   build:
     type: script
     runner: docker
-    cmd: "npm run build"
+    script: "npm run build"
   deploy:
     type: docker
     image: kubectl:latest
@@ -1433,7 +1642,7 @@ secrets:
 actions:
   backup:
     type: script
-    cmd: "pg_dump"
+    script: "pg_dump"
     env:
       DB_PASSWORD: "{{ secret.db_password }}"
       API_KEY: "{{ secret.missing_key }}"
@@ -1458,7 +1667,7 @@ secrets:
 actions:
   backup:
     type: script
-    cmd: "pg_dump"
+    script: "pg_dump"
     env:
       DB_PASSWORD: "{{ secret.db.password }}"
       DB_HOST: "{{ secret.db.host }}"
@@ -1480,7 +1689,7 @@ actions:
   test:
     type: script
     runner: docker
-    cmd: "npm test"
+    script: "npm test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1494,7 +1703,7 @@ actions:
   test:
     type: script
     runner: invalid
-    cmd: "npm test"
+    script: "npm test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1508,7 +1717,7 @@ actions:
 actions:
   test:
     type: script
-    cmd: "echo hi"
+    script: "echo hi"
     entrypoint: ["/bin/sh"]
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -1584,7 +1793,7 @@ actions:
     type: script
     runner: docker
     tags: ["node-20"]
-    cmd: "npm test"
+    script: "npm test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1597,7 +1806,7 @@ actions:
         let action: ActionDef = serde_yaml::from_str(
             r#"
 type: script
-cmd: "echo test"
+script: "echo test"
 "#,
         )
         .unwrap();
@@ -1611,7 +1820,7 @@ cmd: "echo test"
             r#"
 type: script
 runner: docker
-cmd: "npm test"
+script: "npm test"
 "#,
         )
         .unwrap();
@@ -1626,7 +1835,7 @@ cmd: "npm test"
 type: script
 runner: docker
 tags: ["node-20"]
-cmd: "npm test"
+script: "npm test"
 "#,
         )
         .unwrap();
@@ -1680,7 +1889,7 @@ tags: ["gpu"]
             r#"
 type: script
 runner: pod
-cmd: "npm test"
+script: "npm test"
 "#,
         )
         .unwrap();
@@ -1742,7 +1951,7 @@ actions:
   test:
     type: script
     runner: pod
-    cmd: "npm test"
+    script: "npm test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1756,7 +1965,7 @@ actions:
   test:
     type: script
     runner: local
-    cmd: "echo test"
+    script: "echo test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -1769,7 +1978,7 @@ actions:
         let action: ActionDef = serde_yaml::from_str(
             r#"
 type: script
-cmd: "echo test"
+script: "echo test"
 "#,
         )
         .unwrap();
@@ -1783,7 +1992,7 @@ cmd: "echo test"
             r#"
 type: script
 runner: docker
-cmd: "npm test"
+script: "npm test"
 "#,
         )
         .unwrap();
@@ -1797,7 +2006,7 @@ cmd: "npm test"
             r#"
 type: script
 runner: pod
-cmd: "npm test"
+script: "npm test"
 "#,
         )
         .unwrap();
@@ -1836,10 +2045,10 @@ image: alpine:latest
 actions:
   deploy:
     type: script
-    cmd: "make deploy"
+    script: "make deploy"
   notify:
     type: script
-    cmd: "curl $WEBHOOK"
+    script: "curl $WEBHOOK"
 
 tasks:
   release:
@@ -1866,7 +2075,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "make deploy"
+    script: "make deploy"
 
 tasks:
   release:
@@ -1890,7 +2099,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "make deploy"
+    script: "make deploy"
 
 tasks:
   release:
@@ -1911,7 +2120,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
   run-cleanup:
     type: task
     task: cleanup
@@ -2020,7 +2229,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
   run-self:
     type: task
     task: loopy
@@ -2045,7 +2254,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
   run-self:
     type: task
     task: loopy
@@ -2097,7 +2306,7 @@ task: other-task
 actions:
   test:
     type: script
-    cmd: "echo hi"
+    script: "echo hi"
     manifest:
       spec:
         serviceAccountName: my-sa
@@ -2115,7 +2324,7 @@ actions:
   test:
     type: script
     runner: docker
-    cmd: "echo hi"
+    script: "echo hi"
     manifest:
       spec:
         serviceAccountName: my-sa
@@ -2188,7 +2397,7 @@ actions:
   test:
     type: script
     runner: pod
-    cmd: "echo hi"
+    script: "echo hi"
     manifest:
       spec:
         serviceAccountName: my-sa
@@ -2239,7 +2448,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci:
     flow:
@@ -2266,7 +2475,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci:
     flow:
@@ -2292,7 +2501,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci:
     flow:
@@ -2354,7 +2563,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci-pipeline:
     flow:
@@ -2389,7 +2598,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci-pipeline:
     flow:
@@ -2413,7 +2622,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci-pipeline:
     flow:
@@ -2440,7 +2649,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci-pipeline:
     flow:
@@ -2467,7 +2676,7 @@ triggers:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 tasks:
   ci-pipeline:
     flow:
@@ -2518,7 +2727,7 @@ triggers:
 actions:
   notify:
     type: script
-    cmd: "curl $WEBHOOK"
+    script: "curl $WEBHOOK"
 
 on_success:
   - action: notify
@@ -2540,7 +2749,7 @@ on_error:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 
 on_success:
   - action: nonexistent
@@ -2559,7 +2768,7 @@ on_success:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 
 on_error:
   - action: missing-action
@@ -2729,7 +2938,7 @@ connection_types:
 actions:
   run-migration:
     type: script
-    cmd: "migrate"
+    script: "migrate"
 
 tasks:
   deploy:
@@ -2753,7 +2962,7 @@ tasks:
 actions:
   run-migration:
     type: script
-    cmd: "migrate"
+    script: "migrate"
 
 tasks:
   deploy:
@@ -2778,7 +2987,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 
 tasks:
   test:
@@ -2810,7 +3019,7 @@ tasks:
 actions:
   run-query:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
     input:
       query:
         type: text
@@ -2837,7 +3046,7 @@ tasks:
 actions:
   generate:
     type: script
-    cmd: "echo report"
+    script: "echo report"
 tasks:
   report:
     input:
@@ -2872,7 +3081,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
     input:
       api_key:
         type: string
@@ -2903,7 +3112,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
     input:
       password:
         type: string
@@ -2934,7 +3143,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -2962,7 +3171,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
     input:
       env:
         type: string
@@ -2992,7 +3201,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
     input:
       env:
         type: string
@@ -3020,7 +3229,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -3046,7 +3255,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -3074,7 +3283,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -3101,7 +3310,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -3130,7 +3339,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -3156,7 +3365,7 @@ tasks:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   test:
     input:
@@ -3214,7 +3423,7 @@ tasks:
 actions:
   common.slack-notify:
     type: script
-    cmd: "echo notify"
+    script: "echo notify"
 tasks:
   test:
     flow:
@@ -3276,7 +3485,7 @@ actions:
     task: common.deploy-service
   run-step:
     type: script
-    cmd: "echo running"
+    script: "echo running"
 tasks:
   common.deploy-service:
     flow:
@@ -3303,7 +3512,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "echo build"
+    script: "echo build"
 tasks:
   test:
     flow:
@@ -3335,10 +3544,10 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "echo build"
+    script: "echo build"
   common.alert:
     type: script
-    cmd: "echo alert"
+    script: "echo alert"
 tasks:
   test:
     flow:
@@ -3365,7 +3574,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "echo build"
+    script: "echo build"
 tasks:
   test:
     flow:
@@ -3401,10 +3610,10 @@ on_error:
 actions:
   build:
     type: script
-    cmd: "echo build"
+    script: "echo build"
   common.deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
 tasks:
   release:
     flow:
@@ -3436,7 +3645,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   deploy:
     flow:
@@ -3459,7 +3668,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   deploy:
     flow:
@@ -3482,7 +3691,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   deploy:
     timeout: 30m
@@ -3505,7 +3714,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   deploy:
     timeout: 604801
@@ -3528,7 +3737,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   deploy:
     flow:
@@ -3561,7 +3770,7 @@ triggers:
 actions:
   etl:
     type: script
-    cmd: "python etl.py"
+    script: "python etl.py"
 tasks:
   pipeline:
     flow:
@@ -3588,7 +3797,7 @@ triggers:
 actions:
   build:
     type: script
-    cmd: "make"
+    script: "make"
 tasks:
   ci:
     flow:
@@ -3616,7 +3825,7 @@ triggers:
 actions:
   run:
     type: script
-    cmd: "ruby script.rb"
+    script: "ruby script.rb"
     language: ruby
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -3633,7 +3842,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
     language: {lang}
 "#
             );
@@ -3653,7 +3862,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "python script.py"
+    script: "python script.py"
     dependencies:
       - requests
 "#;
@@ -3676,7 +3885,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "script.py"
+    script: "script.py"
     interpreter: "python3.12"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -3698,7 +3907,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "python script.py"
+    script: "python script.py"
     language: python
     dependencies:
       - requests
@@ -3721,7 +3930,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "script.py"
+    script: "script.py"
     language: python
     interpreter: "python3; rm -rf /"
 "#;
@@ -3740,7 +3949,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "script.py"
+    script: "script.py"
     language: python
     interpreter: ""
 "#;
@@ -3759,7 +3968,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "script.py"
+    script: "script.py"
     language: python
     dependencies:
       - "requests; evil"
@@ -3779,7 +3988,7 @@ actions:
 actions:
   run:
     type: script
-    cmd: "script.py"
+    script: "script.py"
     language: python
     dependencies:
       - ""
@@ -3878,5 +4087,152 @@ tasks:
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("'language' field"));
+    }
+
+    #[test]
+    fn test_validate_action_script_cmd_and_source_rejected() {
+        // cmd + source (no script) — should fail with "both inline script and source file"
+        let yaml = r#"
+actions:
+  my-action:
+    type: script
+    cmd: "echo hello"
+    source: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "cmd + source should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("both inline script and source file"),
+            "Error should mention 'both inline script and source file'"
+        );
+    }
+
+    #[test]
+    fn test_validate_action_script_all_three_fields_rejected() {
+        // cmd + script + source — should fail on the cmd+script conflict first
+        let yaml = r#"
+actions:
+  my-action:
+    type: script
+    cmd: "echo hello"
+    script: "echo world"
+    source: "deploy.sh"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "cmd + script + source should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("both 'cmd' and 'script'"),
+            "Error should mention 'both 'cmd' and 'script''"
+        );
+    }
+
+    #[test]
+    fn test_validate_action_script_empty_script_field() {
+        let yaml = r#"
+actions:
+  my-action:
+    type: script
+    script: ""
+tasks:
+  test-task:
+    flow:
+      step1:
+        action: my-action
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Empty 'script' field should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("empty 'script'"),
+            "Error should mention empty 'script'"
+        );
+    }
+
+    #[test]
+    fn test_validate_action_script_empty_source_field() {
+        let yaml = r#"
+actions:
+  my-action:
+    type: script
+    source: ""
+tasks:
+  test-task:
+    flow:
+      step1:
+        action: my-action
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Empty 'source' field should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("empty 'source'"),
+            "Error should mention empty 'source'"
+        );
+    }
+
+    #[test]
+    fn test_validate_action_script_empty_cmd_field() {
+        let yaml = r#"
+actions:
+  my-action:
+    type: script
+    cmd: ""
+tasks:
+  test-task:
+    flow:
+      step1:
+        action: my-action
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Empty 'cmd' field should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("empty 'cmd'"),
+            "Error should mention empty 'cmd'"
+        );
+    }
+
+    #[test]
+    fn test_validate_task_action_with_script_rejected() {
+        // type:task with a script field — should fail since script is not allowed on task actions
+        let yaml = r#"
+actions:
+  run-child:
+    type: task
+    task: some-task
+    script: "echo hi"
+tasks:
+  some-task:
+    flow:
+      s:
+        action: run-child
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "type:task with 'script' field should be rejected"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("'script'"),
+            "Error should mention 'script' field"
+        );
     }
 }

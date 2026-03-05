@@ -32,9 +32,9 @@ pub enum RunnerMode {
 /// Configuration for a step execution
 #[derive(Debug, Clone)]
 pub struct RunConfig {
-    /// The command to execute (for shell type)
+    /// Inline code to execute (from `script` or deprecated `cmd` YAML field)
     pub cmd: Option<String>,
-    /// The script path (for shell type, alternative to cmd)
+    /// Path to a script file (from `source` YAML field)
     pub script: Option<String>,
     /// Environment variables
     pub env: HashMap<String, String>,

@@ -45,7 +45,7 @@ const WORKFLOW_YAML: &str = r#"
 actions:
   echo-greeting:
     type: script
-    cmd: |
+    script: |
       echo "Hello {{ input.name }}!"
       echo 'OUTPUT: {"greeting": "Hello {{ input.name }}!"}'
     input:
@@ -53,7 +53,7 @@ actions:
 
   echo-upper:
     type: script
-    cmd: |
+    script: |
       MSG="{{ input.msg }}"
       echo "${MSG}" | tr a-z A-Z
       UPPER=$(echo "${MSG}" | tr a-z A-Z)
@@ -63,17 +63,17 @@ actions:
 
   fail-action:
     type: script
-    cmd: |
+    script: |
       echo "About to fail"
       exit 1
 
   slow-action:
     type: script
-    cmd: sleep 300
+    script: sleep 300
 
   hook-notify:
     type: script
-    cmd: |
+    script: |
       echo "Hook fired: status={{ input.status }}, task={{ input.task_name }}"
       echo 'OUTPUT: {"notified": true}'
     input:
@@ -82,7 +82,7 @@ actions:
 
   success-notify:
     type: script
-    cmd: |
+    script: |
       echo "Success hook fired: task={{ input.task_name }}"
       echo 'OUTPUT: {"success_notified": true}'
     input:

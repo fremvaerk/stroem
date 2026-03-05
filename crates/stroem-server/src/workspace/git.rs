@@ -270,7 +270,7 @@ mod tests {
     async fn test_clone_local_repo_loads_config() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "deploy.yaml",
-            "actions:\n  greet:\n    type: script\n    cmd: echo hello\ntasks:\n  hello:\n    flow:\n      step1:\n        action: greet\n",
+            "actions:\n  greet:\n    type: script\n    script: echo hello\ntasks:\n  hello:\n    flow:\n      step1:\n        action: greet\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -287,7 +287,7 @@ mod tests {
     async fn test_clone_sets_revision_to_git_oid() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  a:\n    type: script\n    cmd: echo hi\n",
+            "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -309,7 +309,7 @@ mod tests {
     async fn test_fetch_detects_new_commit() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  a:\n    type: script\n    cmd: echo v1\n",
+            "actions:\n  a:\n    type: script\n    script: echo v1\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -324,7 +324,7 @@ mod tests {
             "main",
             &[(
                 "test.yaml",
-                "actions:\n  a:\n    type: script\n    cmd: echo v2\n",
+                "actions:\n  a:\n    type: script\n    script: echo v2\n",
             )],
             "update",
         );
@@ -339,7 +339,7 @@ mod tests {
     async fn test_reload_no_changes_same_revision() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  a:\n    type: script\n    cmd: echo stable\n",
+            "actions:\n  a:\n    type: script\n    script: echo stable\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -358,7 +358,7 @@ mod tests {
     async fn test_config_updates_after_commit() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  greet:\n    type: script\n    cmd: echo hello\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+            "actions:\n  greet:\n    type: script\n    script: echo hello\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -373,7 +373,7 @@ mod tests {
             "main",
             &[(
                 "test.yaml",
-                "actions:\n  greet:\n    type: script\n    cmd: echo hello\n  build:\n    type: script\n    cmd: make\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
+                "actions:\n  greet:\n    type: script\n    script: echo hello\n  build:\n    type: script\n    script: make\ntasks:\n  t1:\n    flow:\n      s1:\n        action: greet\n",
             )],
             "add build action",
         );
@@ -388,7 +388,7 @@ mod tests {
     async fn test_clone_specific_branch() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  main_action:\n    type: script\n    cmd: echo main\n",
+            "actions:\n  main_action:\n    type: script\n    script: echo main\n",
         )]);
 
         // Create a "develop" branch with different content
@@ -412,7 +412,7 @@ mod tests {
             "develop",
             &[(
                 "test.yaml",
-                "actions:\n  dev_action:\n    type: script\n    cmd: echo develop\n",
+                "actions:\n  dev_action:\n    type: script\n    script: echo develop\n",
             )],
             "develop commit",
         );
@@ -436,7 +436,7 @@ mod tests {
     async fn test_clone_creates_working_directory() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "deploy.yaml",
-            "actions:\n  a:\n    type: script\n    cmd: echo hi\n",
+            "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -458,7 +458,7 @@ mod tests {
         let (_bare_dir, url) = create_bare_repo(&[
             (
                 "actions.yaml",
-                "actions:\n  greet:\n    type: script\n    cmd: echo hi\n  build:\n    type: script\n    cmd: make\n",
+                "actions:\n  greet:\n    type: script\n    script: echo hi\n  build:\n    type: script\n    script: make\n",
             ),
             (
                 "tasks.yaml",
@@ -759,7 +759,7 @@ mod tests {
     async fn test_peek_revision_matches_revision_after_load() {
         let (_bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  a:\n    type: script\n    cmd: echo hi\n",
+            "actions:\n  a:\n    type: script\n    script: echo hi\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -779,7 +779,7 @@ mod tests {
     async fn test_peek_revision_detects_new_commit() {
         let (bare_dir, url) = create_bare_repo(&[(
             "test.yaml",
-            "actions:\n  a:\n    type: script\n    cmd: echo v1\n",
+            "actions:\n  a:\n    type: script\n    script: echo v1\n",
         )]);
 
         let clone_dir = TempDir::new().unwrap();
@@ -794,7 +794,7 @@ mod tests {
             "main",
             &[(
                 "test.yaml",
-                "actions:\n  a:\n    type: script\n    cmd: echo v2\n",
+                "actions:\n  a:\n    type: script\n    script: echo v2\n",
             )],
             "update",
         );

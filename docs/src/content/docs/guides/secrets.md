@@ -48,14 +48,14 @@ Then use the resolved values in templates — no `| vals` needed:
 ```yaml
 env:
   DB_PASSWORD: "{{ secret.DB_PASSWORD }}"
-cmd: "deploy --token {{ secret.API_TOKEN }}"
+script: "deploy --token {{ secret.API_TOKEN }}"
 ```
 
 Secrets are re-resolved when the workspace reloads (on config change or git poll), so rotated secrets are picked up automatically.
 
 ### Inline resolution
 
-You can also use `| vals` inline in any template expression (step `input:`, action `env:`, `cmd:`, `script:`, hook `input:`) without going through `secrets:`:
+You can also use `| vals` inline in any template expression (step `input:`, action `env:`, `script:`, `source:`, hook `input:`) without going through `secrets:`:
 
 ```yaml
 env:
@@ -75,7 +75,7 @@ secrets:
 actions:
   deploy:
     type: script
-    cmd: "deploy --token {{ secret.API_TOKEN }}"
+    script: "deploy --token {{ secret.API_TOKEN }}"
     env:
       DB_PASSWORD: "{{ secret.DB_PASSWORD }}"
     input:

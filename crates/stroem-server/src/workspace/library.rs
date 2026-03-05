@@ -410,8 +410,9 @@ mod tests {
             name: None,
             description: None,
             task: None,
-            cmd: Some(cmd.to_string()),
-            script: None,
+            cmd: None,
+            script: Some(cmd.to_string()),
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -437,6 +438,7 @@ mod tests {
             task: Some(task_ref.to_string()),
             cmd: None,
             script: None,
+            source: None,
             runner: None,
             language: None,
             dependencies: vec![],
@@ -778,10 +780,10 @@ mod tests {
 actions:
   slack-notify:
     type: script
-    cmd: "echo notify"
+    script: "echo notify"
   pagerduty-alert:
     type: script
-    cmd: "echo alert"
+    script: "echo alert"
 tasks:
   full-deploy:
     flow:
@@ -867,7 +869,7 @@ connections:
 actions:
   slack-notify:
     type: script
-    cmd: "echo notify"
+    script: "echo notify"
 tasks:
   deploy:
     flow:
@@ -908,7 +910,7 @@ tasks:
         let yaml_content = r#"actions:
   slack-notify:
     type: script
-    cmd: echo notify
+    script: echo notify
 tasks:
   deploy:
     flow:
@@ -1092,7 +1094,7 @@ tasks:
         // Library version should win
         assert_eq!(workspace.actions.len(), 1);
         assert_eq!(
-            workspace.actions["common.notify"].cmd.as_deref(),
+            workspace.actions["common.notify"].script.as_deref(),
             Some("echo lib-version")
         );
     }
@@ -1137,10 +1139,10 @@ tasks:
 actions:
   slack-notify:
     type: script
-    cmd: "echo notifying"
+    script: "echo notifying"
   run-deploy:
     type: script
-    cmd: "echo deploying"
+    script: "echo deploying"
 tasks:
   deploy-pipeline:
     flow:
@@ -1172,7 +1174,7 @@ connection_types:
 actions:
   build:
     type: script
-    cmd: "echo building"
+    script: "echo building"
 tasks:
   ci-pipeline:
     flow:
@@ -1293,10 +1295,10 @@ tasks:
 actions:
   slack-notify:
     type: script
-    cmd: "echo notifying"
+    script: "echo notifying"
   run-deploy:
     type: script
-    cmd: "echo deploying"
+    script: "echo deploying"
 tasks:
   deploy-pipeline:
     flow:
@@ -1328,7 +1330,7 @@ connection_types:
 actions:
   build:
     type: script
-    cmd: "echo building"
+    script: "echo building"
 tasks:
   broken-pipeline:
     flow:
