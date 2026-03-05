@@ -78,7 +78,7 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at)
             VALUES
             "#,
         );
@@ -96,14 +96,15 @@ impl JobStepRepo {
             JsonValue,
             String,
             Option<i32>,
+            Option<DateTime<Utc>>,
         )> = Vec::new();
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 11;
+            let base = i * 12;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -114,9 +115,15 @@ impl JobStepRepo {
                 base + 8,
                 base + 9,
                 base + 10,
-                base + 11
+                base + 11,
+                base + 12
             ));
             let required_tags_json = serde_json::to_value(&step.required_tags).unwrap_or_default();
+            let ready_at = if step.status == "ready" {
+                Some(Utc::now())
+            } else {
+                None
+            };
             bindings.push((
                 step.job_id,
                 step.step_name.clone(),
@@ -129,6 +136,7 @@ impl JobStepRepo {
                 required_tags_json,
                 step.runner.clone(),
                 step.timeout_secs,
+                ready_at,
             ));
         }
 
@@ -145,7 +153,8 @@ impl JobStepRepo {
                 .bind(binding.7)
                 .bind(binding.8)
                 .bind(binding.9)
-                .bind(binding.10);
+                .bind(binding.10)
+                .bind(binding.11);
         }
 
         q.execute(executor)
@@ -421,7 +430,7 @@ impl JobStepRepo {
             sqlx::query(
                 r#"
                 UPDATE job_step
-                SET status = 'ready'
+                SET status = 'ready', ready_at = NOW()
                 WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'
                 "#,
             )
@@ -596,6 +605,33 @@ impl JobStepRepo {
         .fetch_all(pool)
         .await
         .context("get_timed_out_steps")?;
+        Ok(rows)
+    }
+
+    /// Find ready steps that have been waiting longer than `timeout_secs` and
+    /// have no active worker whose tags satisfy the step's `required_tags`.
+    pub async fn get_unmatched_ready_steps(
+        pool: &PgPool,
+        timeout_secs: f64,
+    ) -> Result<Vec<StaleStepInfo>> {
+        let rows = sqlx::query_as::<_, StaleStepInfo>(
+            r#"
+            SELECT js.job_id, js.step_name, NULL::uuid AS worker_id
+            FROM job_step js
+            WHERE js.status = 'ready'
+              AND js.action_type != 'task'
+              AND js.ready_at < NOW() - make_interval(secs => $1::double precision)
+              AND NOT EXISTS (
+                  SELECT 1 FROM worker w
+                  WHERE w.status = 'active'
+                    AND js.required_tags <@ w.tags
+              )
+            "#,
+        )
+        .bind(timeout_secs)
+        .fetch_all(pool)
+        .await
+        .context("get_unmatched_ready_steps")?;
         Ok(rows)
     }
 }

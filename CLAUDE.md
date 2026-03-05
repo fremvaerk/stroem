@@ -322,13 +322,15 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 ### Worker Recovery
 - `crates/stroem-server/src/recovery.rs` — background sweeper that detects stale workers
 - `crates/stroem-server/src/job_recovery.rs` — shared orchestration logic (used by both `complete_step` handler and recovery sweeper)
-- Config: optional `recovery` section in `server-config.yaml` with `heartbeat_timeout_secs` (default 120) and `sweep_interval_secs` (default 60)
+- Config: optional `recovery` section in `server-config.yaml` with `heartbeat_timeout_secs` (default 120), `sweep_interval_secs` (default 60), and `unmatched_step_timeout_secs` (default 30)
 - Always active with defaults when config section is absent (`#[serde(default)]`)
-- Sweep cycle: mark stale workers inactive → fail their running steps → orchestrate each job (promote/skip/terminal) → propagate to parent
+- Sweep cycle (4 phases): Phase 1: mark stale workers inactive → fail their running steps → orchestrate. Phase 2: fail steps that exceeded their timeout. Phase 3: cancel jobs that exceeded their timeout. Phase 4: fail ready steps with no matching active worker (after `unmatched_step_timeout_secs`).
 - Worker heartbeat (`POST /worker/heartbeat`) also sets `status = 'active'`, so returning workers auto-reactivate
 - `WorkerRepo::mark_stale_inactive()` uses `make_interval(secs => $1)` for threshold comparison
 - `JobStepRepo::get_running_steps_for_workers()` finds stuck steps by worker ID
-- Failed steps get error message: `"Worker heartbeat timeout (worker {id} unresponsive)"`
+- `JobStepRepo::get_unmatched_ready_steps()` finds ready steps with no active worker matching `required_tags`
+- `job_step.ready_at` column (migration `016_ready_at.sql`) tracks when a step became claimable — set by `promote_ready_steps()` and `create_steps_tx()` (for initially-ready steps)
+- Failed steps get error message: `"Worker heartbeat timeout (worker {id} unresponsive)"` or `"No active worker with required tags to run this step"`
 - Strategy: fail, don't retry — avoids data corruption from re-running non-idempotent steps
 - Clean shutdown via `CancellationToken` (same pattern as scheduler)
 

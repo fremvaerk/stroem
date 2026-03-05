@@ -172,6 +172,56 @@ async fn sweep(state: &AppState) -> Result<()> {
         }
     }
 
+    // Phase 4: Fail ready steps with no matching active workers
+    let unmatched_timeout = state.config.recovery.unmatched_step_timeout_secs as f64;
+    let unmatched = JobStepRepo::get_unmatched_ready_steps(&state.pool, unmatched_timeout).await?;
+    for step_info in &unmatched {
+        let error_msg = "No active worker with required tags to run this step";
+
+        state
+            .append_server_log(
+                step_info.job_id,
+                &format!(
+                    "[recovery] Step '{}' has been ready for {}s with no matching worker, failing",
+                    step_info.step_name, state.config.recovery.unmatched_step_timeout_secs
+                ),
+            )
+            .await;
+
+        tracing::warn!(
+            "Step '{}/{}' has no matching worker, failing",
+            step_info.job_id,
+            step_info.step_name
+        );
+
+        JobStepRepo::mark_failed(
+            &state.pool,
+            step_info.job_id,
+            &step_info.step_name,
+            error_msg,
+        )
+        .await?;
+
+        if let Err(e) = orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
+        {
+            tracing::error!(
+                "Failed to orchestrate after unmatched step '{}/{}': {:#}",
+                step_info.job_id,
+                step_info.step_name,
+                e
+            );
+            state
+                .append_server_log(
+                    step_info.job_id,
+                    &format!(
+                        "[recovery] Failed to orchestrate after unmatched step '{}': {:#}",
+                        step_info.step_name, e
+                    ),
+                )
+                .await;
+        }
+    }
+
     Ok(())
 }
 
@@ -204,6 +254,7 @@ mod tests {
             recovery: RecoveryConfig {
                 heartbeat_timeout_secs: 120,
                 sweep_interval_secs: 1,
+                unmatched_step_timeout_secs: 30,
             },
         };
 

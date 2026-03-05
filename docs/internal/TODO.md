@@ -160,6 +160,25 @@ Last updated: 2026-03-04.
 - [ ] Retry for final log flush and S3 upload
 - [ ] Extract `stroem-orchestrator` crate (orchestrator, job_creator, job_recovery, hooks, scheduler)
 
+## Review: Unmatched Step Recovery (2026-03-05)
+
+### Critical
+- [x] `get_unmatched_ready_steps()` missing `AND action_type != 'task'` — task steps wrongly failed when no workers active
+- [x] Add config validation: `unmatched_step_timeout_secs >= 5`
+
+### Important
+- [x] Rewrite SQL predicate `ready_at + interval < NOW()` → `ready_at < NOW() - interval` for index seekability
+- [x] Add partial B-tree index on `ready_at WHERE status = 'ready'` in migration 016
+- [x] Add test: inactive worker with matching tags must not protect step from Phase 4
+- [x] Add test: zero workers registered — unmatched step should be failed
+- [x] Add test: `type: task` step not failed when no workers active
+- [x] Add test: empty `required_tags` step not failed when any active worker exists
+- [x] Add test: config validation rejects `unmatched_step_timeout_secs < 5`
+
+### Minor
+- [x] Existing DB tests (`test_create_steps_and_claim`, `test_promote_ready_steps`) don't assert `ready_at`
+- [x] Config parse test `test_parse_config_recovery_defaults` doesn't assert `unmatched_step_timeout_secs == 30`
+
 ## Bugs Found & Fixed
 
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)

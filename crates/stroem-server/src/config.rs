@@ -122,6 +122,9 @@ pub struct RecoveryConfig {
     /// How often the recovery sweeper runs in seconds (default: 60)
     #[serde(default = "default_sweep_interval")]
     pub sweep_interval_secs: u64,
+    /// Seconds a ready step can wait without a matching worker before being failed (default: 30)
+    #[serde(default = "default_unmatched_step_timeout")]
+    pub unmatched_step_timeout_secs: u64,
 }
 
 fn default_heartbeat_timeout() -> u64 {
@@ -130,12 +133,16 @@ fn default_heartbeat_timeout() -> u64 {
 fn default_sweep_interval() -> u64 {
     60
 }
+fn default_unmatched_step_timeout() -> u64 {
+    30
+}
 
 impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
+            unmatched_step_timeout_secs: 30,
         }
     }
 }
@@ -179,6 +186,9 @@ impl ServerConfig {
         }
         if self.recovery.sweep_interval_secs < 5 {
             anyhow::bail!("sweep_interval_secs must be at least 5");
+        }
+        if self.recovery.unmatched_step_timeout_secs < 5 {
+            anyhow::bail!("unmatched_step_timeout_secs must be at least 5");
         }
         Ok(())
     }
@@ -832,6 +842,7 @@ worker_token: "token"
         let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.recovery.heartbeat_timeout_secs, 120);
         assert_eq!(config.recovery.sweep_interval_secs, 60);
+        assert_eq!(config.recovery.unmatched_step_timeout_secs, 30);
     }
 
     #[test]
@@ -1399,6 +1410,48 @@ recovery:
         assert!(
             err.to_string().contains("sweep_interval_secs"),
             "Error should mention sweep_interval_secs: {}",
+            err
+        );
+    }
+
+    fn make_valid_server_config_with_unmatched_timeout(
+        unmatched_step_timeout_secs: u64,
+    ) -> ServerConfig {
+        let token = valid_32char_token();
+        let yaml = format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {{}}
+worker_token: "{token}"
+recovery:
+  heartbeat_timeout_secs: 120
+  sweep_interval_secs: 60
+  unmatched_step_timeout_secs: {unmatched_step_timeout_secs}
+"#
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn test_validate_unmatched_step_timeout_exactly_5() {
+        let config = make_valid_server_config_with_unmatched_timeout(5);
+        assert!(
+            config.validate().is_ok(),
+            "unmatched_step_timeout_secs = 5 should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_unmatched_step_timeout_4_fails() {
+        let config = make_valid_server_config_with_unmatched_timeout(4);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("unmatched_step_timeout_secs"),
+            "Error should mention unmatched_step_timeout_secs: {}",
             err
         );
     }

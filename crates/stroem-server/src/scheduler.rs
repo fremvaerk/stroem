@@ -707,6 +707,7 @@ mod tests {
             recovery: RecoveryConfig {
                 heartbeat_timeout_secs: 120,
                 sweep_interval_secs: 60,
+                unmatched_step_timeout_secs: 30,
             },
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);

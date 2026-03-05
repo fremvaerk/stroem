@@ -42,6 +42,7 @@ worker_token: "change-in-production"
 # recovery:
 #   heartbeat_timeout_secs: 120
 #   sweep_interval_secs: 60
+#   unmatched_step_timeout_secs: 30
 # Optional: authentication
 # auth:
 #   jwt_secret: "your-jwt-secret"

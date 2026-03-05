@@ -8151,6 +8151,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         recovery: stroem_server::config::RecoveryConfig {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
+            unmatched_step_timeout_secs: 30,
         },
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
@@ -9874,6 +9875,7 @@ async fn setup_recovery() -> Result<(
         recovery: stroem_server::config::RecoveryConfig {
             heartbeat_timeout_secs: 5, // short for tests
             sweep_interval_secs: 1,
+            unmatched_step_timeout_secs: 30,
         },
     };
 
@@ -10112,6 +10114,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         recovery: stroem_server::config::RecoveryConfig {
             heartbeat_timeout_secs: 5,
             sweep_interval_secs: 1,
+            unmatched_step_timeout_secs: 30,
         },
     };
 
@@ -13396,6 +13399,349 @@ async fn test_get_config_returns_version_field() -> Result<()> {
         .as_str()
         .expect("version should be a string");
     assert!(!version.is_empty(), "version should not be empty");
+
+    Ok(())
+}
+
+// ─── Unmatched ready step recovery tests ─────────────────────────────
+
+/// Helper: create a recovery AppState with a custom unmatched_step_timeout_secs.
+async fn setup_recovery_with_unmatched_timeout(
+    timeout_secs: u64,
+) -> Result<(
+    AppState,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: stroem_server::config::RecoveryConfig {
+            heartbeat_timeout_secs: 120,
+            sweep_interval_secs: 1,
+            unmatched_step_timeout_secs: timeout_secs,
+        },
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+
+    Ok((state, pool, temp_dir, container))
+}
+
+/// Helper: override a step's required_tags and backdate its ready_at.
+async fn set_step_tags_and_backdate(
+    pool: &PgPool,
+    job_id: Uuid,
+    step_name: &str,
+    required_tags: Vec<String>,
+    backdate_secs: i64,
+) {
+    let tags_json = serde_json::to_value(&required_tags).unwrap();
+    sqlx::query(
+        "UPDATE job_step SET required_tags = $1, ready_at = NOW() - make_interval(secs => $2::double precision) \
+         WHERE job_id = $3 AND step_name = $4",
+    )
+    .bind(tags_json)
+    .bind(backdate_secs as f64)
+    .bind(job_id)
+    .bind(step_name)
+    .execute(pool)
+    .await
+    .expect("Failed to update step tags and ready_at");
+}
+
+#[tokio::test]
+async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+
+    // Register a worker with ["script"] tags — it cannot run ["gpu"] steps
+    let _worker_id = register_test_worker(&pool).await;
+
+    // Create a real job via the normal path (hello-world has a single "greet" step)
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Override the step's required_tags to ["gpu"] (no worker can match) and backdate ready_at
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec!["gpu".to_string()], 10).await;
+
+    // Verify step is ready before sweep
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps[0].status, "ready");
+
+    // Run recovery sweep
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    // Step should be failed with descriptive error
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(
+        step.error_message
+            .as_ref()
+            .unwrap()
+            .contains("No active worker"),
+        "Error message should mention no active worker: {:?}",
+        step.error_message
+    );
+
+    // Job should be failed (single step → cascaded)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+
+    // Register a worker with ["script"] tags
+    let _worker_id = register_test_worker(&pool).await;
+
+    // Create a real job (hello-world, step "greet" has required_tags: ["script"])
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Backdate ready_at but keep tags as ["script"] — worker CAN match
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec!["script".to_string()], 10).await;
+
+    // Run recovery sweep
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    // Step should still be ready (not failed)
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "Step with matching worker should remain ready"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(60).await?;
+
+    // Register a worker with ["script"] tags
+    let _worker_id = register_test_worker(&pool).await;
+
+    // Create a real job and set tags to ["gpu"] but backdate only 1 second
+    // (timeout is 60s, so it should NOT be failed yet)
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec!["gpu".to_string()], 1).await;
+
+    // Run recovery sweep
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    // Step should still be ready — hasn't exceeded the timeout
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "Recently-ready step should not be failed yet"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+
+    // Do NOT register any worker
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec!["script".to_string()], 10).await;
+
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(step.status, "failed");
+    assert!(step
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("No active worker"));
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+
+    // Register a worker with ["script"] tags, then mark it inactive
+    let worker_id = register_test_worker(&pool).await;
+    sqlx::query("UPDATE worker SET status = 'inactive' WHERE worker_id = $1")
+        .bind(worker_id)
+        .execute(&pool)
+        .await?;
+
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Step has ["script"] tags — the inactive worker matches but shouldn't protect it
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec!["script".to_string()], 10).await;
+
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(
+        step.status, "failed",
+        "Inactive worker should not protect step"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_does_not_fail_task_type_step() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+
+    // No workers registered — but task-type steps should be excluded
+
+    // Create a job + task-type step directly via SQL
+    let job_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, input, status, source_type, source_id) \
+         VALUES ($1, 'default', 'hello-world', '{}', 'running', 'api', 'test')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, status, required_tags, runner, ready_at) \
+         VALUES ($1, 'sub-task', 'sub-action', 'task', 'ready', '[]'::jsonb, 'none', NOW() - INTERVAL '10 minutes')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "sub-task").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "Task-type steps must not be failed by Phase 4"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
+    let (state, pool, _tmp, _container) = setup_recovery_with_unmatched_timeout(1).await?;
+
+    // Register a worker — any active worker should match empty required_tags
+    let _worker_id = register_test_worker(&pool).await;
+
+    let workspace_config = state.get_workspace("default").await.unwrap();
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace_config,
+        "default",
+        "hello-world",
+        json!({"name": "test"}),
+        "api",
+        None,
+    )
+    .await?;
+
+    // Set required_tags to empty array — should match any worker
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec![], 10).await;
+
+    stroem_server::recovery::sweep_once(&state).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "greet").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "Step with empty tags should match any active worker"
+    );
 
     Ok(())
 }

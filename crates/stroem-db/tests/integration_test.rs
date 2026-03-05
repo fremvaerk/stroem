@@ -183,6 +183,31 @@ async fn test_create_steps_and_claim() -> Result<()> {
 
     JobStepRepo::create_steps(&pool, &steps).await?;
 
+    // Verify ready_at is set for ready steps and NULL for pending steps
+    let ready_at_rows: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        "SELECT step_name, ready_at FROM job_step WHERE job_id = $1 ORDER BY step_name",
+    )
+    .bind(job_id)
+    .fetch_all(&pool)
+    .await?;
+
+    for (name, ready_at) in &ready_at_rows {
+        let step = steps.iter().find(|s| s.step_name == *name).unwrap();
+        if step.status == "ready" {
+            assert!(
+                ready_at.is_some(),
+                "ready_at should be set for ready step '{}'",
+                name
+            );
+        } else {
+            assert!(
+                ready_at.is_none(),
+                "ready_at should be NULL for pending step '{}'",
+                name
+            );
+        }
+    }
+
     // Claim a ready step
     let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], worker_id)
         .await?
@@ -537,6 +562,15 @@ async fn test_promote_ready_steps() -> Result<()> {
     assert_eq!(promoted.len(), 2);
     assert!(promoted.contains(&"step2".to_string()));
     assert!(promoted.contains(&"step4".to_string()));
+
+    // Verify ready_at is set after promotion
+    let ready_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT ready_at FROM job_step WHERE job_id = $1 AND step_name = $2")
+            .bind(job_id)
+            .bind(&promoted[0])
+            .fetch_one(&pool)
+            .await?;
+    assert!(ready_at.is_some(), "ready_at should be set after promotion");
 
     // Complete step2 and step4
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
