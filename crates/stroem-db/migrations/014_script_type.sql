@@ -23,7 +23,7 @@ SET lock_timeout = '5s';
 
 ALTER TABLE job_step DROP CONSTRAINT IF EXISTS job_step_action_type_check;
 ALTER TABLE job_step ADD CONSTRAINT job_step_action_type_check
-  CHECK (action_type IN ('script', 'docker', 'pod', 'task'));
+  CHECK (action_type IN ('script', 'shell', 'docker', 'pod', 'task'));
 ALTER TABLE job_step ALTER COLUMN action_type SET DEFAULT 'script';
 
 RESET lock_timeout;
