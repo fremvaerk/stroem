@@ -4151,10 +4151,7 @@ tasks:
         let result = validate_workflow_config(&config);
         assert!(result.is_err(), "Empty 'script' field should be rejected");
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("empty 'script'"),
+            result.unwrap_err().to_string().contains("empty 'script'"),
             "Error should mention empty 'script'"
         );
     }
@@ -4176,10 +4173,7 @@ tasks:
         let result = validate_workflow_config(&config);
         assert!(result.is_err(), "Empty 'source' field should be rejected");
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("empty 'source'"),
+            result.unwrap_err().to_string().contains("empty 'source'"),
             "Error should mention empty 'source'"
         );
     }
@@ -4201,10 +4195,7 @@ tasks:
         let result = validate_workflow_config(&config);
         assert!(result.is_err(), "Empty 'cmd' field should be rejected");
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("empty 'cmd'"),
+            result.unwrap_err().to_string().contains("empty 'cmd'"),
             "Error should mention empty 'cmd'"
         );
     }

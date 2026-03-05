@@ -4,6 +4,7 @@ use crate::traits::{
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
+use std::sync::Arc;
 use stroem_common::language::ScriptLanguage;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -149,7 +150,11 @@ impl Runner for ShellRunner {
         let stdout_reader = BufReader::new(stdout);
         let stderr_reader = BufReader::new(stderr);
 
-        // Read both streams concurrently
+        // Wrap callback in Arc so both stream tasks can share it
+        let log_callback = log_callback.map(Arc::new);
+
+        // Read both streams concurrently, streaming logs inline
+        let cb_stdout = log_callback.clone();
         let stdout_handle = tokio::spawn(async move {
             let mut lines = stdout_reader.lines();
             let mut collected = Vec::new();
@@ -158,12 +163,19 @@ impl Runner for ShellRunner {
             while let Some(line) = lines.next_line().await.transpose() {
                 match line {
                     Ok(line) => {
-                        collected.push(line.clone());
+                        if let Some(ref cb) = cb_stdout {
+                            cb(LogLine {
+                                stream: LogStream::Stdout,
+                                line: line.clone(),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
 
-                        // Check for OUTPUT: prefix
+                        // Check for OUTPUT: prefix (borrow before move)
                         if let Some(parsed) = parse_output_line(&line) {
                             output = Some(parsed);
                         }
+                        collected.push(line);
                     }
                     Err(e) => {
                         tracing::warn!("Error reading stdout line: {:#}", e);
@@ -175,6 +187,7 @@ impl Runner for ShellRunner {
             (collected, output)
         });
 
+        let cb_stderr = log_callback.clone();
         let stderr_handle = tokio::spawn(async move {
             let mut lines = stderr_reader.lines();
             let mut collected = Vec::new();
@@ -182,6 +195,13 @@ impl Runner for ShellRunner {
             while let Some(line) = lines.next_line().await.transpose() {
                 match line {
                     Ok(line) => {
+                        if let Some(ref cb) = cb_stderr {
+                            cb(LogLine {
+                                stream: LogStream::Stderr,
+                                line: line.clone(),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
                         collected.push(line);
                     }
                     Err(e) => {
@@ -232,23 +252,7 @@ impl Runner for ShellRunner {
                     _ => (Vec::new(), Vec::new(), None),
                 };
 
-                // Deliver partial logs via callback
-                if let Some(ref callback) = log_callback {
-                    for line in &stdout_lines {
-                        callback(LogLine {
-                            stream: LogStream::Stdout,
-                            line: line.clone(),
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
-                    for line in &stderr_lines {
-                        callback(LogLine {
-                            stream: LogStream::Stderr,
-                            line: line.clone(),
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
-                }
+                // Logs already streamed inline by the reader tasks
 
                 Ok(RunResult {
                     exit_code: -1,
@@ -264,23 +268,7 @@ impl Runner for ShellRunner {
             Outcome::Streams(result) => {
                 let (stdout_lines, stderr_lines, parsed_output) = result?;
 
-                // Call log_callback for all collected lines if provided
-                if let Some(ref callback) = log_callback {
-                    for line in &stdout_lines {
-                        callback(LogLine {
-                            stream: LogStream::Stdout,
-                            line: line.clone(),
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
-                    for line in &stderr_lines {
-                        callback(LogLine {
-                            stream: LogStream::Stderr,
-                            line: line.clone(),
-                            timestamp: chrono::Utc::now(),
-                        });
-                    }
-                }
+                // Logs already streamed inline by the reader tasks
 
                 // Wait for the process to complete
                 let status = child.wait().await?;
@@ -537,6 +525,139 @@ mod tests {
         assert!(
             result.is_err(),
             "expected error when script file is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_streams_during_execution() {
+        let runner = ShellRunner::new();
+        let first_seen = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let first_seen_cb = first_seen.clone();
+
+        let callback: LogCallback = Box::new(move |_line| {
+            let mut guard = first_seen_cb.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(std::time::Instant::now());
+            }
+        });
+
+        let start = std::time::Instant::now();
+        // Print first line, then sleep 300ms before second line
+        let config = shell_config(
+            Some("echo first && sleep 0.3 && echo second"),
+            None,
+            HashMap::new(),
+        );
+        let result = runner
+            .execute(config, Some(callback), CancellationToken::new())
+            .await
+            .unwrap();
+        let total_elapsed = start.elapsed();
+
+        assert_eq!(result.exit_code, 0);
+        let first_at = first_seen.lock().unwrap().expect("callback never fired");
+        // First callback must arrive well before the process exits
+        assert!(
+            first_at < start + total_elapsed / 2,
+            "callback arrived too late ({:?} into {:?} run), not streaming",
+            first_at.duration_since(start),
+            total_elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_stream_labels() {
+        let runner = ShellRunner::new();
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<LogLine>::new()));
+        let lines_clone = lines.clone();
+        let callback: LogCallback = Box::new(move |line| {
+            lines_clone.lock().unwrap().push(line);
+        });
+
+        let config = shell_config(
+            Some("echo to_stdout && echo to_stderr >&2"),
+            None,
+            HashMap::new(),
+        );
+        runner
+            .execute(config, Some(callback), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let captured = lines.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+
+        let stdout_lines: Vec<_> = captured
+            .iter()
+            .filter(|l| l.stream == LogStream::Stdout)
+            .collect();
+        let stderr_lines: Vec<_> = captured
+            .iter()
+            .filter(|l| l.stream == LogStream::Stderr)
+            .collect();
+
+        assert_eq!(stdout_lines.len(), 1);
+        assert_eq!(stderr_lines.len(), 1);
+        assert!(stdout_lines[0].line.contains("to_stdout"));
+        assert!(stderr_lines[0].line.contains("to_stderr"));
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_streams_partial_logs() {
+        let runner = ShellRunner::new();
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<LogLine>::new()));
+        let lines_clone = lines.clone();
+        let callback: LogCallback = Box::new(move |line| {
+            lines_clone.lock().unwrap().push(line);
+        });
+
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+
+        let config = shell_config(Some("echo before_cancel && sleep 10"), None, HashMap::new());
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            token_clone.cancel();
+        });
+
+        let result = runner.execute(config, Some(callback), token).await.unwrap();
+
+        assert_eq!(result.exit_code, -1);
+        let captured = lines.lock().unwrap();
+        assert!(
+            captured.iter().any(|l| l.line.contains("before_cancel")),
+            "partial log line missing after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_no_duplicate_callbacks() {
+        let runner = ShellRunner::new();
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+
+        let callback: LogCallback = Box::new(move |_| {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let token = CancellationToken::new();
+        let token_clone = token.clone();
+
+        let config = shell_config(Some("echo once && sleep 10"), None, HashMap::new());
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            token_clone.cancel();
+        });
+
+        runner.execute(config, Some(callback), token).await.unwrap();
+
+        let count = call_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            count, 1,
+            "expected 1 callback, got {} — possible duplicate firing",
+            count
         );
     }
 }
