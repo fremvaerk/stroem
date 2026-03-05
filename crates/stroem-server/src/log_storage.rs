@@ -300,7 +300,8 @@ impl LogStorage {
                             return Ok(None);
                         }
                     }
-                    Err(anyhow::anyhow!("Failed to get log from S3: {}", sdk_err))
+                    tracing::warn!("S3 log lookup failed (non-fatal): {}", sdk_err);
+                    Ok(None)
                 }
             }
         } else {
@@ -467,10 +468,11 @@ impl LogStorage {
                         return Ok(None);
                     }
                 }
-                Err(anyhow::anyhow!(
-                    "Failed to get step log from S3: {}",
-                    sdk_err
-                ))
+                // Log but don't fail — S3 fallback is best-effort.
+                // Active jobs won't have S3 logs yet, and misconfigured S3
+                // shouldn't break log viewing.
+                tracing::warn!("S3 step log lookup failed (non-fatal): {}", sdk_err);
+                Ok(None)
             }
         }
     }
