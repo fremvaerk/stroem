@@ -559,6 +559,11 @@ const BACKOFF_WAITING_REASONS: &[&str] = &[
 /// before treating it as a permanent failure.
 const BACKOFF_TIMEOUT_SECS: u64 = 300;
 
+/// Maximum time (seconds) to wait for a Pending pod (e.g. ContainerCreating)
+/// before treating it as stuck. Covers issues like missing ConfigMaps,
+/// unschedulable pods, or slow image pulls that never surface as WaitingError.
+const PENDING_TIMEOUT_SECS: u64 = 600;
+
 /// Classify a pod's phase and extract exit code from the step container status.
 ///
 /// In addition to checking the pod phase, this inspects container waiting states
@@ -725,6 +730,7 @@ impl Runner for KubeRunner {
         let mut exit_code = -1i32;
         let mut pod_terminal = false;
         let mut backoff_first_seen: Option<std::time::Instant> = None;
+        let mut pending_first_seen: Option<std::time::Instant> = None;
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
@@ -763,6 +769,7 @@ impl Runner for KubeRunner {
                     break;
                 }
                 Some(PodPhaseStatus::WaitingError { reason, message }) => {
+                    pending_first_seen = None;
                     if TERMINAL_WAITING_REASONS.contains(&reason.as_str()) {
                         // Immediate terminal errors — no point waiting
                         tracing::error!(
@@ -817,7 +824,30 @@ impl Runner for KubeRunner {
                 }
                 Some(PodPhaseStatus::Pending) => {
                     backoff_first_seen = None; // Reset if no longer in error state
-                    tracing::debug!("Pod {} is Pending", pod_name);
+                    let first_seen = pending_first_seen.get_or_insert_with(std::time::Instant::now);
+                    let elapsed = first_seen.elapsed().as_secs();
+                    if elapsed >= PENDING_TIMEOUT_SECS {
+                        tracing::error!(
+                            "Pod {} stuck in Pending for {}s, giving up",
+                            pod_name,
+                            elapsed,
+                        );
+                        if let Some(ref cb) = log_callback {
+                            let _ = cb(LogLine {
+                                stream: LogStream::Stderr,
+                                line: format!(
+                                    "Pod stuck in Pending state for {}s (check events for details: \
+                                     missing volumes, unschedulable, etc.)",
+                                    elapsed
+                                ),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                        exit_code = 1;
+                        pod_terminal = true;
+                        break;
+                    }
+                    tracing::debug!("Pod {} is Pending ({}s)", pod_name, elapsed);
                 }
                 Some(PodPhaseStatus::Unknown(ref phase)) => {
                     tracing::warn!("Pod {} in unexpected phase: {}", pod_name, phase);
