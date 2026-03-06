@@ -293,9 +293,12 @@ impl KubeRunner {
             }
         };
 
-        // Inject startup scripts volume + mount if configured
-        if let Some(ref cm_name) = self.startup_configmap {
-            Self::inject_startup_configmap(&mut pod_json, cm_name);
+        // Inject startup scripts volume + mount if configured (Type 2 only —
+        // Type 1 pods run the user's image as-is without the startup entrypoint)
+        if config.runner_mode == RunnerMode::WithWorkspace {
+            if let Some(ref cm_name) = self.startup_configmap {
+                Self::inject_startup_configmap(&mut pod_json, cm_name);
+            }
         }
 
         // Validate overrides for dangerous fields before applying them
@@ -1951,6 +1954,8 @@ mod tests {
 
     #[test]
     fn test_build_pod_spec_with_startup_configmap_no_workspace() {
+        // Type 1 (NoWorkspace) pods should NOT get startup scripts —
+        // they run the user's image as-is without the startup entrypoint.
         let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
         let config = make_pod_config(None);
         let pod = runner
@@ -1958,21 +1963,24 @@ mod tests {
             .unwrap();
         let spec = pod.spec.unwrap();
 
-        // Should have startup-scripts volume
-        let volumes = spec.volumes.unwrap();
-        let startup_vol = volumes.iter().find(|v| v.name == "startup-scripts");
-        assert!(startup_vol.is_some(), "Should have startup-scripts volume");
-        let cm = startup_vol.unwrap().config_map.as_ref().unwrap();
-        assert_eq!(cm.name, "stroem-runner-startup");
-        assert_eq!(cm.default_mode, Some(493)); // 0755
+        // Should NOT have startup-scripts volume
+        let has_startup_vol = spec.volumes.as_ref().map_or(false, |vols| {
+            vols.iter().any(|v| v.name == "startup-scripts")
+        });
+        assert!(
+            !has_startup_vol,
+            "NoWorkspace pods should not have startup-scripts volume"
+        );
 
-        // Step container should have the mount
+        // Step container should NOT have the mount
         let container = &spec.containers[0];
-        let mounts = container.volume_mounts.as_ref().unwrap();
-        let startup_mount = mounts.iter().find(|m| m.name == "startup-scripts");
-        assert!(startup_mount.is_some(), "Should have startup-scripts mount");
-        assert_eq!(startup_mount.unwrap().mount_path, "/etc/stroem/startup.d");
-        assert_eq!(startup_mount.unwrap().read_only, Some(true));
+        let has_startup_mount = container.volume_mounts.as_ref().map_or(false, |mounts| {
+            mounts.iter().any(|m| m.name == "startup-scripts")
+        });
+        assert!(
+            !has_startup_mount,
+            "NoWorkspace pods should not have startup-scripts mount"
+        );
     }
 
     #[test]
@@ -2015,15 +2023,16 @@ mod tests {
     fn test_build_pod_spec_startup_configmap_with_manifest_overrides() {
         // Verify that a manifest override with its own volumes and volumeMounts
         // does not displace the startup-scripts volume/mount injected before the merge.
+        // Uses WithWorkspace because startup scripts are only injected for Type 2 pods.
         let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
         let config = RunConfig {
             cmd: Some("echo hello".to_string()),
             script: None,
             env: HashMap::new(),
             workdir: "/tmp".to_string(),
-            action_type: "pod".to_string(),
+            action_type: "script".to_string(),
             image: Some("alpine:latest".to_string()),
-            runner_mode: RunnerMode::NoWorkspace,
+            runner_mode: RunnerMode::WithWorkspace,
             runner_image: None,
             entrypoint: None,
             command: None,
