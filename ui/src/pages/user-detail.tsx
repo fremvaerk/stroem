@@ -22,7 +22,7 @@ import type { UserDetail } from "@/lib/types";
 
 export function UserDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { user: currentUser, isAdmin, aclEnabled } = useAuth();
+  const { user: currentUser, isAdmin } = useAuth();
   const [user, setUser] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -61,11 +61,11 @@ export function UserDetailPage() {
   }, [load]);
 
   useEffect(() => {
-    if (!isAdmin || !aclEnabled) return;
+    if (!isAdmin) return;
     listGroups()
       .then((data) => setAllGroups(data.groups))
       .catch(() => {});
-  }, [isAdmin, aclEnabled]);
+  }, [isAdmin]);
 
   async function handleAdminToggle(checked: boolean) {
     if (!user || !id) return;
@@ -172,7 +172,7 @@ export function UserDetailPage() {
   }
 
   const isSelf = currentUser?.user_id === user.user_id;
-  const showAdminCard = isAdmin && aclEnabled;
+  const showAdminCard = isAdmin;
 
   return (
     <div className="space-y-6">
@@ -222,33 +222,29 @@ export function UserDetailPage() {
                 <span className="text-muted-foreground">-</span>
               ),
           },
-          ...(aclEnabled
-            ? [
-                {
-                  label: "Role",
-                  value: user.is_admin ? (
-                    <Badge className="text-xs">Admin</Badge>
-                  ) : (
-                    <span className="text-muted-foreground">User</span>
-                  ),
-                },
-                {
-                  label: "Groups",
-                  value:
-                    (user.groups?.length ?? 0) > 0 ? (
-                      <div className="flex flex-wrap gap-1">
-                        {(user.groups ?? []).map((g) => (
-                          <Badge key={g} variant="outline" className="text-xs">
-                            {g}
-                          </Badge>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="text-muted-foreground">-</span>
-                    ),
-                },
-              ]
-            : []),
+          {
+            label: "Role",
+            value: user.is_admin ? (
+              <Badge className="text-xs">Admin</Badge>
+            ) : (
+              <span className="text-muted-foreground">User</span>
+            ),
+          },
+          {
+            label: "Groups",
+            value:
+              (user.groups?.length ?? 0) > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {(user.groups ?? []).map((g) => (
+                    <Badge key={g} variant="outline" className="text-xs">
+                      {g}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">-</span>
+              ),
+          },
           {
             label: "Last Login",
             value: user.last_login_at ? formatTime(user.last_login_at) : "-",

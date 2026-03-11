@@ -89,6 +89,27 @@ impl UserRepo {
         Ok(rows)
     }
 
+    /// Check if any admin user exists.
+    pub async fn has_any_admin(pool: &PgPool) -> Result<bool> {
+        let row: (bool,) =
+            sqlx::query_as(r#"SELECT EXISTS(SELECT 1 FROM "user" WHERE is_admin = true)"#)
+                .fetch_one(pool)
+                .await
+                .context("Failed to check for admin users")?;
+        Ok(row.0)
+    }
+
+    /// Get the first user by creation date.
+    pub async fn get_first(pool: &PgPool) -> Result<Option<UserRow>> {
+        let row = sqlx::query_as::<_, UserRow>(
+            r#"SELECT user_id, email, name, password_hash, is_admin, created_at, last_login_at FROM "user" ORDER BY created_at ASC LIMIT 1"#,
+        )
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get first user")?;
+        Ok(row)
+    }
+
     /// Set or unset admin status for a user.
     pub async fn set_admin(pool: &PgPool, user_id: Uuid, is_admin: bool) -> Result<()> {
         sqlx::query(r#"UPDATE "user" SET is_admin = $1 WHERE user_id = $2"#)

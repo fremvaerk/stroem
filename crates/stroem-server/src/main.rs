@@ -94,6 +94,24 @@ async fn main() -> Result<()> {
         }
     }
 
+    // If no admin exists (e.g. after ACL migration on existing DB), promote the first user
+    match UserRepo::has_any_admin(&pool).await {
+        Ok(false) => {
+            if let Ok(Some(first_user)) = UserRepo::get_first(&pool).await {
+                if let Err(e) = UserRepo::set_admin(&pool, first_user.user_id, true).await {
+                    tracing::warn!("Failed to promote first user to admin: {:#}", e);
+                } else {
+                    tracing::info!(
+                        "No admin user found — promoted first user '{}' to admin",
+                        first_user.email
+                    );
+                }
+            }
+        }
+        Ok(true) => {}
+        Err(e) => tracing::warn!("Failed to check for admin users: {:#}", e),
+    }
+
     // Load workspaces (individual failures are logged but don't crash the server)
     tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
     let workspace_manager = WorkspaceManager::new(
