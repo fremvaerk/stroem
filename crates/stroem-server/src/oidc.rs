@@ -155,19 +155,31 @@ pub async fn provision_user(
     }
 
     // 3. Create new user + link
+    // First OIDC user becomes admin (if no users exist yet)
+    let is_first_user = UserRepo::count(pool).await.unwrap_or(1) == 0;
+
     let user_id = Uuid::new_v4();
     UserRepo::create(pool, user_id, email, None, name).await?;
     UserAuthLinkRepo::create(pool, user_id, provider_id, external_id).await?;
 
+    if is_first_user {
+        UserRepo::set_admin(pool, user_id, true).await?;
+        tracing::info!(
+            "Created first user {} as admin via OIDC provider {}",
+            email,
+            provider_id
+        );
+    } else {
+        tracing::info!(
+            "Created new user {} via OIDC provider {}",
+            email,
+            provider_id
+        );
+    }
+
     let user = UserRepo::get_by_id(pool, user_id)
         .await?
         .context("Newly created user not found")?;
-
-    tracing::info!(
-        "Created new user {} via OIDC provider {}",
-        user.email,
-        provider_id
-    );
 
     Ok(user)
 }

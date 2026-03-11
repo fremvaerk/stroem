@@ -950,6 +950,7 @@ async fn setup() -> Result<(
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let workspace = test_workspace();
@@ -1973,6 +1974,7 @@ async fn test_task_detail_connections() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     // Build a workspace with connections
@@ -4010,6 +4012,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -4231,6 +4234,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -4460,6 +4464,7 @@ async fn setup_with_auth() -> Result<(
             }),
         }),
         recovery: Default::default(),
+        acl: None,
     };
 
     // Seed initial user
@@ -6254,6 +6259,7 @@ async fn setup_multi_workspace() -> Result<(
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let ws_default = test_workspace();
@@ -6631,6 +6637,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -6794,6 +6801,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -6875,6 +6883,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -6972,6 +6981,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7104,6 +7114,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7876,6 +7887,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
             initial_user: None,
         }),
         recovery: Default::default(),
+        acl: None,
     };
 
     let workspace = test_workspace();
@@ -7956,6 +7968,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
             initial_user: None,
         }),
         recovery: Default::default(),
+        acl: None,
     };
 
     let workspace = test_workspace();
@@ -8020,6 +8033,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
             initial_user: None,
         }),
         recovery: Default::default(),
+        acl: None,
     };
 
     let workspace = test_workspace();
@@ -8168,6 +8182,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             sweep_interval_secs: 60,
             unmatched_step_timeout_secs: 30,
         },
+        acl: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -9896,6 +9911,7 @@ async fn setup_recovery() -> Result<(
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: 30,
         },
+        acl: None,
     };
 
     let workspace = test_workspace();
@@ -10135,6 +10151,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: 30,
         },
+        acl: None,
     };
 
     let workspace = task_action_test_workspace();
@@ -10264,6 +10281,7 @@ async fn test_execute_task_with_valid_auth_sets_source_user() -> Result<()> {
     let token = stroem_server::auth::create_access_token(
         &Uuid::new_v4().to_string(),
         AUTH_USER_EMAIL,
+        false,
         AUTH_JWT_SECRET,
     )?;
 
@@ -10369,6 +10387,7 @@ async fn test_auth_middleware_allows_with_valid_token() -> Result<()> {
     let token = stroem_server::auth::create_access_token(
         &Uuid::new_v4().to_string(),
         AUTH_USER_EMAIL,
+        false,
         AUTH_JWT_SECRET,
     )?;
 
@@ -11832,6 +11851,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -12139,6 +12159,7 @@ async fn setup_sync_webhook() -> Result<(
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -12668,6 +12689,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         worker_token: "test-token".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -12747,6 +12769,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         worker_token: "test-token".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -12808,6 +12831,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         worker_token: "test-token".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -12875,6 +12899,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         worker_token: "test-token".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(pool, mgr, sched_config, sched_log_storage, HashMap::new());
@@ -13230,6 +13255,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         worker_token: "test-token-secret".to_string(),
         auth: None,
         recovery: Default::default(),
+        acl: None,
     };
 
     let mgr =
@@ -13468,6 +13494,7 @@ async fn setup_recovery_with_unmatched_timeout(
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: timeout_secs,
         },
+        acl: None,
     };
 
     let workspace = test_workspace();

@@ -56,29 +56,36 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to run migrations")?;
 
-    // Seed initial user if configured
+    // Seed initial user if configured (always promoted to admin)
     if let Some(auth_config) = &config.auth {
         if let Some(initial_user) = &auth_config.initial_user {
             match UserRepo::get_by_email(&pool, &initial_user.email).await {
-                Ok(Some(_)) => {
+                Ok(Some(user)) => {
                     tracing::info!(
-                        "Initial user '{}' already exists, skipping seed",
+                        "Initial user '{}' already exists, ensuring admin",
                         initial_user.email
                     );
+                    if let Err(e) = UserRepo::set_admin(&pool, user.user_id, true).await {
+                        tracing::warn!("Failed to promote initial user to admin: {:#}", e);
+                    }
                 }
                 Ok(None) => {
+                    let user_id = uuid::Uuid::new_v4();
                     let password_hash = hash_password(&initial_user.password)
                         .context("Failed to hash initial user password")?;
                     UserRepo::create(
                         &pool,
-                        uuid::Uuid::new_v4(),
+                        user_id,
                         &initial_user.email,
                         Some(&password_hash),
                         None,
                     )
                     .await
                     .context("Failed to create initial user")?;
-                    tracing::info!("Created initial user: {}", initial_user.email);
+                    UserRepo::set_admin(&pool, user_id, true)
+                        .await
+                        .context("Failed to set initial user as admin")?;
+                    tracing::info!("Created initial admin user: {}", initial_user.email);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to check for initial user: {:#}", e);

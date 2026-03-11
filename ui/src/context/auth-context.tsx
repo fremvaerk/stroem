@@ -18,6 +18,8 @@ interface AuthContextValue {
   hasInternalAuth: boolean;
   oidcProviders: OidcProvider[];
   serverVersion: string | null;
+  isAdmin: boolean;
+  aclEnabled: boolean;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   restoreFromOidc: (accessToken: string) => Promise<void>;
@@ -32,6 +34,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [hasInternalAuth, setHasInternalAuth] = useState(false);
   const [oidcProviders, setOidcProviders] = useState<OidcProvider[]>([]);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [aclEnabled, setAclEnabled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setHasInternalAuth(config.hasInternalAuth);
       setOidcProviders(config.oidcProviders);
       setServerVersion(config.version);
+      setAclEnabled(config.aclEnabled);
 
       if (config.authRequired) {
         try {
@@ -93,11 +97,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       hasInternalAuth,
       oidcProviders,
       serverVersion,
+      isAdmin: user?.is_admin ?? false,
+      aclEnabled,
       login,
       logout,
       restoreFromOidc,
     }),
-    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, serverVersion, login, logout, restoreFromOidc],
+    [user, isLoading, authRequired, hasInternalAuth, oidcProviders, serverVersion, aclEnabled, login, logout, restoreFromOidc],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;

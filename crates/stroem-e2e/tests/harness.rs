@@ -221,6 +221,7 @@ impl TestEnv {
                 sweep_interval_secs: 2,
                 unmatched_step_timeout_secs: 30,
             },
+            acl: None,
         };
 
         // 4. Load workspaces using real FolderSource

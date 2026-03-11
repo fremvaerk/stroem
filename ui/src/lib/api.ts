@@ -186,22 +186,24 @@ export interface ServerConfig {
   hasInternalAuth: boolean;
   oidcProviders: OidcProvider[];
   version: string | null;
+  aclEnabled: boolean;
 }
 
 export async function getServerConfig(): Promise<ServerConfig> {
   try {
     const res = await fetch("/api/config");
     if (!res.ok)
-      return { authRequired: false, hasInternalAuth: false, oidcProviders: [], version: null };
+      return { authRequired: false, hasInternalAuth: false, oidcProviders: [], version: null, aclEnabled: false };
     const data = await res.json();
     return {
       authRequired: !!data.auth_required,
       hasInternalAuth: !!data.has_internal_auth,
       oidcProviders: data.oidc_providers || [],
       version: data.version ?? null,
+      aclEnabled: !!data.acl_enabled,
     };
   } catch {
-    return { authRequired: false, hasInternalAuth: false, oidcProviders: [], version: null };
+    return { authRequired: false, hasInternalAuth: false, oidcProviders: [], version: null, aclEnabled: false };
   }
 }
 
@@ -324,6 +326,24 @@ export async function listUsers(
 
 export async function getUser(id: string): Promise<UserDetail> {
   return apiFetch<UserDetail>(`/api/users/${id}`);
+}
+
+export async function setUserAdmin(userId: string, isAdmin: boolean): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/api/users/${encodeURIComponent(userId)}/admin`, {
+    method: "PUT",
+    body: JSON.stringify({ is_admin: isAdmin }),
+  });
+}
+
+export async function setUserGroups(userId: string, groups: string[]): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(`/api/users/${encodeURIComponent(userId)}/groups`, {
+    method: "PUT",
+    body: JSON.stringify({ groups }),
+  });
+}
+
+export async function listGroups(): Promise<{ groups: string[] }> {
+  return apiFetch<{ groups: string[] }>("/api/groups");
 }
 
 export async function cancelJob(id: string): Promise<{ status: string }> {

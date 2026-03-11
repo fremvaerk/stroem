@@ -1,5 +1,7 @@
+use crate::acl::{load_user_acl_context, make_task_path, AllowedScope, TaskPermission};
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
+use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
 use axum::{
     extract::{Path, Query, State},
@@ -38,8 +40,22 @@ pub struct DashboardStats {
 
 /// GET /api/stats - Accurate job status counts for the dashboard
 #[tracing::instrument(skip(state))]
-pub async fn get_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match JobRepo::get_status_counts(&state.pool).await {
+pub async fn get_stats(
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+) -> impl IntoResponse {
+    // Resolve ACL scope when auth is present and ACL is configured
+    let acl_pairs = match resolve_acl_scope(&state, &auth_user).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
+
+    let counts_result = match acl_pairs {
+        Some(ref pairs) => JobRepo::get_status_counts_with_acl(&state.pool, pairs).await,
+        None => JobRepo::get_status_counts(&state.pool).await,
+    };
+
+    match counts_result {
         Ok(counts) => {
             let stats = DashboardStats {
                 pending: *counts.get("pending").unwrap_or(&0),
@@ -65,6 +81,7 @@ pub async fn get_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 #[tracing::instrument(skip(state))]
 pub async fn list_jobs(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Query(query): Query<ListJobsQuery>,
 ) -> impl IntoResponse {
     if query.task_name.is_some() && query.workspace.is_none() {
@@ -85,21 +102,59 @@ pub async fn list_jobs(
         }
     }
 
+    // Resolve ACL scope
+    let acl_pairs = match resolve_acl_scope(&state, &auth_user).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
+
     let status = query.status.as_deref();
-    let (result, total) = match (query.workspace.as_deref(), query.task_name.as_deref()) {
-        (Some(ws), Some(task)) => {
-            let jobs =
-                JobRepo::list_by_task(&state.pool, ws, task, status, query.limit, query.offset)
-                    .await;
-            let count = JobRepo::count_by_task(&state.pool, ws, task, status).await;
+
+    let (result, total) = match acl_pairs {
+        // ACL filtering is active — use ACL-aware queries
+        Some(ref pairs) => {
+            // If the query has a workspace/task filter, intersect with allowed pairs
+            let effective_pairs: Vec<(String, String)> =
+                match (query.workspace.as_deref(), query.task_name.as_deref()) {
+                    (Some(ws), Some(task)) => pairs
+                        .iter()
+                        .filter(|(p_ws, p_task)| p_ws == ws && p_task == task)
+                        .cloned()
+                        .collect(),
+                    (Some(ws), None) => pairs
+                        .iter()
+                        .filter(|(p_ws, _)| p_ws == ws)
+                        .cloned()
+                        .collect(),
+                    _ => pairs.clone(),
+                };
+            let jobs = JobRepo::list_with_acl(
+                &state.pool,
+                &effective_pairs,
+                status,
+                query.limit,
+                query.offset,
+            )
+            .await;
+            let count = JobRepo::count_with_acl(&state.pool, &effective_pairs, status).await;
             (jobs, count)
         }
-        _ => {
-            let ws = query.workspace.as_deref();
-            let jobs = JobRepo::list(&state.pool, ws, status, query.limit, query.offset).await;
-            let count = JobRepo::count(&state.pool, ws, status).await;
-            (jobs, count)
-        }
+        // No ACL filtering — use existing queries
+        None => match (query.workspace.as_deref(), query.task_name.as_deref()) {
+            (Some(ws), Some(task)) => {
+                let jobs =
+                    JobRepo::list_by_task(&state.pool, ws, task, status, query.limit, query.offset)
+                        .await;
+                let count = JobRepo::count_by_task(&state.pool, ws, task, status).await;
+                (jobs, count)
+            }
+            _ => {
+                let ws = query.workspace.as_deref();
+                let jobs = JobRepo::list(&state.pool, ws, status, query.limit, query.offset).await;
+                let count = JobRepo::count(&state.pool, ws, status).await;
+                (jobs, count)
+            }
+        },
     };
 
     match (result, total) {
@@ -158,6 +213,7 @@ pub struct JobDetailResponse {
 #[tracing::instrument(skip(state))]
 pub async fn get_job(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_uuid_param(&id, "job") {
@@ -184,6 +240,19 @@ pub async fn get_job(
                 .into_response();
         }
     };
+
+    // ACL check
+    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    if matches!(perm, TaskPermission::Deny) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Job not found"})),
+        )
+            .into_response();
+    }
 
     // Get steps
     let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
@@ -387,6 +456,7 @@ fn redact_response(response: &mut JobDetailResponse, secret_values: &[String]) {
 #[tracing::instrument(skip(state))]
 pub async fn get_step_logs(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Path((id, step_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let job_id = match parse_uuid_param(&id, "job") {
@@ -412,6 +482,19 @@ pub async fn get_step_logs(
                 .into_response();
         }
     };
+
+    // ACL check
+    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    if matches!(perm, TaskPermission::Deny) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Job not found"})),
+        )
+            .into_response();
+    }
 
     let meta = JobLogMeta {
         workspace: job.workspace,
@@ -440,6 +523,7 @@ pub async fn get_step_logs(
 #[tracing::instrument(skip(state))]
 pub async fn get_job_logs(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_uuid_param(&id, "job") {
@@ -466,6 +550,19 @@ pub async fn get_job_logs(
         }
     };
 
+    // ACL check
+    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    if matches!(perm, TaskPermission::Deny) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Job not found"})),
+        )
+            .into_response();
+    }
+
     let meta = JobLogMeta {
         workspace: job.workspace,
         task_name: job.task_name,
@@ -489,12 +586,56 @@ pub async fn get_job_logs(
 #[tracing::instrument(skip(state))]
 pub async fn cancel_job(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let job_id = match parse_uuid_param(&id, "job") {
         Ok(id) => id,
         Err(resp) => return resp,
     };
+
+    // Load job for ACL check (also needed for status check if ACL is off)
+    let job = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to get job: {:#}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get job: {}", e)})),
+            )
+                .into_response();
+        }
+    };
+
+    // ACL check — cancel requires Run permission
+    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    match perm {
+        TaskPermission::Deny => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response();
+        }
+        TaskPermission::View => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Insufficient permissions to cancel this job"})),
+            )
+                .into_response();
+        }
+        TaskPermission::Run => {}
+    }
 
     match crate::cancellation::cancel_job(&state, job_id).await {
         Ok(crate::cancellation::CancelResult::Cancelled) => {
@@ -517,6 +658,97 @@ pub async fn cancel_job(
                 Json(json!({"error": format!("Failed to cancel job: {}", e)})),
             )
                 .into_response()
+        }
+    }
+}
+
+/// Check ACL permission for a specific job's workspace/task.
+///
+/// Returns the user's permission level, or an error response on failure.
+/// Returns `Ok(TaskPermission::Run)` when ACL is not configured or auth is absent.
+async fn check_job_acl(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+    workspace: &str,
+    task_name: &str,
+) -> Result<TaskPermission, axum::response::Response> {
+    let auth = match auth_user {
+        Some(a) => a,
+        None => return Ok(TaskPermission::Run),
+    };
+    if !state.acl.is_configured() {
+        return Ok(TaskPermission::Run);
+    }
+    let user_id = auth.user_id()?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load ACL context: {:#}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response()
+        })?;
+    let folder = state
+        .get_workspace(workspace)
+        .await
+        .and_then(|ws| ws.tasks.get(task_name).and_then(|t| t.folder.clone()));
+    let task_path = make_task_path(folder.as_deref(), task_name);
+    Ok(state
+        .acl
+        .evaluate(workspace, &task_path, &auth.claims.email, &groups, is_admin))
+}
+
+/// Build the ACL-filtered list of (workspace, task_name) pairs allowed for this user.
+///
+/// Returns:
+/// - `Ok(None)` when no ACL filtering is needed (no auth user, ACL not configured, or admin)
+/// - `Ok(Some(pairs))` when filtering is active
+/// - `Err(response)` on failure (user_id parse error or DB error)
+async fn resolve_acl_scope(
+    state: &AppState,
+    auth_user: &Option<AuthUser>,
+) -> Result<Option<Vec<(String, String)>>, axum::response::Response> {
+    let auth = match auth_user {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    if !state.acl.is_configured() {
+        return Ok(None);
+    }
+
+    let user_id = auth.user_id()?;
+    let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load ACL context: {:#}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response()
+        })?;
+
+    // Collect all workspace tasks
+    let mut all_tasks = Vec::new();
+    for (ws_name, ws_config) in state.workspaces.get_all_configs().await {
+        for (task_name, task_def) in &ws_config.tasks {
+            all_tasks.push((ws_name.clone(), task_name.clone(), task_def.folder.clone()));
+        }
+    }
+
+    match state
+        .acl
+        .allowed_scope(&all_tasks, &auth.claims.email, &groups, is_admin)
+    {
+        AllowedScope::All => Ok(None),
+        AllowedScope::Filtered(items) => {
+            let pairs = items
+                .into_iter()
+                .map(|(ws, task, _perm)| (ws, task))
+                .collect();
+            Ok(Some(pairs))
         }
     }
 }

@@ -1,5 +1,7 @@
+use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::get_workspace_or_error;
+use crate::web::api::middleware::AuthUser;
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
@@ -72,6 +74,7 @@ pub fn compute_next_runs(trigger: &TriggerDef, count: usize) -> Vec<DateTime<Utc
 #[tracing::instrument(skip(state))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Path(ws): Path<String>,
 ) -> impl IntoResponse {
     let workspace = match get_workspace_or_error(&state, &ws).await {
@@ -79,11 +82,38 @@ pub async fn list_triggers(
         Err(resp) => return resp,
     };
 
-    let triggers: Vec<TriggerInfo> = workspace
+    let mut triggers: Vec<TriggerInfo> = workspace
         .triggers
         .iter()
         .map(|(name, trigger)| TriggerInfo::from_def(name, trigger, 5))
         .collect();
+
+    // ACL filter: only show triggers for tasks the user can access
+    if let Some(ref auth) = auth_user {
+        if state.acl.is_configured() {
+            if let Ok(user_id) = auth.user_id() {
+                if let Ok((is_admin, groups)) =
+                    load_user_acl_context(&state.pool, user_id, auth.is_admin()).await
+                {
+                    if !is_admin {
+                        triggers.retain(|t| {
+                            let task_def = workspace.tasks.get(&t.task);
+                            let folder = task_def.and_then(|td| td.folder.as_deref());
+                            let task_path = make_task_path(folder, &t.task);
+                            let perm = state.acl.evaluate(
+                                &ws,
+                                &task_path,
+                                &auth.claims.email,
+                                &groups,
+                                false,
+                            );
+                            !matches!(perm, TaskPermission::Deny)
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     Json(triggers).into_response()
 }

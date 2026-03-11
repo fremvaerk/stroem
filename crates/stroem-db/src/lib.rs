@@ -9,4 +9,5 @@ pub use repos::job_step::{JobStepRepo, JobStepRow, NewJobStep, StaleStepInfo};
 pub use repos::refresh_token::{RefreshTokenRepo, RefreshTokenRow};
 pub use repos::user::{UserRepo, UserRow};
 pub use repos::user_auth_link::{UserAuthLinkRepo, UserAuthLinkRow};
+pub use repos::user_group::{UserGroupRepo, UserGroupRow};
 pub use repos::worker::{WorkerRepo, WorkerRow};

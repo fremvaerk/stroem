@@ -80,9 +80,11 @@ pub async fn issue_token_pair(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     email: &str,
+    is_admin: bool,
     jwt_secret: &str,
 ) -> Result<IssuedTokenPair, Response> {
-    let access_token = match create_access_token(&user_id.to_string(), email, jwt_secret) {
+    let access_token = match create_access_token(&user_id.to_string(), email, is_admin, jwt_secret)
+    {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Failed to create access token: {:#}", e);
@@ -186,6 +188,7 @@ pub async fn login(
         &state.pool,
         user.user_id,
         &user.email,
+        user.is_admin,
         &auth_config.jwt_secret,
     )
     .await
@@ -302,6 +305,7 @@ pub async fn refresh(
         &state.pool,
         user.user_id,
         &user.email,
+        user.is_admin,
         &auth_config.jwt_secret,
     )
     .await
@@ -377,26 +381,41 @@ pub async fn me(State(state): State<Arc<AppState>>, auth: AuthUser) -> impl Into
         Err(resp) => return resp,
     };
 
-    match UserRepo::get_by_id(&state.pool, user_id).await {
-        Ok(Some(user)) => Json(json!({
-            "user_id": user.user_id,
-            "name": user.name,
-            "email": user.email,
-            "created_at": user.created_at,
-        }))
-        .into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found"})),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get user: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
+    let user = match UserRepo::get_by_id(&state.pool, user_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "User not found"})),
             )
                 .into_response()
         }
-    }
+        Err(e) => {
+            tracing::error!("Failed to get user: {:#}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+                .into_response();
+        }
+    };
+
+    let groups: Vec<String> =
+        match stroem_db::UserGroupRepo::get_groups_for_user(&state.pool, user.user_id).await {
+            Ok(g) => g.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!("Failed to load user groups: {:#}", e);
+                vec![]
+            }
+        };
+
+    Json(json!({
+        "user_id": user.user_id,
+        "name": user.name,
+        "email": user.email,
+        "is_admin": user.is_admin,
+        "groups": groups,
+        "created_at": user.created_at,
+    }))
+    .into_response()
 }

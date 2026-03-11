@@ -15,6 +15,7 @@ export interface TaskListItem {
   workspace: string;
   folder?: string;
   has_triggers: boolean;
+  can_execute?: boolean;
 }
 
 export interface InputField {
@@ -58,6 +59,7 @@ export interface TaskDetail {
   flow: Record<string, FlowStep>;
   triggers: TriggerInfo[];
   connections?: Record<string, string[]>;
+  can_execute?: boolean;
 }
 
 export interface JobListItem {
@@ -128,6 +130,8 @@ export interface UserListItem {
   auth_methods: string[];
   created_at: string;
   last_login_at: string | null;
+  is_admin?: boolean;
+  groups?: string[];
 }
 
 export interface UserDetail {
@@ -137,6 +141,8 @@ export interface UserDetail {
   auth_methods: string[];
   created_at: string;
   last_login_at: string | null;
+  is_admin?: boolean;
+  groups?: string[];
 }
 
 export interface TokenResponse {
@@ -148,6 +154,8 @@ export interface AuthUser {
   name: string;
   email: string;
   created_at: string;
+  is_admin?: boolean;
+  groups?: string[];
 }
 
 export interface ExecuteTaskResponse {

@@ -31,6 +31,7 @@ const navItems = [
   { title: "Workspaces", href: "/workspaces", icon: FolderOpen },
   { title: "Tasks", href: "/tasks", icon: ListChecks },
   { title: "Jobs", href: "/jobs", icon: Play },
+  { title: "Workers", href: "/workers", icon: Server },
 ];
 
 function isActive(pathname: string, href: string): boolean {
@@ -40,15 +41,14 @@ function isActive(pathname: string, href: string): boolean {
 
 export function AppSidebar() {
   const { pathname } = useLocation();
-  const { user, authRequired, serverVersion, logout } = useAuth();
+  const { user, authRequired, serverVersion, logout, isAdmin, aclEnabled } = useAuth();
 
   const adminItems = useMemo(() => {
-    const items = [{ title: "Workers", href: "/workers", icon: Server }];
-    if (authRequired) {
-      items.push({ title: "Users", href: "/users", icon: Users });
-    }
-    return items;
-  }, [authRequired]);
+    if (!authRequired) return [];
+    const showAdminItems = !aclEnabled || isAdmin;
+    if (!showAdminItems) return [];
+    return [{ title: "Users", href: "/users", icon: Users }];
+  }, [authRequired, isAdmin, aclEnabled]);
 
   return (
     <Sidebar>

@@ -603,4 +603,131 @@ impl JobRepo {
             .context("get_active_by_source")?;
         Ok(rows)
     }
+
+    /// List jobs filtered to allowed workspace/task pairs (for ACL-filtered views).
+    ///
+    /// `allowed_pairs` is a list of `(workspace, task_name)` tuples the caller is permitted
+    /// to see. Returns an empty vec immediately when `allowed_pairs` is empty.
+    pub async fn list_with_acl(
+        pool: &PgPool,
+        allowed_pairs: &[(String, String)],
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<JobRow>> {
+        if allowed_pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut conditions = Vec::new();
+        let mut param_idx = 1u32;
+        let mut values_parts = Vec::new();
+        for _ in allowed_pairs {
+            values_parts.push(format!("(${}, ${})", param_idx, param_idx + 1));
+            param_idx += 2;
+        }
+        conditions.push(format!(
+            "(workspace, task_name) IN ({})",
+            values_parts.join(", ")
+        ));
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+        let where_clause = format!(" WHERE {}", conditions.join(" AND "));
+        let limit_idx = param_idx;
+        let offset_idx = param_idx + 1;
+        let sql = format!(
+            "SELECT {} FROM job{} ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}",
+            JOB_COLUMNS, where_clause
+        );
+        let mut query = sqlx::query_as::<_, JobRow>(&sql);
+        for (ws, task) in allowed_pairs {
+            query = query.bind(ws).bind(task);
+        }
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+        query = query.bind(limit).bind(offset);
+        let jobs = query
+            .fetch_all(pool)
+            .await
+            .context("Failed to list jobs with ACL")?;
+        Ok(jobs)
+    }
+
+    /// Count jobs filtered to allowed workspace/task pairs.
+    ///
+    /// Returns 0 immediately when `allowed_pairs` is empty.
+    pub async fn count_with_acl(
+        pool: &PgPool,
+        allowed_pairs: &[(String, String)],
+        status: Option<&str>,
+    ) -> Result<i64> {
+        if allowed_pairs.is_empty() {
+            return Ok(0);
+        }
+        let mut conditions = Vec::new();
+        let mut param_idx = 1u32;
+        let mut values_parts = Vec::new();
+        for _ in allowed_pairs {
+            values_parts.push(format!("(${}, ${})", param_idx, param_idx + 1));
+            param_idx += 2;
+        }
+        conditions.push(format!(
+            "(workspace, task_name) IN ({})",
+            values_parts.join(", ")
+        ));
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+        }
+        let where_clause = format!(" WHERE {}", conditions.join(" AND "));
+        let sql = format!("SELECT COUNT(*) FROM job{where_clause}");
+        let mut query = sqlx::query_as::<_, (i64,)>(&sql);
+        for (ws, task) in allowed_pairs {
+            query = query.bind(ws).bind(task);
+        }
+        if let Some(s) = status {
+            query = query.bind(s);
+        }
+        let count = query
+            .fetch_one(pool)
+            .await
+            .context("Failed to count jobs with ACL")?;
+        Ok(count.0)
+    }
+
+    /// Get job status counts filtered to allowed workspace/task pairs.
+    ///
+    /// Returns an empty map immediately when `allowed_pairs` is empty.
+    pub async fn get_status_counts_with_acl(
+        pool: &PgPool,
+        allowed_pairs: &[(String, String)],
+    ) -> Result<HashMap<String, i64>> {
+        if allowed_pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut param_idx = 1u32;
+        let mut values_parts = Vec::new();
+        for _ in allowed_pairs {
+            values_parts.push(format!("(${}, ${})", param_idx, param_idx + 1));
+            param_idx += 2;
+        }
+        let sql = format!(
+            "SELECT status, COUNT(*) FROM job WHERE (workspace, task_name) IN ({}) GROUP BY status",
+            values_parts.join(", ")
+        );
+        let mut query = sqlx::query_as::<_, (String, i64)>(&sql);
+        for (ws, task) in allowed_pairs {
+            query = query.bind(ws).bind(task);
+        }
+        let rows = query
+            .fetch_all(pool)
+            .await
+            .context("Failed to get status counts with ACL")?;
+        let mut counts = HashMap::new();
+        for (status, count) in rows {
+            counts.insert(status, count);
+        }
+        Ok(counts)
+    }
 }

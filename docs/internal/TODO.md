@@ -43,6 +43,8 @@ Last updated: 2026-03-04.
 - [ ] Error responses manually constructed with `json!({})` — define `AppError` enum implementing `IntoResponse`
 - [x] Step-level timeout, job-level timeout, and cron concurrency policy
 - [ ] No heartbeat failure → worker re-registration logic
+- [ ] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
+- [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
 
 ## Code Quality / Rust
 
@@ -106,6 +108,7 @@ Last updated: 2026-03-04.
 - [x] Both `tw-animate-css` and `tailwindcss-animate` installed — remove unused one
 - [x] No sourcemap in production builds
 - [x] `vite.config.ts` suppresses proxy errors silently
+- [ ] Job duration insights: show average/p50/p95 duration for a task and per-step, estimated time remaining on running jobs and individual steps, and a duration history chart on the job detail page (with per-step breakdown)
 
 ## Test Coverage
 
@@ -149,6 +152,55 @@ Last updated: 2026-03-04.
 - [ ] Playwright: Dashboard content
 - [x] Full library loading pipeline integration test (2 tests in library.rs: happy path through WorkspaceManager::new + validation failure for missing ref)
 - [ ] Git workspace source auth failure test
+
+## ACL / Authorization
+
+- [x] Database migration: `is_admin` on user, `user_group` table
+- [x] Config-driven ACL rules in `server-config.yaml` (`acl:` section)
+- [x] `AclEvaluator` module with highest-wins permission evaluation (Run > View > Deny)
+- [x] `is_admin` in JWT Claims (backward compat via `#[serde(default)]`)
+- [x] Admin middleware helpers (`is_admin()`, `require_admin()`)
+- [x] Token creation includes `is_admin`
+- [x] Initial user always promoted to admin; first OIDC user becomes admin
+- [x] ACL enforcement on all API endpoints (tasks, jobs, workspaces, workers, users, WS)
+- [x] Admin-only endpoints: user admin toggle, group CRUD
+- [x] Frontend: auth context exposes `isAdmin`/`aclEnabled`, sidebar conditional, task detail `can_execute`, users page admin/group management
+- [x] Config parsing tests for ACL section
+- [x] ACL evaluator unit tests (19 tests: glob matching, evaluation logic, admin bypass, scoping)
+- [ ] Integration tests for ACL enforcement (handler-level with DB)
+- [ ] Playwright E2E tests for admin/ACL flows
+
+## Review: ACL Implementation (2026-03-11)
+
+### Critical
+- [x] WebSocket ACL bypass: any ACL check failure silently allows upgrade (deny-by-default violated) — `ws.rs`
+- [x] Workspace list ACL bypass: ACL errors return ALL workspaces unfiltered — `workspaces.rs`
+
+### Important
+- [x] Triggers endpoint has no ACL enforcement — info disclosure — `triggers.rs`
+- [x] Workers `get_worker` returns job metadata without ACL filtering — `workers.rs`
+- [x] WebSocket double token parsing (fragile duplication) — `ws.rs`
+- [x] No group name validation (arbitrary strings accepted) — `users.rs`
+- [x] `set_groups` INSERT lacks `ON CONFLICT DO NOTHING` — duplicate groups cause constraint error — `user_group.rs`
+- [x] ACL check boilerplate duplicated 5x in `jobs.rs` with inconsistencies — refactor to helper
+- [x] `count_with_acl` missing `param_idx += 1` after status binding — `job.rs` (verified: consistent with existing pattern, no fix needed)
+- [x] No admin self-demotion guard — `users.rs`
+
+### Minor
+- [x] `glob_match` silently wrong with multiple `*` wildcards — `acl.rs`
+- [x] Stale JWT `is_admin` (15-min window after admin revocation) — known limitation, documented below
+
+> **Known limitation**: When an admin revokes another user's admin status, the
+> user's existing JWT access tokens remain valid (with the old `is_admin: true`)
+> until they expire (15 minutes). API key requests always read `is_admin` from
+> the DB, so they reflect changes immediately. The 15-minute window is acceptable
+> given the access token TTL. Mitigation: use shorter token TTLs or implement a
+> token revocation list (not currently planned).
+- [x] Frontend race condition in rapid group operations — `user-detail.tsx`
+- [x] `user.groups!` non-null assertion should use `?? []` — `user-detail.tsx`
+- [x] `getUserGroups` in `api.ts` is dead code (never called) — removed
+- [x] Missing `#[tracing::instrument]` on `load_user_acl_context` — `acl.rs`
+- [x] Silent error swallowing in `get_user` groups fetch — `users.rs`
 
 ## Roadmap Items (from review)
 

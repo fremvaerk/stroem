@@ -112,6 +112,65 @@ pub struct AuthConfig {
     pub initial_user: Option<InitialUserConfig>,
 }
 
+/// ACL action: what a matching rule grants
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AclAction {
+    Run,
+    View,
+    Deny,
+}
+
+impl AclAction {
+    /// Numeric priority for highest-wins evaluation (higher = more permissive)
+    pub fn priority(self) -> u8 {
+        match self {
+            AclAction::Deny => 1,
+            AclAction::View => 2,
+            AclAction::Run => 3,
+        }
+    }
+}
+
+/// A single ACL rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclRule {
+    /// Workspace name or "*" for all
+    pub workspace: String,
+    /// Glob patterns on task names (e.g. ["deploy/*", "build"])
+    #[serde(default = "default_wildcard_vec")]
+    pub tasks: Vec<String>,
+    /// Permission to grant
+    pub action: AclAction,
+    /// Groups that this rule applies to (OR'd with users)
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// User emails that this rule applies to (OR'd with groups)
+    #[serde(default)]
+    pub users: Vec<String>,
+}
+
+fn default_wildcard_vec() -> Vec<String> {
+    vec!["*".to_string()]
+}
+
+fn default_acl_action() -> AclAction {
+    AclAction::Deny
+}
+
+/// ACL configuration section in server-config.yaml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclConfig {
+    /// Default action when no rule matches (default: deny)
+    #[serde(default = "default_acl_action")]
+    pub default: AclAction,
+    /// ACL rules — all matching rules are checked, highest permission wins
+    #[serde(default)]
+    pub rules: Vec<AclRule>,
+}
+
 /// Recovery configuration for detecting stale workers and recovering stuck steps
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +225,8 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     #[serde(default)]
     pub recovery: RecoveryConfig,
+    /// ACL configuration (optional — when absent, all authenticated users have full access)
+    pub acl: Option<AclConfig>,
 }
 
 impl ServerConfig {
@@ -1454,5 +1515,112 @@ recovery:
             "Error should mention unmatched_step_timeout_secs: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_parse_config_without_acl() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.acl.is_none());
+    }
+
+    #[test]
+    fn test_parse_config_with_acl() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+acl:
+  default: deny
+  rules:
+    - workspace: production
+      tasks: ["deploy/*"]
+      action: run
+      groups: [devops]
+      users: [contractor@ext.com]
+    - workspace: "*"
+      tasks: ["*"]
+      action: view
+      groups: [engineering]
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let acl = config.acl.unwrap();
+        assert!(matches!(acl.default, AclAction::Deny));
+        assert_eq!(acl.rules.len(), 2);
+
+        let r0 = &acl.rules[0];
+        assert_eq!(r0.workspace, "production");
+        assert_eq!(r0.tasks, vec!["deploy/*"]);
+        assert!(matches!(r0.action, AclAction::Run));
+        assert_eq!(r0.groups, vec!["devops"]);
+        assert_eq!(r0.users, vec!["contractor@ext.com"]);
+
+        let r1 = &acl.rules[1];
+        assert_eq!(r1.workspace, "*");
+        assert_eq!(r1.tasks, vec!["*"]);
+        assert!(matches!(r1.action, AclAction::View));
+        assert_eq!(r1.groups, vec!["engineering"]);
+        assert!(r1.users.is_empty());
+    }
+
+    #[test]
+    fn test_parse_acl_rule_defaults() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+acl:
+  rules:
+    - workspace: "*"
+      action: view
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let acl = config.acl.unwrap();
+        // default action defaults to deny
+        assert!(matches!(acl.default, AclAction::Deny));
+        let rule = &acl.rules[0];
+        // tasks defaults to ["*"]
+        assert_eq!(rule.tasks, vec!["*"]);
+        // groups and users default to empty
+        assert!(rule.groups.is_empty());
+        assert!(rule.users.is_empty());
+    }
+
+    #[test]
+    fn test_parse_acl_empty_rules() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+acl:
+  default: view
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let acl = config.acl.unwrap();
+        assert!(matches!(acl.default, AclAction::View));
+        assert!(acl.rules.is_empty());
+    }
+
+    #[test]
+    fn test_acl_action_priority() {
+        assert_eq!(AclAction::Deny.priority(), 1);
+        assert_eq!(AclAction::View.priority(), 2);
+        assert_eq!(AclAction::Run.priority(), 3);
     }
 }

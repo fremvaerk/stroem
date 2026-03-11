@@ -7,7 +7,7 @@ Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
 Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
 Phase 3 complete: Multi-workspace support, tarball distribution, Docker and Kubernetes runners, libraries.
-Phase 4 (mostly complete): Advanced features (pod actions, secrets, connections, DAG visualization). Remaining: RBAC.
+Phase 4 complete: Advanced features (pod actions, secrets, connections, DAG visualization, ACL/RBAC).
 Phase 5: Advanced flow control (conditionals, loops, approval gates).
 Phase 6: Shared storage & worker affinity.
 Phase 7: AI agent actions & MCP integration.
@@ -300,6 +300,23 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
   - JIT user provisioning: find by auth_link → find by email → create new user (in `oidc::provision_user`)
   - Routes: `GET /api/auth/oidc/{provider}` (start) and `GET /api/auth/oidc/{provider}/callback`
   - After callback, issues internal JWT tokens and redirects to `/login/callback#access_token=...&refresh_token=...`
+
+### ACL (Access Control)
+- **Config-driven**: Optional `acl` section in `server-config.yaml` with `default` action and `rules` list
+- **No ACL config = backward compat**: everything open, all authenticated users have full access
+- **Admin flag**: `is_admin` boolean on user table; admins bypass all ACL checks
+- **Groups**: Named sets of users stored in `user_group` DB table, managed by admins via API
+- **Rule evaluation**: All matching rules checked, **highest permission wins** (Run > View > Deny). Order doesn't matter.
+- **Glob matching**: Simple `*` wildcard for workspace and task patterns
+- **Task path**: `"{folder}/{task_name}"` or `"{task_name}"` when no folder — used for task pattern matching
+- **Permission levels**: `Run` (full access), `View` (read-only, can see but not execute/cancel), `Deny` (invisible)
+- **`AclEvaluator`** in `crates/stroem-server/src/acl.rs`: `evaluate()`, `allowed_scope()`, `is_configured()`
+- **Helper**: `load_user_acl_context()` loads user groups from DB, returns `(is_admin, HashSet<String>)`
+- DB: Migration `017_acl.sql` adds `is_admin` column and `user_group` table
+- `Claims.is_admin` uses `#[serde(default)]` for backward compat with old JWTs
+- Initial user (from config) always promoted to admin; first OIDC user becomes admin
+- Admin-only endpoints: `PUT /api/users/{id}/admin`, `GET/PUT /api/users/{id}/groups`, `GET /api/groups`
+- Workers and Users pages restricted to admin when ACL is enabled
 
 ### Log Storage
 - `LogStorage` in `AppState` — local JSONL files + optional S3 archival

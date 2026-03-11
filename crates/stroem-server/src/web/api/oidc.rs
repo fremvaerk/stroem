@@ -272,6 +272,7 @@ pub async fn oidc_callback(
         &state.pool,
         user.user_id,
         &user.email,
+        user.is_admin,
         &auth_config.jwt_secret,
     )
     .await

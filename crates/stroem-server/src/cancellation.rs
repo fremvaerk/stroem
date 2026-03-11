@@ -166,6 +166,7 @@ mod tests {
                 sweep_interval_secs: 60,
                 unmatched_step_timeout_secs: 30,
             },
+            acl: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
         let log_storage = LogStorage::new(log_dir);

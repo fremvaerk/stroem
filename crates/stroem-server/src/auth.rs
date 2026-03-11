@@ -27,11 +27,17 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
 }
 
 /// Create an access token (JWT) with 15-minute TTL
-pub fn create_access_token(user_id: &str, email: &str, jwt_secret: &str) -> Result<String> {
+pub fn create_access_token(
+    user_id: &str,
+    email: &str,
+    is_admin: bool,
+    jwt_secret: &str,
+) -> Result<String> {
     let now = chrono::Utc::now().timestamp();
     let claims = Claims {
         sub: user_id.to_string(),
         email: email.to_string(),
+        is_admin,
         iat: now,
         exp: now + 900, // 15 minutes
     };
@@ -138,15 +144,47 @@ mod tests {
     #[test]
     fn test_jwt_create_and_validate() {
         let secret = "test-jwt-secret";
-        let token = create_access_token("user-123", "test@example.com", secret).unwrap();
+        let token = create_access_token("user-123", "test@example.com", false, secret).unwrap();
         let claims = validate_access_token(&token, secret).unwrap();
         assert_eq!(claims.sub, "user-123");
         assert_eq!(claims.email, "test@example.com");
+        assert!(!claims.is_admin);
+    }
+
+    #[test]
+    fn test_jwt_create_and_validate_admin() {
+        let secret = "test-jwt-secret";
+        let token = create_access_token("admin-1", "admin@example.com", true, secret).unwrap();
+        let claims = validate_access_token(&token, secret).unwrap();
+        assert_eq!(claims.sub, "admin-1");
+        assert!(claims.is_admin);
+    }
+
+    #[test]
+    fn test_jwt_backward_compat_no_is_admin() {
+        // Old JWTs without is_admin should deserialize with is_admin = false
+        let secret = "test-jwt-secret";
+        let now = chrono::Utc::now().timestamp();
+        // Manually create a JWT without is_admin
+        let claims_json = serde_json::json!({
+            "sub": "user-1",
+            "email": "old@example.com",
+            "iat": now,
+            "exp": now + 900,
+        });
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &claims_json,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap();
+        let claims = validate_access_token(&token, secret).unwrap();
+        assert!(!claims.is_admin);
     }
 
     #[test]
     fn test_jwt_wrong_secret_fails() {
-        let token = create_access_token("user-123", "test@example.com", "secret-1").unwrap();
+        let token = create_access_token("user-123", "test@example.com", false, "secret-1").unwrap();
         let result = validate_access_token(&token, "secret-2");
         assert!(result.is_err());
     }

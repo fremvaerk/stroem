@@ -14,7 +14,7 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::delete, routing::get, routing::post, Json, Router};
+use axum::{routing::delete, routing::get, routing::post, routing::put, Json, Router};
 use serde::Serialize;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
@@ -193,6 +193,7 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     Json(json!({
         "auth_required": state.config.auth.is_some(),
+        "acl_enabled": state.acl.is_configured(),
         "oidc_providers": oidc_providers,
         "has_internal_auth": has_internal_auth,
         "version": env!("CARGO_PKG_VERSION"),
@@ -266,6 +267,12 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         )
         .route("/users", get(users::list_users))
         .route("/users/{id}", get(users::get_user))
+        .route("/users/{id}/admin", put(users::set_user_admin))
+        .route(
+            "/users/{id}/groups",
+            get(users::get_user_groups).put(users::set_user_groups),
+        )
+        .route("/groups", get(users::list_groups))
         .route("/workers", get(workers::list_workers))
         .route("/workers/{id}", get(workers::get_worker))
         .route("/stats", get(jobs::get_stats))

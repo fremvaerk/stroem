@@ -45,6 +45,25 @@ impl AuthUser {
                 .into_response()
         })
     }
+
+    /// Whether this user has admin privileges.
+    pub fn is_admin(&self) -> bool {
+        self.claims.is_admin
+    }
+
+    /// Returns `Ok(())` when the user is admin, or a 403 response otherwise.
+    #[allow(clippy::result_large_err)]
+    pub fn require_admin(&self) -> Result<(), Response> {
+        if self.claims.is_admin {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Admin access required"})),
+            )
+                .into_response())
+        }
+    }
 }
 
 /// Validate an API key token and return Claims if valid.
@@ -116,6 +135,7 @@ pub(crate) async fn validate_api_key(
     Ok(Claims {
         sub: user.user_id.to_string(),
         email: user.email,
+        is_admin: user.is_admin,
         iat: chrono::Utc::now().timestamp(),
         exp: chrono::Utc::now().timestamp() + 3600, // synthetic expiry for Claims struct
     })

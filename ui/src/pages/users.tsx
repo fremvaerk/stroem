@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
+import { useAuth } from "@/context/auth-context";
 import { listUsers } from "@/lib/api";
 import type { UserListItem } from "@/lib/types";
 
@@ -29,6 +30,7 @@ function formatTime(dateStr: string): string {
 
 export function UsersPage() {
   useTitle("Users");
+  const { aclEnabled } = useAuth();
   const [users, setUsers] = useState<UserListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -78,6 +80,8 @@ export function UsersPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>Auth Method</TableHead>
+                  {aclEnabled && <TableHead>Role</TableHead>}
+                  {aclEnabled && <TableHead>Groups</TableHead>}
                   <TableHead>Last Login</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
@@ -109,6 +113,36 @@ export function UsersPage() {
                         ))}
                       </div>
                     </TableCell>
+                    {aclEnabled && (
+                      <TableCell>
+                        {u.is_admin ? (
+                          <Badge className="text-xs">Admin</Badge>
+                        ) : (
+                          <span className="text-sm text-muted-foreground">
+                            User
+                          </span>
+                        )}
+                      </TableCell>
+                    )}
+                    {aclEnabled && (
+                      <TableCell>
+                        {u.groups && u.groups.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {u.groups.map((g) => (
+                              <Badge
+                                key={g}
+                                variant="outline"
+                                className="text-xs"
+                              >
+                                {g}
+                              </Badge>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {u.last_login_at ? formatTime(u.last_login_at) : "-"}
                     </TableCell>

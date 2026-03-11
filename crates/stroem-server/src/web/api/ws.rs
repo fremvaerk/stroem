@@ -1,3 +1,4 @@
+use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use crate::web::api::parse_uuid_param;
@@ -10,6 +11,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use stroem_common::models::auth::Claims;
 use stroem_db::JobRepo;
 use uuid::Uuid;
 
@@ -40,9 +42,8 @@ pub async fn job_log_stream(
         Err(resp) => return resp,
     };
 
-    // Validate auth when enabled
-    if let Some(auth_config) = &state.config.auth {
-        // Try Authorization header first, then ?token= query param
+    // --- Auth: validate token when auth is enabled, saving claims for ACL ---
+    let claims: Option<Claims> = if let Some(auth_config) = &state.config.auth {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -52,19 +53,21 @@ pub async fn job_log_stream(
 
         match token {
             Some(t) if t.starts_with("strm_") => {
-                if let Err(resp) = crate::web::api::middleware::validate_api_key(&t, &state).await {
-                    return resp;
+                match crate::web::api::middleware::validate_api_key(&t, &state).await {
+                    Ok(c) => Some(c),
+                    Err(resp) => return resp,
                 }
             }
-            Some(t) => {
-                if crate::auth::validate_access_token(&t, &auth_config.jwt_secret).is_err() {
+            Some(t) => match crate::auth::validate_access_token(&t, &auth_config.jwt_secret) {
+                Ok(c) => Some(c),
+                Err(_) => {
                     return (
                         StatusCode::UNAUTHORIZED,
                         Json(json!({"error": "Invalid or expired token"})),
                     )
                         .into_response();
                 }
-            }
+            },
             None => {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -73,6 +76,75 @@ pub async fn job_log_stream(
                     .into_response();
             }
         }
+    } else {
+        None
+    };
+
+    // --- ACL check: deny-by-default when ACL is configured ---
+    if state.acl.is_configured() {
+        if let Some(ref claims) = claims {
+            let user_id = match claims.sub.parse::<uuid::Uuid>() {
+                Ok(id) => id,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "Invalid user ID in token"})),
+                    )
+                        .into_response();
+                }
+            };
+            let (is_admin, groups) =
+                match load_user_acl_context(&state.pool, user_id, claims.is_admin).await {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        tracing::error!("Failed to load ACL context for WS: {:#}", e);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Internal server error"})),
+                        )
+                            .into_response();
+                    }
+                };
+            if !is_admin {
+                let job = match JobRepo::get(&state.pool, job_id).await {
+                    Ok(Some(j)) => j,
+                    Ok(None) => {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({"error": "Job not found"})),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to get job for ACL check: {:#}", e);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Internal server error"})),
+                        )
+                            .into_response();
+                    }
+                };
+                let folder = state
+                    .get_workspace(&job.workspace)
+                    .await
+                    .and_then(|ws| ws.tasks.get(&job.task_name).and_then(|t| t.folder.clone()));
+                let task_path = make_task_path(folder.as_deref(), &job.task_name);
+                let perm =
+                    state
+                        .acl
+                        .evaluate(&job.workspace, &task_path, &claims.email, &groups, false);
+                if matches!(perm, TaskPermission::Deny) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": "Job not found"})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        // No claims but ACL configured = deny (auth should have caught this,
+        // but this is a safety net for the case where auth is not configured
+        // but ACL is — which shouldn't happen in practice)
     }
 
     let skip_backfill = query.skip_backfill;

@@ -8,6 +8,7 @@ pub struct User {
     pub user_id: Uuid,
     pub name: Option<String>,
     pub email: String,
+    pub is_admin: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -16,6 +17,8 @@ pub struct User {
 pub struct Claims {
     pub sub: String,
     pub email: String,
+    #[serde(default)]
+    pub is_admin: bool,
     pub exp: i64,
     pub iat: i64,
 }

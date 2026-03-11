@@ -1,4 +1,6 @@
+use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
+use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
 use axum::{
     extract::{Path, Query, State},
@@ -61,6 +63,7 @@ pub async fn list_workers(
 #[tracing::instrument(skip(state))]
 pub async fn get_worker(
     State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let worker_id = match parse_uuid_param(&id, "worker") {
@@ -97,6 +100,58 @@ pub async fn get_worker(
             )
                 .into_response();
         }
+    };
+
+    // ACL filter: remove jobs for tasks the user can't see
+    let jobs: Vec<_> = if let Some(ref auth) = auth_user {
+        if state.acl.is_configured() {
+            let user_id = match auth.user_id() {
+                Ok(id) => id,
+                Err(_) => {
+                    return Json(json!({
+                        "worker_id": worker.worker_id,
+                        "name": worker.name,
+                        "status": worker.status,
+                        "tags": worker.tags,
+                        "version": worker.version,
+                        "last_heartbeat": worker.last_heartbeat,
+                        "registered_at": worker.registered_at,
+                        "jobs": [],
+                    }))
+                    .into_response();
+                }
+            };
+            match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
+                Ok((true, _)) => jobs, // admin sees all
+                Ok((false, groups)) => {
+                    let all_configs = state.workspaces.get_all_configs().await;
+                    jobs.into_iter()
+                        .filter(|j| {
+                            let folder = all_configs
+                                .iter()
+                                .find(|(ws_name, _)| ws_name == &j.workspace)
+                                .and_then(|(_, ws)| {
+                                    ws.tasks.get(&j.task_name).and_then(|t| t.folder.clone())
+                                });
+                            let task_path = make_task_path(folder.as_deref(), &j.task_name);
+                            let perm = state.acl.evaluate(
+                                &j.workspace,
+                                &task_path,
+                                &auth.claims.email,
+                                &groups,
+                                false,
+                            );
+                            !matches!(perm, TaskPermission::Deny)
+                        })
+                        .collect()
+                }
+                Err(_) => vec![], // error loading ACL context, show no jobs for safety
+            }
+        } else {
+            jobs
+        }
+    } else {
+        jobs
     };
 
     let jobs_json: Vec<serde_json::Value> = jobs

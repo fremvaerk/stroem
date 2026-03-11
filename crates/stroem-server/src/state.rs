@@ -1,3 +1,4 @@
+use crate::acl::AclEvaluator;
 use crate::config::ServerConfig;
 use crate::job_completion::JobCompletionNotifier;
 use crate::log_broadcast::LogBroadcast;
@@ -16,6 +17,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub workspaces: Arc<WorkspaceManager>,
     pub config: Arc<ServerConfig>,
+    pub acl: Arc<AclEvaluator>,
     pub log_broadcast: Arc<LogBroadcast>,
     pub log_storage: Arc<LogStorage>,
     pub oidc_providers: Arc<HashMap<String, OidcProvider>>,
@@ -34,10 +36,12 @@ impl AppState {
         log_storage: LogStorage,
         oidc_providers: HashMap<String, OidcProvider>,
     ) -> Self {
+        let acl = AclEvaluator::new(config.acl.clone());
         Self {
             pool,
             workspaces: Arc::new(workspaces),
             config: Arc::new(config),
+            acl: Arc::new(acl),
             log_broadcast: Arc::new(LogBroadcast::new()),
             log_storage: Arc::new(log_storage),
             oidc_providers: Arc::new(oidc_providers),
@@ -99,6 +103,7 @@ mod tests {
                 sweep_interval_secs: 60,
                 unmatched_step_timeout_secs: 30,
             },
+            acl: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
         let log_storage = LogStorage::new(log_dir);

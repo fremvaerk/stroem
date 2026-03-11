@@ -267,9 +267,14 @@ export function TaskDetailPage() {
               </div>
             )}
             <div className={inputFields.length > 0 ? "mt-6" : ""}>
-              <Button type="submit" disabled={submitting}>
+              <Button type="submit" disabled={submitting || task.can_execute === false}>
                 {submitting ? "Running..." : "Run Task"}
               </Button>
+              {task.can_execute === false && (
+                <p className="mt-2 text-sm text-muted-foreground">
+                  You have view-only access to this task.
+                </p>
+              )}
             </div>
           </form>
         </CardContent>
