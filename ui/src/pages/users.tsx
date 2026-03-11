@@ -30,11 +30,12 @@ function formatTime(dateStr: string): string {
 
 export function UsersPage() {
   useTitle("Users");
-  const { aclEnabled } = useAuth();
+  const { isAdmin } = useAuth();
   const [users, setUsers] = useState<UserListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [offset, setOffset] = useState(0);
+  const [forbidden, setForbidden] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -42,7 +43,7 @@ export function UsersPage() {
       setUsers(data.items);
       setTotal(data.total);
     } catch {
-      // ignore
+      setForbidden(true);
     } finally {
       setLoading(false);
     }
@@ -67,7 +68,11 @@ export function UsersPage() {
           <CardTitle className="text-base">All Users</CardTitle>
         </CardHeader>
         <CardContent>
-          {loading ? (
+          {forbidden ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Admin access required to view users.
+            </p>
+          ) : loading ? (
             <LoadingSpinner />
           ) : users.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
@@ -80,8 +85,8 @@ export function UsersPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Email</TableHead>
                   <TableHead>Auth Method</TableHead>
-                  {aclEnabled && <TableHead>Role</TableHead>}
-                  {aclEnabled && <TableHead>Groups</TableHead>}
+                  {isAdmin && <TableHead>Role</TableHead>}
+                  {isAdmin && <TableHead>Groups</TableHead>}
                   <TableHead>Last Login</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
@@ -113,7 +118,7 @@ export function UsersPage() {
                         ))}
                       </div>
                     </TableCell>
-                    {aclEnabled && (
+                    {isAdmin && (
                       <TableCell>
                         {u.is_admin ? (
                           <Badge className="text-xs">Admin</Badge>
@@ -124,7 +129,7 @@ export function UsersPage() {
                         )}
                       </TableCell>
                     )}
-                    {aclEnabled && (
+                    {isAdmin && (
                       <TableCell>
                         {u.groups && u.groups.length > 0 ? (
                           <div className="flex flex-wrap gap-1">

@@ -41,14 +41,12 @@ function isActive(pathname: string, href: string): boolean {
 
 export function AppSidebar() {
   const { pathname } = useLocation();
-  const { user, authRequired, serverVersion, logout, isAdmin, aclEnabled } = useAuth();
+  const { user, authRequired, serverVersion, logout, isAdmin } = useAuth();
 
   const adminItems = useMemo(() => {
-    if (!authRequired) return [];
-    const showAdminItems = !aclEnabled || isAdmin;
-    if (!showAdminItems) return [];
+    if (!authRequired || !isAdmin) return [];
     return [{ title: "Users", href: "/users", icon: Users }];
-  }, [authRequired, isAdmin, aclEnabled]);
+  }, [authRequired, isAdmin]);
 
   return (
     <Sidebar>
