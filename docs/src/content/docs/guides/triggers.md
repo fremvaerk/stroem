@@ -188,8 +188,30 @@ HTTP status: `200 OK`.
 ```
 HTTP status: `202 Accepted` — use the `job_id` to poll manually.
 
+### Checking async job status
+
+When using async webhooks, the response includes a `job_id`. You can check the job status using the same webhook endpoint — no API key or JWT required:
+
+```bash
+# Trigger the webhook (async)
+curl -X POST http://localhost:8080/hooks/my-webhook?secret=whsec_abc123 \
+  -H "Content-Type: application/json" \
+  -d '{"ref": "main"}'
+# Response: {"job_id":"abc-123","trigger":"my-webhook","task":"deploy"}
+
+# Check job status (same secret)
+curl http://localhost:8080/hooks/my-webhook/jobs/abc-123?secret=whsec_abc123
+# Response: {"job_id":"abc-123","trigger":"my-webhook","task":"deploy","status":"running","output":null}
+
+# Wait for completion (blocks until done or timeout)
+curl "http://localhost:8080/hooks/my-webhook/jobs/abc-123?secret=whsec_abc123&wait=true&timeout=60"
+# Response: {"job_id":"abc-123","trigger":"my-webhook","task":"deploy","status":"completed","output":{...}}
+```
+
+The status endpoint only returns jobs created by that specific webhook trigger — it cannot be used to query arbitrary jobs.
+
+See [Webhook API](/reference/webhook-api/) for the full endpoint reference.
+
 ### Webhook name uniqueness
 
 Webhook names should be unique across all workspaces. If the same name appears in multiple workspaces, the first match wins at dispatch time.
-
-See [Webhook API](/reference/webhook-api/) for the full endpoint reference.

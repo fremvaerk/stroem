@@ -3,11 +3,12 @@ use crate::state::AppState;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, Method, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -16,13 +17,16 @@ use std::time::Duration;
 use stroem_common::models::job::JobStatus;
 use stroem_common::models::workflow::TriggerDef;
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 const DEFAULT_SYNC_TIMEOUT_SECS: u64 = 30;
+const MAX_WAIT_TIMEOUT_SECS: u64 = 300;
 
 /// Build the webhook routes: GET and POST on /{name}.
 pub fn build_hooks_routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/{name}", get(webhook_handler).post(webhook_handler))
+        .route("/{name}/jobs/{job_id}", get(webhook_job_status))
         .with_state(state)
 }
 
@@ -32,7 +36,7 @@ pub fn build_hooks_routes(state: Arc<AppState>) -> Router {
 /// 2. Validate secret if configured
 /// 3. Build input from request body, headers, query params, and trigger defaults
 /// 4. Create a job for the trigger's target task
-#[tracing::instrument(skip(state, headers, body))]
+#[tracing::instrument(skip(state, query, headers, body))]
 async fn webhook_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -54,23 +58,10 @@ async fn webhook_handler(
     };
 
     // 2. Validate secret (constant-time to prevent timing attacks)
-    if let Some(ref expected_secret) = wh.secret {
-        let provided = extract_secret(&query, &headers);
-        let is_valid = provided
-            .as_deref()
-            .map(|s| {
-                let provided_hash = Sha256::digest(s.as_bytes());
-                let expected_hash = Sha256::digest(expected_secret.as_bytes());
-                provided_hash.ct_eq(&expected_hash).into()
-            })
-            .unwrap_or(false);
-        if !is_valid {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid or missing secret"})),
-            )
-                .into_response();
-        }
+    if let Some(resp) =
+        validate_webhook_secret(&wh, query.get("secret").map(String::as_str), &headers)
+    {
+        return resp.into_response();
     }
 
     // 3. Build input
@@ -120,9 +111,7 @@ async fn webhook_handler(
                 // between create_job_for_task and subscribe. If already terminal,
                 // return immediately without waiting.
                 if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-                    if job.status == JobStatus::Completed.as_ref()
-                        || job.status == JobStatus::Failed.as_ref()
-                    {
+                    if is_terminal_status(&job.status) {
                         return Json(json!({
                             "job_id": job_id.to_string(),
                             "trigger": name,
@@ -179,6 +168,283 @@ async fn webhook_handler(
     }
 }
 
+/// Validate the webhook secret. Returns a 401 response if validation fails,
+/// or `None` if the request is authorized.
+///
+/// `provided_secret` is the caller-supplied secret (e.g. from a query param).
+/// If absent, the function falls back to the `Authorization: Bearer` header.
+fn validate_webhook_secret(
+    wh: &WebhookMatch,
+    provided_secret: Option<&str>,
+    headers: &HeaderMap,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    if let Some(ref expected_secret) = wh.secret {
+        // Use the caller-supplied secret, or fall back to Authorization: Bearer header.
+        let effective_secret: Option<String> = provided_secret
+            .map(|s| s.to_string())
+            .or_else(|| {
+                headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|val| val.strip_prefix("Bearer "))
+                    .map(|t| t.to_string())
+            });
+        let is_valid = effective_secret
+            .as_deref()
+            .map(|s| {
+                let provided_hash = Sha256::digest(s.as_bytes());
+                let expected_hash = Sha256::digest(expected_secret.as_bytes());
+                provided_hash.ct_eq(&expected_hash).into()
+            })
+            .unwrap_or(false);
+        if !is_valid {
+            return Some((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Invalid or missing secret"})),
+            ));
+        }
+    }
+    None
+}
+
+/// Returns `true` if the job status represents a terminal state.
+fn is_terminal_status(status: &str) -> bool {
+    status == JobStatus::Completed.as_ref()
+        || status == JobStatus::Failed.as_ref()
+        || status == JobStatus::Cancelled.as_ref()
+}
+
+/// Query params for the webhook job status endpoint.
+#[derive(Debug, Deserialize)]
+struct StatusQuery {
+    #[serde(default)]
+    wait: bool,
+    #[serde(default)]
+    timeout: Option<u64>,
+    secret: Option<String>,
+}
+
+/// Response for the webhook job status endpoint.
+#[derive(Debug, Serialize)]
+struct WebhookJobStatusResponse {
+    job_id: String,
+    trigger: String,
+    task: String,
+    status: String,
+    output: Option<serde_json::Value>,
+    created_at: String,
+    completed_at: Option<String>,
+}
+
+/// Add `Cache-Control: no-store` to a response to prevent intermediary caching
+/// of mutable job status data.
+fn with_no_cache(response: axum::response::Response) -> axum::response::Response {
+    let (mut parts, body) = response.into_parts();
+    parts.headers.insert(
+        header::CACHE_CONTROL,
+        "no-store".parse().expect("static header value is valid"),
+    );
+    axum::response::Response::from_parts(parts, body)
+}
+
+/// Check the status of a job created by a webhook trigger.
+///
+/// Uses the same authentication as the webhook itself (secret or open).
+/// Only returns jobs that were created by this specific webhook trigger.
+/// Supports `?wait=true&timeout=30` to wait for job completion.
+#[tracing::instrument(skip(state, query, headers))]
+async fn webhook_job_status(
+    State(state): State<Arc<AppState>>,
+    Path((name, job_id_str)): Path<(String, String)>,
+    Query(query): Query<StatusQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Parse job_id
+    let job_id = match Uuid::parse_str(&job_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Invalid job_id format"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Find webhook trigger
+    let wh = match find_webhook_trigger(&state, &name).await {
+        Some(f) => f,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Webhook not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Validate secret
+    if let Some(resp) = validate_webhook_secret(&wh, query.secret.as_deref(), &headers) {
+        return resp.into_response();
+    }
+
+    // Load job from DB
+    let job = match stroem_db::JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Job not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to load job {}: {:#}", job_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to load job"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Verify job belongs to this webhook trigger
+    let expected_source_id = format!("{}/{}", wh.ws_name, wh.trigger_key);
+    if job.source_type != "webhook" || job.source_id.as_deref() != Some(&expected_source_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Job not found"})),
+        )
+            .into_response();
+    }
+
+    let is_terminal = is_terminal_status(&job.status);
+
+    // If wait=true and job is not terminal, wait for completion
+    if query.wait && !is_terminal {
+        let timeout_secs = query
+            .timeout
+            .unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS)
+            .min(MAX_WAIT_TIMEOUT_SECS);
+        let mut rx = state.job_completion.subscribe(job_id).await;
+
+        // Re-check after subscribing (race guard)
+        if let Ok(Some(fresh_job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+            if is_terminal_status(&fresh_job.status) {
+                return with_no_cache(
+                    Json(WebhookJobStatusResponse {
+                        job_id: job_id.to_string(),
+                        trigger: name,
+                        task: wh.task,
+                        status: fresh_job.status,
+                        output: fresh_job.output,
+                        created_at: fresh_job.created_at.to_rfc3339(),
+                        completed_at: fresh_job.completed_at.map(|t| t.to_rfc3339()),
+                    })
+                    .into_response(),
+                );
+            }
+        }
+
+        let timeout = Duration::from_secs(timeout_secs);
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(Ok(_event)) => {
+                // Job completed — re-query DB to get accurate timestamps.
+                if let Ok(Some(current)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+                    return with_no_cache(
+                        Json(WebhookJobStatusResponse {
+                            job_id: job_id.to_string(),
+                            trigger: name,
+                            task: wh.task,
+                            status: current.status,
+                            output: current.output,
+                            created_at: current.created_at.to_rfc3339(),
+                            completed_at: current.completed_at.map(|t| t.to_rfc3339()),
+                        })
+                        .into_response(),
+                    );
+                }
+                // DB error after completion — fall through to timeout fallback below
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to load job"})),
+                )
+                    .into_response();
+            }
+            Ok(Err(_lagged)) => {
+                // Broadcast message was missed — job is likely already terminal. Re-query DB.
+                if let Ok(Some(current)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+                    return with_no_cache(
+                        Json(WebhookJobStatusResponse {
+                            job_id: job_id.to_string(),
+                            trigger: name,
+                            task: wh.task,
+                            status: current.status,
+                            output: current.output,
+                            created_at: current.created_at.to_rfc3339(),
+                            completed_at: current.completed_at.map(|t| t.to_rfc3339()),
+                        })
+                        .into_response(),
+                    );
+                }
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to load job"})),
+                )
+                    .into_response();
+            }
+            Err(_elapsed) => {
+                // Genuine timeout — return current status with 202 for manual polling
+                if let Ok(Some(current)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+                    return with_no_cache(
+                        (
+                            StatusCode::ACCEPTED,
+                            Json(WebhookJobStatusResponse {
+                                job_id: job_id.to_string(),
+                                trigger: name,
+                                task: wh.task,
+                                status: current.status,
+                                output: current.output,
+                                created_at: current.created_at.to_rfc3339(),
+                                completed_at: current.completed_at.map(|t| t.to_rfc3339()),
+                            }),
+                        )
+                            .into_response(),
+                    );
+                }
+                return with_no_cache(
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(WebhookJobStatusResponse {
+                            job_id: job_id.to_string(),
+                            trigger: name,
+                            task: wh.task,
+                            status: "running".to_string(),
+                            output: None,
+                            created_at: job.created_at.to_rfc3339(),
+                            completed_at: None,
+                        }),
+                    )
+                        .into_response(),
+                );
+            }
+        }
+    }
+
+    with_no_cache(
+        Json(WebhookJobStatusResponse {
+            job_id: job_id.to_string(),
+            trigger: name,
+            task: wh.task,
+            status: job.status,
+            output: job.output,
+            created_at: job.created_at.to_rfc3339(),
+            completed_at: job.completed_at.map(|t| t.to_rfc3339()),
+        })
+        .into_response(),
+    )
+}
+
 /// Search result from find_webhook_trigger.
 struct WebhookMatch {
     ws_name: String,
@@ -226,6 +492,7 @@ async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMat
 }
 
 /// Extract secret from query param `?secret=xxx` or `Authorization: Bearer xxx` header.
+#[cfg(test)]
 fn extract_secret(query: &HashMap<String, String>, headers: &HeaderMap) -> Option<String> {
     // Check query param first
     if let Some(s) = query.get("secret") {
@@ -526,5 +793,89 @@ mod tests {
         headers.insert("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
         // Basic auth should not be extracted as a secret
         assert_eq!(extract_secret(&query, &headers), None);
+    }
+
+    #[test]
+    fn test_validate_webhook_secret_with_valid_secret() {
+        let wh = WebhookMatch {
+            ws_name: "default".to_string(),
+            trigger_key: "test-trigger".to_string(),
+            task: "deploy".to_string(),
+            secret: Some("my-secret".to_string()),
+            default_input: HashMap::new(),
+            mode: None,
+            timeout_secs: None,
+        };
+        let headers = HeaderMap::new();
+        assert!(validate_webhook_secret(&wh, Some("my-secret"), &headers).is_none());
+    }
+
+    #[test]
+    fn test_validate_webhook_secret_with_invalid_secret() {
+        let wh = WebhookMatch {
+            ws_name: "default".to_string(),
+            trigger_key: "test-trigger".to_string(),
+            task: "deploy".to_string(),
+            secret: Some("my-secret".to_string()),
+            default_input: HashMap::new(),
+            mode: None,
+            timeout_secs: None,
+        };
+        let headers = HeaderMap::new();
+        let result = validate_webhook_secret(&wh, Some("wrong-secret"), &headers);
+        assert!(result.is_some());
+        let (status, _) = result.unwrap();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_validate_webhook_secret_missing_when_required() {
+        let wh = WebhookMatch {
+            ws_name: "default".to_string(),
+            trigger_key: "test-trigger".to_string(),
+            task: "deploy".to_string(),
+            secret: Some("my-secret".to_string()),
+            default_input: HashMap::new(),
+            mode: None,
+            timeout_secs: None,
+        };
+        let headers = HeaderMap::new();
+        let result = validate_webhook_secret(&wh, None, &headers);
+        assert!(result.is_some());
+        let (status, _) = result.unwrap();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_validate_webhook_secret_open_webhook() {
+        let wh = WebhookMatch {
+            ws_name: "default".to_string(),
+            trigger_key: "test-trigger".to_string(),
+            task: "deploy".to_string(),
+            secret: None,
+            default_input: HashMap::new(),
+            mode: None,
+            timeout_secs: None,
+        };
+        let headers = HeaderMap::new();
+        // Open webhook — no secret configured, should always allow
+        assert!(validate_webhook_secret(&wh, None, &headers).is_none());
+    }
+
+    #[test]
+    fn test_validate_webhook_secret_via_bearer_header() {
+        let wh = WebhookMatch {
+            ws_name: "default".to_string(),
+            trigger_key: "test-trigger".to_string(),
+            task: "deploy".to_string(),
+            secret: Some("bearer-secret".to_string()),
+            default_input: HashMap::new(),
+            mode: None,
+            timeout_secs: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer bearer-secret".parse().unwrap());
+        // No query-param secret — falls back to the Authorization: Bearer header.
+        assert!(validate_webhook_secret(&wh, None, &headers).is_none());
     }
 }

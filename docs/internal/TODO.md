@@ -231,6 +231,36 @@ Last updated: 2026-03-04.
 - [x] Existing DB tests (`test_create_steps_and_claim`, `test_promote_ready_steps`) don't assert `ready_at`
 - [x] Config parse test `test_parse_config_recovery_defaults` doesn't assert `unmatched_step_timeout_secs == 30`
 
+## Review: Webhook Job Status Endpoint (2026-03-12)
+
+### Critical
+- [x] Secret leaked via `#[tracing::instrument]` — `webhook_job_status` only skips `state`; `query` (contains secret) and `headers` (contains Bearer token) logged in traces. Also `webhook_handler` doesn't skip `query`.
+- [x] `webhook_handler` race guard missing `Cancelled` status — lines 112-114 only check `Completed | Failed`, inconsistent with new code that correctly includes `Cancelled`
+
+### Important
+- [x] `HashMap` reconstruction for secret validation — `StatusQuery.secret` round-tripped through HashMap for `extract_secret` compatibility. Refactor `validate_webhook_secret` to accept `Option<&str>` directly.
+- [x] `Lagged` broadcast error silently treated as timeout — wildcard arm catches both timeout and `RecvError::Lagged`; should re-query DB on Lagged
+- [x] Missing `Cache-Control: no-store` on webhook job status responses — mutable job status could be cached by intermediaries
+
+### Minor
+- [x] Duplicated terminal-status check (lines 293-295 and 307-309) — extract `is_terminal_status()` helper
+- [ ] Response struct vs `json!()` inconsistency — new code uses typed struct, existing handler uses `json!()` macro
+- [x] Response missing timestamps (`created_at`, `completed_at`) — available on JobRow but not returned
+- [ ] UUID error message phrasing inconsistency — `"Invalid job_id format"` vs API's `"Invalid job ID"`
+
+### Test Coverage
+- [ ] Integration: malformed UUID returns 400
+- [ ] Integration: unknown webhook returns 404
+- [ ] Integration: unknown job_id returns 404
+- [ ] Integration: IDOR — API-sourced job returns 404
+- [ ] Integration: IDOR — job from different webhook returns 404
+- [ ] Integration: secret required but missing returns 401
+- [ ] Integration: valid secret (query param and Bearer) returns 200
+- [ ] Integration: default no-wait returns current status
+- [ ] Integration: wait on terminal job returns immediately
+- [ ] Integration: wait timeout returns 202
+- [ ] Integration: cancelled job treated as terminal
+
 ## Bugs Found & Fixed
 
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)
