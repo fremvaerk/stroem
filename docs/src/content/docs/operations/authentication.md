@@ -157,4 +157,8 @@ server:
     STROEM__AUTH__INITIAL_USER__PASSWORD: "real-admin-password"
 ```
 
+## Authorization (ACL)
+
+Once authentication is enabled, you can optionally configure **access control lists** to restrict which users can see and execute tasks. See [Authorization](/operations/authorization/) for details on ACL rules, admin users, and group management.
+
 See [Auth API](/reference/auth-api/) for the full endpoint reference.

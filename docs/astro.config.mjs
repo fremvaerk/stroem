@@ -51,6 +51,7 @@ export default defineConfig({
           collapsed: true,
           items: [
             { label: "Authentication", slug: "operations/authentication" },
+            { label: "Authorization", slug: "operations/authorization" },
             { label: "Log Storage", slug: "operations/log-storage" },
             { label: "Recovery", slug: "operations/recovery" },
             { label: "Startup Scripts", slug: "operations/startup-scripts" },

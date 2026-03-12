@@ -110,6 +110,8 @@ Authorization: Bearer <access_token>
   "user_id": "d1e2f3a4-b5c6-7890-abcd-ef1234567890",
   "name": null,
   "email": "admin@stroem.local",
+  "is_admin": true,
+  "groups": ["devops", "engineering"],
   "created_at": "2025-02-11T10:00:00Z"
 }
 ```
@@ -211,7 +213,9 @@ Returns server configuration for the UI. This is a **public** endpoint (no auth 
   "has_internal_auth": true,
   "oidc_providers": [
     { "id": "google", "display_name": "Google" }
-  ]
+  ],
+  "acl_enabled": false,
+  "version": "0.7.3"
 }
 ```
 
@@ -220,6 +224,88 @@ Returns server configuration for the UI. This is a **public** endpoint (no auth 
 | `auth_required` | Whether authentication is enabled |
 | `has_internal_auth` | Whether email/password login is available |
 | `oidc_providers` | List of configured OIDC providers |
+| `acl_enabled` | Whether ACL authorization rules are configured |
+| `version` | Server version string |
+
+## User Management (Admin Only)
+
+The following endpoints require admin privileges. Non-admin users receive `403 Forbidden`.
+
+### List Users
+
+```
+GET /api/users?limit=20&offset=0
+```
+
+Returns paginated list of all users with their admin status, groups, and auth methods.
+
+### Get User
+
+```
+GET /api/users/{id}
+```
+
+Returns detailed user information including groups.
+
+### Set Admin Status
+
+```
+PUT /api/users/{id}/admin
+```
+
+**Request body:**
+
+```json
+{
+  "is_admin": true
+}
+```
+
+Admins cannot revoke their own admin status.
+
+| Status | Description |
+|--------|-------------|
+| `400` | Attempting to revoke own admin status |
+| `403` | Not an admin |
+| `404` | User not found |
+
+### Set User Groups
+
+```
+PUT /api/users/{id}/groups
+```
+
+**Request body:**
+
+```json
+{
+  "groups": ["devops", "engineering"]
+}
+```
+
+Replaces all groups for the user. Group names must be 1-64 characters, alphanumeric with `_` and `-`.
+
+| Status | Description |
+|--------|-------------|
+| `400` | Invalid group name |
+| `403` | Not an admin |
+| `404` | User not found |
+
+### List Groups
+
+```
+GET /api/groups
+```
+
+Returns all distinct group names across all users.
+
+**Response:**
+
+```json
+{
+  "groups": ["devops", "engineering", "qa"]
+}
+```
 
 ## OIDC Login Start
 
