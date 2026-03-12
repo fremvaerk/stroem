@@ -271,6 +271,10 @@ actions:
     script: "python /workspace/test_gpu.py"
 ```
 
+:::note Pending pod timeout
+Pods that remain in `Pending` state for more than 10 minutes are automatically terminated and the step is marked as failed. This prevents jobs from hanging indefinitely when pods can't be scheduled (e.g., insufficient resources, node affinity failures, image pull errors). The error message includes the pod's status reason when available.
+:::
+
 ## Task actions (Type 3)
 
 Actions of `type: task` reference another task by name. When a step using a task action becomes ready, the server creates a child job that runs the referenced task's full flow.

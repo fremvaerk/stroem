@@ -54,6 +54,19 @@ worker_token: "change-in-production"
 #   initial_user:
 #     email: admin@stroem.local
 #     password: admin
+# Optional: access control list (requires auth enabled)
+# acl:
+#   default: deny
+#   rules:
+#     - workspace: "*"
+#       tasks: ["*"]
+#       action: run
+#       groups: [devops]
+#     - workspace: "production"
+#       tasks: ["deploy/*"]
+#       action: view
+#       groups: [engineering]
+#       users: [contractor@ext.com]
 ```
 
 ### Server fields
@@ -68,6 +81,37 @@ worker_token: "change-in-production"
 | `worker_token` | Yes | Shared secret for worker authentication |
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
 | `auth` | No | Authentication config (see [Authentication](/operations/authentication/)) |
+| `acl` | No | Access control list configuration (see [Authorization](/operations/authorization/)) |
+
+### ACL configuration
+
+Access control is optional and requires authentication to be enabled. Configure fine-grained permissions using an `acl` section:
+
+```yaml
+acl:
+  default: deny    # deny | view | run (default: deny)
+  rules:
+    - workspace: "*"
+      tasks: ["*"]
+      action: run
+      groups: [devops]
+    - workspace: "production"
+      tasks: ["deploy/*"]
+      action: view
+      groups: [engineering]
+      users: [contractor@ext.com]
+```
+
+| Field | Description |
+|-------|-------------|
+| `default` | Default action when no rule matches: `deny` (invisible), `view` (read-only), `run` (full access). Defaults to `deny`. |
+| `rules[].workspace` | Workspace name or `*` wildcard. Must match exactly (case-sensitive). |
+| `rules[].tasks` | List of task path patterns. Paths are `"{folder}/{task}"` or `"{task}"`. Supports `*` wildcard. |
+| `rules[].action` | Permission level: `run` (execute/cancel), `view` (read-only), `deny` (invisible). |
+| `rules[].groups` | Group names to match (OR'd with `users`). Users must be in at least one listed group. |
+| `rules[].users` | User email addresses to match (OR'd with `groups`). |
+
+See [Authorization](/operations/authorization/) for detailed behavior, admin role, and rule evaluation order.
 
 ## Worker configuration
 

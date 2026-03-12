@@ -5,7 +5,7 @@ description: Public REST API reference
 
 Base URL: `http://localhost:8080` (configurable via `server-config.yaml`)
 
-Task, job, and log endpoints do not require authentication unless the server is configured with an `auth` section.
+Task, job, and log endpoints do not require authentication unless the server is configured with an `auth` section. When ACL is configured, list endpoints (tasks, jobs, workspaces) are filtered based on user permissions. See [Authorization](/operations/authorization/) for details.
 
 ## List Workspaces
 
@@ -314,7 +314,121 @@ Returns registered users with their authentication methods. Supports `limit` and
 GET /api/users/{id}
 ```
 
-Returns a single user's info including authentication methods.
+Returns a single user's info including authentication methods and groups.
+
+## User Management (Admin Only)
+
+The following endpoints require admin privileges (`is_admin: true`). Non-admin users receive a `403` Forbidden response.
+
+### List Users
+
+```
+GET /api/users
+```
+
+Returns registered users with pagination.
+
+| Query parameter | Default | Description |
+|----------------|---------|-------------|
+| `limit` | `20` | Number of users to return |
+| `offset` | `0` | Pagination offset |
+
+**Response:**
+
+```json
+{
+  "items": [
+    {
+      "id": "user-uuid-...",
+      "email": "alice@example.com",
+      "is_admin": true,
+      "groups": ["devops", "admin"]
+    }
+  ],
+  "total": 1
+}
+```
+
+### Get User Detail
+
+```
+GET /api/users/{id}
+```
+
+Returns a single user's info including admin flag and group memberships.
+
+**Response:**
+
+```json
+{
+  "id": "user-uuid-...",
+  "email": "alice@example.com",
+  "is_admin": true,
+  "groups": ["devops"]
+}
+```
+
+### Set Admin Flag
+
+```
+PUT /api/users/{id}/admin
+```
+
+Grants or revokes admin privileges.
+
+**Request body:**
+
+```json
+{
+  "is_admin": true
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "is_admin": true
+}
+```
+
+### Set User Groups
+
+```
+PUT /api/users/{id}/groups
+```
+
+Updates the user's group memberships.
+
+**Request body:**
+
+```json
+{
+  "groups": ["devops", "qa"]
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "groups": ["devops", "qa"]
+}
+```
+
+### List Groups
+
+```
+GET /api/groups
+```
+
+Returns all distinct group names in use.
+
+**Response:**
+
+```json
+["admin", "devops", "qa"]
+```
 
 ## List Workers
 

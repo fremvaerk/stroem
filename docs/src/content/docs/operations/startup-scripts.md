@@ -21,6 +21,12 @@ Both worker and runner Docker images include an entrypoint script that:
 
 If the directory doesn't exist or is empty, the entrypoint proceeds directly to the main process.
 
+## Type 1 vs Type 2 behavior
+
+**Type 2 actions** (`type: script` with `runner: pod`): Startup scripts ARE mounted and run before the main process. The runner environment is set up with installed tools, configured auth, etc. This is the typical case for script execution.
+
+**Type 1 actions** (`type: pod` or `type: docker`): Startup scripts are NOT injected. These actions run your prepared container image as-is without modification, giving you full control. If you need startup behavior in a Type 1 pod, bake the scripts directly into your container image or use the `manifest` field to mount your own volumes.
+
 ## Helm configuration
 
 The Helm chart provides three `startupScript` values:

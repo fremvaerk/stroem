@@ -80,7 +80,7 @@ kubernetes:
 
 ## Worker tags
 
-Tags control which steps a worker can claim. Each step computes `required_tags` based on its action type and runner:
+Tags control which steps a worker can claim. Each step automatically computes `required_tags` based on its action type and runner configuration:
 
 | Action | Runner | Required tags |
 |--------|--------|--------------|
@@ -91,7 +91,34 @@ Tags control which steps a worker can claim. Each step computes `required_tags` 
 | `pod` | — | `["kubernetes"]` |
 | `task` | — | `[]` (server-dispatched) |
 
-Actions can add extra tags via the `tags` field (e.g., `tags: ["gpu"]`). A worker claims a step only when all required tags are present in the worker's tag set.
+### Step tag matching
+
+A worker claims a step only when **all** of the step's `required_tags` are present in the worker's `tags` list. This ensures specialized workloads route to capable workers.
+
+**Worker configuration:**
+```yaml
+tags:
+  - script      # can run local scripts
+  - docker      # can run docker steps
+  - kubernetes  # can run pod steps
+  - gpu         # custom tag for GPU-enabled work
+```
+
+**Step with custom tags:**
+```yaml
+flow:
+  train-model:
+    action: train-gpu
+    tags: ["gpu"]        # adds to required_tags
+```
+
+A step with `type: script, runner: docker, tags: ["gpu"]` requires `["docker", "gpu"]` — only workers with both tags can claim it.
+
+### Unmatched steps
+
+If no active worker has all required tags for a step, the step remains ready but unclaimed. After `unmatched_step_timeout_secs` (default 30 seconds, configurable in server recovery settings), the step fails with error: `"No active worker with required tags to run this step"`.
+
+**Example scenario:** A step requires `["kubernetes"]` but all workers have `["script", "docker"]`. After 30 seconds, the step fails. To fix: add a worker with Kubernetes runner enabled, or remove the `runner: pod` requirement.
 
 ## Pre-installed tools
 

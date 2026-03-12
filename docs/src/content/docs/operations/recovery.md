@@ -33,6 +33,33 @@ The default heartbeat timeout of 120 seconds means a worker must miss 4 consecut
 
 The `unmatched_step_timeout_secs` grace period prevents false positives when workers are temporarily restarting or scaling up. A step is only failed if it has been ready for longer than this timeout **and** no active worker has matching tags.
 
+### Tag-based worker matching (Phase 4)
+
+Steps compute a set of `required_tags` based on their action type and runner:
+- `type: script` with `runner: local` → `["script"]`
+- `type: script` with `runner: docker` → `["script", "docker"]`
+- `type: script` with `runner: pod` → `["script", "kubernetes"]`
+- `type: docker` → `["docker"]`
+- `type: pod` → `["kubernetes"]`
+- `type: task` → excluded from Phase 4 (dispatched server-side)
+- Steps with explicit `tags: [...]` include those as well
+
+Workers declare their capabilities in `worker-config.yaml`:
+```yaml
+tags:
+  - script
+  - docker
+  - kubernetes
+```
+
+Phase 4 uses a SQL containment check: `required_tags <@ worker_tags` (PostgreSQL). A step is claimable by a worker only if **all required tags are present** in the worker's tag set. If no active worker satisfies this requirement after `unmatched_step_timeout_secs` seconds, the step is failed with error message:
+
+```
+No active worker with required tags to run this step
+```
+
+`type: task` steps are explicitly excluded from Phase 4 — they are dispatched by the server itself via `handle_task_steps()`, not claimed by workers.
+
 ## Recovery strategy
 
 When a worker dies mid-step or a step has no matching worker, the step is **failed, not retried**:
