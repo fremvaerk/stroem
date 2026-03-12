@@ -61,7 +61,8 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
     };
 
     // Run orchestrator: promote steps, skip unreachable, check terminal
-    orchestrator::on_step_completed(&state.pool, job_id, step_name, &task).await?;
+    orchestrator::on_step_completed(&state.pool, job_id, step_name, &task, Some(&workspace))
+        .await?;
 
     // Handle any newly-promoted type: task steps
     if let Err(e) =
@@ -162,8 +163,14 @@ async fn propagate_to_parent(
             };
 
             // Run orchestrator for parent job
-            orchestrator::on_step_completed(&state.pool, parent_job_id, parent_step, &parent_task)
-                .await?;
+            orchestrator::on_step_completed(
+                &state.pool,
+                parent_job_id,
+                parent_step,
+                &parent_task,
+                Some(&parent_ws),
+            )
+            .await?;
 
             // Handle any newly-promoted task steps in the parent
             crate::job_creator::handle_task_steps(
@@ -345,6 +352,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -406,6 +414,7 @@ mod tests {
             required_tags: json!([]),
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }
     }
 

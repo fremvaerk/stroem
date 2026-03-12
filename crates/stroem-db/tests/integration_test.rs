@@ -165,6 +165,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -178,6 +179,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
 
@@ -255,6 +257,7 @@ async fn test_claim_concurrency() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         });
     }
 
@@ -342,6 +345,7 @@ async fn test_step_lifecycle() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
 
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -405,6 +409,7 @@ async fn test_update_input() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -453,6 +458,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -466,6 +472,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -479,6 +486,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -492,6 +500,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
 
@@ -509,6 +518,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -522,6 +532,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -535,6 +546,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -548,6 +560,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -556,7 +569,7 @@ async fn test_promote_ready_steps() -> Result<()> {
     JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
 
     // Promote ready steps
-    let promoted = JobStepRepo::promote_ready_steps(&pool, job_id, &flow).await?;
+    let promoted = JobStepRepo::promote_ready_steps(&pool, job_id, &flow, None).await?;
 
     // step2 and step4 should be promoted
     assert_eq!(promoted.len(), 2);
@@ -577,7 +590,7 @@ async fn test_promote_ready_steps() -> Result<()> {
     JobStepRepo::mark_completed(&pool, job_id, "step4", None).await?;
 
     // Promote again
-    let promoted = JobStepRepo::promote_ready_steps(&pool, job_id, &flow).await?;
+    let promoted = JobStepRepo::promote_ready_steps(&pool, job_id, &flow, None).await?;
 
     // step3 should now be promoted
     assert_eq!(promoted.len(), 1);
@@ -648,6 +661,7 @@ async fn test_all_steps_terminal() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -661,6 +675,7 @@ async fn test_all_steps_terminal() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
 
@@ -709,6 +724,7 @@ async fn test_any_step_failed() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -722,6 +738,7 @@ async fn test_any_step_failed() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
 
@@ -768,6 +785,7 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -883,6 +901,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -896,6 +915,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             required_tags: vec!["docker".to_string()],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -989,6 +1009,7 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
             required_tags: vec!["docker".to_string()],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -1047,6 +1068,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -1102,6 +1124,7 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
             required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -1145,6 +1168,7 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
             required_tags: vec!["docker".to_string(), "gpu".to_string()],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -1219,6 +1243,7 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 required_tags: vec!["kubernetes".to_string()],
                 runner: "local".to_string(),
                 timeout_secs: None,
+                when_condition: None,
             },
             NewJobStep {
                 job_id,
@@ -1232,6 +1257,7 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 required_tags: vec!["script".to_string()],
                 runner: "local".to_string(),
                 timeout_secs: None,
+                when_condition: None,
             },
         ],
     )
@@ -1289,6 +1315,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -1946,6 +1973,7 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
 
     JobStepRepo::create_steps_tx(&mut *tx, &steps).await?;
@@ -2213,6 +2241,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2226,6 +2255,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2239,6 +2269,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2306,6 +2337,7 @@ async fn test_get_running_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2319,6 +2351,7 @@ async fn test_get_running_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2332,6 +2365,7 @@ async fn test_get_running_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2345,6 +2379,7 @@ async fn test_get_running_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2358,6 +2393,7 @@ async fn test_get_running_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2427,6 +2463,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2440,6 +2477,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2525,6 +2563,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -2538,6 +2577,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2716,6 +2756,7 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         })
         .collect();
     JobStepRepo::create_steps(&pool, &steps).await?;

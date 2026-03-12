@@ -8,7 +8,8 @@ Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
 Phase 3 complete: Multi-workspace support, tarball distribution, Docker and Kubernetes runners, libraries.
 Phase 4 complete: Advanced features (pod actions, secrets, connections, DAG visualization, ACL/RBAC).
-Phase 5: Advanced flow control (conditionals, loops, approval gates).
+Phase 5a complete: Conditional flow steps (`when` expressions).
+Phase 5b-d: For-each loops, while loops, approval gates.
 Phase 6: Shared storage & worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -216,6 +217,19 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Server-side enforcement**: `recovery.rs` sweep Phase 2 (`get_timed_out_steps`) and Phase 3 (`get_timed_out_jobs`)
 - **Worker-side enforcement**: `poller.rs` wraps step execution in `tokio::time::timeout` with abort handle
 - `ClaimResponse` includes `timeout_secs` so workers know the step's timeout
+
+### Conditional Flow Steps (`when`)
+- `FlowStep.when: Option<String>` — Tera template expression evaluated at step promotion time
+- `evaluate_condition()` in `template.rs`: renders template, result is truthy if non-empty and not `"false"` or `"0"`
+- Condition-false steps marked `skipped`; cascade via `skip_unreachable_steps()` as normal
+- `continue_on_failure: true` now accepts `skipped` dependencies (convergence after conditional branches)
+- Root steps with `when` (no deps) start as `pending`; evaluated in post-creation promote loop in `job_creator.rs`
+- Condition evaluation errors → step fails with error message (not silently skipped)
+- `build_step_render_context()` includes skipped steps with `{ "output": null }` so downstream `when` expressions get falsy values
+- DB: `when_condition TEXT` column on `job_step` (migration `018_when_conditions.sql`)
+- Validation: Tera syntax checked at YAML parse time in `validation.rs`
+- `orchestrator::on_step_completed()` takes optional `&WorkspaceConfig` for building render context with secrets
+- UI: "condition" badge on skipped conditional steps, "when" badge on active ones, `when` expression shown in task detail
 
 ### Webhook Triggers
 - `TriggerDef` is a tagged enum (`#[serde(tag = "type")]`) with `Scheduler` and `Webhook` variants

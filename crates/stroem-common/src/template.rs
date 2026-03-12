@@ -85,6 +85,22 @@ pub fn render_template(template: &str, context: &serde_json::Value) -> Result<St
         .context("Failed to render template")
 }
 
+/// Evaluate a `when` condition template against a JSON context.
+///
+/// Returns `true` (step should run) if the rendered result is truthy:
+/// non-empty and not `"false"`, `"0"`, `"null"`, or `"none"` (all
+/// comparisons are case-insensitive). Returns `false` (step should be
+/// skipped) otherwise. Template render errors propagate as `Err`.
+pub fn evaluate_condition(template: &str, context: &serde_json::Value) -> Result<bool> {
+    let rendered = render_template(template, context)?;
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+    let lower = trimmed.to_lowercase();
+    Ok(lower != "false" && lower != "0" && lower != "null" && lower != "none")
+}
+
 /// Recursively renders all string values in a JSON value as Tera templates.
 /// Objects and arrays are traversed; non-string leaves pass through unchanged.
 pub fn render_json_strings(
@@ -1808,5 +1824,125 @@ mod tests {
         let context = json!({});
         let result = render_json_strings(&value, &context);
         assert!(result.is_err());
+    }
+
+    // ─── evaluate_condition tests ────────────────────────────────────────
+
+    #[test]
+    fn test_evaluate_condition_true_string() {
+        let ctx = json!({});
+        assert!(evaluate_condition("true", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_false_string() {
+        let ctx = json!({});
+        assert!(!evaluate_condition("false", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_zero_string() {
+        let ctx = json!({});
+        assert!(!evaluate_condition("0", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_empty_string() {
+        let ctx = json!({});
+        assert!(!evaluate_condition("", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_nonempty_string() {
+        let ctx = json!({});
+        assert!(evaluate_condition("yes", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_one_string() {
+        let ctx = json!({});
+        assert!(evaluate_condition("1", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_template_true() {
+        let ctx = json!({"input": {"deploy": true}});
+        assert!(evaluate_condition("{{ input.deploy }}", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_template_false() {
+        let ctx = json!({"input": {"deploy": false}});
+        assert!(!evaluate_condition("{{ input.deploy }}", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_tera_comparison() {
+        let ctx = json!({"input": {"env": "production"}});
+        assert!(
+            evaluate_condition("{% if input.env == \"production\" %}true{% endif %}", &ctx,)
+                .unwrap()
+        );
+        assert!(
+            !evaluate_condition("{% if input.env == \"staging\" %}true{% endif %}", &ctx,).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_evaluate_condition_step_output() {
+        let ctx = json!({"check": {"output": {"has_data": true}}});
+        assert!(evaluate_condition("{{ check.output.has_data }}", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_step_output_false() {
+        let ctx = json!({"check": {"output": {"has_data": false}}});
+        assert!(!evaluate_condition("{{ check.output.has_data }}", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_undefined_variable_is_error() {
+        let ctx = json!({});
+        assert!(evaluate_condition("{{ missing.var }}", &ctx).is_err());
+    }
+
+    #[test]
+    fn test_evaluate_condition_whitespace_trimmed() {
+        let ctx = json!({});
+        assert!(evaluate_condition("  true  ", &ctx).unwrap());
+        assert!(!evaluate_condition("  false  ", &ctx).unwrap());
+        assert!(!evaluate_condition("  0  ", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_not_operator() {
+        let ctx = json!({"check": {"output": {"has_data": false}}});
+        // Tera `not` filter
+        assert!(
+            evaluate_condition("{% if not check.output.has_data %}true{% endif %}", &ctx,).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_evaluate_condition_false_case_insensitive() {
+        let ctx = json!({});
+        assert!(!evaluate_condition("False", &ctx).unwrap());
+        assert!(!evaluate_condition("FALSE", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_null_is_falsy() {
+        let ctx = json!({});
+        assert!(!evaluate_condition("null", &ctx).unwrap());
+        assert!(!evaluate_condition("Null", &ctx).unwrap());
+        assert!(!evaluate_condition("NULL", &ctx).unwrap());
+    }
+
+    #[test]
+    fn test_evaluate_condition_none_is_falsy() {
+        let ctx = json!({});
+        assert!(!evaluate_condition("none", &ctx).unwrap());
+        assert!(!evaluate_condition("None", &ctx).unwrap());
+        assert!(!evaluate_condition("NONE", &ctx).unwrap());
     }
 }

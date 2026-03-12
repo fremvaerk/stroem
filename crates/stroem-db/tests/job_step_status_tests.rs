@@ -38,6 +38,7 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }
 }
 
@@ -492,6 +493,7 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -505,6 +507,7 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -547,6 +550,7 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -561,6 +565,7 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             // notify always runs, regardless of build outcome.
             continue_on_failure: true,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );

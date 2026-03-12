@@ -2,41 +2,87 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashSet;
 use stroem_common::models::job::JobStatus;
-use stroem_common::models::workflow::TaskDef;
+use stroem_common::models::workflow::{TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
 
-/// Handle step completion and orchestrate next steps
-#[tracing::instrument(skip(pool, task))]
+/// Handle step completion and orchestrate next steps.
+///
+/// `workspace_config` is optional — when provided, `when` conditions on steps
+/// are evaluated (secrets are available for template rendering). When `None`,
+/// steps with `when` conditions stay pending until a context is available.
+#[tracing::instrument(skip(pool, task, workspace_config))]
 pub async fn on_step_completed(
     pool: &PgPool,
     job_id: Uuid,
     step_name: &str,
     task: &TaskDef,
+    workspace_config: Option<&WorkspaceConfig>,
 ) -> Result<()> {
     tracing::info!("Orchestrating after step '{}' completed", step_name);
 
-    // 1. Promote pending steps to ready if their dependencies are met
-    let promoted = JobStepRepo::promote_ready_steps(pool, job_id, &task.flow)
-        .await
-        .context("Failed to promote ready steps")?;
+    // Fetch job_row once — it doesn't change during orchestration, but is only
+    // needed when workspace_config is provided (for render context construction).
+    let job_row = if workspace_config.is_some() {
+        Some(JobRepo::get(pool, job_id).await?.context("Job not found")?)
+    } else {
+        None
+    };
 
-    if !promoted.is_empty() {
-        tracing::info!("Promoted steps to ready: {:?}", promoted);
-    }
+    // 1. Promote pending steps to ready if their dependencies are met.
+    //    Loop because conditional skips may cascade and unblock further steps.
+    //    Rebuild the render context each iteration so newly-skipped steps are
+    //    visible to subsequent `when` condition evaluations.
+    //    Safety bound: at most (flow length + 1) iterations — each iteration
+    //    must promote or skip at least one step, so this bound can never be
+    //    reached in correct operation.
+    let max_iterations = task.flow.len() + 1;
+    for _iteration in 0..max_iterations {
+        // Rebuild render context from fresh step data each iteration
+        let render_ctx = if let Some(ws_config) = workspace_config {
+            let steps_snapshot = JobStepRepo::get_steps_for_job(pool, job_id).await?;
+            Some(crate::job_creator::build_step_render_context(
+                job_row.as_ref().unwrap(),
+                &steps_snapshot,
+                ws_config,
+            ))
+        } else {
+            None
+        };
 
-    // 2. Skip unreachable pending steps (cascade until stable)
-    loop {
+        let changed =
+            JobStepRepo::promote_ready_steps(pool, job_id, &task.flow, render_ctx.as_ref())
+                .await
+                .context("Failed to promote ready steps")?;
+
+        if !changed.is_empty() {
+            tracing::info!("Promoted/skipped steps: {:?}", changed);
+        }
+
+        // Skip unreachable pending steps (cascade until stable)
         let skipped = JobStepRepo::skip_unreachable_steps(pool, job_id, &task.flow)
             .await
             .context("Failed to skip unreachable steps")?;
-        if skipped.is_empty() {
+
+        if !skipped.is_empty() {
+            tracing::info!("Skipped unreachable steps: {:?}", skipped);
+        }
+
+        // If nothing changed in this iteration, we're stable
+        if changed.is_empty() && skipped.is_empty() {
             break;
         }
-        tracing::info!("Skipped unreachable steps: {:?}", skipped);
+
+        if _iteration + 1 == max_iterations {
+            tracing::warn!(
+                job_id = %job_id,
+                "Cascade loop reached iteration limit ({}) — breaking to avoid infinite loop",
+                max_iterations
+            );
+        }
     }
 
-    // 3. Check if all steps are terminal (completed/failed/skipped/cancelled)
+    // 2. Check if all steps are terminal (completed/failed/skipped/cancelled)
     let all_terminal = JobStepRepo::all_steps_terminal(pool, job_id)
         .await
         .context("Failed to check if all steps are terminal")?;
@@ -53,7 +99,7 @@ pub async fn on_step_completed(
                 return Ok(());
             }
         }
-        // 4. Check if any step failed
+        // 3. Check if any step failed
         let failed_names = JobStepRepo::get_failed_step_names(pool, job_id)
             .await
             .context("Failed to get failed step names")?;

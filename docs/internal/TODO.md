@@ -202,6 +202,49 @@ Last updated: 2026-03-04.
 - [x] Missing `#[tracing::instrument]` on `load_user_acl_context` — `acl.rs`
 - [x] Silent error swallowing in `get_user` groups fetch — `users.rs`
 
+## Phase 5: Advanced Flow Control
+
+- [x] 5a: Conditional flow steps (`when` expressions) — model, template evaluation, orchestrator, DB migration, validation, API, UI, docs, tests
+- [ ] 5b: For-each loops (fan-out/fan-in)
+- [ ] 5c: While loops (retry-until patterns)
+- [ ] 5d: Suspend/Resume + Approval gates
+
+## Review: Phase 5a Conditional Flow Steps (2026-03-12)
+
+### Critical
+- [x] Stale render context in cascade loop — context built once before loop; steps skipped/failed in iteration N invisible to condition evaluations in iteration N+1. Rebuild context inside loop after each pass. — `orchestrator.rs:25-62`, `job_creator.rs:155-169`
+- [x] Missing `AND status = 'pending'` guard on `mark_skipped` — concurrent orchestrator+recovery can overwrite completed/running steps — `job_step.rs:527`
+- [x] Missing `AND status = 'pending'` guard on `mark_failed` in `promote_ready_steps` — guarded inline SQL used instead of shared helper — `job_step.rs:498-512`
+
+### Important
+- [x] Failed steps excluded from render context — `continue_on_failure` + `when` referencing a failed step causes undefined variable error. Include failed steps with `{"output": null, "error": "..."}` — `job_creator.rs`
+- [x] Case-sensitive truthiness in `evaluate_condition` — `"False"`, `"FALSE"`, `"null"`, `"none"` now falsy (case-insensitive) — `template.rs:94-101`
+- [x] Condition evaluated from in-memory `flow_step.when` instead of DB `step.when_condition` — now uses `step.when_condition` from JobStepRow — `job_step.rs:449`
+- [x] No infinite loop guard on cascade — `task.flow.len() + 1` safety bound with tracing::warn — `orchestrator.rs:39`, `job_creator.rs:161`
+- [x] Batch `to_skip` and `to_fail` in `promote_ready_steps` — `to_skip` batched with `ANY($2)`; `to_fail` uses inline guarded SQL — `job_step.rs:481-512`
+- [x] `when_condition` set twice in job detail API — removed flow config override, DB value is source of truth — `jobs.rs`
+
+### Test Coverage
+- [ ] Integration: `promote_ready_steps` with actual `when` conditions (true→ready, false→skipped, error→failed)
+- [x] Integration: orchestrator `on_step_completed` with `workspace_config = Some(...)` and conditional steps (5 tests)
+- [x] Integration: cascade — `when`-skipped step → downstream also skipped
+- [ ] Integration: root step `when` condition at job creation (immediate skip + cascade)
+- [x] Integration: all steps conditional, all false → job completes as `completed`
+- [x] Unit: `build_step_render_context` with skipped step → `{"output": null}`
+- [ ] Unit: `when` condition referencing skipped step's null output
+- [ ] Integration: `when_condition` visible in job detail API response
+- [x] Integration: `continue_on_failure` + skipped dependency + `when` condition interaction
+- [ ] Integration: `type: task` step with `when` condition (should skip without creating child job)
+- [ ] Integration: `when` with `render_context = None` leaves step as `pending` (recovery sweeper path)
+- [ ] Unit: empty `when: ""` behavior documented
+
+### Minor
+- [ ] Validation doesn't catch typos in `when` variable references (step names) — only caught at runtime
+- [ ] Two-pass validation silently passes unknown Tera filters — add clarifying comment — `validation.rs:113-126`
+- [ ] 13-element tuple in `create_steps_tx` with `#[allow(clippy::type_complexity)]` — replace with named struct — `job_step.rs:88-103`
+- [ ] Double step-list fetch per cascade iteration (`promote_ready_steps` + `skip_unreachable_steps` both call `get_steps_for_job`) — future optimization target
+- [ ] `REPEATABLE READ` transaction for `promote_ready_steps` read-classify-write — future hardening — `job_step.rs:399`
+
 ## Roadmap Items (from review)
 
 - [ ] Leader election via pg advisory locks for scheduler/recovery

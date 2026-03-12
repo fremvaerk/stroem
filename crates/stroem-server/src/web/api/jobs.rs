@@ -283,6 +283,7 @@ pub async fn get_job(
                 "started_at": step.started_at,
                 "completed_at": step.completed_at,
                 "error_message": step.error_message,
+                "when_condition": step.when_condition,
                 "depends_on": serde_json::Value::Array(vec![]),
             })
         })
@@ -336,7 +337,9 @@ pub async fn get_job(
                     .unwrap_or(usize::MAX)
             });
 
-            // Enrich steps with depends_on from task flow
+            // Enrich steps with depends_on from task flow.
+            // when_condition is already set from the DB (captured at job creation)
+            // and must not be overwritten here.
             for step_json in &mut steps_json {
                 if let Some(step_name) = step_json["step_name"].as_str() {
                     if let Some(flow_step) = task.flow.get(step_name) {
@@ -913,6 +916,7 @@ mod tests {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -926,6 +930,7 @@ mod tests {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -939,6 +944,7 @@ mod tests {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );

@@ -322,6 +322,7 @@ mod tests {
             input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         }
     }
@@ -344,6 +345,7 @@ mod tests {
             required_tags: json!([]),
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }
     }
 

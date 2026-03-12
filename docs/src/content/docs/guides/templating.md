@@ -7,7 +7,7 @@ Strøm uses [Tera](https://keats.github.io/tera/) for templating. Templates are 
 
 ## Available context
 
-Inside a step's `input` templates, you have access to:
+Inside a step's `input` templates and `when` conditions, you have access to:
 
 | Variable | Description |
 |----------|-------------|
@@ -109,3 +109,26 @@ The `| vals` filter resolves secret references at template render time. See [Sec
 env:
   DB_PASSWORD: "{{ 'ref+awsssm:///prod/db/password' | vals }}"
 ```
+
+## Conditional step execution
+
+Steps support a `when` field for conditional execution. The condition is a Tera template that evaluates to true or false when the step's dependencies are met:
+
+```yaml
+tasks:
+  conditional:
+    input:
+      run_checks: { type: boolean, default: false }
+    flow:
+      check:
+        action: validate
+        when: "{{ input.run_checks }}"
+
+      process:
+        action: process-data
+        depends_on: [check]
+        continue_on_failure: true
+        # Runs whether check ran or was skipped
+```
+
+See [Conditional Flow Steps](/guides/conditionals/) for the full feature documentation.

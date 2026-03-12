@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -28,6 +28,7 @@ pub struct JobStepRow {
     pub required_tags: JsonValue,
     pub runner: String,
     pub timeout_secs: Option<i32>,
+    pub when_condition: Option<String>,
 }
 
 /// New job step for creation
@@ -44,6 +45,7 @@ pub struct NewJobStep {
     pub required_tags: Vec<String>,
     pub runner: String,
     pub timeout_secs: Option<i32>,
+    pub when_condition: Option<String>,
 }
 
 /// A stale running step with its job info for recovery.
@@ -78,7 +80,7 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at, when_condition)
             VALUES
             "#,
         );
@@ -97,14 +99,15 @@ impl JobStepRepo {
             String,
             Option<i32>,
             Option<DateTime<Utc>>,
+            Option<String>,
         )> = Vec::new();
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 12;
+            let base = i * 13;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -116,7 +119,8 @@ impl JobStepRepo {
                 base + 9,
                 base + 10,
                 base + 11,
-                base + 12
+                base + 12,
+                base + 13
             ));
             let required_tags_json = serde_json::to_value(&step.required_tags).unwrap_or_default();
             let ready_at = if step.status == "ready" {
@@ -137,6 +141,7 @@ impl JobStepRepo {
                 step.runner.clone(),
                 step.timeout_secs,
                 ready_at,
+                step.when_condition.clone(),
             ));
         }
 
@@ -154,7 +159,8 @@ impl JobStepRepo {
                 .bind(binding.8)
                 .bind(binding.9)
                 .bind(binding.10)
-                .bind(binding.11);
+                .bind(binding.11)
+                .bind(binding.12);
         }
 
         q.execute(executor)
@@ -382,13 +388,19 @@ impl JobStepRepo {
         Ok(())
     }
 
-    /// Update steps from pending to ready based on completed dependencies.
-    /// This is called by the orchestrator after a step completes.
+    /// Update steps from pending to ready based on completed dependencies and
+    /// `when` conditions. Steps with `continue_on_failure: true` also accept
+    /// `skipped` dependencies (convergence after conditional branches).
+    ///
+    /// `render_context` is a JSON object used to evaluate `when` Tera templates.
+    /// When `None`, steps with `when` conditions are not promoted (they stay pending).
+    ///
     /// Returns the names of newly promoted steps.
     pub async fn promote_ready_steps(
         pool: &PgPool,
         job_id: Uuid,
         flow: &HashMap<String, FlowStep>,
+        render_context: Option<&serde_json::Value>,
     ) -> Result<Vec<String>> {
         // Get all steps for the job
         let steps = Self::get_steps_for_job(pool, job_id).await?;
@@ -399,32 +411,57 @@ impl JobStepRepo {
             .map(|s| (s.step_name.clone(), s.status.clone()))
             .collect();
 
-        // Collect all step names that are ready to be promoted
-        let to_promote: Vec<String> = steps
-            .iter()
-            .filter(|s| s.status == StepStatus::Pending.as_ref())
-            .filter_map(|step| {
-                let flow_step = flow.get(&step.step_name)?;
-                let deps_met = flow_step.depends_on.iter().all(|dep| {
-                    status_map
-                        .get(dep)
-                        .map(|status| {
-                            if flow_step.continue_on_failure {
-                                status == StepStatus::Completed.as_ref()
-                                    || status == StepStatus::Failed.as_ref()
-                            } else {
-                                status == StepStatus::Completed.as_ref()
-                            }
-                        })
-                        .unwrap_or(false)
-                });
-                if deps_met {
-                    Some(step.step_name.clone())
-                } else {
-                    None
+        // Partition into steps to promote and steps to skip (condition false)
+        let mut to_promote: Vec<String> = Vec::new();
+        let mut to_skip: Vec<String> = Vec::new();
+        let mut to_fail: Vec<(String, String)> = Vec::new();
+
+        for step in &steps {
+            if step.status != StepStatus::Pending.as_ref() {
+                continue;
+            }
+            let flow_step = match flow.get(&step.step_name) {
+                Some(fs) => fs,
+                None => continue,
+            };
+            let deps_met = flow_step.depends_on.iter().all(|dep| {
+                status_map
+                    .get(dep)
+                    .map(|status| {
+                        if flow_step.continue_on_failure {
+                            status == StepStatus::Completed.as_ref()
+                                || status == StepStatus::Failed.as_ref()
+                                || status == StepStatus::Skipped.as_ref()
+                        } else {
+                            status == StepStatus::Completed.as_ref()
+                        }
+                    })
+                    .unwrap_or(false)
+            });
+            if !deps_met {
+                continue;
+            }
+
+            // Dependencies met — evaluate `when` condition if present.
+            // Use the stored `when_condition` from the DB row so we evaluate
+            // the expression captured at job creation time, not the potentially
+            // stale current workflow config.
+            if let Some(ref when_expr) = step.when_condition {
+                if let Some(ctx) = render_context {
+                    match stroem_common::template::evaluate_condition(when_expr, ctx) {
+                        Ok(true) => to_promote.push(step.step_name.clone()),
+                        Ok(false) => to_skip.push(step.step_name.clone()),
+                        Err(e) => to_fail.push((
+                            step.step_name.clone(),
+                            format!("when condition error: {:#}", e),
+                        )),
+                    }
                 }
-            })
-            .collect();
+                // If render_context is None, leave step as pending (can't evaluate yet)
+            } else {
+                to_promote.push(step.step_name.clone());
+            }
+        }
 
         if !to_promote.is_empty() {
             sqlx::query(
@@ -441,16 +478,58 @@ impl JobStepRepo {
             .context("Failed to promote steps to ready")?;
         }
 
-        Ok(to_promote)
+        // Mark condition-false steps as skipped (batch, guarded against concurrent transitions)
+        if !to_skip.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE job_step
+                SET status = 'skipped', completed_at = NOW()
+                WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'
+                "#,
+            )
+            .bind(job_id)
+            .bind(&to_skip)
+            .execute(pool)
+            .await
+            .context("Failed to skip condition-false steps")?;
+        }
+
+        // Mark condition-error steps as failed (guarded against concurrent transitions)
+        for (name, err) in &to_fail {
+            sqlx::query(
+                r#"
+                UPDATE job_step
+                SET status = 'failed', error_message = $1, completed_at = NOW()
+                WHERE job_id = $2 AND step_name = $3 AND status = 'pending'
+                "#,
+            )
+            .bind(err)
+            .bind(job_id)
+            .bind(name.as_str())
+            .execute(pool)
+            .await
+            .context("Failed to mark condition-error step as failed")?;
+        }
+
+        // Return all steps that changed state (promoted + skipped + failed)
+        // so the orchestrator knows to loop for cascading effects
+        let mut changed = to_promote;
+        changed.extend(to_skip);
+        changed.extend(to_fail.into_iter().map(|(name, _)| name));
+        Ok(changed)
     }
 
-    /// Mark a step as skipped (unreachable due to failed dependency)
+    /// Mark a step as skipped (unreachable due to failed dependency).
+    ///
+    /// The `AND status = 'pending'` guard prevents overwriting a step that has
+    /// already transitioned to `running`, `completed`, or `failed` due to a
+    /// concurrent process.
     pub async fn mark_skipped(pool: &PgPool, job_id: Uuid, step_name: &str) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE job_step
             SET status = 'skipped', completed_at = NOW()
-            WHERE job_id = $1 AND step_name = $2
+            WHERE job_id = $1 AND step_name = $2 AND status = 'pending'
             "#,
         )
         .bind(job_id)

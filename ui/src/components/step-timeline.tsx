@@ -71,6 +71,16 @@ export function StepTimeline({
                   <span className="text-xs text-muted-foreground">
                     {formatActionName(step.action_name)}
                   </span>
+                  {step.when_condition && step.status === "skipped" && (
+                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                      condition
+                    </span>
+                  )}
+                  {step.when_condition && step.status !== "skipped" && (
+                    <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                      when
+                    </span>
+                  )}
                   {step.worker_id && workerNames && (
                     <Link
                       to={`/workers/${step.worker_id}`}

@@ -394,6 +394,9 @@ export function TaskDetailPage() {
                     {step.depends_on && step.depends_on.length > 0 && (
                       <> &middot; depends on: {step.depends_on.join(", ")}</>
                     )}
+                    {step.when && (
+                      <> &middot; when: <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{step.when}</code></>
+                    )}
                   </p>
                 </div>
               </div>

@@ -37,6 +37,7 @@ export interface FlowStep {
   input?: Record<string, unknown>;
   depends_on?: string[];
   continue_on_failure?: boolean;
+  when?: string;
 }
 
 export interface TriggerInfo {
@@ -89,6 +90,7 @@ export interface JobStep {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  when_condition: string | null;
   depends_on: string[];
 }
 

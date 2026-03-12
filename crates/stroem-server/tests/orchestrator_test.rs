@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use stroem_common::models::workflow::{FlowStep, TaskDef};
+use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
 use stroem_server::orchestrator::on_step_completed;
 use testcontainers::runners::AsyncRunner;
@@ -68,6 +68,7 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         input: HashMap::new(),
         continue_on_failure: false,
         timeout: None,
+        when: None,
         inline_action: None,
     }
 }
@@ -105,6 +107,22 @@ fn flow_step_cof(depends_on: Vec<&str>) -> FlowStep {
     FlowStep {
         continue_on_failure: true,
         ..flow_step(depends_on)
+    }
+}
+
+/// Build a `FlowStep` with a `when` condition expression.
+fn flow_step_when(depends_on: Vec<&str>, when_expr: &str) -> FlowStep {
+    FlowStep {
+        when: Some(when_expr.to_string()),
+        ..flow_step(depends_on)
+    }
+}
+
+/// Build a `NewJobStep` with a `when_condition` set.
+fn step_when(job_id: Uuid, name: &str, status: &str, when_expr: &str) -> NewJobStep {
+    NewJobStep {
+        when_condition: Some(when_expr.to_string()),
+        ..step(job_id, name, status)
     }
 }
 
@@ -145,7 +163,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 
     // Complete A → B should become ready
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task).await?;
+    on_step_completed(&pool, job_id, "a", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -160,7 +178,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 
     // Complete B → C should become ready
     JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
-    on_step_completed(&pool, job_id, "b", &task).await?;
+    on_step_completed(&pool, job_id, "b", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -170,7 +188,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 
     // Complete C → job should complete
     JobStepRepo::mark_completed(&pool, job_id, "c", None).await?;
-    on_step_completed(&pool, job_id, "c", &task).await?;
+    on_step_completed(&pool, job_id, "c", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -204,7 +222,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 
     // Complete A — C must still be pending because B is not done
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task).await?;
+    on_step_completed(&pool, job_id, "a", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -214,7 +232,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 
     // Complete B — now C must be promoted
     JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
-    on_step_completed(&pool, job_id, "b", &task).await?;
+    on_step_completed(&pool, job_id, "b", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -224,7 +242,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 
     // Complete C → job complete
     JobStepRepo::mark_completed(&pool, job_id, "c", None).await?;
-    on_step_completed(&pool, job_id, "c", &task).await?;
+    on_step_completed(&pool, job_id, "c", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -255,7 +273,7 @@ async fn test_failed_step_skips_dependents() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "exit code 1").await?;
-    on_step_completed(&pool, job_id, "a", &task).await?;
+    on_step_completed(&pool, job_id, "a", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped", "B must be skipped when A fails");
@@ -292,7 +310,7 @@ async fn test_continue_on_failure_promotes_dependent() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "non-fatal error").await?;
-    on_step_completed(&pool, job_id, "a", &task).await?;
+    on_step_completed(&pool, job_id, "a", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -324,7 +342,7 @@ async fn test_all_steps_completed_job_completes() -> Result<()> {
 
     let output = json!({"result": 42});
     JobStepRepo::mark_completed(&pool, job_id, "only", Some(output.clone())).await?;
-    on_step_completed(&pool, job_id, "only", &task).await?;
+    on_step_completed(&pool, job_id, "only", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -358,7 +376,7 @@ async fn test_mix_completed_and_failed_job_fails() -> Result<()> {
 
     // Complete the ok step
     JobStepRepo::mark_completed(&pool, job_id, "ok", None).await?;
-    on_step_completed(&pool, job_id, "ok", &task).await?;
+    on_step_completed(&pool, job_id, "ok", &task, None).await?;
 
     // Job is still running (bad step is outstanding)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -367,7 +385,7 @@ async fn test_mix_completed_and_failed_job_fails() -> Result<()> {
     // Fail the bad step
     JobStepRepo::mark_running(&pool, job_id, "bad", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "bad", "unexpected error").await?;
-    on_step_completed(&pool, job_id, "bad", &task).await?;
+    on_step_completed(&pool, job_id, "bad", &task, None).await?;
 
     // Now all steps are terminal and bad failed without continue_on_failure
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -405,7 +423,7 @@ async fn test_cascading_skip_multi_level() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "root failure").await?;
-    on_step_completed(&pool, job_id, "a", &task).await?;
+    on_step_completed(&pool, job_id, "a", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped");
@@ -435,7 +453,7 @@ async fn test_all_tolerable_failures_job_completes() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "tolerable error").await?;
-    on_step_completed(&pool, job_id, "a", &task).await?;
+    on_step_completed(&pool, job_id, "a", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(
@@ -475,7 +493,7 @@ async fn test_diamond_dag_join_waits_for_both_branches() -> Result<()> {
 
     // Complete root — left and right promoted, join still pending
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task).await?;
+    on_step_completed(&pool, job_id, "root", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["left"], "ready");
@@ -484,24 +502,260 @@ async fn test_diamond_dag_join_waits_for_both_branches() -> Result<()> {
 
     // Complete left — join still needs right
     JobStepRepo::mark_completed(&pool, job_id, "left", None).await?;
-    on_step_completed(&pool, job_id, "left", &task).await?;
+    on_step_completed(&pool, job_id, "left", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["join"], "pending");
 
     // Complete right — join is now ready
     JobStepRepo::mark_completed(&pool, job_id, "right", None).await?;
-    on_step_completed(&pool, job_id, "right", &task).await?;
+    on_step_completed(&pool, job_id, "right", &task, None).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["join"], "ready");
 
     // Complete join → job complete
     JobStepRepo::mark_completed(&pool, job_id, "join", None).await?;
-    on_step_completed(&pool, job_id, "join", &task).await?;
+    on_step_completed(&pool, job_id, "join", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
+
+    Ok(())
+}
+
+// ─── Test 10: Conditional step promoted when condition is true ────────────────
+
+/// When step A completes with `{"proceed": true}`, step B (which has
+/// `when: "{{ a.output.proceed }}"`) must be promoted to ready.
+#[tokio::test]
+async fn test_conditional_step_promoted_when_condition_true() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.proceed }}"),
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ a.output.proceed }}"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"proceed": true}))).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["b"], "ready",
+        "B must be promoted when condition evaluates to true"
+    );
+
+    Ok(())
+}
+
+// ─── Test 11: Conditional step skipped when condition is false ────────────────
+
+/// When step A completes with `{"proceed": false}`, step B (which has
+/// `when: "{{ a.output.proceed }}"`) must be skipped and the job must complete.
+#[tokio::test]
+async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.proceed }}"),
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ a.output.proceed }}"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"proceed": false}))).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["b"], "skipped",
+        "B must be skipped when condition evaluates to false"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "job must complete when only remaining step is skipped"
+    );
+
+    Ok(())
+}
+
+// ─── Test 12: Cascade — conditional skip propagates to downstream ─────────────
+
+/// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.go }}"`),
+/// C (pending, depends on B).  When A completes with `{"go": false}`, B must
+/// be skipped by condition evaluation and C must be skipped as unreachable.
+#[tokio::test]
+async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.go }}"),
+    );
+    flow.insert("c".to_string(), flow_step(vec!["b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ a.output.go }}"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"go": false}))).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "skipped", "B must be skipped by condition");
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped because its dependency B was skipped"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "job must complete when all remaining steps are skipped"
+    );
+
+    Ok(())
+}
+
+// ─── Test 13: All conditional steps false → job completes ────────────────────
+
+/// Steps: A (ready, no when), B (pending, depends on A, `when: "false"`),
+/// C (pending, depends on A, `when: "false"`).  When A completes, both B and C
+/// must be skipped and the job must complete.
+#[tokio::test]
+async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step_when(vec!["a"], "false"));
+    flow.insert("c".to_string(), flow_step_when(vec!["a"], "false"));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "false"),
+            step_when(job_id, "c", "pending", "false"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "skipped", "B must be skipped (when: false)");
+    assert_eq!(statuses["c"], "skipped", "C must be skipped (when: false)");
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "job must complete when all remaining steps are skipped"
+    );
+
+    Ok(())
+}
+
+// ─── Test 14: continue_on_failure with skipped dep + truthy when ──────────────
+
+/// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`),
+/// C (pending, depends on B, `continue_on_failure: true`, `when: "true"`).
+/// When A completes with `{"deploy": false}`, B is skipped by condition.
+/// C has continue_on_failure, so a skipped B still satisfies its deps; and
+/// `when: "true"` is truthy, so C must be promoted to ready.
+#[tokio::test]
+async fn test_continue_on_failure_accepts_skipped_dep_with_truthy_when() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.deploy }}"),
+    );
+    flow.insert(
+        "c".to_string(),
+        FlowStep {
+            continue_on_failure: true,
+            when: Some("true".to_string()),
+            ..flow_step(vec!["b"])
+        },
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ a.output.deploy }}"),
+            step_when(job_id, "c", "pending", "true"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"deploy": false}))).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["b"], "skipped",
+        "B must be skipped when condition is false"
+    );
+    assert_eq!(
+        statuses["c"], "ready",
+        "C must be promoted: continue_on_failure accepts skipped dep and when:true is truthy"
+    );
 
     Ok(())
 }

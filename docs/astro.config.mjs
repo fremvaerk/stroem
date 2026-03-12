@@ -35,6 +35,7 @@ export default defineConfig({
             { label: "Action Types", slug: "guides/action-types" },
             { label: "Runners", slug: "guides/runners" },
             { label: "Templating", slug: "guides/templating" },
+            { label: "Conditional Flow Steps", slug: "guides/conditionals" },
             { label: "Input & Output", slug: "guides/input-and-output" },
             { label: "Triggers", slug: "guides/triggers" },
             { label: "Hooks", slug: "guides/hooks" },

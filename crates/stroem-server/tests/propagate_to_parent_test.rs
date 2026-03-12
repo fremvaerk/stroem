@@ -132,6 +132,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -147,6 +148,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -210,6 +212,7 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
         required_tags: vec![],
         runner: "none".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }
 }
 
@@ -227,6 +230,7 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }
 }
 
@@ -517,6 +521,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -547,6 +552,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -577,6 +583,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -668,6 +675,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -687,6 +695,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -803,6 +812,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -816,6 +826,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -831,6 +842,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -910,6 +922,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
                 required_tags: vec![],
                 runner: "none".to_string(),
                 timeout_secs: None,
+                when_condition: None,
             },
         ],
     )

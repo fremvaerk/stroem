@@ -195,6 +195,10 @@ pub struct FlowStep {
     /// Step-level timeout: kill this step after the specified duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<HumanDuration>,
+    /// Conditional execution: Tera template expression evaluated at promotion time.
+    /// If the rendered result is falsy ("", "false", "0"), the step is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
     /// Temporary storage for inline action definitions during deserialization.
     /// Automatically moved to `config.actions` during `WorkflowConfig` deserialization.
     #[serde(skip)]
@@ -240,6 +244,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 continue_on_failure: bool,
                 #[serde(default)]
                 timeout: Option<HumanDuration>,
+                #[serde(default)]
+                when: Option<String>,
             }
             let ref_step: RefStep =
                 serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
@@ -252,6 +258,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 input: ref_step.input,
                 continue_on_failure: ref_step.continue_on_failure,
                 timeout: ref_step.timeout,
+                when: ref_step.when,
                 inline_action: None,
             })
         } else if has_type {
@@ -263,6 +270,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 "input",
                 "continue_on_failure",
                 "timeout",
+                "when",
             ];
 
             let mut step_map = serde_yaml::Mapping::new();
@@ -315,6 +323,10 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .get(serde_yaml::Value::String("timeout".into()))
                 .and_then(|v| serde_yaml::from_value(v.clone()).ok());
 
+            let when: Option<String> = step_map
+                .get(serde_yaml::Value::String("when".into()))
+                .and_then(|v| serde_yaml::from_value(v.clone()).ok());
+
             Ok(FlowStep {
                 action: String::new(), // placeholder — set by hoist_inline_actions()
                 name,
@@ -323,6 +335,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 input,
                 continue_on_failure,
                 timeout,
+                when,
                 inline_action: Some(action_def),
             })
         } else {
@@ -2674,5 +2687,76 @@ tasks:
         assert_eq!(task.input.get("start_date").unwrap().order, Some(1));
         assert_eq!(task.input.get("end_date").unwrap().order, Some(2));
         assert!(task.input.get("name").unwrap().order.is_none());
+    }
+
+    #[test]
+    fn test_parse_when_on_reference_step() {
+        let yaml = r#"
+            actions:
+              check:
+                type: script
+                script: "echo ok"
+              deploy:
+                type: script
+                script: "echo deploy"
+            tasks:
+              pipeline:
+                flow:
+                  check:
+                    action: check
+                  deploy:
+                    action: deploy
+                    depends_on: [check]
+                    when: "{{ check.output.success }}"
+        "#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("pipeline").unwrap();
+        assert!(task.flow.get("check").unwrap().when.is_none());
+        assert_eq!(
+            task.flow.get("deploy").unwrap().when.as_deref(),
+            Some("{{ check.output.success }}")
+        );
+    }
+
+    #[test]
+    fn test_parse_when_on_inline_step() {
+        let yaml = r#"
+            actions: {}
+            tasks:
+              pipeline:
+                flow:
+                  check:
+                    type: script
+                    script: "echo ok"
+                  deploy:
+                    type: script
+                    script: "echo deploy"
+                    depends_on: [check]
+                    when: "{{ check.output.success }}"
+        "#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("pipeline").unwrap();
+        assert_eq!(
+            task.flow.get("deploy").unwrap().when.as_deref(),
+            Some("{{ check.output.success }}")
+        );
+    }
+
+    #[test]
+    fn test_parse_when_absent_is_none() {
+        let yaml = r#"
+            actions:
+              check:
+                type: script
+                script: "echo ok"
+            tasks:
+              pipeline:
+                flow:
+                  check:
+                    action: check
+        "#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("pipeline").unwrap();
+        assert!(task.flow.get("check").unwrap().when.is_none());
     }
 }

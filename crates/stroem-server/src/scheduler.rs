@@ -400,6 +400,7 @@ mod tests {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );

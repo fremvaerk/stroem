@@ -152,6 +152,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: hello_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -200,6 +201,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: greet_step_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -215,6 +217,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: shout_step_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -261,6 +264,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -274,6 +278,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -287,6 +292,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -318,6 +324,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -331,6 +338,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -344,6 +352,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -357,6 +366,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -388,6 +398,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -421,6 +432,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: mi_greet_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -438,6 +450,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: mi_process_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -484,6 +497,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -497,6 +511,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -510,6 +525,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -527,6 +543,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -615,6 +632,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: bt_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -767,6 +785,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: dp_transform_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -782,6 +801,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: dp_summarize_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -828,6 +848,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -1121,6 +1142,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1702,6 +1724,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -1742,11 +1765,12 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -1771,6 +1795,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -1784,6 +1809,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -1797,6 +1823,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -1838,6 +1865,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -1851,6 +1879,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -1864,13 +1893,14 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Complete step1
     JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     let job_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step2 = job_steps.iter().find(|s| s.step_name == "step2").unwrap();
@@ -1878,7 +1908,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     // Complete step2
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     let job_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step3 = job_steps.iter().find(|s| s.step_name == "step3").unwrap();
@@ -1886,7 +1916,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     // Complete step3
     JobStepRepo::mark_completed(&pool, job_id, "step3", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step3", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step3", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -2114,6 +2144,7 @@ async fn test_task_detail_connections() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -2160,6 +2191,7 @@ async fn test_task_detail_connections() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -3440,6 +3472,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -3524,6 +3557,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -3599,6 +3633,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -3681,6 +3716,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "pod".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -3757,6 +3793,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "none".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -3971,6 +4008,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -4138,6 +4176,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -4197,6 +4236,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -4954,6 +4994,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -4967,6 +5008,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -5008,6 +5050,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5021,17 +5064,18 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Complete step1 with output
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // Complete step2 (terminal) with output
     JobStepRepo::mark_completed(&pool, job_id, "step2", Some(json!({"y": 2}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -5059,6 +5103,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -5072,6 +5117,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -5113,6 +5159,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5126,17 +5173,18 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Complete step1 with output
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // Complete step2 (terminal) with NO output
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -5165,6 +5213,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -5178,6 +5227,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -5191,6 +5241,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -5232,6 +5283,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5245,6 +5297,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5258,21 +5311,22 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     // Complete step1
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // Complete step2 (terminal) with output
     JobStepRepo::mark_completed(&pool, job_id, "step2", Some(json!({"a": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     // Complete step3 (terminal) with output
     JobStepRepo::mark_completed(&pool, job_id, "step3", Some(json!({"b": 2}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step3", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step3", &task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -5388,6 +5442,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -5465,6 +5520,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5478,6 +5534,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5519,6 +5576,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5532,6 +5590,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5539,7 +5598,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
     // Complete first step successfully
     JobStepRepo::mark_running(&pool, job_id, "step-ok", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step-ok", Some(json!({"result": "ok"}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step-ok", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step-ok", &task, None).await?;
 
     // Verify step-fail was promoted to ready
     let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -5552,7 +5611,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
     // Fail the second step
     JobStepRepo::mark_running(&pool, job_id, "step-fail", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step-fail", "Exit code: 1\nStderr: boom").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step-fail", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step-fail", &task, None).await?;
 
     // Check final state
     let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -5593,6 +5652,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5606,6 +5666,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5647,6 +5708,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5660,6 +5722,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5667,7 +5730,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
     // Fail step1
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // step2 should be skipped
     let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -5700,6 +5763,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5713,6 +5777,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: true,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5754,6 +5819,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5767,6 +5833,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5774,7 +5841,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     // Fail step1
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // step2 should be promoted to ready (continue_on_failure = true)
     let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -5784,7 +5851,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     // Complete step2 successfully
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     // Job should be failed (step1 failed)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -5814,6 +5881,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: true,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5827,6 +5895,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5868,6 +5937,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5881,6 +5951,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5888,7 +5959,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
     // Fail step1 (tolerable)
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // Job should still be running (step2 not done yet)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -5897,7 +5968,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
     // Complete step2 successfully
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     // Job should be completed (step1's failure is tolerable)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -5927,6 +5998,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: true,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5940,6 +6012,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -5981,6 +6054,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -5994,6 +6068,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6001,12 +6076,12 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
     // Fail step1 (tolerable)
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // Fail step2 (intolerable)
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step2", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
 
     // Job should be failed (step2's failure is intolerable)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -6034,6 +6109,7 @@ async fn test_cascading_skip() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -6047,6 +6123,7 @@ async fn test_cascading_skip() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -6060,6 +6137,7 @@ async fn test_cascading_skip() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -6101,6 +6179,7 @@ async fn test_cascading_skip() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -6114,6 +6193,7 @@ async fn test_cascading_skip() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
         NewJobStep {
             job_id,
@@ -6127,6 +6207,7 @@ async fn test_cascading_skip() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6134,7 +6215,7 @@ async fn test_cascading_skip() -> Result<()> {
     // Fail step1
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
 
     // Both step2 and step3 should be skipped (cascading)
     let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -6194,6 +6275,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -6513,6 +6595,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
+        when_condition: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -7319,6 +7402,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -7349,6 +7433,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -7640,6 +7725,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8211,6 +8297,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8264,7 +8351,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"result": "ok"}))).await?;
 
     // Run orchestrator to mark job as completed
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     // Verify job is completed
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8321,6 +8408,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8368,7 +8456,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step1", "exit code 1").await?;
 
     // Orchestrator marks job as failed
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
 
@@ -8414,6 +8502,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8488,6 +8577,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8532,7 +8622,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     let state = hook_test_state(pool.clone(), &workspace);
@@ -8578,6 +8668,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: true,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8591,6 +8682,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8633,12 +8725,12 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "build error").await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     // Fail step2
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step2", "test failure").await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task, None).await?;
 
     // Job should be failed (step2.continue_on_failure=false)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8706,6 +8798,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: true,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8719,6 +8812,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: true,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8763,12 +8857,12 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "deploy crashed").await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     // step2 succeeds
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task, None).await?;
 
     // Job should be "completed" (all failures tolerable)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8830,6 +8924,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8875,7 +8970,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", python_traceback).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -8943,6 +9038,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -8988,7 +9084,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", python_error).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -9050,6 +9146,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 input: HashMap::new(),
                 continue_on_failure: false,
                 timeout: None,
+                when: None,
                 inline_action: None,
             },
         );
@@ -9068,8 +9165,14 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     };
 
     // Orchestrator should mark the hook job as completed
-    stroem_server::orchestrator::on_step_completed(&pool, hook_job_id, "hook", &hook_task_def)
-        .await?;
+    stroem_server::orchestrator::on_step_completed(
+        &pool,
+        hook_job_id,
+        "hook",
+        &hook_task_def,
+        None,
+    )
+    .await?;
 
     let hook_job_after = JobRepo::get(&pool, hook_job_id).await?.unwrap();
     assert_eq!(
@@ -9166,6 +9269,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9197,6 +9301,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9210,6 +9315,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9256,6 +9362,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9368,7 +9475,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
 
     // Run orchestrator to promote cleanup step
     let task = workspace.tasks.get("deploy").unwrap();
-    orchestrator::on_step_completed(&pool, parent_job_id, "build", task).await?;
+    orchestrator::on_step_completed(&pool, parent_job_id, "build", task, None).await?;
 
     // Now handle_task_steps should dispatch the cleanup step
     stroem_server::job_creator::handle_task_steps(&pool, &workspace, "default", parent_job_id)
@@ -9407,7 +9514,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
 
     // Run orchestrator for the child job
     let child_task = workspace.tasks.get("cleanup").unwrap();
-    orchestrator::on_step_completed(&pool, child_job.job_id, "clean", child_task).await?;
+    orchestrator::on_step_completed(&pool, child_job.job_id, "clean", child_task, None).await?;
 
     // Child job should now be completed
     let child_after = JobRepo::get(&pool, child_job.job_id).await?.unwrap();
@@ -9418,7 +9525,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
         .await?;
 
     // Run orchestrator for the parent job
-    orchestrator::on_step_completed(&pool, parent_job_id, "cleanup", task).await?;
+    orchestrator::on_step_completed(&pool, parent_job_id, "cleanup", task, None).await?;
 
     // Parent job should now be completed
     let parent_after = JobRepo::get(&pool, parent_job_id).await?.unwrap();
@@ -9463,6 +9570,7 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         required_tags: vec![],
         runner: "none".to_string(),
         timeout_secs: None,
+        when_condition: None,
     };
     JobStepRepo::create_steps(&pool, &[step]).await?;
 
@@ -9528,6 +9636,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             input: step_input,
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9609,6 +9718,7 @@ async fn test_task_action_in_hook() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9652,7 +9762,7 @@ async fn test_task_action_in_hook() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step1", "something broke").await?;
 
     // Orchestrate → job fails
-    orchestrator::on_step_completed(&pool, job_id, "step1", task).await?;
+    orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -9735,6 +9845,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9794,6 +9905,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -9841,7 +9953,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
 
     // Run orchestrator for child → child job fails
     let child_task = workspace.tasks.get("failing-task").unwrap();
-    orchestrator::on_step_completed(&pool, child_job.job_id, "crash", child_task).await?;
+    orchestrator::on_step_completed(&pool, child_job.job_id, "crash", child_task, None).await?;
 
     let child_after = JobRepo::get(&pool, child_job.job_id).await?.unwrap();
     assert_eq!(child_after.status, "failed");
@@ -9852,7 +9964,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
 
     // Run orchestrator for parent → parent job fails
     let parent_task = workspace.tasks.get("parent-of-fail").unwrap();
-    orchestrator::on_step_completed(&pool, parent_job_id, "run", parent_task).await?;
+    orchestrator::on_step_completed(&pool, parent_job_id, "run", parent_task, None).await?;
 
     let parent_after = JobRepo::get(&pool, parent_job_id).await?.unwrap();
     assert_eq!(parent_after.status, "failed");
@@ -10188,6 +10300,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         parent_job_id,
         "build",
         workspace.tasks.get("deploy").unwrap(),
+        None,
     )
     .await?;
 
@@ -11970,6 +12083,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             input: HashMap::from([("sql".to_string(), json!("{{ input.sql }}"))]),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -12108,6 +12222,7 @@ async fn setup_sync_webhook() -> Result<(
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -12624,6 +12739,7 @@ async fn setup_scheduler_workspace(
             input: HashMap::new(),
             continue_on_failure: false,
             timeout: None,
+            when: None,
             inline_action: None,
         },
     );
@@ -13014,6 +13130,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;
@@ -13043,6 +13160,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }],
     )
     .await?;

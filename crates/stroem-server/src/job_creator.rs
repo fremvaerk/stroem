@@ -89,9 +89,11 @@ fn create_job_for_task_inner<'a>(
                 }
             };
 
-            let status = if flow_step.depends_on.is_empty() {
+            let status = if flow_step.depends_on.is_empty() && flow_step.when.is_none() {
                 StepStatus::Ready
             } else {
+                // Steps with `when` conditions start as pending even if they
+                // have no deps — the post-creation promote loop evaluates them.
                 StepStatus::Pending
             };
 
@@ -113,6 +115,7 @@ fn create_job_for_task_inner<'a>(
                 timeout_secs: flow_step
                     .timeout
                     .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
+                when_condition: flow_step.when.clone(),
             });
         }
 
@@ -143,6 +146,42 @@ fn create_job_for_task_inner<'a>(
         tx.commit().await.context("Failed to commit job creation")?;
 
         tracing::info!("Created job {} with {} steps", job_id, new_steps.len());
+
+        // Evaluate root steps with `when` conditions (no deps, but conditional)
+        let has_root_conditions = task
+            .flow
+            .values()
+            .any(|fs| fs.depends_on.is_empty() && fs.when.is_some());
+        if has_root_conditions {
+            // Fetch job_row once — it doesn't change, but the step snapshot
+            // must be refreshed each iteration as steps are promoted/skipped.
+            let job_row = JobRepo::get(pool, job_id).await?.context("Job not found")?;
+
+            // Safety bound: at most (flow length + 1) iterations.
+            let max_iterations = task.flow.len() + 1;
+            for _iteration in 0..max_iterations {
+                let steps_snapshot = JobStepRepo::get_steps_for_job(pool, job_id).await?;
+                let render_ctx =
+                    build_step_render_context(&job_row, &steps_snapshot, workspace_config);
+
+                // Promote/skip loop: root conditions may cascade
+                let changed =
+                    JobStepRepo::promote_ready_steps(pool, job_id, &task.flow, Some(&render_ctx))
+                        .await?;
+                let skipped = JobStepRepo::skip_unreachable_steps(pool, job_id, &task.flow).await?;
+                if changed.is_empty() && skipped.is_empty() {
+                    break;
+                }
+
+                if _iteration + 1 == max_iterations {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        "Root-condition cascade loop reached iteration limit ({}) — breaking to avoid infinite loop",
+                        max_iterations
+                    );
+                }
+            }
+        }
 
         // Handle any initially-ready type: task steps
         handle_task_steps(pool, workspace_config, workspace_name, job_id).await?;
@@ -279,7 +318,7 @@ pub async fn handle_task_steps(
 /// Build a template render context from a job and its steps.
 /// Same logic as claim_job but without DB access (steps already loaded).
 /// Includes workspace secrets under the `secret` key.
-fn build_step_render_context(
+pub fn build_step_render_context(
     job: &JobRow,
     steps: &[stroem_db::JobStepRow],
     workspace_config: &WorkspaceConfig,
@@ -293,6 +332,23 @@ fn build_step_render_context(
             let mut step_ctx = serde_json::Map::new();
             if let Some(ref output) = s.output {
                 step_ctx.insert("output".to_string(), output.clone());
+            }
+            let safe_name = s.step_name.replace('-', "_");
+            ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
+        } else if s.status == StepStatus::Skipped.as_ref() {
+            // Include skipped steps with null output so downstream `when`
+            // expressions can reference them without Tera undefined errors.
+            let mut step_ctx = serde_json::Map::new();
+            step_ctx.insert("output".to_string(), serde_json::Value::Null);
+            let safe_name = s.step_name.replace('-', "_");
+            ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
+        } else if s.status == StepStatus::Failed.as_ref() {
+            // Include failed steps with null output and their error message so
+            // downstream `when` expressions can inspect them.
+            let mut step_ctx = serde_json::Map::new();
+            step_ctx.insert("output".to_string(), serde_json::Value::Null);
+            if let Some(ref err) = s.error_message {
+                step_ctx.insert("error".to_string(), serde_json::Value::String(err.clone()));
             }
             let safe_name = s.step_name.replace('-', "_");
             ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
@@ -373,6 +429,7 @@ mod tests {
             required_tags: json!([]),
             runner: "local".to_string(),
             timeout_secs: None,
+            when_condition: None,
         }
     }
 
@@ -434,6 +491,38 @@ mod tests {
         // Hyphens in step names become underscores
         assert_eq!(ctx["build_app"]["output"]["image"], "app:latest");
         assert!(ctx.get("build-app").is_none());
+    }
+
+    #[test]
+    fn test_build_step_render_context_skipped_step_has_null_output() {
+        let job = make_job(None);
+        let steps = vec![
+            make_step(job.job_id, "build", "completed", Some(json!({"tag": "v1"}))),
+            make_step(job.job_id, "deploy", "skipped", None),
+        ];
+        let ws = WorkspaceConfig::new();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        assert_eq!(ctx["build"]["output"]["tag"], "v1");
+        // Skipped step should be present with null output
+        assert!(ctx.get("deploy").is_some());
+        assert!(ctx["deploy"]["output"].is_null());
+    }
+
+    #[test]
+    fn test_build_step_render_context_failed_step_has_null_output_and_error() {
+        let job = make_job(None);
+        let mut failed_step = make_step(job.job_id, "risky", "failed", None);
+        failed_step.error_message = Some("command failed".to_string());
+        let steps = vec![failed_step];
+        let ws = WorkspaceConfig::new();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        assert!(ctx.get("risky").is_some());
+        assert!(ctx["risky"]["output"].is_null());
+        assert_eq!(ctx["risky"]["error"], "command failed");
     }
 
     #[test]

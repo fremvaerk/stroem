@@ -129,7 +129,7 @@ tasks:
         action: greet
 ```
 
-Inline steps support all action fields (`type`, `script`, `source`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`):
+Inline steps support all action fields (`type`, `script`, `source`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`, `timeout`, `when`):
 
 ```yaml
 tasks:
@@ -313,5 +313,6 @@ The validator checks:
 - Flow steps reference existing actions
 - Dependencies reference existing steps within the same flow
 - No cycles in the dependency graph
+- Step `when` conditions have valid Tera template syntax
 - Trigger cron expressions are valid
 - Hook action references exist

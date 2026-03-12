@@ -109,6 +109,23 @@ fn validate_workflow_config_inner(
                 }
             }
 
+            // Validate when condition template syntax
+            if let Some(ref when_expr) = step.when {
+                if tera::Tera::one_off(when_expr, &tera::Context::new(), false).is_err() {
+                    // Only catch syntax errors — undefined variables are OK at validation time
+                    let mut test_tera = tera::Tera::default();
+                    if let Err(e) = test_tera.add_raw_template("__when__", when_expr) {
+                        bail!(
+                            "Task '{}' step '{}' has invalid when expression '{}': {}",
+                            task_name,
+                            step_name,
+                            when_expr,
+                            e
+                        );
+                    }
+                }
+            }
+
             // Validate step timeout (max 24h = 86400s)
             if let Some(ref timeout) = step.timeout {
                 if timeout.as_secs() > 86400 {
@@ -4224,6 +4241,72 @@ tasks:
         assert!(
             result.unwrap_err().to_string().contains("'script'"),
             "Error should mention 'script' field"
+        );
+    }
+
+    #[test]
+    fn test_validate_when_valid_template() {
+        let yaml = r#"
+            actions:
+              check:
+                type: script
+                script: "echo ok"
+            tasks:
+              test-task:
+                flow:
+                  step1:
+                    action: check
+                    when: "{{ input.deploy }}"
+        "#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Valid when expression should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_when_invalid_template_syntax() {
+        let yaml = r#"
+            actions:
+              check:
+                type: script
+                script: "echo ok"
+            tasks:
+              test-task:
+                flow:
+                  step1:
+                    action: check
+                    when: "{% if %}"
+        "#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Invalid when syntax should fail");
+        assert!(result.unwrap_err().to_string().contains("when expression"));
+    }
+
+    #[test]
+    fn test_validate_when_with_tera_logic() {
+        let yaml = r#"
+            actions:
+              check:
+                type: script
+                script: "echo ok"
+            tasks:
+              test-task:
+                flow:
+                  step1:
+                    action: check
+                    when: "{% if input.env == \"production\" %}true{% endif %}"
+        "#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Tera logic in when should pass: {:?}",
+            result
         );
     }
 }
