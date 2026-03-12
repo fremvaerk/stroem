@@ -180,9 +180,8 @@ fn validate_webhook_secret(
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {
     if let Some(ref expected_secret) = wh.secret {
         // Use the caller-supplied secret, or fall back to Authorization: Bearer header.
-        let effective_secret: Option<String> = provided_secret
-            .map(|s| s.to_string())
-            .or_else(|| {
+        let effective_secret: Option<String> =
+            provided_secret.map(|s| s.to_string()).or_else(|| {
                 headers
                     .get("authorization")
                     .and_then(|v| v.to_str().ok())

@@ -94,7 +94,6 @@ async fn main() -> Result<()> {
         }
     }
 
-
     // Load workspaces (individual failures are logged but don't crash the server)
     tracing::info!("Loading {} workspace(s)...", config.workspaces.len());
     let workspace_manager = WorkspaceManager::new(
