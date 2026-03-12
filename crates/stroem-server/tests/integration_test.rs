@@ -27,6 +27,7 @@ use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -972,13 +973,14 @@ async fn setup() -> Result<(
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
 }
@@ -2005,6 +2007,7 @@ async fn test_task_detail_connections() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     // Build a workspace with connections
@@ -2214,7 +2217,7 @@ async fn test_task_detail_connections() -> Result<()> {
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     // Test 1: Task with connection-type input includes connections field
     let response = router
@@ -4051,12 +4054,13 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = stroem_server::log_storage::LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = stroem_server::web::build_router(state);
+    let router = stroem_server::web::build_router(state, CancellationToken::new());
 
     // Trigger the broken-task
     let response = router
@@ -4275,12 +4279,13 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = stroem_server::log_storage::LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = stroem_server::web::build_router(state);
+    let router = stroem_server::web::build_router(state, CancellationToken::new());
 
     // Execute parent-task
     let response = router
@@ -4505,6 +4510,7 @@ async fn setup_with_auth() -> Result<(
         }),
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     // Seed initial user
@@ -4522,7 +4528,7 @@ async fn setup_with_auth() -> Result<(
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
 }
@@ -6342,6 +6348,7 @@ async fn setup_multi_workspace() -> Result<(
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let ws_default = test_workspace();
@@ -6396,7 +6403,7 @@ async fn setup_multi_workspace() -> Result<(
     let mgr = WorkspaceManager::from_entries(entries);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
 }
@@ -6721,6 +6728,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -6737,7 +6745,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     // Download tarball
     let req = Request::builder()
@@ -6885,6 +6893,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -6901,7 +6910,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     // Send a wrong ETag — should get 200 with full tarball, not 304
     let req = Request::builder()
@@ -6967,6 +6976,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -6983,7 +6993,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     // First request — get the revision
     let req = Request::builder()
@@ -7065,6 +7075,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7082,7 +7093,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
     // AppState is Clone and shares Arc<WorkspaceManager> across clones
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
-    let router = build_router(state.clone());
+    let router = build_router(state.clone(), CancellationToken::new());
 
     // First request — get original revision
     let req = Request::builder()
@@ -7198,6 +7209,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7214,7 +7226,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     let req = Request::builder()
         .method("GET")
@@ -7974,13 +7986,14 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         }),
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     let res = router.oneshot(api_get("/api/config")).await?;
     assert_eq!(res.status(), 200);
@@ -8055,13 +8068,14 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         }),
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let workspace = test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     let res = router.oneshot(api_get("/api/config")).await?;
     assert_eq!(res.status(), 200);
@@ -8120,6 +8134,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         }),
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let workspace = test_workspace();
@@ -8127,7 +8142,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
     // No actual OIDC providers initialized (would need real discovery)
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     let res = router.oneshot(api_get("/api/config")).await?;
     assert_eq!(res.status(), 200);
@@ -8269,6 +8284,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             unmatched_step_timeout_secs: 30,
         },
         acl: None,
+        mcp: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -10024,6 +10040,7 @@ async fn setup_recovery() -> Result<(
             unmatched_step_timeout_secs: 30,
         },
         acl: None,
+        mcp: None,
     };
 
     let workspace = test_workspace();
@@ -10264,6 +10281,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             unmatched_step_timeout_secs: 30,
         },
         acl: None,
+        mcp: None,
     };
 
     let workspace = task_action_test_workspace();
@@ -11965,6 +11983,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -12107,7 +12126,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     // Execute task: provide connection name "clickhouse-prod" for `db` input
     let response = router
@@ -12275,12 +12294,13 @@ async fn setup_sync_webhook() -> Result<(
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
 }
@@ -12385,7 +12405,7 @@ async fn test_async_webhook_returns_200_immediately() -> Result<()> {
 #[tokio::test]
 async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()> {
     let (state, pool, _tmp, _container) = setup_recovery().await?;
-    let router = build_router(state.clone());
+    let router = build_router(state.clone(), CancellationToken::new());
 
     // Execute single-step task
     let response = router
@@ -12472,7 +12492,7 @@ async fn test_recovery_marks_stale_worker_steps_as_failed_via_api() -> Result<()
 #[tokio::test]
 async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
     let (state, pool, _tmp, _container) = setup_recovery().await?;
-    let router = build_router(state.clone());
+    let router = build_router(state.clone(), CancellationToken::new());
 
     // Execute single-step task
     let response = router
@@ -12540,7 +12560,7 @@ async fn test_recovery_does_not_affect_active_workers_via_api() -> Result<()> {
 #[tokio::test]
 async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
     let (state, pool, _tmp, _container) = setup_recovery().await?;
-    let router = build_router(state.clone());
+    let router = build_router(state.clone(), CancellationToken::new());
 
     // Execute the 2-step task: greet → shout
     let response = router
@@ -12650,7 +12670,7 @@ async fn test_recovery_handles_multi_step_job_via_api() -> Result<()> {
 #[tokio::test]
 async fn test_recovery_worker_reactivation_on_heartbeat_via_api() -> Result<()> {
     let (state, pool, _tmp, _container) = setup_recovery().await?;
-    let router = build_router(state.clone());
+    let router = build_router(state.clone(), CancellationToken::new());
 
     // Register worker via API
     let response = router
@@ -12806,6 +12826,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -12886,6 +12907,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -12948,6 +12970,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -13016,6 +13039,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(pool, mgr, sched_config, sched_log_storage, HashMap::new());
@@ -13374,6 +13398,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         auth: None,
         recovery: Default::default(),
         acl: None,
+        mcp: None,
     };
 
     let mgr =
@@ -13381,7 +13406,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
 
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
-    let router = build_router(state);
+    let router = build_router(state, CancellationToken::new());
 
     // Download "default" tarball — expect 200, gzip content-type, X-Revision header
     let req = Request::builder()
@@ -13613,6 +13638,7 @@ async fn setup_recovery_with_unmatched_timeout(
             unmatched_step_timeout_secs: timeout_secs,
         },
         acl: None,
+        mcp: None,
     };
 
     let workspace = test_workspace();

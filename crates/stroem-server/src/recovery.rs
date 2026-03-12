@@ -257,6 +257,7 @@ mod tests {
                 unmatched_step_timeout_secs: 30,
             },
             acl: None,
+            mcp: None,
         };
 
         let ws_config = WorkspaceConfig::new();

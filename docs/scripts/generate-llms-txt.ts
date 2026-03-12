@@ -87,6 +87,7 @@ const sections: { file: string; title: string }[] = [
   { file: "examples/hello-world.md", title: "Example: Hello World" },
   { file: "examples/deploy-pipeline.md", title: "Example: Deploy Pipeline" },
   { file: "examples/ci-pipeline.md", title: "Example: CI Pipeline" },
+  { file: "guides/mcp.md", title: "MCP Integration" },
 ];
 
 function stripFrontmatter(content: string): string {

@@ -56,6 +56,7 @@ fn setup_state(
             unmatched_step_timeout_secs: 30,
         },
         acl: None,
+        mcp: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace_config);
     let log_storage = LogStorage::new(log_dir);

@@ -171,6 +171,15 @@ pub struct AclConfig {
     pub rules: Vec<AclRule>,
 }
 
+/// MCP server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpConfig {
+    /// Whether the MCP endpoint is enabled (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// Recovery configuration for detecting stale workers and recovering stuck steps
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -227,6 +236,8 @@ pub struct ServerConfig {
     pub recovery: RecoveryConfig,
     /// ACL configuration (optional — when absent, all authenticated users have full access)
     pub acl: Option<AclConfig>,
+    /// MCP server endpoint configuration (optional)
+    pub mcp: Option<McpConfig>,
 }
 
 impl ServerConfig {
@@ -1622,5 +1633,77 @@ acl:
         assert_eq!(AclAction::Deny.priority(), 1);
         assert_eq!(AclAction::View.priority(), 2);
         assert_eq!(AclAction::Run.priority(), 3);
+    }
+
+    // ─── McpConfig parsing tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_mcp_config_enabled() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+mcp:
+  enabled: true
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let mcp = config.mcp.expect("mcp section should be present");
+        assert!(mcp.enabled);
+    }
+
+    #[test]
+    fn test_parse_mcp_config_disabled() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+mcp:
+  enabled: false
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let mcp = config.mcp.expect("mcp section should be present");
+        assert!(!mcp.enabled);
+    }
+
+    #[test]
+    fn test_parse_mcp_absent_defaults_to_none() {
+        // When the `mcp` section is omitted, `ServerConfig.mcp` should be None.
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.mcp.is_none());
+    }
+
+    #[test]
+    fn test_parse_mcp_config_unknown_field_rejected() {
+        // `McpConfig` has `#[serde(deny_unknown_fields)]`, so extra fields must fail.
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+worker_token: "token"
+mcp:
+  enabled: true
+  unknown_key: "should fail"
+"#;
+        let result = serde_yaml::from_str::<ServerConfig>(yaml);
+        assert!(
+            result.is_err(),
+            "Unknown fields in mcp section should be rejected"
+        );
     }
 }

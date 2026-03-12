@@ -222,6 +222,7 @@ impl TestEnv {
                 unmatched_step_timeout_secs: 30,
             },
             acl: None,
+            mcp: None,
         };
 
         // 4. Load workspaces using real FolderSource
@@ -248,7 +249,7 @@ impl TestEnv {
         let _scheduler = stroem_server::scheduler::start(state.clone(), cancel_token.clone());
 
         // 7. Build router and bind to :0
-        let app = build_router(state);
+        let app = build_router(state, cancel_token.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let server_url = format!("http://{}", addr);

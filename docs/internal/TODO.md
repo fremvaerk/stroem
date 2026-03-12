@@ -247,6 +247,8 @@ Last updated: 2026-03-04.
 
 ## Roadmap Items (from review)
 
+- [x] MCP server endpoint (Phase 7a): 8 tools, Streamable HTTP transport, auth support
+- [x] MCP per-tool ACL enforcement (Phase 7a follow-up)
 - [ ] Leader election via pg advisory locks for scheduler/recovery
 - [ ] Generate OpenAPI spec with `utoipa`
 - [ ] S3 as primary log store (eliminate local file dependency)
@@ -303,6 +305,36 @@ Last updated: 2026-03-04.
 - [ ] Integration: wait on terminal job returns immediately
 - [ ] Integration: wait timeout returns 202
 - [ ] Integration: cancelled job treated as terminal
+
+## Review: MCP Server Endpoint (2026-03-12)
+
+### Critical
+- [x] `source_type = "mcp"` violates DB CHECK constraint — `tools.rs:283` passes `"mcp"` but constraint only allows `trigger/user/api/webhook/hook/task`. Every `execute_task` call fails. Fix: migration `019_mcp_source_type.sql`
+- [x] `"mcp"` missing from hooks `is_top_level` check — `hooks.rs:67-69` only matches `api|user|trigger|webhook`. MCP jobs won't fire workspace-level hook fallbacks. Fix: add `"mcp"` to match
+- [x] Auth not enforced on MCP endpoint — `auth.rs` functions wired via task_local middleware + per-tool ACL checks
+
+### Important
+- [x] `can_execute` hardcoded — now uses ACL scope to determine Run vs View permission
+- [x] Missing `#[tracing::instrument]` on public MCP functions — violates project convention
+- [x] `not_found` uses wrong JSON-RPC error code — `tools.rs:133` maps "not found" to `invalid_params` (-32602). Should use custom code or `internal_error`
+- [x] `list_jobs` limit accepts negative values — `tools.rs:416` `.min(100)` without `.max(1)`. Negative LIMIT = no limit in Postgres
+- [x] `task.flow` iteration order is non-deterministic — `get_task` iterates HashMap, random step order each call
+
+### Minor
+- [x] `format_logs` timestamp slicing — uses `find('T')` instead of fixed offset
+- [x] `json_result` error fallback doesn't JSON-escape error message — `tools.rs:142-143`
+- [x] Double `Utc::now()` in `auth.rs:71-72` — minor TOCTOU; synthetic `exp` misleading for API key path
+- [x] No audit trail for MCP operations — `source_id` now set to user email from auth context
+
+### Test Coverage
+- [x] Integration: `execute_task` → `get_job_status` happy path — `mcp_test.rs`
+- [x] Integration: MCP endpoint disabled returns 404 — `mcp_test.rs`
+- [x] Integration: `tools/list` returns all 8 tools — `mcp_test.rs`
+- [x] Integration: parameter validation (invalid UUID, invalid status) — `mcp_test.rs`
+- [x] Unit: `McpConfig` parsing (enabled/disabled/absent/unknown fields) — 4 tests in config.rs
+- [x] Unit: `format_logs` edge cases (missing fields, short timestamps, Unicode) — 6 tests in tools.rs
+- [x] Auth: 401 without token when auth enabled — `mcp_test.rs`
+- [x] Regression: MCP-created jobs fire hooks correctly — `mcp_test.rs`
 
 ## Bugs Found & Fixed
 

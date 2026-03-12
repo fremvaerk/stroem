@@ -712,6 +712,7 @@ mod tests {
                 unmatched_step_timeout_secs: 30,
             },
             acl: None,
+            mcp: None,
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();

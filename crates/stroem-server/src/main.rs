@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
     let _recovery = stroem_server::recovery::start(state.clone(), cancel_token.clone());
 
     // Build router
-    let app = stroem_server::web::build_router(state);
+    let app = stroem_server::web::build_router(state, cancel_token.clone());
 
     // Start server with graceful shutdown
     let listener = tokio::net::TcpListener::bind(&config.listen)

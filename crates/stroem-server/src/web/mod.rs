@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use rust_embed::Embed;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -16,7 +17,7 @@ use tower_http::trace::TraceLayer;
 #[folder = "static/"]
 struct StaticFiles;
 
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router {
     let state = Arc::new(state);
 
     // Build CORS layer: restrict to base_url origin when auth is configured,
@@ -57,13 +58,22 @@ pub fn build_router(state: AppState) -> Router {
             .allow_headers(Any),
     };
 
-    Router::new()
+    let mut router = Router::new()
         .nest("/api", api::build_api_routes(state.clone()))
         .nest(
             "/worker",
             worker_api::build_worker_api_routes(state.clone()),
         )
-        .nest("/hooks", hooks::build_hooks_routes(state.clone()))
+        .nest("/hooks", hooks::build_hooks_routes(state.clone()));
+
+    #[cfg(feature = "mcp")]
+    if state.config.mcp.as_ref().is_some_and(|m| m.enabled) {
+        let mcp_routes = crate::mcp::build_mcp_routes(state.clone(), cancel_token);
+        router = router.nest("/mcp", mcp_routes);
+        tracing::info!("MCP endpoint enabled at /mcp");
+    }
+
+    router
         .fallback(static_handler)
         .layer(cors)
         .layer(TraceLayer::new_for_http())

@@ -74,6 +74,11 @@ k8s-openapi = { version = "0.27", features = ["latest"] }
 # Concurrency utilities
 dashmap = "6"
 
+# MCP server
+rmcp = { version = "1.2", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+schemars = "1"
+http = "1"
+
 # Workspace sources
 async-trait = "0.1"
 git2 = "0.20"

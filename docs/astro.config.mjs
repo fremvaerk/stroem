@@ -45,6 +45,7 @@ export default defineConfig({
               slug: "guides/secrets",
             },
             { label: "Multi-Workspace", slug: "guides/multi-workspace" },
+            { label: "MCP Integration", slug: "guides/mcp" },
           ],
         },
         {

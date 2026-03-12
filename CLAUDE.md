@@ -231,6 +231,21 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `orchestrator::on_step_completed()` takes optional `&WorkspaceConfig` for building render context with secrets
 - UI: "condition" badge on skipped conditional steps, "when" badge on active ones, `when` expression shown in task detail
 
+### MCP Server (Model Context Protocol)
+- Feature-gated: `mcp` cargo feature on `stroem-server` (enabled by default alongside `s3`)
+- Config: `mcp: { enabled: true }` in `server-config.yaml` (disabled by default)
+- Endpoint: `/mcp` via Streamable HTTP transport (stateless, JSON response mode)
+- Crate: `rmcp` v1.2 (official Rust MCP SDK) with `macros` + `transport-streamable-http-server` features
+- `build_mcp_routes()` in `mcp/mod.rs` returns an Axum `Router` with auth middleware wrapping `StreamableHttpService`
+- `StromMcpHandler` in `mcp/handler.rs`: `ServerHandler` impl with `#[tool_handler]` macro, holds `Arc<AppState>` + `Option<McpAuthContext>`
+- 8 tools defined via `#[tool_router]` / `#[tool]` macros in `mcp/tools.rs`
+- Tools: `list_workspaces`, `list_tasks`, `get_task`, `execute_task`, `get_job_status`, `get_job_logs`, `list_jobs`, `cancel_job`
+- **Auth middleware**: `tokio::task_local!` passes `Option<McpAuthContext>` from Axum middleware to handler factory. Validates Bearer token (API key `strm_` or JWT). Returns 401 when auth is configured and token is missing/invalid.
+- **Per-tool ACL**: Each tool checks permissions via `check_task_acl()` or `resolve_acl_scope()` from `mcp/auth.rs`. List tools filter by ACL scope; mutation tools (execute, cancel) require `Run` permission; read tools (get_task, get_job_status, get_job_logs) require `View` or higher; `Deny` returns "not found".
+- `Parameters<T>` wrapper from `rmcp::handler::server::wrapper::Parameters` for tool input deserialization
+- Jobs created by MCP tools have `source_type = "mcp"`, `source_id` = user email (audit trail)
+- `CancellationToken` passed from `main.rs` through `build_router()` for graceful shutdown
+
 ### Webhook Triggers
 - `TriggerDef` is a tagged enum (`#[serde(tag = "type")]`) with `Scheduler` and `Webhook` variants
 - Accessor methods: `task()`, `input()`, `enabled()`, `trigger_type_str()`

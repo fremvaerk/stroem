@@ -66,7 +66,7 @@ pub async fn fire_hooks(
     // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.
     let is_top_level = matches!(
         job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook"
+        "api" | "user" | "trigger" | "webhook" | "mcp"
     );
     let hooks: &[HookDef] = if !task_hooks.is_empty() {
         task_hooks
@@ -354,7 +354,10 @@ mod tests {
             _ => return None,
         };
 
-        let is_top_level = matches!(job_source_type, "api" | "user" | "trigger" | "webhook");
+        let is_top_level = matches!(
+            job_source_type,
+            "api" | "user" | "trigger" | "webhook" | "mcp"
+        );
         let hooks: &[HookDef] = if !task_hooks.is_empty() {
             task_hooks
         } else if is_top_level {
