@@ -191,8 +191,9 @@ async fn test_mark_skipped_sets_status_and_completed_at() -> Result<()> {
     Ok(())
 }
 
-/// `mark_skipped` on a step that starts as "ready" (already claimed before
-/// the DAG was updated) also transitions to skipped.
+/// `mark_skipped` on a step that starts as "ready" is a no-op — the status
+/// guard (`AND status = 'pending'`) prevents overwriting a step that has
+/// already been claimed or promoted.
 #[tokio::test]
 async fn test_mark_skipped_on_ready_step() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -203,16 +204,16 @@ async fn test_mark_skipped_on_ready_step() -> Result<()> {
     JobStepRepo::mark_skipped(&pool, job_id, "step1").await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
-    assert_eq!(steps[0].status, "skipped");
-    assert!(steps[0].completed_at.is_some());
+    // Step stays ready — mark_skipped only transitions from pending
+    assert_eq!(steps[0].status, "ready");
 
     Ok(())
 }
 
-/// `mark_skipped` on an already-completed step overwrites the status — same
-/// unconditional UPDATE behaviour as `mark_failed`.
+/// `mark_skipped` on an already-completed step is a no-op — the status
+/// guard prevents overwriting terminal states.
 #[tokio::test]
-async fn test_mark_skipped_overwrites_completed_step() -> Result<()> {
+async fn test_mark_skipped_does_not_overwrite_completed_step() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let job_id = make_job(&pool, "skip-overwrite").await?;
@@ -227,7 +228,8 @@ async fn test_mark_skipped_overwrites_completed_step() -> Result<()> {
     JobStepRepo::mark_skipped(&pool, job_id, "step1").await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
-    assert_eq!(steps[0].status, "skipped");
+    // Step stays completed — mark_skipped only transitions from pending
+    assert_eq!(steps[0].status, "completed");
 
     Ok(())
 }
