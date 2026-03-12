@@ -129,7 +129,7 @@ tasks:
         action: greet
 ```
 
-Inline steps support all action fields (`type`, `script`, `source`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`, `timeout`, `when`):
+Inline steps support all action fields (`type`, `script`, `source`, `image`, `runner`, `env`, `tags`, etc.) plus all step fields (`depends_on`, `input`, `continue_on_failure`, `timeout`, [`when`](/guides/conditionals/)):
 
 ```yaml
 tasks:

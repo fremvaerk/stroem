@@ -79,6 +79,7 @@ const sections: { file: string; title: string }[] = [
   { file: "guides/action-types.md", title: "Action Types" },
   { file: "guides/input-and-output.md", title: "Input & Output" },
   { file: "guides/templating.md", title: "Templating" },
+  { file: "guides/conditionals.md", title: "Conditional Flow Steps" },
   { file: "guides/triggers.md", title: "Triggers" },
   { file: "guides/hooks.md", title: "Hooks" },
   { file: "guides/connections.md", title: "Connections" },
