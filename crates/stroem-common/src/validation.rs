@@ -109,7 +109,28 @@ fn validate_workflow_config_inner(
                 }
             }
 
-            // Validate when condition template syntax
+            // Validate when condition template syntax.
+            //
+            // Two-pass strategy: first try `one_off` (compile + execute) with an
+            // empty context to catch syntax errors. If that fails (because the
+            // expression references variables not in the empty context), fall back
+            // to `add_raw_template` (compile only) to distinguish syntax errors
+            // from missing-variable errors.
+            //
+            // Known limitation — variable references: we cannot validate which
+            // step names are referenced in the expression at parse time, because
+            // the full step output context is only built at runtime during
+            // `promote_ready_steps`. A typo like `{{ step_nme.output.value }}`
+            // (missing 'a') passes this check and surfaces as a condition
+            // evaluation failure when the job runs.
+            //
+            // Known limitation — unknown Tera filters: Tera's compile-time check
+            // only validates syntax, not filter names. An expression like
+            // `{{ foo | nonexistent_filter }}` passes both the `add_raw_template`
+            // compile step and the `one_off` call with an empty context (because
+            // the variable is undefined and the filter is never invoked), but will
+            // fail at render time when `foo` has a value. Unknown filters are
+            // therefore caught only at job execution time, not at YAML parse time.
             if let Some(ref when_expr) = step.when {
                 if tera::Tera::one_off(when_expr, &tera::Context::new(), false).is_err() {
                     // Only catch syntax errors — undefined variables are OK at validation time

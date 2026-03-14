@@ -48,6 +48,26 @@ pub struct NewJobStep {
     pub when_condition: Option<String>,
 }
 
+/// Bind parameters for a single row in the batch INSERT inside [`JobStepRepo::create_steps_tx`].
+///
+/// Using a named struct avoids the large anonymous tuple that would otherwise
+/// require `#[allow(clippy::type_complexity)]`.
+struct StepInsertRow {
+    job_id: Uuid,
+    step_name: String,
+    action_name: String,
+    action_type: String,
+    action_image: Option<String>,
+    action_spec: Option<JsonValue>,
+    input: Option<JsonValue>,
+    status: String,
+    required_tags: JsonValue,
+    runner: String,
+    timeout_secs: Option<i32>,
+    ready_at: Option<DateTime<Utc>>,
+    when_condition: Option<String>,
+}
+
 /// A stale running step with its job info for recovery.
 #[derive(Debug, sqlx::FromRow)]
 pub struct StaleStepInfo {
@@ -85,22 +105,7 @@ impl JobStepRepo {
             "#,
         );
 
-        #[allow(clippy::type_complexity)]
-        let mut bindings: Vec<(
-            Uuid,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<JsonValue>,
-            Option<JsonValue>,
-            String,
-            JsonValue,
-            String,
-            Option<i32>,
-            Option<DateTime<Utc>>,
-            Option<String>,
-        )> = Vec::new();
+        let mut rows: Vec<StepInsertRow> = Vec::new();
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
@@ -122,45 +127,45 @@ impl JobStepRepo {
                 base + 12,
                 base + 13
             ));
-            let required_tags_json = serde_json::to_value(&step.required_tags).unwrap_or_default();
+            let required_tags = serde_json::to_value(&step.required_tags).unwrap_or_default();
             let ready_at = if step.status == "ready" {
                 Some(Utc::now())
             } else {
                 None
             };
-            bindings.push((
-                step.job_id,
-                step.step_name.clone(),
-                step.action_name.clone(),
-                step.action_type.clone(),
-                step.action_image.clone(),
-                step.action_spec.clone(),
-                step.input.clone(),
-                step.status.clone(),
-                required_tags_json,
-                step.runner.clone(),
-                step.timeout_secs,
+            rows.push(StepInsertRow {
+                job_id: step.job_id,
+                step_name: step.step_name.clone(),
+                action_name: step.action_name.clone(),
+                action_type: step.action_type.clone(),
+                action_image: step.action_image.clone(),
+                action_spec: step.action_spec.clone(),
+                input: step.input.clone(),
+                status: step.status.clone(),
+                required_tags,
+                runner: step.runner.clone(),
+                timeout_secs: step.timeout_secs,
                 ready_at,
-                step.when_condition.clone(),
-            ));
+                when_condition: step.when_condition.clone(),
+            });
         }
 
         let mut q = sqlx::query(&query);
-        for binding in bindings {
+        for row in rows {
             q = q
-                .bind(binding.0)
-                .bind(binding.1)
-                .bind(binding.2)
-                .bind(binding.3)
-                .bind(binding.4)
-                .bind(binding.5)
-                .bind(binding.6)
-                .bind(binding.7)
-                .bind(binding.8)
-                .bind(binding.9)
-                .bind(binding.10)
-                .bind(binding.11)
-                .bind(binding.12);
+                .bind(row.job_id)
+                .bind(row.step_name)
+                .bind(row.action_name)
+                .bind(row.action_type)
+                .bind(row.action_image)
+                .bind(row.action_spec)
+                .bind(row.input)
+                .bind(row.status)
+                .bind(row.required_tags)
+                .bind(row.runner)
+                .bind(row.timeout_secs)
+                .bind(row.ready_at)
+                .bind(row.when_condition);
         }
 
         q.execute(executor)
@@ -402,6 +407,19 @@ impl JobStepRepo {
         flow: &HashMap<String, FlowStep>,
         render_context: Option<&serde_json::Value>,
     ) -> Result<Vec<String>> {
+        // TODO(optimize): the orchestrator calls promote_ready_steps and then
+        // skip_unreachable_steps in the same loop iteration, each fetching all
+        // steps for the job via get_steps_for_job. These two fetches could be
+        // collapsed into a single DB round-trip by passing the already-loaded
+        // step slice into both functions.
+        //
+        // TODO(harden): the read-classify-write pattern here (fetch all steps,
+        // decide which to promote/skip, then UPDATE) is subject to a TOCTOU
+        // race if two orchestrator instances run concurrently for the same job.
+        // Upgrading the surrounding transaction to REPEATABLE READ isolation
+        // would prevent a concurrent UPDATE from being missed between the SELECT
+        // and the subsequent UPDATE statements.
+
         // Get all steps for the job
         let steps = Self::get_steps_for_job(pool, job_id).await?;
 
@@ -550,6 +568,11 @@ impl JobStepRepo {
         job_id: Uuid,
         flow: &HashMap<String, FlowStep>,
     ) -> Result<Vec<String>> {
+        // TODO(optimize): see the note in promote_ready_steps — the orchestrator
+        // calls both functions back-to-back in the same loop iteration, resulting
+        // in two separate get_steps_for_job fetches per cascade round. A future
+        // refactor could pass the already-fetched step slice in to avoid the
+        // redundant DB round-trip.
         let steps = Self::get_steps_for_job(pool, job_id).await?;
         let status_map: HashMap<String, String> = steps
             .iter()

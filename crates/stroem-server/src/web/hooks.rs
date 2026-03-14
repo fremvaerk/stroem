@@ -112,13 +112,13 @@ async fn webhook_handler(
                 // return immediately without waiting.
                 if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
                     if is_terminal_status(&job.status) {
-                        return Json(json!({
-                            "job_id": job_id.to_string(),
-                            "trigger": name,
-                            "task": wh.task,
-                            "status": job.status,
-                            "output": job.output,
-                        }))
+                        return Json(WebhookSyncResponse {
+                            job_id: job_id.to_string(),
+                            trigger: name,
+                            task: wh.task,
+                            status: job.status,
+                            output: job.output,
+                        })
                         .into_response();
                     }
                 }
@@ -126,34 +126,35 @@ async fn webhook_handler(
                 let timeout = Duration::from_secs(timeout_secs);
 
                 match tokio::time::timeout(timeout, rx.recv()).await {
-                    Ok(Ok(event)) => Json(json!({
-                        "job_id": job_id.to_string(),
-                        "trigger": name,
-                        "task": wh.task,
-                        "status": event.status,
-                        "output": event.output,
-                    }))
+                    Ok(Ok(event)) => Json(WebhookSyncResponse {
+                        job_id: job_id.to_string(),
+                        trigger: name,
+                        task: wh.task,
+                        status: event.status,
+                        output: event.output,
+                    })
                     .into_response(),
                     _ => {
                         // Timeout or channel error — return 202 for manual polling
                         (
                             StatusCode::ACCEPTED,
-                            Json(json!({
-                                "job_id": job_id.to_string(),
-                                "trigger": name,
-                                "task": wh.task,
-                                "status": "running",
-                            })),
+                            Json(WebhookSyncResponse {
+                                job_id: job_id.to_string(),
+                                trigger: name,
+                                task: wh.task,
+                                status: "running".to_string(),
+                                output: None,
+                            }),
                         )
                             .into_response()
                     }
                 }
             } else {
-                Json(json!({
-                    "job_id": job_id.to_string(),
-                    "trigger": name,
-                    "task": wh.task,
-                }))
+                Json(WebhookAsyncResponse {
+                    job_id: job_id.to_string(),
+                    trigger: name,
+                    task: wh.task,
+                })
                 .into_response()
             }
         }
@@ -223,6 +224,25 @@ struct StatusQuery {
     secret: Option<String>,
 }
 
+/// Response for async (fire-and-forget) webhook invocation.
+#[derive(Debug, Serialize)]
+struct WebhookAsyncResponse {
+    job_id: String,
+    trigger: String,
+    task: String,
+}
+
+/// Response for sync webhook invocation (job completed or timed out mid-wait).
+#[derive(Debug, Serialize)]
+struct WebhookSyncResponse {
+    job_id: String,
+    trigger: String,
+    task: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<serde_json::Value>,
+}
+
 /// Response for the webhook job status endpoint.
 #[derive(Debug, Serialize)]
 struct WebhookJobStatusResponse {
@@ -264,7 +284,7 @@ async fn webhook_job_status(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid job_id format"})),
+                Json(json!({"error": "Invalid job ID"})),
             )
                 .into_response()
         }

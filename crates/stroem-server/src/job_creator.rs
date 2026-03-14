@@ -186,6 +186,16 @@ fn create_job_for_task_inner<'a>(
         // Handle any initially-ready type: task steps
         handle_task_steps(pool, workspace_config, workspace_name, job_id).await?;
 
+        // If all steps ended up terminal (e.g. all skipped by when conditions),
+        // mark the job as completed now rather than waiting for the recovery sweep.
+        if has_root_conditions {
+            let all_terminal = JobStepRepo::all_steps_terminal(pool, job_id).await?;
+            if all_terminal {
+                JobRepo::mark_completed(pool, job_id, None).await?;
+                tracing::info!(job_id = %job_id, "All steps terminal at creation — job marked completed");
+            }
+        }
+
         Ok(job_id)
     })
 }

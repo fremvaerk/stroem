@@ -709,7 +709,7 @@ async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
 /// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`),
 /// C (pending, depends on B, `continue_on_failure: true`, `when: "true"`).
 /// When A completes with `{"deploy": false}`, B is skipped by condition.
-/// C has continue_on_failure, so a skipped B still satisfies its deps; and
+/// C has `continue_on_failure`, so a skipped B still satisfies its deps; and
 /// `when: "true"` is truthy, so C must be promoted to ready.
 #[tokio::test]
 async fn test_continue_on_failure_accepts_skipped_dep_with_truthy_when() -> Result<()> {
@@ -755,6 +755,193 @@ async fn test_continue_on_failure_accepts_skipped_dep_with_truthy_when() -> Resu
     assert_eq!(
         statuses["c"], "ready",
         "C must be promoted: continue_on_failure accepts skipped dep and when:true is truthy"
+    );
+
+    Ok(())
+}
+
+// ─── Test 15: Two sibling branches — one truthy, one falsy — evaluated together ─
+
+/// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`),
+/// C (pending, depends on A, `when: "false"`).  When A completes with
+/// `{"deploy": "yes"}`, both `when` conditions must be resolved in the same
+/// `promote_ready_steps` call: B → ready (truthy), C → skipped (falsy).
+#[tokio::test]
+async fn test_sibling_when_branches_truthy_and_falsy_evaluated_together() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.deploy }}"),
+    );
+    flow.insert("c".to_string(), flow_step_when(vec!["a"], "false"));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ a.output.deploy }}"),
+            step_when(job_id, "c", "pending", "false"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // A completes with truthy "deploy" output
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"deploy": "yes"}))).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["b"], "ready",
+        "B must be promoted: when expression '{{ a.output.deploy }}' is truthy"
+    );
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped: when expression 'false' is always falsy"
+    );
+
+    // Job is not terminal yet — B is still outstanding
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "pending",
+        "Job must still be pending while B has not completed"
+    );
+
+    Ok(())
+}
+
+// ─── Test 16: `when` condition error marks step failed ────────────────────────
+
+/// When a `when` expression references an undefined variable, `evaluate_condition`
+/// returns an error. The step must be marked `failed` (not skipped) and the job
+/// must end as `failed`.
+#[tokio::test]
+async fn test_when_condition_error_marks_step_failed() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    // Tera raises an error when `nonexistent` is not defined and the template
+    // uses strict undefined handling (the default).
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ nonexistent.foo }}"),
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ nonexistent.foo }}"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // A completes — the render context will not contain `nonexistent`
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"ok": true}))).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["b"], "failed",
+        "B must be failed when the when expression raises an evaluation error"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "Job must fail when a step fails due to a when condition error"
+    );
+
+    // Confirm the error message is stored on the step
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let b = steps.iter().find(|s| s.step_name == "b").unwrap();
+    assert!(
+        b.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("when condition error"),
+        "Error message must mention 'when condition error', got: {:?}",
+        b.error_message
+    );
+
+    Ok(())
+}
+
+// ─── Test 17: Downstream `when` expression referencing a skipped step's null output ─
+
+/// Skipped steps appear in the render context with `output: null`.  A downstream
+/// step whose `when` expression reads `{{ a.output }}` must therefore evaluate to
+/// falsy (null is falsy) and be skipped itself — even though it has
+/// `continue_on_failure: true` (which means its deps are satisfied).
+///
+/// Flow: A (root, ready) → B (depends on A, `when: "false"` → will be skipped)
+///       → C (depends on B, `continue_on_failure: true`, `when: "{{ b.output }}"`)
+///
+/// After A completes:
+///  - B is skipped by its `when: "false"` condition.
+///  - C's deps are met (continue_on_failure accepts skipped B).
+///  - C's `when: "{{ b.output }}"` resolves to null → falsy → C is also skipped.
+///  - Job completes (no failures, all remaining steps skipped).
+#[tokio::test]
+async fn test_when_condition_referencing_skipped_step_null_output_is_falsy() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step_when(vec!["a"], "false"));
+    flow.insert(
+        "c".to_string(),
+        FlowStep {
+            continue_on_failure: true,
+            when: Some("{{ b.output }}".to_string()),
+            ..flow_step(vec!["b"])
+        },
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "false"),
+            step_when(job_id, "c", "pending", "{{ b.output }}"),
+        ],
+    )
+    .await?;
+
+    // Override the step for C so it has continue_on_failure — but since
+    // continue_on_failure lives in the TaskDef flow (not the DB), the flow
+    // definition above already captures it.  The DB step just needs the right
+    // when_condition, which step_when provides.
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "skipped", "B must be skipped (when: false)");
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped: {{ b.output }} resolves to null (skipped step), which is falsy"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "Job must complete: no failures, all remaining steps are skipped"
     );
 
     Ok(())

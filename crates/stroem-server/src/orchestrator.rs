@@ -50,6 +50,10 @@ pub async fn on_step_completed(
             None
         };
 
+        // TODO(optimize): promote_ready_steps and skip_unreachable_steps each
+        // call get_steps_for_job internally, so this loop issues two separate
+        // DB fetches per iteration. A future refactor could load the step list
+        // once and pass it into both functions to halve the round-trips.
         let changed =
             JobStepRepo::promote_ready_steps(pool, job_id, &task.flow, render_ctx.as_ref())
                 .await

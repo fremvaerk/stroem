@@ -1,7 +1,7 @@
 # Strøm TODO
 
 Consolidated from [codebase-review-2026-03-01.md](codebase-review-2026-03-01.md) and development memory.
-Last updated: 2026-03-04.
+Last updated: 2026-03-13.
 
 ---
 
@@ -225,25 +225,25 @@ Last updated: 2026-03-04.
 - [x] `when_condition` set twice in job detail API — removed flow config override, DB value is source of truth — `jobs.rs`
 
 ### Test Coverage
-- [ ] Integration: `promote_ready_steps` with actual `when` conditions (true→ready, false→skipped, error→failed)
+- [x] Integration: `promote_ready_steps` with actual `when` conditions (true→ready, false→skipped, error→failed) — `orchestrator_test.rs`
 - [x] Integration: orchestrator `on_step_completed` with `workspace_config = Some(...)` and conditional steps (5 tests)
 - [x] Integration: cascade — `when`-skipped step → downstream also skipped
-- [ ] Integration: root step `when` condition at job creation (immediate skip + cascade)
+- [x] Integration: root step `when` condition at job creation (immediate skip + cascade) — `integration_test.rs`
 - [x] Integration: all steps conditional, all false → job completes as `completed`
 - [x] Unit: `build_step_render_context` with skipped step → `{"output": null}`
-- [ ] Unit: `when` condition referencing skipped step's null output
-- [ ] Integration: `when_condition` visible in job detail API response
+- [x] Unit: `when` condition referencing skipped step's null output — `orchestrator_test.rs`
+- [x] Integration: `when_condition` visible in job detail API response — `integration_test.rs`
 - [x] Integration: `continue_on_failure` + skipped dependency + `when` condition interaction
-- [ ] Integration: `type: task` step with `when` condition (should skip without creating child job)
-- [ ] Integration: `when` with `render_context = None` leaves step as `pending` (recovery sweeper path)
-- [ ] Unit: empty `when: ""` behavior documented
+- [x] Integration: `type: task` step with `when` condition (should skip without creating child job) — `integration_test.rs`
+- [x] Integration: `when` with `render_context = None` leaves step as `pending` (recovery sweeper path) — `orchestrator_test.rs`
+- [x] Unit: empty `when: ""` behavior documented — `orchestrator_test.rs`
 
 ### Minor
-- [ ] Validation doesn't catch typos in `when` variable references (step names) — only caught at runtime
-- [ ] Two-pass validation silently passes unknown Tera filters — add clarifying comment — `validation.rs:113-126`
-- [ ] 13-element tuple in `create_steps_tx` with `#[allow(clippy::type_complexity)]` — replace with named struct — `job_step.rs:88-103`
-- [ ] Double step-list fetch per cascade iteration (`promote_ready_steps` + `skip_unreachable_steps` both call `get_steps_for_job`) — future optimization target
-- [ ] `REPEATABLE READ` transaction for `promote_ready_steps` read-classify-write — future hardening — `job_step.rs:399`
+- [x] Validation doesn't catch typos in `when` variable references (step names) — documented as known limitation with comment — `validation.rs`
+- [x] Two-pass validation silently passes unknown Tera filters — clarifying comment added — `validation.rs`
+- [x] 13-element tuple in `create_steps_tx` replaced with `StepInsertRow` named struct — `job_step.rs`
+- [x] Double step-list fetch per cascade iteration — TODO comment added for future optimization — `orchestrator.rs`
+- [x] `REPEATABLE READ` transaction for `promote_ready_steps` — TODO comment added for future hardening — `job_step.rs`
 
 ## Roadmap Items (from review)
 
@@ -289,22 +289,22 @@ Last updated: 2026-03-04.
 
 ### Minor
 - [x] Duplicated terminal-status check (lines 293-295 and 307-309) — extract `is_terminal_status()` helper
-- [ ] Response struct vs `json!()` inconsistency — new code uses typed struct, existing handler uses `json!()` macro
+- [x] Response struct vs `json!()` inconsistency — refactored `webhook_handler` to use typed `WebhookAsyncResponse`/`WebhookSyncResponse` structs — `hooks.rs`
 - [x] Response missing timestamps (`created_at`, `completed_at`) — available on JobRow but not returned
-- [ ] UUID error message phrasing inconsistency — `"Invalid job_id format"` vs API's `"Invalid job ID"`
+- [x] UUID error message phrasing — fixed to `"Invalid job ID"` consistent with API — `hooks.rs`
 
 ### Test Coverage
-- [ ] Integration: malformed UUID returns 400
-- [ ] Integration: unknown webhook returns 404
-- [ ] Integration: unknown job_id returns 404
-- [ ] Integration: IDOR — API-sourced job returns 404
-- [ ] Integration: IDOR — job from different webhook returns 404
-- [ ] Integration: secret required but missing returns 401
-- [ ] Integration: valid secret (query param and Bearer) returns 200
-- [ ] Integration: default no-wait returns current status
-- [ ] Integration: wait on terminal job returns immediately
-- [ ] Integration: wait timeout returns 202
-- [ ] Integration: cancelled job treated as terminal
+- [x] Integration: malformed UUID returns 400 — `integration_test.rs`
+- [x] Integration: unknown webhook returns 404 — `integration_test.rs`
+- [x] Integration: unknown job_id returns 404 — `integration_test.rs`
+- [x] Integration: IDOR — API-sourced job returns 404 — `integration_test.rs`
+- [x] Integration: IDOR — job from different webhook returns 404 — `integration_test.rs`
+- [x] Integration: secret required but missing returns 401 — `integration_test.rs`
+- [x] Integration: valid secret (query param and Bearer) returns 200 — `integration_test.rs`
+- [x] Integration: default no-wait returns current status — `integration_test.rs`
+- [x] Integration: wait on terminal job returns immediately — `integration_test.rs`
+- [x] Integration: wait timeout returns 202 — (covered by existing sync mode tests)
+- [x] Integration: cancelled job treated as terminal — `integration_test.rs`
 
 ## Review: MCP Server Endpoint (2026-03-12)
 

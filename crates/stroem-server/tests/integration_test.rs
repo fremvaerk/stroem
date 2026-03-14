@@ -13938,3 +13938,847 @@ async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Phase 5a when-condition integration tests ────────────────────────────────
+
+/// Builds a minimal workspace with a `noop` script action and one task defined
+/// by the supplied flow map.  Avoids boilerplate repetition in when-tests.
+fn when_test_workspace_with_flow(
+    task_name: &str,
+    flow: HashMap<String, FlowStep>,
+) -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+    workspace.actions.insert(
+        "noop".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("true".to_string()),
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+    workspace.tasks.insert(
+        task_name.to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+    workspace
+}
+
+/// When a task has a root step (no dependencies) with `when: "false"`, the
+/// post-creation promote loop must evaluate the condition immediately and mark
+/// the step `skipped`.  Any dependent steps must cascade to `skipped` via
+/// `skip_unreachable_steps`.
+#[tokio::test]
+async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "root".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: Some("false".to_string()),
+            inline_action: None,
+        },
+    );
+    flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["root".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            inline_action: None,
+        },
+    );
+    let workspace = when_test_workspace_with_flow("conditional-root", flow);
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "conditional-root",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let root = steps.iter().find(|s| s.step_name == "root").unwrap();
+    let child = steps.iter().find(|s| s.step_name == "child").unwrap();
+
+    assert_eq!(
+        root.status, "skipped",
+        "Root step with when:false must be skipped immediately at job creation"
+    );
+    assert_eq!(
+        child.status, "skipped",
+        "Child step must cascade to skipped because its only dependency was skipped"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "Job must complete when all steps are skipped at creation time"
+    );
+
+    Ok(())
+}
+
+/// Complementary to the test above: a root step with a truthy `when` condition
+/// must be promoted to `ready` by the post-creation promote loop.
+#[tokio::test]
+async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "root".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: Some("true".to_string()),
+            inline_action: None,
+        },
+    );
+    let workspace = when_test_workspace_with_flow("truthy-root", flow);
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "truthy-root",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let root = steps.iter().find(|s| s.step_name == "root").unwrap();
+
+    assert_eq!(
+        root.status, "ready",
+        "Root step with when:true must be promoted to ready at job creation"
+    );
+
+    Ok(())
+}
+
+/// A `type: task` flow step that carries `when: "false"` must be skipped by the
+/// post-creation promote loop.  No child job must be spawned for it.
+#[tokio::test]
+async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = WorkspaceConfig::default();
+
+    workspace.actions.insert(
+        "noop".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: Some("true".to_string()),
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    workspace.actions.insert(
+        "run-child".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            name: None,
+            description: None,
+            task: Some("child-task".to_string()),
+            cmd: None,
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+        },
+    );
+
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "work".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "child-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: child_flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "conditional-task-step".to_string(),
+        FlowStep {
+            action: "run-child".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: Some("false".to_string()),
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "parent-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: parent_flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "parent-task",
+        json!({}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let task_step = steps
+        .iter()
+        .find(|s| s.step_name == "conditional-task-step")
+        .unwrap();
+
+    assert_eq!(
+        task_step.status, "skipped",
+        "type:task step with when:false must be skipped at job creation"
+    );
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let child_jobs: Vec<_> = all_jobs
+        .iter()
+        .filter(|j| j.source_type == "task")
+        .collect();
+    assert!(
+        child_jobs.is_empty(),
+        "No child job must be spawned for a type:task step skipped by its when condition"
+    );
+
+    let job = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "Job must complete when its only step is skipped"
+    );
+
+    Ok(())
+}
+
+/// The job detail endpoint must return `when_condition` on each step so the UI
+/// and API consumers can display the condition expression.
+#[tokio::test]
+async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "build".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            inline_action: None,
+        },
+    );
+    flow.insert(
+        "deploy".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["build".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: Some("{{ input.should_deploy }}".to_string()),
+            inline_action: None,
+        },
+    );
+    let workspace = when_test_workspace_with_flow("build-and-deploy", flow);
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "build-and-deploy",
+        json!({"should_deploy": true}),
+        "api",
+        None,
+    )
+    .await?;
+
+    let res = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = body_json(res).await;
+    let steps = body["steps"].as_array().expect("steps must be an array");
+
+    let deploy_step = steps
+        .iter()
+        .find(|s| s["step_name"].as_str() == Some("deploy"))
+        .expect("deploy step must be present in the response");
+
+    assert_eq!(
+        deploy_step["when_condition"],
+        json!("{{ input.should_deploy }}"),
+        "when_condition must be returned verbatim in the job detail API"
+    );
+
+    let build_step = steps
+        .iter()
+        .find(|s| s["step_name"].as_str() == Some("build"))
+        .expect("build step must be present in the response");
+
+    assert!(
+        build_step["when_condition"].is_null(),
+        "Steps without a when condition must have null when_condition in the API response"
+    );
+
+    Ok(())
+}
+
+// ===== Webhook job status endpoint tests =====
+
+/// Helper: fire a webhook and return the created job_id.
+async fn fire_webhook(router: Router, uri: &str) -> Uuid {
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "fire_webhook: expected 200 OK"
+    );
+    let body = body_json(response).await;
+    body["job_id"]
+        .as_str()
+        .expect("job_id missing in webhook response")
+        .parse()
+        .expect("job_id is not a valid UUID")
+}
+
+// Test 1: malformed UUID in the job_id path segment → 400
+#[tokio::test]
+async fn test_webhook_job_status_malformed_uuid() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/hooks/github-push/jobs/not-a-uuid?secret=whsec_test123")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed UUID must return 400"
+    );
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().is_some(),
+        "response must include an error field"
+    );
+
+    Ok(())
+}
+
+// Test 2: webhook name does not exist → 404
+#[tokio::test]
+async fn test_webhook_job_status_unknown_webhook() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let job_id = Uuid::new_v4();
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!("/hooks/nonexistent-webhook/jobs/{}", job_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown webhook name must return 404"
+    );
+
+    Ok(())
+}
+
+// Test 3: webhook exists but job UUID is not in the DB → 404
+#[tokio::test]
+async fn test_webhook_job_status_unknown_job_id() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let random_id = Uuid::new_v4();
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!("/hooks/public-hook/jobs/{}", random_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown job id must return 404"
+    );
+
+    Ok(())
+}
+
+// Test 4: IDOR — job created via the API (source_type = "api") is not visible via webhook status endpoint → 404
+#[tokio::test]
+async fn test_webhook_job_status_idor_api_sourced_job() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Create a job through the normal API endpoint (source_type = "api")
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Alice"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let api_job_id = body["job_id"].as_str().unwrap().to_string();
+
+    // Try to access it via the webhook status endpoint for public-hook
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!("/hooks/public-hook/jobs/{}", api_job_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "API-sourced job must not be visible via webhook status endpoint"
+    );
+
+    Ok(())
+}
+
+// Test 5: IDOR — job created by webhook A is not visible via webhook B's status endpoint → 404
+#[tokio::test]
+async fn test_webhook_job_status_idor_different_webhook() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Fire public-hook to create a job
+    let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
+
+    // Try to access that job via github-push's status endpoint
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!(
+            "/hooks/github-push/jobs/{}?secret=whsec_test123",
+            job_id
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "job from a different webhook must not be accessible via another webhook's status endpoint"
+    );
+
+    Ok(())
+}
+
+// Test 6: secret-protected webhook, no secret provided → 401
+#[tokio::test]
+async fn test_webhook_job_status_secret_required_but_missing() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let job_id = Uuid::new_v4();
+    // Request without any secret for the secret-protected github-push webhook
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!("/hooks/github-push/jobs/{}", job_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "missing secret must return 401"
+    );
+
+    Ok(())
+}
+
+// Test 7: secret-protected webhook, secret supplied via query param → 200 (or 404 for missing job)
+#[tokio::test]
+async fn test_webhook_job_status_secret_via_query_param() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // First create a real job via the webhook so we have a valid job_id
+    let job_id = fire_webhook(router.clone(), "/hooks/github-push?secret=whsec_test123").await;
+
+    // Access status with secret via query param
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!(
+            "/hooks/github-push/jobs/{}?secret=whsec_test123",
+            job_id
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    // Secret is correct → endpoint accepts the request and returns job status
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "valid secret via query param must be accepted"
+    );
+    let body = body_json(response).await;
+    assert_eq!(
+        body["job_id"].as_str(),
+        Some(job_id.to_string().as_str()),
+        "job_id must match the created job"
+    );
+    assert_eq!(body["trigger"], "github-push");
+    assert_eq!(body["task"], "hello-world");
+    assert!(
+        body["status"].as_str().is_some(),
+        "response must include a status field"
+    );
+
+    Ok(())
+}
+
+// Test 8: secret-protected webhook, secret supplied via Authorization: Bearer header → 200
+#[tokio::test]
+async fn test_webhook_job_status_secret_via_bearer() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Create a job via the webhook (with secret in query param for the fire)
+    let job_id = fire_webhook(router.clone(), "/hooks/github-push?secret=whsec_test123").await;
+
+    // Check status with secret via Authorization: Bearer header
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!("/hooks/github-push/jobs/{}", job_id))
+        .header("Authorization", "Bearer whsec_test123")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "valid secret via Bearer header must be accepted"
+    );
+    let body = body_json(response).await;
+    assert_eq!(body["trigger"], "github-push");
+    assert_eq!(body["task"], "hello-world");
+
+    Ok(())
+}
+
+// Test 9: fire webhook, immediately check status without wait param → returns current status
+#[tokio::test]
+async fn test_webhook_job_status_default_no_wait() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Fire public-hook (no secret required)
+    let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
+
+    // Check status immediately — no wait param, job is likely still pending/running
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!("/hooks/public-hook/jobs/{}", job_id))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "immediate status check must return 200"
+    );
+    let body = body_json(response).await;
+    assert_eq!(
+        body["job_id"].as_str(),
+        Some(job_id.to_string().as_str()),
+        "job_id must match"
+    );
+    assert_eq!(body["trigger"], "public-hook");
+    assert_eq!(body["task"], "hello-world");
+    // Status is present and is one of the valid job statuses
+    let status = body["status"]
+        .as_str()
+        .expect("status field must be present");
+    assert!(
+        ["pending", "running", "completed", "failed", "cancelled"].contains(&status),
+        "status '{}' is not a valid job status",
+        status
+    );
+    // No-wait response should include a created_at timestamp
+    assert!(
+        body["created_at"].as_str().is_some(),
+        "created_at must be present"
+    );
+
+    Ok(())
+}
+
+// Test 10: fire webhook, drive job to a terminal state, then GET with wait=true →
+// returns immediately with terminal status (race-guard path: job already terminal at subscribe time)
+#[tokio::test]
+async fn test_webhook_job_status_wait_on_terminal_job() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // Fire public-hook to create a job.
+    // The `hello-world` task requires `name` in its step template; since public-hook
+    // sends no input, the step will fail template rendering at claim time and drive
+    // the job to `failed` — which is still a terminal state and sufficient to verify
+    // the `wait=true` fast-path (job already terminal before subscribing).
+    let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
+
+    // Register a worker and attempt to claim the step.
+    // The claim will return 422 because `{{ input.name }}` cannot be rendered (missing
+    // field), but as a side-effect the handler marks the step failed and drives the job
+    // to its terminal state via the orchestrator, including firing the job_completion
+    // notification — all before the 422 response is returned.
+    let worker_id = register_test_worker(&pool).await;
+    let _claim_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+
+    // The job must now be in a terminal state (failed) regardless of whether the
+    // claim succeeded or the template rendering failed.
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert!(
+        ["failed", "completed", "cancelled"].contains(&job.status.as_str()),
+        "job must be terminal after claim attempt, got: {}",
+        job.status
+    );
+    let expected_terminal_status = job.status.clone();
+
+    // Now GET /hooks/public-hook/jobs/{job_id}?wait=true — the job is already terminal,
+    // so the endpoint re-queries the DB after subscribing (race guard) and returns
+    // immediately without waiting on the broadcast channel.
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!(
+            "/hooks/public-hook/jobs/{}?wait=true&timeout=5",
+            job_id
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "wait=true on already-terminal job must return 200"
+    );
+    let body = body_json(response).await;
+    assert_eq!(
+        body["job_id"].as_str(),
+        Some(job_id.to_string().as_str()),
+        "job_id must match"
+    );
+    assert_eq!(
+        body["status"].as_str(),
+        Some(expected_terminal_status.as_str()),
+        "status must match the terminal status from DB"
+    );
+    assert_eq!(body["trigger"], "public-hook");
+    assert_eq!(body["task"], "hello-world");
+    assert!(
+        body["completed_at"].as_str().is_some(),
+        "completed_at must be present for a terminal job"
+    );
+
+    Ok(())
+}
+
+// Test 11: fire webhook, cancel the job, then GET with wait=true → returns immediately with "cancelled"
+#[tokio::test]
+async fn test_webhook_job_status_cancelled_treated_as_terminal() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Fire public-hook to create a job
+    let job_id = fire_webhook(router.clone(), "/hooks/public-hook").await;
+
+    // Cancel the job via the API — this also fires the job_completion notification
+    // (the job has no running steps, so cancellation is immediate).
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/cancel", job_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "cancel request must succeed"
+    );
+
+    // GET /hooks/public-hook/jobs/{job_id}?wait=true — job is already cancelled (terminal),
+    // so the endpoint should return immediately without blocking on the broadcast channel.
+    let request = Request::builder()
+        .method("GET")
+        .uri(&format!(
+            "/hooks/public-hook/jobs/{}?wait=true&timeout=2",
+            job_id
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(request).await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "wait=true on cancelled job must return 200"
+    );
+    let body = body_json(response).await;
+    assert_eq!(
+        body["job_id"].as_str(),
+        Some(job_id.to_string().as_str()),
+        "job_id must match"
+    );
+    assert_eq!(
+        body["status"].as_str(),
+        Some("cancelled"),
+        "status must be cancelled"
+    );
+    assert_eq!(body["trigger"], "public-hook");
+
+    Ok(())
+}
