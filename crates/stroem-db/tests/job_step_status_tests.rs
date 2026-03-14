@@ -764,3 +764,70 @@ async fn test_get_failed_step_names_empty_when_no_failures() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Regression: skipped deps must not block downstream steps ─────────
+
+/// A skipped dependency should NOT cause `skip_unreachable_steps` to skip
+/// the downstream step. Only `failed` and `cancelled` deps are blocking.
+/// This guards against regression of the skipped-deps-as-satisfied change.
+#[tokio::test]
+async fn test_skip_unreachable_steps_does_not_block_on_skipped_dep() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = make_job(&pool, "skip-dep-not-blocking").await?;
+    let steps = vec![
+        make_step(job_id, "a", "pending"),
+        make_step(job_id, "b", "pending"),
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    // A is skipped (e.g. its `when` condition evaluated to false).
+    JobStepRepo::mark_skipped(&pool, job_id, "a").await?;
+
+    // Define the DAG: B depends on A.
+    let mut flow: HashMap<String, FlowStep> = HashMap::new();
+    flow.insert(
+        "a".to_string(),
+        FlowStep {
+            action: "a-action".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            inline_action: None,
+        },
+    );
+    flow.insert(
+        "b".to_string(),
+        FlowStep {
+            action: "b-action".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["a".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            inline_action: None,
+        },
+    );
+
+    let skipped = JobStepRepo::skip_unreachable_steps(&pool, job_id, &flow).await?;
+
+    assert!(
+        skipped.is_empty(),
+        "b must NOT be skipped when its only dep is skipped (not failed/cancelled)"
+    );
+
+    let all = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let b = all.iter().find(|s| s.step_name == "b").unwrap();
+    assert_eq!(
+        b.status, "pending",
+        "b must remain pending — a skipped dep is not a blocking dep"
+    );
+
+    Ok(())
+}

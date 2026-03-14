@@ -238,6 +238,22 @@ Last updated: 2026-03-13.
 - [x] Integration: `when` with `render_context = None` leaves step as `pending` (recovery sweeper path) — `orchestrator_test.rs`
 - [x] Unit: empty `when: ""` behavior documented — `orchestrator_test.rs`
 
+## Review: Skipped-Deps-As-Satisfied (2026-03-14)
+
+### Critical
+- [x] `continue_on_failure: true` + all-deps-skipped incorrectly cascade-skips the step — guard on `!flow_step.continue_on_failure` — `job_step.rs:465`
+
+### Test Coverage
+- [x] Cancelled dep blocks step without `continue_on_failure` — Test 23 `orchestrator_test.rs`
+- [x] Cancelled dep + `continue_on_failure: true` → step proceeds — Test 24 `orchestrator_test.rs`
+- [x] All-deps-skipped + `continue_on_failure: true` → step proceeds (after bug fix) — Test 25 `orchestrator_test.rs`
+- [x] Truthy `when` + all-deps-skipped → cascade-skip takes precedence — Test 26 `orchestrator_test.rs`
+- [x] 3+ dep fan-in with heterogeneous statuses (1 completed + 2 skipped → runs) — Test 27 `orchestrator_test.rs`
+- [x] `skip_unreachable_steps` does NOT treat skipped dep as blocking (regression guard) — `job_step_status_tests.rs`
+
+### Minor
+- [x] Test 12 comment says "skipped as unreachable" but cascade-skip now happens in `promote_ready_steps` — update comment — `orchestrator_test.rs`
+
 ### Minor
 - [x] Validation doesn't catch typos in `when` variable references (step names) — documented as known limitation with comment — `validation.rs`
 - [x] Two-pass validation silently passes unknown Tera filters — clarifying comment added — `validation.rs`

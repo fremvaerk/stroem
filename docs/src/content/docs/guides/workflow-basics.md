@@ -247,6 +247,8 @@ Both timeouts are enforced server-side by the recovery sweeper (periodic check) 
 
 By default, when a step fails, all downstream steps that depend on it are automatically **skipped**. The job is marked as `failed` once all steps reach a terminal state.
 
+Note: **skipped** dependencies (from conditional `when` expressions) are treated differently from **failed** dependencies. A step with a skipped dependency proceeds normally as long as at least one dependency completed. Only failed and cancelled dependencies cause downstream steps to be skipped. See the [Conditionals guide](/guides/conditionals/) for branching patterns.
+
 If you want a step to run even when its dependency fails (e.g., cleanup steps, notifications), use `continue_on_failure: true`:
 
 ```yaml
@@ -263,8 +265,10 @@ flow:
 
 The `continue_on_failure` flag has dual semantics (similar to GitHub Actions' `continue-on-error`):
 
-1. **Dependency tolerance**: The step runs even if its dependencies fail.
+1. **Failure tolerance**: The step runs even if its dependencies **fail** or are **cancelled**.
 2. **Job tolerance**: If the step itself fails, its failure is considered *tolerable* — the job can still be marked `completed` as long as all non-tolerable steps succeed.
+
+You do **not** need `continue_on_failure` to handle skipped dependencies from conditional branches — those are automatically treated as satisfied.
 
 ### DAG visualization
 

@@ -11,8 +11,8 @@ The `when` field provides runtime control flow without explicit step branching:
 
 - **Condition evaluation**: When a step's dependencies are met, the `when` expression is evaluated
 - **Truthy/falsy**: If the result is truthy (non-empty, not "false", not "0"), the step runs. Otherwise it's skipped
-- **Cascade**: Steps that depend on a skipped step are also skipped, unless they have `continue_on_failure: true`
-- **Convergence**: After conditional branches, use `continue_on_failure: true` on the merge step to accept skipped dependencies
+- **Cascade**: If ALL of a step's dependencies are skipped, the step is also skipped (mid-branch cascade). If at least one dependency completed, the step proceeds normally.
+- **Convergence**: When conditional branches merge, convergence steps run automatically — no `continue_on_failure` needed.
 - **Validation**: `when` syntax is validated at YAML parse time (syntax errors are caught early)
 
 ## YAML Syntax
@@ -23,20 +23,19 @@ tasks:
     input:
       run_checks: { type: boolean, default: false }
     flow:
+      setup:
+        action: init-workspace
+
       check-data:
         action: validate-input
+        depends_on: [setup]
         when: "{{ input.run_checks }}"
 
-      use-data:
+      process:
         action: process-data
-        depends_on: [check-data]
-        # Only runs if check-data ran (not skipped)
-
-      cleanup:
-        action: finalize
-        depends_on: [use-data]
-        continue_on_failure: true
-        # Runs regardless of whether use-data was skipped
+        depends_on: [setup, check-data]
+        # Runs whether check-data completed or was skipped
+        # (setup completed → not all deps skipped → step proceeds)
 ```
 
 ## Truthiness Rules
@@ -97,9 +96,9 @@ tasks:
         when: "{{ check.output.ok }}"
 ```
 
-## Convergence Pattern (continue_on_failure)
+## Convergence Pattern
 
-When multiple branches converge back to a single step, use `continue_on_failure: true` so the merge step can accept both skipped and completed dependencies.
+When multiple branches converge back to a single step, the merge step runs automatically because skipped dependencies from conditional `when` expressions are treated as satisfied.
 
 ```yaml
 tasks:
@@ -119,15 +118,14 @@ tasks:
 
       # Convergence: merge branches
       # One of fast-check or slow-check ran, one was skipped
-      # continue_on_failure allows us to accept the skipped one
+      # Since skipped deps are treated as satisfied, process-results runs automatically
       process-results:
         action: handle-checks
         depends_on: [fast-check, slow-check]
-        continue_on_failure: true
         # Proceeds whether both ran, or one was skipped
 ```
 
-Without `continue_on_failure: true` on the merge step, if `fast-check` is skipped, `process-results` would also be skipped (cascade). With it, `process-results` runs regardless.
+**How it works**: Skipped dependencies count as satisfied. A convergence step runs as long as at least one of its dependencies completed. If ALL dependencies are skipped (which would mean no branch was taken), the step is also skipped (mid-branch cascade).
 
 ## Root Step Conditions
 
@@ -146,9 +144,10 @@ tasks:
       main:
         action: do-work
         depends_on: [setup]
-        # Runs regardless — depends_on is the ordering rule,
-        # even if setup was skipped due to when condition
-        continue_on_failure: true
+        # If setup is skipped and main has no other deps,
+        # main is also cascade-skipped (all deps skipped).
+        # To make main always run, remove the dependency
+        # or add a non-conditional dep.
 ```
 
 ## Error Handling
@@ -182,7 +181,7 @@ This will skip the step if `check.output.status` is undefined (renders to empty 
 
 ### If/else branch
 
-Two mutually exclusive branches, merge with continue_on_failure:
+Two mutually exclusive branches that merge back together:
 
 ```yaml
 tasks:
@@ -201,7 +200,8 @@ tasks:
       merge:
         action: finalize
         depends_on: [fast-path, slow-path]
-        continue_on_failure: true
+        # Runs automatically: one branch ran, one was skipped
+        # Skipped deps are treated as satisfied
 ```
 
 ### Multi-step branch with cascade
@@ -229,17 +229,18 @@ tasks:
         depends_on: [advanced-step-1]
         # Also skipped if advanced-step-1 was skipped
 
-      # Convergence
+      # Convergence (note: summary only has one dep, so it also skips if entire branch is skipped)
       summary:
         action: generate-report
         depends_on: [advanced-step-2]
-        continue_on_failure: true
-        # Runs whether advanced branch ran or was skipped
+        # Skips if advanced-step-2 is skipped (all-deps-skipped rule)
 ```
 
-### Input-based skip
+Note: In this pattern, `summary` also skips because its only dependency (`advanced-step-2`) is skipped when the branch is disabled. If you want `summary` to always run, add a second dependency from outside the branch to ensure at least one dependency completes.
 
-Skip a step based on job input:
+### Optional step (skip if not needed)
+
+An optional step in a linear pipeline. Use a shared root dependency so the downstream step has at least one completed dep:
 
 ```yaml
 tasks:
@@ -248,18 +249,21 @@ tasks:
       skip_validation: { type: boolean, default: false }
       data: { type: string, required: true }
     flow:
-      validate:
-        action: validate-data
+      prepare:
+        action: prepare-data
         input:
           data: "{{ input.data }}"
+
+      validate:
+        action: validate-data
+        depends_on: [prepare]
         when: "{{ not input.skip_validation }}"
 
       process:
         action: use-data
-        input:
-          data: "{{ input.data }}"
-        depends_on: [validate]
-        continue_on_failure: true
+        depends_on: [prepare, validate]
+        # Runs whether validate completed or was skipped
+        # (prepare completed → not all deps skipped → step proceeds)
 ```
 
 ### Condition based on step output
@@ -335,23 +339,22 @@ tasks:
         action: fast-process
         depends_on: [verify]
         when: "{{ input.use_fast }}"
-        continue_on_failure: true
 
       slow:
         action: slow-process
         depends_on: [verify]
         when: "{{ not input.use_fast }}"
-        continue_on_failure: true
 
-      # Convergence with error tolerance
+      # Convergence: merge branches
       finish:
         action: cleanup
         depends_on: [fast, slow]
-        continue_on_failure: true
+        # Runs automatically: at least one branch completes
 ```
 
 This workflow:
-1. Optionally skips the pre-check based on input
-2. Branches into fast or slow path based on input
-3. Converges at cleanup regardless of which branch ran
-4. Tolerates failures with `continue_on_failure: true`
+1. Optionally runs the pre-check based on input (if skipped, the entire downstream cascade is skipped)
+2. When verify runs, branches into fast or slow path based on input
+3. Converges at finish — one branch completed, one skipped → finish runs automatically
+
+**When do you still need `continue_on_failure`?** Only when you want a step to run even if its dependency **failed** (error, crash). Skipped dependencies from `when` conditions are handled automatically.

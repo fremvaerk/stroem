@@ -394,8 +394,9 @@ impl JobStepRepo {
     }
 
     /// Update steps from pending to ready based on completed dependencies and
-    /// `when` conditions. Steps with `continue_on_failure: true` also accept
-    /// `skipped` dependencies (convergence after conditional branches).
+    /// `when` conditions. Skipped dependencies count as satisfied (like completed).
+    /// If ALL deps are skipped (none completed), the step is cascade-skipped.
+    /// Failed/cancelled deps still block unless `continue_on_failure: true`.
     ///
     /// `render_context` is a JSON object used to evaluate `when` Tera templates.
     /// When `None`, steps with `when` conditions are not promoted (they stay pending).
@@ -442,22 +443,38 @@ impl JobStepRepo {
                 Some(fs) => fs,
                 None => continue,
             };
+            // Skipped deps always count as satisfied; failed/cancelled only
+            // with continue_on_failure.
             let deps_met = flow_step.depends_on.iter().all(|dep| {
                 status_map
                     .get(dep)
                     .map(|status| {
-                        if flow_step.continue_on_failure {
-                            status == StepStatus::Completed.as_ref()
-                                || status == StepStatus::Failed.as_ref()
-                                || status == StepStatus::Skipped.as_ref()
-                        } else {
-                            status == StepStatus::Completed.as_ref()
-                        }
+                        status == StepStatus::Completed.as_ref()
+                            || status == StepStatus::Skipped.as_ref()
+                            || (flow_step.continue_on_failure
+                                && (status == StepStatus::Failed.as_ref()
+                                    || status == StepStatus::Cancelled.as_ref()))
                     })
                     .unwrap_or(false)
             });
             if !deps_met {
                 continue;
+            }
+
+            // If ALL deps are skipped (none completed), cascade-skip this step.
+            // continue_on_failure opts the step in to running regardless of dep
+            // outcomes, so the cascade-skip does not apply in that case.
+            if !flow_step.depends_on.is_empty() && !flow_step.continue_on_failure {
+                let all_deps_skipped = flow_step.depends_on.iter().all(|dep| {
+                    status_map
+                        .get(dep)
+                        .map(|s| s == StepStatus::Skipped.as_ref())
+                        .unwrap_or(false)
+                });
+                if all_deps_skipped {
+                    to_skip.push(step.step_name.clone());
+                    continue;
+                }
             }
 
             // Dependencies met — evaluate `when` condition if present.
@@ -559,9 +576,10 @@ impl JobStepRepo {
         Ok(())
     }
 
-    /// Skip pending steps that are unreachable due to failed/skipped dependencies.
-    /// A step is unreachable if any dependency is failed or skipped and the step
+    /// Skip pending steps that are unreachable due to failed/cancelled dependencies.
+    /// A step is unreachable if any dependency is failed or cancelled and the step
     /// does not have `continue_on_failure: true`.
+    /// Skipped dependencies are NOT blocking — they are handled in `promote_ready_steps`.
     /// Returns the names of newly skipped steps (call in a loop until empty for cascading).
     pub async fn skip_unreachable_steps(
         pool: &PgPool,
@@ -588,17 +606,15 @@ impl JobStepRepo {
                 if flow_step.continue_on_failure {
                     return None;
                 }
-                let has_failed_dep = flow_step.depends_on.iter().any(|dep| {
+                let has_blocking_dep = flow_step.depends_on.iter().any(|dep| {
                     status_map
                         .get(dep)
                         .map(|s| {
-                            s == StepStatus::Failed.as_ref()
-                                || s == StepStatus::Skipped.as_ref()
-                                || s == StepStatus::Cancelled.as_ref()
+                            s == StepStatus::Failed.as_ref() || s == StepStatus::Cancelled.as_ref()
                         })
                         .unwrap_or(false)
                 });
-                if has_failed_dep {
+                if has_blocking_dep {
                     Some(step.step_name.clone())
                 } else {
                     None

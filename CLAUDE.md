@@ -221,8 +221,9 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 ### Conditional Flow Steps (`when`)
 - `FlowStep.when: Option<String>` — Tera template expression evaluated at step promotion time
 - `evaluate_condition()` in `template.rs`: renders template, result is truthy if non-empty and not `"false"` or `"0"`
-- Condition-false steps marked `skipped`; cascade via `skip_unreachable_steps()` as normal
-- `continue_on_failure: true` now accepts `skipped` dependencies (convergence after conditional branches)
+- Condition-false steps marked `skipped`; cascade-skip handled in `promote_ready_steps()` (all-deps-skipped rule)
+- Skipped deps count as satisfied by default — convergence works without `continue_on_failure`
+- All-deps-skipped rule: if ALL deps are skipped (none completed), step is cascade-skipped
 - Root steps with `when` (no deps) start as `pending`; evaluated in post-creation promote loop in `job_creator.rs`
 - Condition evaluation errors → step fails with error message (not silently skipped)
 - `build_step_render_context()` includes skipped steps with `{ "output": null }` so downstream `when` expressions get falsy values

@@ -613,8 +613,10 @@ async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
 // ─── Test 12: Cascade — conditional skip propagates to downstream ─────────────
 
 /// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.go }}"`),
-/// C (pending, depends on B).  When A completes with `{"go": false}`, B must
-/// be skipped by condition evaluation and C must be skipped as unreachable.
+/// C (pending, depends on B).  When A completes with `{"go": false}`, B is
+/// skipped by its `when` condition.  C's only dep (B) is then skipped, so the
+/// all-deps-skipped rule in `promote_ready_steps` cascade-skips C in the same
+/// orchestrator call, without needing a separate `skip_unreachable_steps` pass.
 #[tokio::test]
 async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -704,15 +706,20 @@ async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
     Ok(())
 }
 
-// ─── Test 14: continue_on_failure with skipped dep + truthy when ──────────────
+// ─── Test 14: skipped dep treated as satisfied + truthy when ──────────────────
 
 /// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`),
-/// C (pending, depends on B, `continue_on_failure: true`, `when: "true"`).
+/// C (pending, depends on B, `when: "true"`).
 /// When A completes with `{"deploy": false}`, B is skipped by condition.
-/// C has `continue_on_failure`, so a skipped B still satisfies its deps; and
-/// `when: "true"` is truthy, so C must be promoted to ready.
+/// C's skipped dep B is treated as satisfied (not all deps skipped since B is
+/// the only dep and it IS skipped — but C also has a truthy `when`).
+/// Wait — C only has B as dep and B is skipped, so ALL deps are skipped → C
+/// should cascade-skip too.
+///
+/// Updated: C depends on both A and B. A completed, B skipped → mixed deps →
+/// C proceeds. `when: "true"` is truthy, so C must be promoted to ready.
 #[tokio::test]
-async fn test_continue_on_failure_accepts_skipped_dep_with_truthy_when() -> Result<()> {
+async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let mut flow = HashMap::new();
@@ -724,9 +731,8 @@ async fn test_continue_on_failure_accepts_skipped_dep_with_truthy_when() -> Resu
     flow.insert(
         "c".to_string(),
         FlowStep {
-            continue_on_failure: true,
             when: Some("true".to_string()),
-            ..flow_step(vec!["b"])
+            ..flow_step(vec!["a", "b"])
         },
     );
     let task = make_task(flow);
@@ -754,7 +760,7 @@ async fn test_continue_on_failure_accepts_skipped_dep_with_truthy_when() -> Resu
     );
     assert_eq!(
         statuses["c"], "ready",
-        "C must be promoted: continue_on_failure accepts skipped dep and when:true is truthy"
+        "C must be promoted: skipped dep B treated as satisfied (A completed), when:true is truthy"
     );
 
     Ok(())
@@ -878,23 +884,20 @@ async fn test_when_condition_error_marks_step_failed() -> Result<()> {
     Ok(())
 }
 
-// ─── Test 17: Downstream `when` expression referencing a skipped step's null output ─
+// ─── Test 17: All-deps-skipped cascade (no continue_on_failure needed) ────────
 
-/// Skipped steps appear in the render context with `output: null`.  A downstream
-/// step whose `when` expression reads `{{ a.output }}` must therefore evaluate to
-/// falsy (null is falsy) and be skipped itself — even though it has
-/// `continue_on_failure: true` (which means its deps are satisfied).
+/// When ALL of a step's dependencies are skipped, the step is cascade-skipped
+/// before its `when` expression is even evaluated.
 ///
 /// Flow: A (root, ready) → B (depends on A, `when: "false"` → will be skipped)
-///       → C (depends on B, `continue_on_failure: true`, `when: "{{ b.output }}"`)
+///       → C (depends on B, `when: "{{ b.output }}"`)
 ///
 /// After A completes:
 ///  - B is skipped by its `when: "false"` condition.
-///  - C's deps are met (continue_on_failure accepts skipped B).
-///  - C's `when: "{{ b.output }}"` resolves to null → falsy → C is also skipped.
+///  - C's only dep (B) is skipped → all-deps-skipped → C is cascade-skipped.
 ///  - Job completes (no failures, all remaining steps skipped).
 #[tokio::test]
-async fn test_when_condition_referencing_skipped_step_null_output_is_falsy() -> Result<()> {
+async fn test_all_deps_skipped_cascade_skip() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let mut flow = HashMap::new();
@@ -903,7 +906,6 @@ async fn test_when_condition_referencing_skipped_step_null_output_is_falsy() -> 
     flow.insert(
         "c".to_string(),
         FlowStep {
-            continue_on_failure: true,
             when: Some("{{ b.output }}".to_string()),
             ..flow_step(vec!["b"])
         },
@@ -921,11 +923,6 @@ async fn test_when_condition_referencing_skipped_step_null_output_is_falsy() -> 
     )
     .await?;
 
-    // Override the step for C so it has continue_on_failure — but since
-    // continue_on_failure lives in the TaskDef flow (not the DB), the flow
-    // definition above already captures it.  The DB step just needs the right
-    // when_condition, which step_when provides.
-
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
@@ -935,13 +932,527 @@ async fn test_when_condition_referencing_skipped_step_null_output_is_falsy() -> 
     assert_eq!(statuses["b"], "skipped", "B must be skipped (when: false)");
     assert_eq!(
         statuses["c"], "skipped",
-        "C must be skipped: {{ b.output }} resolves to null (skipped step), which is falsy"
+        "C must be cascade-skipped: all deps (B) are skipped"
     );
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(
         job.status, "completed",
         "Job must complete: no failures, all remaining steps are skipped"
+    );
+
+    Ok(())
+}
+
+// ─── Test 18: Convergence without continue_on_failure ────────────────────────
+
+/// Classic if/else convergence: A → B(when:true), A → C(when:false), D depends
+/// on [B, C]. D should run without `continue_on_failure` because skipped deps
+/// are treated as satisfied and at least one dep (B) completed.
+#[tokio::test]
+async fn test_convergence_without_continue_on_failure() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ input.use_fast }}"),
+    );
+    flow.insert(
+        "c".to_string(),
+        flow_step_when(vec!["a"], "{% if not input.use_fast %}true{% endif %}"),
+    );
+    // D depends on both branches — NO continue_on_failure
+    flow.insert("d".to_string(), flow_step(vec!["b", "c"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ input.use_fast }}"),
+            step_when(
+                job_id,
+                "c",
+                "pending",
+                "{% if not input.use_fast %}true{% endif %}",
+            ),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // A completes — render context has input.use_fast = true
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    // Build context with use_fast = true
+    let ctx = json!({"input": {"use_fast": true}});
+    let changed = JobStepRepo::promote_ready_steps(&pool, job_id, &task.flow, Some(&ctx)).await?;
+    assert!(changed.contains(&"b".to_string()), "B should be promoted");
+    assert!(changed.contains(&"c".to_string()), "C should be skipped");
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "ready", "B must be ready (use_fast=true)");
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped (use_fast=true)"
+    );
+    assert_eq!(
+        statuses["d"], "pending",
+        "D still pending — B hasn't completed yet"
+    );
+
+    // B completes → D should be promoted (B completed + C skipped = deps met)
+    JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
+    on_step_completed(&pool, job_id, "b", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["d"], "ready",
+        "D must be promoted: B completed + C skipped (treated as satisfied)"
+    );
+
+    Ok(())
+}
+
+// ─── Test 19: Multi-step branch cascade — all deps skipped ────────────────────
+
+/// A → B(when:false) → C → D — all cascade-skip because each step's only dep
+/// is skipped.
+#[tokio::test]
+async fn test_multi_step_branch_cascade_skip() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step_when(vec!["a"], "false"));
+    flow.insert("c".to_string(), flow_step(vec!["b"]));
+    flow.insert("d".to_string(), flow_step(vec!["c"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "false"),
+            step(job_id, "c", "pending"),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "skipped", "B skipped by when:false");
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C cascade-skipped (all deps skipped)"
+    );
+    assert_eq!(
+        statuses["d"], "skipped",
+        "D cascade-skipped (all deps skipped)"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "Job completes — all steps terminal"
+    );
+
+    Ok(())
+}
+
+// ─── Test 20: Mixed skipped + failed dep without continue_on_failure ──────────
+
+/// A(completed) + B(failed) → C(no cof) — C is blocked by failed B.
+#[tokio::test]
+async fn test_mixed_skipped_and_failed_dep_blocks_without_cof() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step(vec![]));
+    flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    let worker_id = register_worker(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "ready"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    // A completes, B fails
+    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "b", "oops").await?;
+    on_step_completed(&pool, job_id, "b", &task, None).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped: B failed and C has no continue_on_failure"
+    );
+
+    Ok(())
+}
+
+// ─── Test 21: Mixed skipped + failed dep with continue_on_failure ─────────────
+
+/// A(skipped) + B(failed) → C(cof:true) — C runs because cof tolerates both
+/// skipped and failed deps.
+#[tokio::test]
+async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("root".to_string(), flow_step(vec![]));
+    flow.insert(
+        "a".to_string(),
+        flow_step_when(vec!["root"], "false"), // will be skipped
+    );
+    flow.insert("b".to_string(), flow_step(vec!["root"])); // will fail
+    flow.insert("c".to_string(), flow_step_cof(vec!["a", "b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    let worker_id = register_worker(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "root", "ready"),
+            step_when(job_id, "a", "pending", "false"),
+            step(job_id, "b", "pending"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // Root completes → A skipped by condition, B promoted
+    JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
+    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["a"], "skipped");
+    assert_eq!(statuses["b"], "ready");
+
+    // B fails → C should still run (cof:true accepts skipped A + failed B)
+    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "b", "boom").await?;
+    on_step_completed(&pool, job_id, "b", &task, None).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["c"], "ready",
+        "C must be promoted: cof accepts skipped A + failed B"
+    );
+
+    Ok(())
+}
+
+// ─── Test 22: Single completed + single skipped dep — convergence ─────────────
+
+/// Classic if/else: A(completed) + B(skipped) → C runs without cof.
+#[tokio::test]
+async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("root".to_string(), flow_step(vec![]));
+    flow.insert("a".to_string(), flow_step(vec!["root"]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["root"], "false"), // always skipped
+    );
+    // C depends on both — no continue_on_failure
+    flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    let worker_id = register_worker(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "root", "ready"),
+            step(job_id, "a", "pending"),
+            step_when(job_id, "b", "pending", "false"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // Root completes → A promoted, B skipped
+    JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
+    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["a"], "ready");
+    assert_eq!(statuses["b"], "skipped");
+
+    // A completes → C should be promoted (A completed + B skipped = deps met)
+    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["c"], "ready",
+        "C must be promoted: A completed + B skipped (treated as satisfied)"
+    );
+
+    Ok(())
+}
+
+// ─── Test 23: Cancelled dep blocks without cof ────────────────────────────────
+
+/// A(ready) + B(ready) → C(no cof). A completes, B gets cancelled.
+/// C should be skipped because B is cancelled and C has no continue_on_failure.
+#[tokio::test]
+async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let worker_id = register_worker(&pool).await;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step(vec![]));
+    flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "ready"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    // A completes, B is marked running then cancelled
+    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
+    JobStepRepo::mark_cancelled(&pool, job_id, "b").await?;
+    on_step_completed(&pool, job_id, "b", &task, None).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["c"], "skipped",
+        "C must be skipped: B is cancelled and C has no continue_on_failure"
+    );
+
+    Ok(())
+}
+
+// ─── Test 24: Cancelled dep + continue_on_failure → step runs ─────────────────
+
+/// A(completed) + B(cancelled) → C(cof:true). C should be promoted.
+#[tokio::test]
+async fn test_cancelled_dep_with_cof_promotes_step() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let worker_id = register_worker(&pool).await;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step(vec![]));
+    flow.insert("c".to_string(), flow_step_cof(vec!["a", "b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "ready"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+
+    // A completes, B is marked running then cancelled
+    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
+    JobStepRepo::mark_cancelled(&pool, job_id, "b").await?;
+    on_step_completed(&pool, job_id, "b", &task, None).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["c"], "ready",
+        "C must be promoted: cof:true tolerates cancelled dep B"
+    );
+
+    Ok(())
+}
+
+// ─── Test 25: All-deps-skipped + continue_on_failure → step runs ──────────────
+
+/// Root → A(when:false, skipped) → B(cof:true). B should be promoted, not
+/// cascade-skipped. continue_on_failure explicitly opts in to running regardless
+/// of dep outcomes, so the all-deps-skipped cascade does not apply.
+#[tokio::test]
+async fn test_all_deps_skipped_with_cof_promotes_step() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("root".to_string(), flow_step(vec![]));
+    flow.insert("a".to_string(), flow_step_when(vec!["root"], "false"));
+    flow.insert("b".to_string(), flow_step_cof(vec!["a"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "root", "ready"),
+            step_when(job_id, "a", "pending", "false"),
+            step(job_id, "b", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // Root completes → A skipped by condition, B should be promoted (not cascade-skipped)
+    JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
+    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["a"], "skipped", "A must be skipped (when: false)");
+    assert_eq!(
+        statuses["b"], "ready",
+        "B must be promoted: cof:true prevents cascade-skip even when all deps are skipped"
+    );
+
+    Ok(())
+}
+
+// ─── Test 26: Truthy when + all-deps-skipped → cascade-skip wins ──────────────
+
+/// Root → A(when:false) → B(when:"true"). B cascade-skips even though its when
+/// is truthy. The all-deps-skipped check runs before when evaluation.
+#[tokio::test]
+async fn test_truthy_when_overridden_by_all_deps_skipped_cascade() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("root".to_string(), flow_step(vec![]));
+    flow.insert("a".to_string(), flow_step_when(vec!["root"], "false"));
+    flow.insert(
+        "b".to_string(),
+        FlowStep {
+            when: Some("true".to_string()),
+            ..flow_step(vec!["a"])
+        },
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "root", "ready"),
+            step_when(job_id, "a", "pending", "false"),
+            step_when(job_id, "b", "pending", "true"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
+    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["a"], "skipped", "A must be skipped (when: false)");
+    assert_eq!(
+        statuses["b"], "skipped",
+        "B must be cascade-skipped: all deps (A) are skipped; when expression never evaluated"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "Job must complete: no failures, all remaining steps are skipped"
+    );
+
+    Ok(())
+}
+
+// ─── Test 27: Three-dep fan-in — 1 completed + 2 skipped → converges ─────────
+
+/// Root → A(no when), Root → B(when:false), Root → C(when:false),
+/// D depends on [A, B, C].  A completes, B and C skip.
+/// D must be promoted because not ALL deps are skipped (A completed).
+#[tokio::test]
+async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let worker_id = register_worker(&pool).await;
+
+    let mut flow = HashMap::new();
+    flow.insert("root".to_string(), flow_step(vec![]));
+    flow.insert("a".to_string(), flow_step(vec!["root"]));
+    flow.insert("b".to_string(), flow_step_when(vec!["root"], "false"));
+    flow.insert("c".to_string(), flow_step_when(vec!["root"], "false"));
+    flow.insert("d".to_string(), flow_step(vec!["a", "b", "c"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "root", "ready"),
+            step(job_id, "a", "pending"),
+            step_when(job_id, "b", "pending", "false"),
+            step_when(job_id, "c", "pending", "false"),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    // Root completes → A promoted, B and C skipped
+    JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
+    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["a"], "ready", "A must be promoted");
+    assert_eq!(statuses["b"], "skipped", "B must be skipped (when: false)");
+    assert_eq!(statuses["c"], "skipped", "C must be skipped (when: false)");
+    assert_eq!(
+        statuses["d"], "pending",
+        "D still pending — A has not completed yet"
+    );
+
+    // A completes → D should be promoted (A completed + B skipped + C skipped)
+    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["d"], "ready",
+        "D must be promoted: 1 completed (A) + 2 skipped (B, C) — not all deps skipped"
     );
 
     Ok(())
