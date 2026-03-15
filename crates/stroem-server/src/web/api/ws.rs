@@ -2,14 +2,13 @@ use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use crate::web::api::parse_uuid_param;
+use crate::web::error::AppError;
 use axum::{
     extract::{ws::WebSocket, Path, Query, State, WebSocketUpgrade},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
-use serde_json::json;
 use std::sync::Arc;
 use stroem_common::models::auth::Claims;
 use stroem_db::JobRepo;
@@ -39,7 +38,7 @@ pub async fn job_log_stream(
 ) -> Response {
     let job_id = match parse_uuid_param(&id, "job") {
         Ok(id) => id,
-        Err(resp) => return resp,
+        Err(e) => return e.into_response(),
     };
 
     // --- Auth: validate token when auth is enabled, saving claims for ACL ---
@@ -61,19 +60,12 @@ pub async fn job_log_stream(
             Some(t) => match crate::auth::validate_access_token(&t, &auth_config.jwt_secret) {
                 Ok(c) => Some(c),
                 Err(_) => {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(json!({"error": "Invalid or expired token"})),
-                    )
+                    return AppError::Unauthorized("Invalid or expired token".into())
                         .into_response();
                 }
             },
             None => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Authentication required"})),
-                )
-                    .into_response();
+                return AppError::Unauthorized("Authentication required".into()).into_response();
             }
         }
     } else {
@@ -86,10 +78,7 @@ pub async fn job_log_stream(
             let user_id = match claims.sub.parse::<uuid::Uuid>() {
                 Ok(id) => id,
                 Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "Invalid user ID in token"})),
-                    )
+                    return AppError::Internal(anyhow::anyhow!("Invalid user ID in token"))
                         .into_response();
                 }
             };
@@ -97,31 +86,23 @@ pub async fn job_log_stream(
                 match load_user_acl_context(&state.pool, user_id, claims.is_admin).await {
                     Ok(ctx) => ctx,
                     Err(e) => {
-                        tracing::error!("Failed to load ACL context for WS: {:#}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": "Internal server error"})),
+                        return AppError::Internal(
+                            anyhow::anyhow!(e).context("load ACL context for WS"),
                         )
-                            .into_response();
+                        .into_response();
                     }
                 };
             if !is_admin {
                 let job = match JobRepo::get(&state.pool, job_id).await {
                     Ok(Some(j)) => j,
                     Ok(None) => {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(json!({"error": "Job not found"})),
-                        )
-                            .into_response();
+                        return AppError::not_found("Job").into_response();
                     }
                     Err(e) => {
-                        tracing::error!("Failed to get job for ACL check: {:#}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": "Internal server error"})),
+                        return AppError::Internal(
+                            anyhow::anyhow!(e).context("get job for ACL check"),
                         )
-                            .into_response();
+                        .into_response();
                     }
                 };
                 let folder = state
@@ -134,11 +115,7 @@ pub async fn job_log_stream(
                         .acl
                         .evaluate(&job.workspace, &task_path, &claims.email, &groups, false);
                 if matches!(perm, TaskPermission::Deny) {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "Job not found"})),
-                    )
-                        .into_response();
+                    return AppError::not_found("Job").into_response();
                 }
             }
         }

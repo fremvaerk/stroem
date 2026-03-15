@@ -19,7 +19,7 @@ Last updated: 2026-03-13.
 - [ ] Webhook secret accepted in query string (logged by proxies) — deprecate in favor of Authorization header
 - [ ] No per-worker authorization: any worker can complete any step, access any workspace
 - [ ] Refresh tokens not invalidated on password change (30-day window)
-- [ ] Error messages leak internal details (SQL errors, file paths) to API clients — sanitize for clients
+- [x] Error messages leak internal details — `AppError::Internal` logs server-side, returns generic "Internal server error" to clients
 - [ ] `vals` CLI executed via PATH — susceptible to binary replacement
 
 ## Architecture
@@ -35,12 +35,12 @@ Last updated: 2026-03-13.
 - [x] Multi-language inline scripts: `type: shell` → `type: script` with `language`, `dependencies`, `interpreter` fields (Python, JS, TS, Go)
 - [ ] Single-server bottleneck: scheduler, recovery, log broadcast in-process — no leader election
 - [ ] No metrics/Prometheus endpoint — capacity planning blind
-- [ ] No proper health check (`/api/config` probe doesn't verify DB/background tasks)
+- [x] No proper health check — `GET /healthz` with DB ping + scheduler/recovery liveness via `BackgroundTasks` atomic flags
 - [ ] Log retention: local JSONL grows unbounded; no cleanup after S3 upload
 - [ ] No API versioning (`/api/` with no version prefix)
 - [ ] DB transactions only for job+steps creation; other paths still have TOCTOU races
 - [ ] `AppState` is a God Object — no compile-time capability enforcement
-- [ ] Error responses manually constructed with `json!({})` — define `AppError` enum implementing `IntoResponse`
+- [x] Error responses — `AppError` enum in `web/error.rs` with `IntoResponse`, all handlers migrated, internal details sanitized
 - [x] Step-level timeout, job-level timeout, and cron concurrency policy
 - [ ] No heartbeat failure → worker re-registration logic
 - [ ] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
@@ -253,6 +253,22 @@ Last updated: 2026-03-13.
 
 ### Minor
 - [x] Test 12 comment says "skipped as unreachable" but cascade-skip now happens in `promote_ready_steps` — update comment — `orchestrator_test.rs`
+
+## Review: Health Check + AppError Migration (2026-03-15)
+
+### Critical
+- [x] `middleware.rs:33` — `user_id()` returns 500 → changed to 401 Unauthorized
+- [x] `auth.rs:112,170` — "Auth not configured" returns 404 → changed to 400 BadRequest
+
+### Important
+- [x] `health.rs:15` — `SELECT 1` wrapped in `tokio::time::timeout(3s, ...)`
+- [x] `tasks.rs:335` — `create_job_for_task` validation errors now mapped to 400 BadRequest
+- [x] AliveGuard extracted to `state.rs` as `pub(crate)`, removed from scheduler.rs and recovery.rs
+- [x] `health.rs` test `test_alive_guard_drop_clears_flag` now tests real `AliveGuard`
+
+### Minor
+- [x] `api_keys.rs` — added `.context()` to all `ApiKeyRepo` calls
+- [x] `jobs.rs:169,508` — `.into_response()` is actually required (return type is `Result<Response, _>`) — verified correct
 
 ### Minor
 - [x] Validation doesn't catch typos in `when` variable references (step names) — documented as known limitation with comment — `validation.rs`

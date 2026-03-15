@@ -4,9 +4,11 @@ use crate::auth::{
 use crate::config::AuthConfig;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::State,
-    http::{header, StatusCode},
+    http::header,
     response::{IntoResponse, Response},
     Json,
 };
@@ -73,40 +75,23 @@ pub struct IssuedTokenPair {
 
 /// Create an access token + refresh token pair and persist the refresh token.
 ///
-/// Returns [`IssuedTokenPair`] on success, or a pre-built error [`Response`]
-/// on failure so callers can directly `return` it.
-#[allow(clippy::result_large_err)]
+/// Returns [`IssuedTokenPair`] on success, or an [`AppError`] on failure.
 pub async fn issue_token_pair(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
     email: &str,
     is_admin: bool,
     jwt_secret: &str,
-) -> Result<IssuedTokenPair, Response> {
-    let access_token = match create_access_token(&user_id.to_string(), email, is_admin, jwt_secret)
-    {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to create access token: {:#}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response());
-        }
-    };
+) -> Result<IssuedTokenPair, AppError> {
+    let access_token = create_access_token(&user_id.to_string(), email, is_admin, jwt_secret)
+        .context("create access token")?;
 
     let (raw_refresh, refresh_hash) = generate_refresh_token();
     let expires_at = Utc::now() + Duration::days(30);
 
-    if let Err(e) = RefreshTokenRepo::create(pool, &refresh_hash, user_id, expires_at).await {
-        tracing::error!("Failed to store refresh token: {:#}", e);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Internal server error"})),
-        )
-            .into_response());
-    }
+    RefreshTokenRepo::create(pool, &refresh_hash, user_id, expires_at)
+        .await
+        .context("store refresh token")?;
 
     Ok(IssuedTokenPair {
         access_token,
@@ -119,92 +104,51 @@ pub async fn issue_token_pair(
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
-) -> impl IntoResponse {
-    let auth_config = match &state.config.auth {
-        Some(cfg) => cfg,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Authentication not configured"})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<Response, AppError> {
+    let auth_config = state
+        .config
+        .auth
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("Authentication not configured".into()))?;
 
-    let user = match UserRepo::get_by_email(&state.pool, &req.email).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid email or password"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("DB error during login: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
-    };
+    let user = UserRepo::get_by_email(&state.pool, &req.email)
+        .await
+        .context("DB error during login")?
+        .ok_or_else(|| AppError::Unauthorized("Invalid email or password".into()))?;
 
-    let password_hash = match &user.password_hash {
-        Some(h) => h,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid email or password"})),
-            )
-                .into_response()
-        }
-    };
+    let password_hash = user
+        .password_hash
+        .as_ref()
+        .ok_or_else(|| AppError::Unauthorized("Invalid email or password".into()))?;
 
-    match verify_password(&req.password, password_hash) {
-        Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid email or password"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Password verification error: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
+    let password_ok =
+        verify_password(&req.password, password_hash).context("password verification")?;
+
+    if !password_ok {
+        return Err(AppError::Unauthorized("Invalid email or password".into()));
     }
 
     if let Err(e) = UserRepo::touch_last_login(&state.pool, user.user_id).await {
         tracing::warn!("Failed to update last_login_at: {:#}", e);
     }
 
-    match issue_token_pair(
+    let tokens = issue_token_pair(
         &state.pool,
         user.user_id,
         &user.email,
         user.is_admin,
         &auth_config.jwt_secret,
     )
-    .await
-    {
-        Ok(tokens) => {
-            let cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
-            (
-                [(header::SET_COOKIE, cookie)],
-                Json(TokenResponse {
-                    access_token: tokens.access_token,
-                }),
-            )
-                .into_response()
-        }
-        Err(resp) => resp,
-    }
+    .await?;
+
+    let cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Json(TokenResponse {
+            access_token: tokens.access_token,
+        }),
+    )
+        .into_response())
 }
 
 /// POST /api/auth/refresh
@@ -218,17 +162,12 @@ pub async fn refresh(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     req: Option<Json<RefreshRequest>>,
-) -> impl IntoResponse {
-    let auth_config = match &state.config.auth {
-        Some(cfg) => cfg,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Authentication not configured"})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<Response, AppError> {
+    let auth_config = state
+        .config
+        .auth
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("Authentication not configured".into()))?;
 
     // Prefer cookie; fall back to body token (backward compat for CLI/API clients).
     let raw_token = jar
@@ -239,42 +178,20 @@ pub async fn refresh(
     let raw_token = match raw_token {
         Some(t) if !t.is_empty() => t,
         _ => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "No refresh token provided"})),
-            )
-                .into_response()
+            return Err(AppError::Unauthorized("No refresh token provided".into()));
         }
     };
 
     let token_hash = hash_refresh_token(&raw_token);
 
-    let token_row = match RefreshTokenRepo::get_by_hash(&state.pool, &token_hash).await {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid refresh token"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("DB error during refresh: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
-    };
+    let token_row = RefreshTokenRepo::get_by_hash(&state.pool, &token_hash)
+        .await
+        .context("DB error during refresh")?
+        .ok_or_else(|| AppError::Unauthorized("Invalid refresh token".into()))?;
 
     if token_row.expires_at < Utc::now() {
         let _ = RefreshTokenRepo::delete(&state.pool, &token_hash).await;
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Refresh token expired"})),
-        )
-            .into_response();
+        return Err(AppError::Unauthorized("Refresh token expired".into()));
     }
 
     // Delete old token (rotation)
@@ -282,46 +199,28 @@ pub async fn refresh(
         tracing::error!("Failed to delete old refresh token: {:#}", e);
     }
 
-    let user = match UserRepo::get_by_id(&state.pool, token_row.user_id).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "User not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("DB error looking up user: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
-    };
+    let user = UserRepo::get_by_id(&state.pool, token_row.user_id)
+        .await
+        .context("DB error looking up user")?
+        .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
 
-    match issue_token_pair(
+    let tokens = issue_token_pair(
         &state.pool,
         user.user_id,
         &user.email,
         user.is_admin,
         &auth_config.jwt_secret,
     )
-    .await
-    {
-        Ok(tokens) => {
-            let cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
-            (
-                [(header::SET_COOKIE, cookie)],
-                Json(TokenResponse {
-                    access_token: tokens.access_token,
-                }),
-            )
-                .into_response()
-        }
-        Err(resp) => resp,
-    }
+    .await?;
+
+    let cookie = refresh_token_cookie(&tokens.raw_refresh_token, 2_592_000, auth_config);
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Json(TokenResponse {
+            access_token: tokens.access_token,
+        }),
+    )
+        .into_response())
 }
 
 /// POST /api/auth/logout
@@ -335,7 +234,7 @@ pub async fn logout(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     req: Option<Json<LogoutRequest>>,
-) -> impl IntoResponse {
+) -> Result<Response, AppError> {
     let auth_config = state.config.auth.as_ref();
 
     // Prefer cookie; fall back to body token.
@@ -346,14 +245,9 @@ pub async fn logout(
 
     if let Some(raw) = raw_token.filter(|t| !t.is_empty()) {
         let token_hash = hash_refresh_token(&raw);
-        if let Err(e) = RefreshTokenRepo::delete(&state.pool, &token_hash).await {
-            tracing::error!("Failed to delete refresh token: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
+        RefreshTokenRepo::delete(&state.pool, &token_hash)
+            .await
+            .context("delete refresh token")?;
     }
 
     // Clear the cookie in the response (Max-Age=0), respecting the Secure flag.
@@ -366,39 +260,25 @@ pub async fn logout(
             )
         });
 
-    (
+    Ok((
         [(header::SET_COOKIE, clear_cookie)],
         Json(json!({"status": "ok"})),
     )
-        .into_response()
+        .into_response())
 }
 
 /// GET /api/auth/me
 #[tracing::instrument(skip(state))]
-pub async fn me(State(state): State<Arc<AppState>>, auth: AuthUser) -> impl IntoResponse {
-    let user_id = match auth.user_id() {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+pub async fn me(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    let user_id = auth.user_id()?;
 
-    let user = match UserRepo::get_by_id(&state.pool, user_id).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "User not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to get user: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response();
-        }
-    };
+    let user = UserRepo::get_by_id(&state.pool, user_id)
+        .await
+        .context("get user")?
+        .ok_or_else(|| AppError::not_found("User"))?;
 
     let groups: Vec<String> =
         match stroem_db::UserGroupRepo::get_groups_for_user(&state.pool, user.user_id).await {
@@ -409,13 +289,12 @@ pub async fn me(State(state): State<Arc<AppState>>, auth: AuthUser) -> impl Into
             }
         };
 
-    Json(json!({
+    Ok(Json(json!({
         "user_id": user.user_id,
         "name": user.name,
         "email": user.email,
         "is_admin": user.is_admin,
         "groups": groups,
         "created_at": user.created_at,
-    }))
-    .into_response()
+    })))
 }

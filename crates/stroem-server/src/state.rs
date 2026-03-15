@@ -7,9 +7,50 @@ use crate::oidc::OidcProvider;
 use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use uuid::Uuid;
+
+/// Drop guard that sets the alive flag to `true` on creation and `false` on drop.
+/// Handles both clean exit and panics.
+pub(crate) struct AliveGuard(Arc<AtomicBool>);
+
+impl AliveGuard {
+    pub(crate) fn new(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Tracks liveness of background tasks (scheduler, recovery sweeper).
+/// Each flag is `true` while the task is running, `false` after it exits.
+#[derive(Clone)]
+pub struct BackgroundTasks {
+    pub scheduler_alive: Arc<AtomicBool>,
+    pub recovery_alive: Arc<AtomicBool>,
+}
+
+impl BackgroundTasks {
+    pub fn new() -> Self {
+        Self {
+            scheduler_alive: Arc::new(AtomicBool::new(false)),
+            recovery_alive: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Default for BackgroundTasks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Shared application state
 #[derive(Clone)]
@@ -25,6 +66,8 @@ pub struct AppState {
     /// Set of job IDs that have been cancelled. Workers poll this to detect
     /// cancellation and kill running processes.
     pub cancelled_jobs: Arc<std::sync::RwLock<HashSet<Uuid>>>,
+    /// Liveness flags for background tasks (scheduler, recovery sweeper).
+    pub background_tasks: BackgroundTasks,
 }
 
 impl AppState {
@@ -47,6 +90,7 @@ impl AppState {
             oidc_providers: Arc::new(oidc_providers),
             job_completion: Arc::new(JobCompletionNotifier::new()),
             cancelled_jobs: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            background_tasks: BackgroundTasks::new(),
         }
     }
 

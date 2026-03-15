@@ -1,4 +1,6 @@
 use crate::state::AppState;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
@@ -6,7 +8,6 @@ use axum::{
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use serde_json::json;
 use std::sync::Arc;
 
 /// GET /worker/workspace/:ws.tar.gz - Download workspace as tarball
@@ -15,20 +16,15 @@ pub async fn download_workspace(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(ws_filename): Path<String>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // Strip .tar.gz suffix to get workspace name
     let ws_name = ws_filename.strip_suffix(".tar.gz").unwrap_or(&ws_filename);
 
-    let workspace_path = match state.workspaces.get_path(ws_name) {
-        Some(p) => p.to_path_buf(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                axum::Json(json!({"error": format!("Workspace '{}' not found", ws_name)})),
-            )
-                .into_response();
-        }
-    };
+    let workspace_path = state
+        .workspaces
+        .get_path(ws_name)
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| AppError::NotFound(format!("Workspace '{}' not found", ws_name)))?;
 
     let revision = state.workspaces.get_revision(ws_name);
 
@@ -37,7 +33,7 @@ pub async fn download_workspace(
         if let Ok(etag_str) = etag.to_str() {
             if let Some(ref rev) = revision {
                 if etag_str.trim_matches('"') == rev.as_str() {
-                    return StatusCode::NOT_MODIFIED.into_response();
+                    return Ok(StatusCode::NOT_MODIFIED.into_response());
                 }
             }
         }
@@ -51,22 +47,11 @@ pub async fn download_workspace(
         match tokio::task::spawn_blocking(move || build_tarball(&workspace_path, &library_paths))
             .await
         {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => {
-                tracing::error!("Failed to build workspace tarball: {:#}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(json!({"error": "Failed to build tarball"})),
-                )
-                    .into_response();
-            }
+            Ok(result) => result.context("build workspace tarball")?,
             Err(e) => {
-                tracing::error!("Tarball task panicked: {:#}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(json!({"error": "Internal error"})),
-                )
-                    .into_response();
+                return Err(AppError::Internal(
+                    anyhow::anyhow!(e).context("tarball task panicked"),
+                ));
             }
         };
 
@@ -77,7 +62,7 @@ pub async fn download_workspace(
         response_headers.insert(header::ETAG, format!("\"{}\"", rev).parse().unwrap());
     }
 
-    (StatusCode::OK, response_headers, tarball).into_response()
+    Ok((StatusCode::OK, response_headers, tarball).into_response())
 }
 
 /// Build a gzipped tar archive of a workspace directory with library overlays

@@ -1,9 +1,11 @@
 use super::rendering;
 use crate::state::AppState;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -95,10 +97,10 @@ pub struct CompleteJobRequest {
 pub async fn register_worker(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let worker_id = Uuid::new_v4();
 
-    match WorkerRepo::register(
+    WorkerRepo::register(
         &state.pool,
         worker_id,
         &req.name,
@@ -106,26 +108,16 @@ pub async fn register_worker(
         req.version.as_deref(),
     )
     .await
-    {
-        Ok(_) => {
-            match &req.version {
-                Some(v) => tracing::info!("Registered worker: {} ({}) v{}", req.name, worker_id, v),
-                None => tracing::info!("Registered worker: {} ({})", req.name, worker_id),
-            }
-            Json(RegisterResponse {
-                worker_id: worker_id.to_string(),
-            })
-            .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to register worker: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to register worker: {}", e)})),
-            )
-                .into_response()
-        }
+    .context("register worker")?;
+
+    match &req.version {
+        Some(v) => tracing::info!("Registered worker: {} ({}) v{}", req.name, worker_id, v),
+        None => tracing::info!("Registered worker: {} ({})", req.name, worker_id),
     }
+
+    Ok(Json(RegisterResponse {
+        worker_id: worker_id.to_string(),
+    }))
 }
 
 /// POST /worker/heartbeat - Update worker heartbeat
@@ -133,29 +125,15 @@ pub async fn register_worker(
 pub async fn heartbeat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<HeartbeatRequest>,
-) -> impl IntoResponse {
-    let worker_id = match Uuid::parse_str(&req.worker_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid worker ID"})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let worker_id = Uuid::parse_str(&req.worker_id)
+        .map_err(|_| AppError::BadRequest("Invalid worker ID".into()))?;
 
-    match WorkerRepo::heartbeat(&state.pool, worker_id).await {
-        Ok(_) => Json(json!({"status": "ok"})).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to update heartbeat: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to update heartbeat: {}", e)})),
-            )
-                .into_response()
-        }
-    }
+    WorkerRepo::heartbeat(&state.pool, worker_id)
+        .await
+        .context("update heartbeat")?;
+
+    Ok(Json(json!({"status": "ok"})))
 }
 
 /// Fail a step that was claimed but couldn't be rendered.
@@ -165,7 +143,7 @@ async fn fail_claimed_step(
     job_id: Uuid,
     step_name: &str,
     error_msg: &str,
-) -> axum::response::Response {
+) -> Response {
     tracing::error!(
         job_id = %job_id,
         step_name = %step_name,
@@ -198,22 +176,17 @@ async fn fail_claimed_step(
 pub async fn claim_job(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ClaimRequest>,
-) -> impl IntoResponse {
-    let worker_id = match Uuid::parse_str(&req.worker_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid worker ID"})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<Response, AppError> {
+    let worker_id = Uuid::parse_str(&req.worker_id)
+        .map_err(|_| AppError::BadRequest("Invalid worker ID".into()))?;
 
-    let step = match JobStepRepo::claim_ready_step(&state.pool, &req.tags, worker_id).await {
-        Ok(Some(step)) => step,
-        Ok(None) => {
-            return Json(ClaimResponse {
+    let step = match JobStepRepo::claim_ready_step(&state.pool, &req.tags, worker_id)
+        .await
+        .context("claim ready step")?
+    {
+        Some(step) => step,
+        None => {
+            return Ok(Json(ClaimResponse {
                 workspace: None,
                 job_id: None,
                 task_name: None,
@@ -226,15 +199,7 @@ pub async fn claim_job(
                 runner: None,
                 timeout_secs: None,
             })
-            .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to claim job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to claim job: {}", e)})),
-            )
-                .into_response();
+            .into_response());
         }
     };
 
@@ -246,23 +211,17 @@ pub async fn claim_job(
     );
 
     // Get the job to access task_name, workspace, and job input
-    let job = match JobRepo::get(&state.pool, step.job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => {
+    let job = match JobRepo::get(&state.pool, step.job_id)
+        .await
+        .context("get job for claimed step")?
+    {
+        Some(j) => j,
+        None => {
             tracing::error!("Job {} not found", step.job_id);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to get job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get job: {}", e)})),
-            )
-                .into_response();
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "Job {} not found after claim",
+                step.job_id
+            )));
         }
     };
 
@@ -294,7 +253,7 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("Failed to render step input template: {:#}", e);
-                return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
+                return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
             }
         };
 
@@ -302,7 +261,7 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("{:#}", e);
-                return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
+                return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
             }
         }
     } else {
@@ -330,7 +289,7 @@ pub async fn claim_job(
         Ok(spec) => spec,
         Err(e) => {
             let msg = format!("{:#}", e);
-            return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
+            return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
         }
     };
 
@@ -343,7 +302,7 @@ pub async fn claim_job(
         Ok(img) => img,
         Err(e) => {
             let msg = format!("{:#}", e);
-            return fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await;
+            return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
         }
     };
 
@@ -360,7 +319,7 @@ pub async fn claim_job(
         tracing::warn!("Failed to persist rendered input: {:#}", e);
     }
 
-    Json(ClaimResponse {
+    Ok(Json(ClaimResponse {
         workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
         task_name: Some(job.task_name),
@@ -373,7 +332,7 @@ pub async fn claim_job(
         runner: Some(step.runner),
         timeout_secs: step.timeout_secs,
     })
-    .into_response()
+    .into_response())
 }
 
 /// POST /worker/jobs/:id/steps/:step/start - Mark step as running
@@ -382,35 +341,20 @@ pub async fn start_step(
     State(state): State<Arc<AppState>>,
     Path((job_id, step_name)): Path<(Uuid, String)>,
     Json(req): Json<StartStepRequest>,
-) -> impl IntoResponse {
-    let worker_id = match Uuid::parse_str(&req.worker_id) {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid worker ID"})),
-            )
-                .into_response()
-        }
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let worker_id = Uuid::parse_str(&req.worker_id)
+        .map_err(|_| AppError::BadRequest("Invalid worker ID".into()))?;
 
-    match JobStepRepo::mark_running(&state.pool, job_id, &step_name, worker_id).await {
-        Ok(_) => {
-            // Also transition the job itself to running (idempotent — no-op if already running)
-            if let Err(e) = JobRepo::mark_running_if_pending(&state.pool, job_id, worker_id).await {
-                tracing::warn!("Failed to transition job to running: {:#}", e);
-            }
-            Json(json!({"status": "ok"})).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to mark step as running: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to mark step as running: {}", e)})),
-            )
-                .into_response()
-        }
+    JobStepRepo::mark_running(&state.pool, job_id, &step_name, worker_id)
+        .await
+        .context("mark step running")?;
+
+    // Also transition the job itself to running (idempotent — no-op if already running)
+    if let Err(e) = JobRepo::mark_running_if_pending(&state.pool, job_id, worker_id).await {
+        tracing::warn!("Failed to transition job to running: {:#}", e);
     }
+
+    Ok(Json(json!({"status": "ok"})))
 }
 
 /// POST /worker/jobs/:id/steps/:step/complete - Mark step as completed
@@ -419,7 +363,7 @@ pub async fn complete_step(
     State(state): State<Arc<AppState>>,
     Path((job_id, step_name)): Path<(Uuid, String)>,
     Json(req): Json<CompleteStepRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // Determine if this step failed based on exit_code or error
     let step_failed = req.exit_code.unwrap_or(0) != 0 || req.error.is_some();
 
@@ -427,37 +371,21 @@ pub async fn complete_step(
         let error_msg = req
             .error
             .unwrap_or_else(|| format!("Process exited with code {}", req.exit_code.unwrap_or(1)));
-        if let Err(e) = JobStepRepo::mark_failed(&state.pool, job_id, &step_name, &error_msg).await
-        {
-            tracing::error!("Failed to mark step as failed: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to mark step as failed: {}", e)})),
-            )
-                .into_response();
-        }
-    } else if let Err(e) =
-        JobStepRepo::mark_completed(&state.pool, job_id, &step_name, req.output).await
-    {
-        tracing::error!("Failed to mark step as completed: {:#}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to mark step as completed: {}", e)})),
-        )
-            .into_response();
+        JobStepRepo::mark_failed(&state.pool, job_id, &step_name, &error_msg)
+            .await
+            .context("mark step failed")?;
+    } else {
+        JobStepRepo::mark_completed(&state.pool, job_id, &step_name, req.output)
+            .await
+            .context("mark step completed")?;
     }
 
     // Orchestrate: promote steps, skip unreachable, propagate to parent, fire hooks
-    if let Err(e) = crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await {
-        tracing::error!("Orchestration error after step completion: {:#}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Orchestrator error: {}", e)})),
-        )
-            .into_response();
-    }
+    crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name)
+        .await
+        .context("orchestration after step completion")?;
 
-    Json(json!({"status": "ok"})).into_response()
+    Ok(Json(json!({"status": "ok"})))
 }
 
 /// POST /worker/jobs/:id/logs - Append log chunk
@@ -466,7 +394,7 @@ pub async fn append_log(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<Uuid>,
     Json(req): Json<AppendLogRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // Convert structured log lines to JSONL with step field
     let step = req.step_name.as_deref().unwrap_or("");
     let jsonl_chunk: String = req
@@ -485,31 +413,25 @@ pub async fn append_log(
         .join("\n")
         + "\n";
 
-    match state.log_storage.append_log(job_id, &jsonl_chunk).await {
-        Ok(_) => {
-            // Update log path in database (idempotent)
-            let log_path = state.log_storage.get_log_path(job_id);
-            if let Err(e) = JobRepo::set_log_path(&state.pool, job_id, &log_path).await {
-                tracing::warn!("Failed to update log path: {:#}", e);
-            }
+    state
+        .log_storage
+        .append_log(job_id, &jsonl_chunk)
+        .await
+        .context("append log")?;
 
-            // Broadcast to WebSocket subscribers
-            state
-                .log_broadcast
-                .broadcast(job_id, jsonl_chunk.clone())
-                .await;
-
-            Json(json!({"status": "ok"})).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to append log: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to append log: {}", e)})),
-            )
-                .into_response()
-        }
+    // Update log path in database (idempotent)
+    let log_path = state.log_storage.get_log_path(job_id);
+    if let Err(e) = JobRepo::set_log_path(&state.pool, job_id, &log_path).await {
+        tracing::warn!("Failed to update log path: {:#}", e);
     }
+
+    // Broadcast to WebSocket subscribers
+    state
+        .log_broadcast
+        .broadcast(job_id, jsonl_chunk.clone())
+        .await;
+
+    Ok(Json(json!({"status": "ok"})))
 }
 
 /// GET /worker/jobs/:id/cancelled - Check if a job has been cancelled
@@ -519,7 +441,7 @@ pub async fn check_cancelled(
     Path(job_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let cancelled = crate::cancellation::is_cancelled(&state, job_id);
-    Json(json!({"cancelled": cancelled})).into_response()
+    Json(json!({"cancelled": cancelled}))
 }
 
 /// POST /worker/jobs/:id/complete - Mark job as completed (for local mode)
@@ -528,25 +450,17 @@ pub async fn complete_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<Uuid>,
     Json(req): Json<CompleteJobRequest>,
-) -> impl IntoResponse {
-    match JobRepo::mark_completed(&state.pool, job_id, req.output).await {
-        Ok(_) => {
-            // Handle terminal state: S3 upload, parent propagation, hooks
-            if let Err(e) = crate::job_recovery::handle_job_terminal(&state, job_id).await {
-                tracing::error!("Failed to handle job terminal state: {:#}", e);
-            }
+) -> Result<impl IntoResponse, AppError> {
+    JobRepo::mark_completed(&state.pool, job_id, req.output)
+        .await
+        .context("mark job completed")?;
 
-            Json(json!({"status": "ok"})).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to mark job as completed: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to mark job as completed: {}", e)})),
-            )
-                .into_response()
-        }
+    // Handle terminal state: S3 upload, parent propagation, hooks
+    if let Err(e) = crate::job_recovery::handle_job_terminal(&state, job_id).await {
+        tracing::error!("Failed to handle job terminal state: {:#}", e);
     }
+
+    Ok(Json(json!({"status": "ok"})))
 }
 
 #[cfg(test)]

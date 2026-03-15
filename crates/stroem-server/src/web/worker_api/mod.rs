@@ -3,15 +3,15 @@ pub mod rendering;
 pub mod workspace;
 
 use crate::state::AppState;
+use crate::web::error::AppError;
 use axum::{
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::header,
     middleware::{self, Next},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Router,
 };
-use serde_json::json;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
@@ -20,7 +20,7 @@ async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+) -> Response {
     // Extract authorization header
     let auth_header = request
         .headers()
@@ -33,17 +33,12 @@ async fn auth_middleware(
             if let Some(token) = header_value.strip_prefix("Bearer ") {
                 token
             } else {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Invalid authorization header format"})),
-                ));
+                return AppError::Unauthorized("Invalid authorization header format".into())
+                    .into_response();
             }
         }
         None => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Missing authorization header"})),
-            ))
+            return AppError::Unauthorized("Missing authorization header".into()).into_response();
         }
     };
 
@@ -53,13 +48,10 @@ async fn auth_middleware(
         .ct_eq(state.config.worker_token.as_bytes())
         .into();
     if !token_valid {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Invalid worker token"})),
-        ));
+        return AppError::Unauthorized("Invalid worker token".into()).into_response();
     }
 
-    Ok(next.run(request).await)
+    next.run(request).await
 }
 
 pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {

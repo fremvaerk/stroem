@@ -2,6 +2,7 @@ use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
+use crate::web::error::AppError;
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
@@ -76,11 +77,8 @@ pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(ws): Path<String>,
-) -> impl IntoResponse {
-    let workspace = match get_workspace_or_error(&state, &ws).await {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let workspace = get_workspace_or_error(&state, &ws).await?;
 
     let mut triggers: Vec<TriggerInfo> = workspace
         .triggers
@@ -115,7 +113,7 @@ pub async fn list_triggers(
         }
     }
 
-    Json(triggers).into_response()
+    Ok(Json(triggers))
 }
 
 #[cfg(test)]

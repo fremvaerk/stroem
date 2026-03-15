@@ -3,10 +3,12 @@ use crate::log_storage::JobLogMeta;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -43,38 +45,28 @@ pub struct DashboardStats {
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // Resolve ACL scope when auth is present and ACL is configured
-    let acl_pairs = match resolve_acl_scope(&state, &auth_user).await {
-        Ok(scope) => scope,
-        Err(resp) => return resp,
+    let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
+
+    let counts = match acl_pairs {
+        Some(ref pairs) => JobRepo::get_status_counts_with_acl(&state.pool, pairs)
+            .await
+            .context("get status counts with ACL")?,
+        None => JobRepo::get_status_counts(&state.pool)
+            .await
+            .context("get status counts")?,
     };
 
-    let counts_result = match acl_pairs {
-        Some(ref pairs) => JobRepo::get_status_counts_with_acl(&state.pool, pairs).await,
-        None => JobRepo::get_status_counts(&state.pool).await,
+    let stats = DashboardStats {
+        pending: *counts.get("pending").unwrap_or(&0),
+        running: *counts.get("running").unwrap_or(&0),
+        completed: *counts.get("completed").unwrap_or(&0),
+        failed: *counts.get("failed").unwrap_or(&0),
+        cancelled: *counts.get("cancelled").unwrap_or(&0),
     };
 
-    match counts_result {
-        Ok(counts) => {
-            let stats = DashboardStats {
-                pending: *counts.get("pending").unwrap_or(&0),
-                running: *counts.get("running").unwrap_or(&0),
-                completed: *counts.get("completed").unwrap_or(&0),
-                failed: *counts.get("failed").unwrap_or(&0),
-                cancelled: *counts.get("cancelled").unwrap_or(&0),
-            };
-            (StatusCode::OK, Json(stats)).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to get stats: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to get stats"})),
-            )
-                .into_response()
-        }
-    }
+    Ok((StatusCode::OK, Json(stats)))
 }
 
 /// GET /api/jobs - List jobs
@@ -83,30 +75,25 @@ pub async fn list_jobs(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Query(query): Query<ListJobsQuery>,
-) -> impl IntoResponse {
+) -> Result<Response, AppError> {
     if query.task_name.is_some() && query.workspace.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "task_name filter requires workspace"})),
-        )
-            .into_response();
+        return Err(AppError::BadRequest(
+            "task_name filter requires workspace".into(),
+        ));
     }
 
     if let Some(ref s) = query.status {
         if !VALID_STATUSES.contains(&s.as_str()) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Invalid status filter '{}'. Must be one of: {}", s, VALID_STATUSES.join(", "))})),
-            )
-                .into_response();
+            return Err(AppError::BadRequest(format!(
+                "Invalid status filter '{}'. Must be one of: {}",
+                s,
+                VALID_STATUSES.join(", ")
+            )));
         }
     }
 
     // Resolve ACL scope
-    let acl_pairs = match resolve_acl_scope(&state, &auth_user).await {
-        Ok(scope) => scope,
-        Err(resp) => return resp,
-    };
+    let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
 
     let status = query.status.as_deref();
 
@@ -157,38 +144,29 @@ pub async fn list_jobs(
         },
     };
 
-    match (result, total) {
-        (Ok(jobs), Ok(total)) => {
-            let jobs_json: Vec<serde_json::Value> = jobs
-                .iter()
-                .map(|job| {
-                    json!({
-                        "job_id": job.job_id,
-                        "workspace": job.workspace,
-                        "task_name": job.task_name,
-                        "mode": job.mode,
-                        "status": job.status,
-                        "source_type": job.source_type,
-                        "source_id": job.source_id,
-                        "worker_id": job.worker_id,
-                        "created_at": job.created_at,
-                        "started_at": job.started_at,
-                        "completed_at": job.completed_at,
-                    })
-                })
-                .collect();
+    let jobs = result.context("list jobs")?;
+    let total = total.context("count jobs")?;
 
-            Json(json!({ "items": jobs_json, "total": total })).into_response()
-        }
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("Failed to list jobs: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to list jobs: {}", e)})),
-            )
-                .into_response()
-        }
-    }
+    let jobs_json: Vec<serde_json::Value> = jobs
+        .iter()
+        .map(|job| {
+            json!({
+                "job_id": job.job_id,
+                "workspace": job.workspace,
+                "task_name": job.task_name,
+                "mode": job.mode,
+                "status": job.status,
+                "source_type": job.source_type,
+                "source_id": job.source_id,
+                "worker_id": job.worker_id,
+                "created_at": job.created_at,
+                "started_at": job.started_at,
+                "completed_at": job.completed_at,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "items": jobs_json, "total": total })).into_response())
 }
 
 #[derive(Debug, Serialize)]
@@ -215,57 +193,25 @@ pub async fn get_job(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    let job_id = match parse_uuid_param(&id, "job") {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let job_id = parse_uuid_param(&id, "job")?;
 
     // Get job
-    let job = match JobRepo::get(&state.pool, job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to get job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get job: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
     if matches!(perm, TaskPermission::Deny) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Job not found"})),
-        )
-            .into_response();
+        return Err(AppError::not_found("Job"));
     }
 
     // Get steps
-    let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to get job steps: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get job steps: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
+        .await
+        .context("get job steps")?;
 
     let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
@@ -373,7 +319,7 @@ pub async fn get_job(
         .unwrap_or_default();
     redact_response(&mut response, &secret_values);
 
-    Json(response).into_response()
+    Ok(Json(response))
 }
 
 const REDACTED: &str = "••••••";
@@ -461,42 +407,18 @@ pub async fn get_step_logs(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path((id, step_name)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let job_id = match parse_uuid_param(&id, "job") {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let job_id = parse_uuid_param(&id, "job")?;
 
-    let job = match JobRepo::get(&state.pool, job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to get job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get job: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
     if matches!(perm, TaskPermission::Deny) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Job not found"})),
-        )
-            .into_response();
+        return Err(AppError::not_found("Job"));
     }
 
     let meta = JobLogMeta {
@@ -505,21 +427,13 @@ pub async fn get_step_logs(
         created_at: job.created_at,
     };
 
-    match state
+    let logs = state
         .log_storage
         .get_step_log(job_id, &step_name, &meta)
         .await
-    {
-        Ok(logs) => Json(json!({"logs": logs})).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get step logs: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get step logs: {}", e)})),
-            )
-                .into_response()
-        }
-    }
+        .context("get step logs")?;
+
+    Ok(Json(json!({"logs": logs})))
 }
 
 /// GET /api/jobs/:id/logs - Get log file contents
@@ -528,42 +442,18 @@ pub async fn get_job_logs(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    let job_id = match parse_uuid_param(&id, "job") {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let job_id = parse_uuid_param(&id, "job")?;
 
-    let job = match JobRepo::get(&state.pool, job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to get job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get job: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check
-    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
     if matches!(perm, TaskPermission::Deny) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Job not found"})),
-        )
-            .into_response();
+        return Err(AppError::not_found("Job"));
     }
 
     let meta = JobLogMeta {
@@ -572,17 +462,13 @@ pub async fn get_job_logs(
         created_at: job.created_at,
     };
 
-    match state.log_storage.get_log(job_id, &meta).await {
-        Ok(logs) => Json(json!({"logs": logs})).into_response(),
-        Err(e) => {
-            tracing::error!("Failed to get logs: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get logs: {}", e)})),
-            )
-                .into_response()
-        }
-    }
+    let logs = state
+        .log_storage
+        .get_log(job_id, &meta)
+        .await
+        .context("get job logs")?;
+
+    Ok(Json(json!({"logs": logs})))
 }
 
 /// POST /api/jobs/:id/cancel - Cancel a running or pending job
@@ -591,90 +477,53 @@ pub async fn cancel_job(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    let job_id = match parse_uuid_param(&id, "job") {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+) -> Result<Response, AppError> {
+    let job_id = parse_uuid_param(&id, "job")?;
 
     // Load job for ACL check (also needed for status check if ACL is off)
-    let job = match JobRepo::get(&state.pool, job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to get job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get job: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
 
     // ACL check — cancel requires Run permission
-    let perm = match check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
-    };
+    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
     match perm {
         TaskPermission::Deny => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response();
+            return Err(AppError::not_found("Job"));
         }
         TaskPermission::View => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "Insufficient permissions to cancel this job"})),
-            )
-                .into_response();
+            return Err(AppError::Forbidden(
+                "Insufficient permissions to cancel this job".into(),
+            ));
         }
         TaskPermission::Run => {}
     }
 
-    match crate::cancellation::cancel_job(&state, job_id).await {
-        Ok(crate::cancellation::CancelResult::Cancelled) => {
-            Json(json!({"status": "cancelled"})).into_response()
+    match crate::cancellation::cancel_job(&state, job_id)
+        .await
+        .context("cancel job")?
+    {
+        crate::cancellation::CancelResult::Cancelled => {
+            Ok(Json(json!({"status": "cancelled"})).into_response())
         }
-        Ok(crate::cancellation::CancelResult::NotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Job not found"})),
-        )
-            .into_response(),
-        Ok(crate::cancellation::CancelResult::AlreadyTerminal) => (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "Job is already in a terminal state"})),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to cancel job: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to cancel job: {}", e)})),
-            )
-                .into_response()
-        }
+        crate::cancellation::CancelResult::NotFound => Err(AppError::not_found("Job")),
+        crate::cancellation::CancelResult::AlreadyTerminal => Err(AppError::Conflict(
+            "Job is already in a terminal state".into(),
+        )),
     }
 }
 
 /// Check ACL permission for a specific job's workspace/task.
 ///
-/// Returns the user's permission level, or an error response on failure.
+/// Returns the user's permission level, or an `AppError` on failure.
 /// Returns `Ok(TaskPermission::Run)` when ACL is not configured or auth is absent.
 async fn check_job_acl(
     state: &AppState,
     auth_user: &Option<AuthUser>,
     workspace: &str,
     task_name: &str,
-) -> Result<TaskPermission, axum::response::Response> {
+) -> Result<TaskPermission, AppError> {
     let auth = match auth_user {
         Some(a) => a,
         None => return Ok(TaskPermission::Run),
@@ -685,14 +534,7 @@ async fn check_job_acl(
     let user_id = auth.user_id()?;
     let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to load ACL context: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response()
-        })?;
+        .context("load ACL context")?;
     let folder = state
         .get_workspace(workspace)
         .await
@@ -708,11 +550,11 @@ async fn check_job_acl(
 /// Returns:
 /// - `Ok(None)` when no ACL filtering is needed (no auth user, ACL not configured, or admin)
 /// - `Ok(Some(pairs))` when filtering is active
-/// - `Err(response)` on failure (user_id parse error or DB error)
+/// - `Err(AppError)` on failure (user_id parse error or DB error)
 async fn resolve_acl_scope(
     state: &AppState,
     auth_user: &Option<AuthUser>,
-) -> Result<Option<Vec<(String, String)>>, axum::response::Response> {
+) -> Result<Option<Vec<(String, String)>>, AppError> {
     let auth = match auth_user {
         Some(a) => a,
         None => return Ok(None),
@@ -724,14 +566,7 @@ async fn resolve_acl_scope(
     let user_id = auth.user_id()?;
     let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to load ACL context: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response()
-        })?;
+        .context("load ACL context")?;
 
     // Collect all workspace tasks
     let mut all_tasks = Vec::new();

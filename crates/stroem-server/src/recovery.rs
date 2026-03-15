@@ -1,5 +1,5 @@
 use crate::job_recovery::orchestrate_after_step;
-use crate::state::AppState;
+use crate::state::{AliveGuard, AppState};
 use anyhow::Result;
 use std::time::Duration;
 use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 /// orchestration to cascade failures and mark jobs as failed.
 pub fn start(state: AppState, cancel: CancellationToken) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let _guard = AliveGuard::new(state.background_tasks.recovery_alive.clone());
         run_loop(state, cancel).await;
     })
 }

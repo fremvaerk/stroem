@@ -2,6 +2,8 @@ use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::{default_limit, parse_uuid_param};
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
@@ -25,38 +27,30 @@ pub struct ListWorkersQuery {
 pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListWorkersQuery>,
-) -> impl IntoResponse {
-    let result = WorkerRepo::list(&state.pool, query.limit, query.offset).await;
-    let total = WorkerRepo::count(&state.pool).await;
+) -> Result<impl IntoResponse, AppError> {
+    let workers = WorkerRepo::list(&state.pool, query.limit, query.offset)
+        .await
+        .context("list workers")?;
+    let total = WorkerRepo::count(&state.pool)
+        .await
+        .context("count workers")?;
 
-    match (result, total) {
-        (Ok(workers), Ok(total)) => {
-            let workers_json: Vec<serde_json::Value> = workers
-                .iter()
-                .map(|w| {
-                    json!({
-                        "worker_id": w.worker_id,
-                        "name": w.name,
-                        "status": w.status,
-                        "tags": w.tags,
-                        "version": w.version,
-                        "last_heartbeat": w.last_heartbeat,
-                        "registered_at": w.registered_at,
-                    })
-                })
-                .collect();
+    let workers_json: Vec<serde_json::Value> = workers
+        .iter()
+        .map(|w| {
+            json!({
+                "worker_id": w.worker_id,
+                "name": w.name,
+                "status": w.status,
+                "tags": w.tags,
+                "version": w.version,
+                "last_heartbeat": w.last_heartbeat,
+                "registered_at": w.registered_at,
+            })
+        })
+        .collect();
 
-            Json(json!({ "items": workers_json, "total": total })).into_response()
-        }
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("Failed to list workers: {:#}", e);
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to list workers: {}", e)})),
-            )
-                .into_response()
-        }
-    }
+    Ok(Json(json!({ "items": workers_json, "total": total })))
 }
 
 /// GET /api/workers/:id - Get worker detail with recent jobs
@@ -65,42 +59,17 @@ pub async fn get_worker(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
-    let worker_id = match parse_uuid_param(&id, "worker") {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let worker_id = parse_uuid_param(&id, "worker")?;
 
-    let worker = match WorkerRepo::get(&state.pool, worker_id).await {
-        Ok(Some(w)) => w,
-        Ok(None) => {
-            return (
-                axum::http::StatusCode::NOT_FOUND,
-                Json(json!({"error": "Worker not found"})),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to get worker: {:#}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get worker: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let worker = WorkerRepo::get(&state.pool, worker_id)
+        .await
+        .context("get worker")?
+        .ok_or_else(|| AppError::not_found("Worker"))?;
 
-    let jobs = match JobRepo::list_by_worker(&state.pool, worker_id, 50, 0).await {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            tracing::error!("Failed to list jobs for worker: {:#}", e);
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to list jobs: {}", e)})),
-            )
-                .into_response();
-        }
-    };
+    let jobs = JobRepo::list_by_worker(&state.pool, worker_id, 50, 0)
+        .await
+        .context("list jobs for worker")?;
 
     // ACL filter: remove jobs for tasks the user can't see
     let jobs: Vec<_> = if let Some(ref auth) = auth_user {
@@ -108,7 +77,8 @@ pub async fn get_worker(
             let user_id = match auth.user_id() {
                 Ok(id) => id,
                 Err(_) => {
-                    return Json(json!({
+                    // Couldn't parse user_id — return worker info with no jobs for safety
+                    return Ok(Json(json!({
                         "worker_id": worker.worker_id,
                         "name": worker.name,
                         "status": worker.status,
@@ -117,8 +87,7 @@ pub async fn get_worker(
                         "last_heartbeat": worker.last_heartbeat,
                         "registered_at": worker.registered_at,
                         "jobs": [],
-                    }))
-                    .into_response();
+                    })));
                 }
             };
             match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
@@ -173,7 +142,7 @@ pub async fn get_worker(
         })
         .collect();
 
-    Json(json!({
+    Ok(Json(json!({
         "worker_id": worker.worker_id,
         "name": worker.name,
         "status": worker.status,
@@ -182,6 +151,5 @@ pub async fn get_worker(
         "last_heartbeat": worker.last_heartbeat,
         "registered_at": worker.registered_at,
         "jobs": jobs_json,
-    }))
-    .into_response()
+    })))
 }

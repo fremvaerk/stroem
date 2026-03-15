@@ -4,14 +4,14 @@ use crate::state::AppState;
 use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::triggers::TriggerInfo;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use stroem_common::template::PRIMITIVE_TYPES;
@@ -67,25 +67,15 @@ pub struct ExecuteTaskResponse {
 pub async fn list_all_tasks(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // Resolve ACL context once if auth is present and ACL is configured.
     let acl_ctx = if let Some(ref auth) = auth_user {
         if state.acl.is_configured() {
-            let user_id = match auth.user_id() {
-                Ok(id) => id,
-                Err(resp) => return resp,
-            };
-            match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
-                Ok(ctx) => Some(ctx),
-                Err(e) => {
-                    tracing::error!("Failed to load ACL context: {:#}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "Internal server error"})),
-                    )
-                        .into_response();
-                }
-            }
+            let user_id = auth.user_id()?;
+            let ctx = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")?;
+            Some(ctx)
         } else {
             None
         }
@@ -129,7 +119,7 @@ pub async fn list_all_tasks(
             });
         }
     }
-    Json(tasks).into_response()
+    Ok(Json(tasks))
 }
 
 /// GET /api/workspaces/:ws/tasks - List all tasks from a workspace
@@ -138,30 +128,17 @@ pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path(ws): Path<String>,
-) -> impl IntoResponse {
-    let workspace = match get_workspace_or_error(&state, &ws).await {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let workspace = get_workspace_or_error(&state, &ws).await?;
 
     // Resolve ACL context once if auth is present and ACL is configured.
     let acl_ctx = if let Some(ref auth) = auth_user {
         if state.acl.is_configured() {
-            let user_id = match auth.user_id() {
-                Ok(id) => id,
-                Err(resp) => return resp,
-            };
-            match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
-                Ok(ctx) => Some(ctx),
-                Err(e) => {
-                    tracing::error!("Failed to load ACL context: {:#}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "Internal server error"})),
-                    )
-                        .into_response();
-                }
-            }
+            let user_id = auth.user_id()?;
+            let ctx = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")?;
+            Some(ctx)
         } else {
             None
         }
@@ -203,7 +180,7 @@ pub async fn list_tasks(
         });
     }
 
-    Json(tasks).into_response()
+    Ok(Json(tasks))
 }
 
 /// GET /api/workspaces/:ws/tasks/:name - Get task detail with action info
@@ -212,54 +189,27 @@ pub async fn get_task(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
     Path((ws, name)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let workspace = match get_workspace_or_error(&state, &ws).await {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let workspace = get_workspace_or_error(&state, &ws).await?;
 
-    let task = match workspace.tasks.get(&name) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Task not found"})),
-            )
-                .into_response()
-        }
-    };
+    let task = workspace
+        .tasks
+        .get(&name)
+        .ok_or_else(|| AppError::not_found("Task"))?;
 
     // ACL check: Deny -> 404 (task not found), View -> can_execute=false, Run -> can_execute=true
     let can_execute = if let Some(ref auth) = auth_user {
         if state.acl.is_configured() {
-            let user_id = match auth.user_id() {
-                Ok(id) => id,
-                Err(resp) => return resp,
-            };
-            let (is_admin, groups) =
-                match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        tracing::error!("Failed to load ACL context: {:#}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": "Internal server error"})),
-                        )
-                            .into_response();
-                    }
-                };
+            let user_id = auth.user_id()?;
+            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")?;
             let task_path = make_task_path(task.folder.as_deref(), &name);
             let perm = state
                 .acl
                 .evaluate(&ws, &task_path, &auth.claims.email, &groups, is_admin);
             match perm {
-                TaskPermission::Deny => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "Task not found"})),
-                    )
-                        .into_response()
-                }
+                TaskPermission::Deny => return Err(AppError::not_found("Task")),
                 TaskPermission::View => Some(false),
                 TaskPermission::Run => Some(true),
             }
@@ -320,7 +270,7 @@ pub async fn get_task(
         can_execute,
     };
 
-    Json(detail).into_response()
+    Ok(Json(detail))
 }
 
 /// POST /api/workspaces/:ws/tasks/:name/execute - Trigger task execution
@@ -330,74 +280,39 @@ pub async fn execute_task(
     auth_user: Option<AuthUser>,
     Path((ws, name)): Path<(String, String)>,
     Json(req): Json<ExecuteTaskRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // 1. Enforce auth: when auth is enabled, require a valid token
     let (source_type, source_id) = match (state.config.auth.is_some(), &auth_user) {
         (false, _) => ("api", None),
         (true, Some(user)) => ("user", Some(user.claims.email.clone())),
         (true, None) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Authentication required"})),
-            )
-                .into_response()
+            return Err(AppError::Unauthorized("Authentication required".into()));
         }
     };
 
-    let workspace = match get_workspace_or_error(&state, &ws).await {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    };
+    let workspace = get_workspace_or_error(&state, &ws).await?;
 
     // 2. Verify task exists in workspace
-    let task = match workspace.tasks.get(&name) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Task not found"})),
-            )
-                .into_response()
-        }
-    };
+    let task = workspace
+        .tasks
+        .get(&name)
+        .ok_or_else(|| AppError::not_found("Task"))?;
 
     // 3. ACL check: Deny -> 404, View -> 403, Run -> proceed
     if let Some(ref auth) = auth_user {
         if state.acl.is_configured() {
-            let user_id = match auth.user_id() {
-                Ok(id) => id,
-                Err(resp) => return resp,
-            };
-            let (is_admin, groups) =
-                match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        tracing::error!("Failed to load ACL context: {:#}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": "Internal server error"})),
-                        )
-                            .into_response();
-                    }
-                };
+            let user_id = auth.user_id()?;
+            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")?;
             let task_path = make_task_path(task.folder.as_deref(), &name);
             let perm = state
                 .acl
                 .evaluate(&ws, &task_path, &auth.claims.email, &groups, is_admin);
             match perm {
-                TaskPermission::Deny => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "Task not found"})),
-                    )
-                        .into_response()
-                }
+                TaskPermission::Deny => return Err(AppError::not_found("Task")),
                 TaskPermission::View => {
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(json!({"error": "View-only access"})),
-                    )
-                        .into_response()
+                    return Err(AppError::Forbidden("View-only access".into()));
                 }
                 TaskPermission::Run => {} // allowed
             }
@@ -407,7 +322,7 @@ pub async fn execute_task(
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
 
     // 4. Create job + steps via shared function
-    let job_id = match create_job_for_task(
+    let job_id = create_job_for_task(
         &state.pool,
         &workspace,
         &ws,
@@ -417,21 +332,22 @@ pub async fn execute_task(
         source_id.as_deref(),
     )
     .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!("Failed to create job: {:#}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to create job: {}", e)})),
-            )
-                .into_response();
+    .map_err(|e| {
+        let msg = e.to_string();
+        // Surface validation errors as 400; keep infrastructure errors as 500.
+        if msg.contains("not found")
+            || msg.contains("required")
+            || msg.contains("invalid")
+            || msg.contains("validation")
+        {
+            AppError::BadRequest(msg)
+        } else {
+            AppError::Internal(e)
         }
-    };
+    })?;
 
     // 5. Return job_id
-    Json(ExecuteTaskResponse {
+    Ok(Json(ExecuteTaskResponse {
         job_id: job_id.to_string(),
-    })
-    .into_response()
+    }))
 }

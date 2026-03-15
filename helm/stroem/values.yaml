@@ -50,7 +50,7 @@ server:
   livenessProbe:
     enabled: true
     httpGet:
-      path: /api/config
+      path: /healthz
       port: http
     initialDelaySeconds: 10
     periodSeconds: 10
@@ -59,7 +59,7 @@ server:
   readinessProbe:
     enabled: true
     httpGet:
-      path: /api/config
+      path: /healthz
       port: http
     initialDelaySeconds: 5
     periodSeconds: 5
@@ -68,7 +68,7 @@ server:
   startupProbe: {}
   #  enabled: true
   #  httpGet:
-  #    path: /api/config
+  #    path: /healthz
   #    port: http
   #  failureThreshold: 30
   #  periodSeconds: 2

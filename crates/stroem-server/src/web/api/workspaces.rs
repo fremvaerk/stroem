@@ -1,6 +1,8 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{extract::State, response::IntoResponse, Json};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -10,30 +12,19 @@ use std::sync::Arc;
 pub async fn list_workspaces(
     State(state): State<Arc<AppState>>,
     auth_user: Option<AuthUser>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let infos = state.workspaces.list_workspace_info().await;
 
     // When ACL is configured, filter to workspaces where user has at least one non-Deny task
     if let Some(ref auth) = auth_user {
         if state.acl.is_configured() {
-            let user_id = match auth.user_id() {
-                Ok(id) => id,
-                Err(resp) => return resp.into_response(),
-            };
-            let (is_admin, groups) =
-                match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        tracing::error!("Failed to load ACL context: {:#}", e);
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": "Internal server error"})),
-                        )
-                            .into_response();
-                    }
-                };
+            let user_id = auth.user_id()?;
+            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")?;
+
             if is_admin {
-                return Json(infos).into_response();
+                return Ok(Json(infos));
             }
 
             // Check which workspaces have at least one visible task
@@ -59,9 +50,9 @@ pub async fn list_workspaces(
                 .into_iter()
                 .filter(|i| visible_workspaces.contains(&i.name))
                 .collect();
-            return Json(filtered).into_response();
+            return Ok(Json(filtered));
         }
     }
 
-    Json(infos).into_response()
+    Ok(Json(infos))
 }

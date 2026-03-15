@@ -1,12 +1,11 @@
 use crate::auth::{hash_api_key, validate_access_token};
 use crate::state::AppState;
+use crate::web::error::AppError;
 use axum::{
     extract::{FromRequestParts, OptionalFromRequestParts},
-    http::{header, request::Parts, StatusCode},
+    http::{header, request::Parts},
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
 use stroem_common::models::auth::Claims;
@@ -26,24 +25,12 @@ pub struct AuthUser {
 impl AuthUser {
     /// Parse the `sub` claim as a [`uuid::Uuid`].
     ///
-    /// Returns an `Err` with a pre-built 500 response when the claim is malformed.
-    /// Callers should early-return the error response directly:
-    ///
-    /// ```ignore
-    /// let user_id = match auth.user_id() {
-    ///     Ok(id) => id,
-    ///     Err(resp) => return resp,
-    /// };
-    /// ```
-    #[allow(clippy::result_large_err)]
-    pub fn user_id(&self) -> Result<uuid::Uuid, Response> {
-        self.claims.sub.parse::<uuid::Uuid>().map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Invalid user ID in token"})),
-            )
-                .into_response()
-        })
+    /// Returns an `Err(AppError::Internal)` when the claim is malformed.
+    pub fn user_id(&self) -> Result<uuid::Uuid, AppError> {
+        self.claims
+            .sub
+            .parse::<uuid::Uuid>()
+            .map_err(|_| AppError::Unauthorized("Invalid token".into()))
     }
 
     /// Whether this user has admin privileges.
@@ -51,17 +38,12 @@ impl AuthUser {
         self.claims.is_admin
     }
 
-    /// Returns `Ok(())` when the user is admin, or a 403 response otherwise.
-    #[allow(clippy::result_large_err)]
-    pub fn require_admin(&self) -> Result<(), Response> {
+    /// Returns `Ok(())` when the user is admin, or `Err(AppError::Forbidden)` otherwise.
+    pub fn require_admin(&self) -> Result<(), AppError> {
         if self.claims.is_admin {
             Ok(())
         } else {
-            Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "Admin access required"})),
-            )
-                .into_response())
+            Err(AppError::Forbidden("Admin access required".into()))
         }
     }
 }
@@ -76,30 +58,17 @@ pub(crate) async fn validate_api_key(
     let key_row = match ApiKeyRepo::get_by_hash(&state.pool, &key_hash).await {
         Ok(Some(row)) => row,
         Ok(None) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid API key"})),
-            )
-                .into_response())
+            return Err(AppError::Unauthorized("Invalid API key".into()).into_response());
         }
         Err(e) => {
-            tracing::error!("DB error validating API key: {:#}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response());
+            return Err(AppError::Internal(anyhow::anyhow!(e)).into_response());
         }
     };
 
     // Check expiry
     if let Some(expires_at) = key_row.expires_at {
         if expires_at < chrono::Utc::now() {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "API key expired"})),
-            )
-                .into_response());
+            return Err(AppError::Unauthorized("API key expired".into()).into_response());
         }
     }
 
@@ -107,19 +76,10 @@ pub(crate) async fn validate_api_key(
     let user = match UserRepo::get_by_id(&state.pool, key_row.user_id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "API key user not found"})),
-            )
-                .into_response())
+            return Err(AppError::Unauthorized("API key user not found".into()).into_response());
         }
         Err(e) => {
-            tracing::error!("DB error loading API key user: {:#}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response());
+            return Err(AppError::Internal(anyhow::anyhow!(e)).into_response());
         }
     };
 
@@ -151,11 +111,9 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         let auth_config = match &state.config.auth {
             Some(cfg) => cfg,
             None => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Authentication not configured"})),
+                return Err(
+                    AppError::Unauthorized("Authentication not configured".into()).into_response(),
                 )
-                    .into_response())
             }
         };
 
@@ -168,19 +126,16 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             Some(val) => match val.strip_prefix("Bearer ") {
                 Some(t) => t,
                 None => {
-                    return Err((
-                        StatusCode::UNAUTHORIZED,
-                        Json(json!({"error": "Invalid authorization header format"})),
+                    return Err(AppError::Unauthorized(
+                        "Invalid authorization header format".into(),
                     )
-                        .into_response())
+                    .into_response())
                 }
             },
             None => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"error": "Missing authorization header"})),
+                return Err(
+                    AppError::Unauthorized("Missing authorization header".into()).into_response(),
                 )
-                    .into_response())
             }
         };
 
@@ -198,11 +153,9 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 claims,
                 is_api_key: false,
             }),
-            Err(_) => Err((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid or expired token"})),
-            )
-                .into_response()),
+            Err(_) => {
+                Err(AppError::Unauthorized("Invalid or expired token".into()).into_response())
+            }
         }
     }
 }

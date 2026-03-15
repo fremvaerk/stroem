@@ -1,5 +1,5 @@
 use crate::job_creator::create_job_for_task;
-use crate::state::AppState;
+use crate::state::{AliveGuard, AppState};
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
 use croner::parser::{CronParser, Seconds};
@@ -33,6 +33,7 @@ struct TriggerState {
 /// last_run state for unchanged triggers) and clean shutdown via CancellationToken.
 pub fn start(state: AppState, cancel: CancellationToken) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let _guard = AliveGuard::new(state.background_tasks.scheduler_alive.clone());
         run_loop(state, cancel).await;
     })
 }

@@ -1,10 +1,11 @@
 use crate::auth::generate_api_key;
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     Json,
 };
 use chrono::{Duration, Utc};
@@ -37,17 +38,13 @@ pub struct ApiKeyInfo {
 }
 
 /// Reject requests authenticated via API key (require JWT for key management).
-fn require_jwt(auth: &AuthUser) -> Option<Response> {
+fn require_jwt(auth: &AuthUser) -> Result<(), AppError> {
     if auth.is_api_key {
-        Some(
-            (
-                StatusCode::FORBIDDEN,
-                Json(json!({"error": "API key management requires JWT authentication"})),
-            )
-                .into_response(),
-        )
+        Err(AppError::Forbidden(
+            "API key management requires JWT authentication".into(),
+        ))
     } else {
-        None
+        Ok(())
     }
 }
 
@@ -57,33 +54,22 @@ pub async fn create_api_key(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Json(req): Json<CreateApiKeyRequest>,
-) -> impl IntoResponse {
-    if let Some(resp) = require_jwt(&auth) {
-        return resp;
-    }
+) -> Result<impl IntoResponse, AppError> {
+    require_jwt(&auth)?;
 
     if req.name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Name is required"})),
-        )
-            .into_response();
+        return Err(AppError::BadRequest("Name is required".into()));
     }
 
     if let Some(days) = req.expires_in_days {
         if days <= 0 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "expires_in_days must be positive"})),
-            )
-                .into_response();
+            return Err(AppError::BadRequest(
+                "expires_in_days must be positive".into(),
+            ));
         }
     }
 
-    let user_id = match auth.user_id() {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+    let user_id = auth.user_id()?;
 
     let (raw_key, key_hash) = generate_api_key();
     let prefix = raw_key[..12].to_string(); // "strm_a1b2c3d"
@@ -92,7 +78,7 @@ pub async fn create_api_key(
         .expires_in_days
         .map(|days| Utc::now() + Duration::days(days));
 
-    if let Err(e) = ApiKeyRepo::create(
+    ApiKeyRepo::create(
         &state.pool,
         &key_hash,
         user_id,
@@ -101,22 +87,14 @@ pub async fn create_api_key(
         expires_at,
     )
     .await
-    {
-        tracing::error!("Failed to create API key: {:#}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Internal server error"})),
-        )
-            .into_response();
-    }
+    .context("create api key")?;
 
-    Json(CreateApiKeyResponse {
+    Ok(Json(CreateApiKeyResponse {
         key: raw_key,
         name: req.name.trim().to_string(),
         prefix,
         expires_at: expires_at.map(|t| t.to_rfc3339()),
-    })
-    .into_response()
+    }))
 }
 
 /// GET /api/auth/api-keys — List current user's API keys
@@ -124,39 +102,26 @@ pub async fn create_api_key(
 pub async fn list_api_keys(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
-) -> impl IntoResponse {
-    if let Some(resp) = require_jwt(&auth) {
-        return resp;
-    }
+) -> Result<impl IntoResponse, AppError> {
+    require_jwt(&auth)?;
 
-    let user_id = match auth.user_id() {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+    let user_id = auth.user_id()?;
 
-    match ApiKeyRepo::list_by_user(&state.pool, user_id).await {
-        Ok(keys) => {
-            let infos: Vec<ApiKeyInfo> = keys
-                .into_iter()
-                .map(|k| ApiKeyInfo {
-                    prefix: k.prefix,
-                    name: k.name,
-                    created_at: k.created_at.to_rfc3339(),
-                    expires_at: k.expires_at.map(|t| t.to_rfc3339()),
-                    last_used_at: k.last_used_at.map(|t| t.to_rfc3339()),
-                })
-                .collect();
-            Json(infos).into_response()
-        }
-        Err(e) => {
-            tracing::error!("Failed to list API keys: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response()
-        }
-    }
+    let keys = ApiKeyRepo::list_by_user(&state.pool, user_id)
+        .await
+        .context("list api keys")?;
+    let infos: Vec<ApiKeyInfo> = keys
+        .into_iter()
+        .map(|k| ApiKeyInfo {
+            prefix: k.prefix,
+            name: k.name,
+            created_at: k.created_at.to_rfc3339(),
+            expires_at: k.expires_at.map(|t| t.to_rfc3339()),
+            last_used_at: k.last_used_at.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+
+    Ok(Json(infos))
 }
 
 /// DELETE /api/auth/api-keys/{prefix} — Revoke an API key by prefix
@@ -165,30 +130,18 @@ pub async fn delete_api_key(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Path(prefix): Path<String>,
-) -> impl IntoResponse {
-    if let Some(resp) = require_jwt(&auth) {
-        return resp;
-    }
+) -> Result<impl IntoResponse, AppError> {
+    require_jwt(&auth)?;
 
-    let user_id = match auth.user_id() {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
+    let user_id = auth.user_id()?;
 
-    match ApiKeyRepo::delete_by_prefix_and_user(&state.pool, &prefix, user_id).await {
-        Ok(true) => Json(json!({"status": "ok"})).into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "API key not found"})),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Failed to delete API key: {:#}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            )
-                .into_response()
-        }
+    let deleted = ApiKeyRepo::delete_by_prefix_and_user(&state.pool, &prefix, user_id)
+        .await
+        .context("delete api key")?;
+
+    if deleted {
+        Ok(Json(json!({"status": "ok"})))
+    } else {
+        Err(AppError::not_found("API key"))
     }
 }

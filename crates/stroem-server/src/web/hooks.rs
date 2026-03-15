@@ -1,5 +1,7 @@
 use crate::job_creator::create_job_for_task;
 use crate::state::AppState;
+use crate::web::error::AppError;
+use anyhow::Context;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -9,7 +11,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,24 +45,18 @@ async fn webhook_handler(
     headers: HeaderMap,
     method: Method,
     body: Bytes,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // 1. Find the first matching enabled webhook trigger across all workspaces
     let wh = match find_webhook_trigger(&state, &name).await {
         Some(f) => f,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Webhook not found"})),
-            )
-                .into_response()
-        }
+        None => return AppError::not_found("Webhook").into_response(),
     };
 
     // 2. Validate secret (constant-time to prevent timing attacks)
-    if let Some(resp) =
+    if let Some(err) =
         validate_webhook_secret(&wh, query.get("secret").map(String::as_str), &headers)
     {
-        return resp.into_response();
+        return err.into_response();
     }
 
     // 3. Build input
@@ -74,18 +69,18 @@ async fn webhook_handler(
     let config = match state.get_workspace(&wh.ws_name).await {
         Some(c) => c,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Workspace not found"})),
-            )
-                .into_response()
+            return AppError::Internal(anyhow::anyhow!(
+                "Workspace '{}' not found after webhook trigger lookup",
+                wh.ws_name
+            ))
+            .into_response();
         }
     };
 
     let is_sync = wh.mode.as_deref() == Some("sync");
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
 
-    match create_job_for_task(
+    let job_id = match create_job_for_task(
         &state.pool,
         &config,
         &wh.ws_name,
@@ -95,81 +90,78 @@ async fn webhook_handler(
         Some(&source_id),
     )
     .await
+    .context("create webhook job")
     {
-        Ok(job_id) => {
-            tracing::info!(
-                "Webhook '{}' created job {} for task '{}'",
-                name,
-                job_id,
-                wh.task
-            );
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("Webhook '{}' failed to create job: {:#}", name, e);
+            return AppError::Internal(e).into_response();
+        }
+    };
 
-            if is_sync {
-                let mut rx = state.job_completion.subscribe(job_id).await;
+    tracing::info!(
+        "Webhook '{}' created job {} for task '{}'",
+        name,
+        job_id,
+        wh.task
+    );
 
-                // Guard against the (unlikely) race where the job completed
-                // between create_job_for_task and subscribe. If already terminal,
-                // return immediately without waiting.
-                if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
-                    if is_terminal_status(&job.status) {
-                        return Json(WebhookSyncResponse {
-                            job_id: job_id.to_string(),
-                            trigger: name,
-                            task: wh.task,
-                            status: job.status,
-                            output: job.output,
-                        })
-                        .into_response();
-                    }
-                }
+    if is_sync {
+        let mut rx = state.job_completion.subscribe(job_id).await;
 
-                let timeout = Duration::from_secs(timeout_secs);
-
-                match tokio::time::timeout(timeout, rx.recv()).await {
-                    Ok(Ok(event)) => Json(WebhookSyncResponse {
-                        job_id: job_id.to_string(),
-                        trigger: name,
-                        task: wh.task,
-                        status: event.status,
-                        output: event.output,
-                    })
-                    .into_response(),
-                    _ => {
-                        // Timeout or channel error — return 202 for manual polling
-                        (
-                            StatusCode::ACCEPTED,
-                            Json(WebhookSyncResponse {
-                                job_id: job_id.to_string(),
-                                trigger: name,
-                                task: wh.task,
-                                status: "running".to_string(),
-                                output: None,
-                            }),
-                        )
-                            .into_response()
-                    }
-                }
-            } else {
-                Json(WebhookAsyncResponse {
+        // Guard against the (unlikely) race where the job completed
+        // between create_job_for_task and subscribe. If already terminal,
+        // return immediately without waiting.
+        if let Ok(Some(job)) = stroem_db::JobRepo::get(&state.pool, job_id).await {
+            if is_terminal_status(&job.status) {
+                return Json(WebhookSyncResponse {
                     job_id: job_id.to_string(),
                     trigger: name,
                     task: wh.task,
+                    status: job.status,
+                    output: job.output,
                 })
-                .into_response()
+                .into_response();
             }
         }
-        Err(e) => {
-            tracing::error!("Webhook '{}' failed to create job: {:#}", name, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to create job: {}", e)})),
-            )
-                .into_response()
+
+        let timeout = Duration::from_secs(timeout_secs);
+
+        match tokio::time::timeout(timeout, rx.recv()).await {
+            Ok(Ok(event)) => Json(WebhookSyncResponse {
+                job_id: job_id.to_string(),
+                trigger: name,
+                task: wh.task,
+                status: event.status,
+                output: event.output,
+            })
+            .into_response(),
+            _ => {
+                // Timeout or channel error — return 202 for manual polling
+                (
+                    StatusCode::ACCEPTED,
+                    Json(WebhookSyncResponse {
+                        job_id: job_id.to_string(),
+                        trigger: name,
+                        task: wh.task,
+                        status: "running".to_string(),
+                        output: None,
+                    }),
+                )
+                    .into_response()
+            }
         }
+    } else {
+        Json(WebhookAsyncResponse {
+            job_id: job_id.to_string(),
+            trigger: name,
+            task: wh.task,
+        })
+        .into_response()
     }
 }
 
-/// Validate the webhook secret. Returns a 401 response if validation fails,
+/// Validate the webhook secret. Returns `Some(AppError)` if validation fails,
 /// or `None` if the request is authorized.
 ///
 /// `provided_secret` is the caller-supplied secret (e.g. from a query param).
@@ -178,7 +170,7 @@ fn validate_webhook_secret(
     wh: &WebhookMatch,
     provided_secret: Option<&str>,
     headers: &HeaderMap,
-) -> Option<(StatusCode, Json<serde_json::Value>)> {
+) -> Option<AppError> {
     if let Some(ref expected_secret) = wh.secret {
         // Use the caller-supplied secret, or fall back to Authorization: Bearer header.
         let effective_secret: Option<String> =
@@ -198,10 +190,7 @@ fn validate_webhook_secret(
             })
             .unwrap_or(false);
         if !is_valid {
-            return Some((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": "Invalid or missing secret"})),
-            ));
+            return Some(AppError::Unauthorized("Invalid or missing secret".into()));
         }
     }
     None
@@ -277,64 +266,38 @@ async fn webhook_job_status(
     Path((name, job_id_str)): Path<(String, String)>,
     Query(query): Query<StatusQuery>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // Parse job_id
     let job_id = match Uuid::parse_str(&job_id_str) {
         Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid job ID"})),
-            )
-                .into_response()
-        }
+        Err(_) => return AppError::BadRequest("Invalid job ID".into()).into_response(),
     };
 
     // Find webhook trigger
     let wh = match find_webhook_trigger(&state, &name).await {
         Some(f) => f,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Webhook not found"})),
-            )
-                .into_response()
-        }
+        None => return AppError::not_found("Webhook").into_response(),
     };
 
     // Validate secret
-    if let Some(resp) = validate_webhook_secret(&wh, query.secret.as_deref(), &headers) {
-        return resp.into_response();
+    if let Some(err) = validate_webhook_secret(&wh, query.secret.as_deref(), &headers) {
+        return err.into_response();
     }
 
     // Load job from DB
     let job = match stroem_db::JobRepo::get(&state.pool, job_id).await {
         Ok(Some(job)) => job,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "Job not found"})),
-            )
-                .into_response()
-        }
+        Ok(None) => return AppError::not_found("Job").into_response(),
         Err(e) => {
             tracing::error!("Failed to load job {}: {:#}", job_id, e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Failed to load job"})),
-            )
-                .into_response();
+            return AppError::Internal(anyhow::anyhow!(e).context("load job")).into_response();
         }
     };
 
     // Verify job belongs to this webhook trigger
     let expected_source_id = format!("{}/{}", wh.ws_name, wh.trigger_key);
     if job.source_type != "webhook" || job.source_id.as_deref() != Some(&expected_source_id) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "Job not found"})),
-        )
-            .into_response();
+        return AppError::not_found("Job").into_response();
     }
 
     let is_terminal = is_terminal_status(&job.status);
@@ -383,11 +346,8 @@ async fn webhook_job_status(
                         .into_response(),
                     );
                 }
-                // DB error after completion — fall through to timeout fallback below
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "Failed to load job"})),
-                )
+                // DB error after completion
+                return AppError::Internal(anyhow::anyhow!("Failed to load job after completion"))
                     .into_response();
             }
             Ok(Err(_lagged)) => {
@@ -406,10 +366,7 @@ async fn webhook_job_status(
                         .into_response(),
                     );
                 }
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "Failed to load job"})),
-                )
+                return AppError::Internal(anyhow::anyhow!("Failed to load job after lag"))
                     .into_response();
             }
             Err(_elapsed) => {
@@ -843,8 +800,7 @@ mod tests {
         let headers = HeaderMap::new();
         let result = validate_webhook_secret(&wh, Some("wrong-secret"), &headers);
         assert!(result.is_some());
-        let (status, _) = result.unwrap();
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(matches!(result.unwrap(), AppError::Unauthorized(_)));
     }
 
     #[test]
@@ -861,8 +817,7 @@ mod tests {
         let headers = HeaderMap::new();
         let result = validate_webhook_secret(&wh, None, &headers);
         assert!(result.is_some());
-        let (status, _) = result.unwrap();
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(matches!(result.unwrap(), AppError::Unauthorized(_)));
     }
 
     #[test]

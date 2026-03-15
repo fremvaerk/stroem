@@ -11,6 +11,7 @@ pub mod workspaces;
 pub mod ws;
 
 use crate::state::AppState;
+use crate::web::error::AppError;
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -127,18 +128,12 @@ macro_rules! auth_rate_limit_layer {
     }};
 }
 
-/// Parse a path parameter as a [`uuid::Uuid`], returning a 400 response on failure.
+/// Parse a path parameter as a [`uuid::Uuid`], returning a 400 `AppError` on failure.
 ///
 /// `entity_name` is used in the error message, e.g. `"job"` → `"Invalid job ID"`.
-#[allow(clippy::result_large_err)]
-pub fn parse_uuid_param(id: &str, entity_name: &str) -> Result<uuid::Uuid, Response> {
-    id.parse::<uuid::Uuid>().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("Invalid {} ID", entity_name)})),
-        )
-            .into_response()
-    })
+pub fn parse_uuid_param(id: &str, entity_name: &str) -> Result<uuid::Uuid, AppError> {
+    id.parse::<uuid::Uuid>()
+        .map_err(|_| AppError::BadRequest(format!("Invalid {} ID", entity_name)))
 }
 
 /// Default pagination limit used across list endpoints.
@@ -146,19 +141,15 @@ pub fn default_limit() -> i64 {
     50
 }
 
-/// Resolve a workspace by name from [`AppState`], returning a 404 response when missing.
-#[allow(clippy::result_large_err)]
+/// Resolve a workspace by name from [`AppState`], returning a 404 `AppError` when missing.
 pub async fn get_workspace_or_error(
     state: &std::sync::Arc<AppState>,
     ws: &str,
-) -> Result<std::sync::Arc<stroem_common::models::workflow::WorkspaceConfig>, Response> {
-    state.get_workspace(ws).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("Workspace '{}' not found", ws)})),
-        )
-            .into_response()
-    })
+) -> Result<std::sync::Arc<stroem_common::models::workflow::WorkspaceConfig>, AppError> {
+    state
+        .get_workspace(ws)
+        .await
+        .ok_or_else(|| AppError::NotFound(format!("Workspace '{}' not found", ws)))
 }
 
 #[derive(Serialize)]

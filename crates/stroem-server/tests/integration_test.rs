@@ -4776,7 +4776,7 @@ async fn test_login_when_auth_not_configured() -> Result<()> {
             json!({"email": "any@test.com", "password": "any"}),
         ))
         .await?;
-    assert_eq!(response.status(), 404);
+    assert_eq!(response.status(), 400);
 
     Ok(())
 }
@@ -14779,6 +14779,54 @@ async fn test_webhook_job_status_cancelled_treated_as_terminal() -> Result<()> {
         "status must be cancelled"
     );
     assert_eq!(body["trigger"], "public-hook");
+
+    Ok(())
+}
+
+// ─── Health check endpoint ─────────────────────────────────────────────
+//
+// NOTE: The /healthz route must be registered in build_router before this
+// test can exercise the HTTP endpoint. The handler lives in web::health::healthz.
+// Background task flags (scheduler_alive, recovery_alive) will read `false`
+// in this test because no background tasks are started via `setup()` — so
+// the endpoint will return 503 with status "degraded" (db ok) or "unhealthy".
+// Once the route is wired AND background tasks are running, expect 200 + "ok".
+//
+// For now we verify: db check passes (db is reachable), the JSON shape is
+// correct, and the overall status reflects that the background tasks are not
+// running (stopped).
+
+#[tokio::test]
+async fn test_healthz_returns_structured_json() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    let response = router.oneshot(api_get("/healthz")).await?;
+
+    // Background tasks are not started in the test harness, so the endpoint
+    // should return 503 with status "degraded" (db ok, tasks stopped).
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = body_json(response).await;
+
+    // The JSON must have a "status" and a "checks" object.
+    assert!(
+        body["status"].is_string(),
+        "response must include a string 'status' field"
+    );
+    assert!(
+        body["checks"].is_object(),
+        "response must include a 'checks' object"
+    );
+
+    // Database is reachable in the test environment.
+    assert_eq!(body["checks"]["db"], "ok");
+
+    // Background tasks are not running, so their checks must reflect that.
+    assert_eq!(body["checks"]["scheduler"], "stopped");
+    assert_eq!(body["checks"]["recovery"], "stopped");
+
+    // With db ok but tasks stopped, overall status is "degraded".
+    assert_eq!(body["status"], "degraded");
 
     Ok(())
 }

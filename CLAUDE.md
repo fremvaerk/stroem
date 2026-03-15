@@ -309,6 +309,24 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Migrations in `crates/stroem-db/migrations/`
 - Job claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`
 
+### Health Check
+- `GET /healthz` — unauthenticated endpoint, not under `/api/`
+- Checks: DB connectivity (`SELECT 1`), scheduler liveness, recovery sweeper liveness
+- `BackgroundTasks` struct in `state.rs` with `Arc<AtomicBool>` flags for scheduler/recovery
+- `AliveGuard` drop guard in `scheduler.rs` and `recovery.rs` — sets flag true on creation, false on drop (handles panics)
+- Response: `{"status": "ok"|"degraded"|"unhealthy", "checks": {"db": "ok"|"error", "scheduler": "ok"|"stopped", "recovery": "ok"|"stopped"}}`
+- Returns 200 when all healthy, 503 otherwise. "degraded" = DB ok but background task stopped
+- Helm chart probes configured to use `/healthz`
+
+### Error Handling (AppError)
+- `AppError` enum in `web/error.rs` — centralized API error type implementing `IntoResponse`
+- Variants: `BadRequest(String)`, `Unauthorized(String)`, `Forbidden(String)`, `NotFound(String)`, `Conflict(String)`, `Internal(anyhow::Error)`
+- `Internal` variant logs full error via tracing, returns generic "Internal server error" to client (sanitization)
+- `From<anyhow::Error>` and `From<sqlx::Error>` impls enable `?` operator in handlers
+- All API handlers (`web/api/`, `web/worker_api/`, `web/hooks.rs`) migrated to return `Result<impl IntoResponse, AppError>`
+- Helper: `AppError::not_found("Entity")` → 404 with "Entity not found"
+- Response format: `{"error": "message"}` (same shape as before, frontend compatible)
+
 ### Authentication
 - **User auth**: Optional JWT-based auth (access tokens 15min, refresh tokens 30 day with rotation)
 - Auth is enabled by adding an `auth` section to `server-config.yaml`

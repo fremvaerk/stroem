@@ -1,4 +1,6 @@
 pub mod api;
+pub mod error;
+pub mod health;
 pub mod hooks;
 pub mod worker_api;
 
@@ -6,6 +8,7 @@ use crate::state::AppState;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use axum::Router;
 use rust_embed::Embed;
 use std::sync::Arc;
@@ -58,7 +61,12 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
             .allow_headers(Any),
     };
 
+    let health_route = Router::new()
+        .route("/healthz", get(health::healthz))
+        .with_state(state.clone());
+
     let mut router = Router::new()
+        .merge(health_route)
         .nest("/api", api::build_api_routes(state.clone()))
         .nest(
             "/worker",
