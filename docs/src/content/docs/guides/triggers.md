@@ -67,6 +67,34 @@ triggers:
 
 The concurrency check uses the trigger's `source_type` and `source_id` (`"{workspace}/{trigger_name}"`) to identify related jobs.
 
+### Timezone support
+
+Scheduler triggers support optional timezone specification to run cron expressions in a specific timezone rather than UTC:
+
+```yaml
+triggers:
+  nightly-build:
+    type: scheduler
+    cron: "0 2 * * *"
+    timezone: "Europe/Copenhagen"    # Runs at 2:00 AM Copenhagen time
+    task: build
+```
+
+- **`timezone` field**: Optional IANA timezone name (e.g., `"America/New_York"`, `"Australia/Sydney"`, `"Europe/London"`)
+- **Default**: UTC when not specified
+- **DST handling**: Daylight Saving Time transitions are handled automatically:
+  - Spring-forward gaps (time jumps ahead): the trigger fires at the first valid time after the gap
+  - Fall-back overlaps (time repeats): the trigger fires once at the first occurrence
+- **Timezone names**: Use standard IANA names from the [IANA Time Zone Database](https://www.iana.org/time-zones) (case-sensitive)
+
+Common timezone examples:
+- `"America/New_York"` — Eastern Time (ET)
+- `"America/Los_Angeles"` — Pacific Time (PT)
+- `"Europe/London"` — Greenwich Mean Time (GMT)
+- `"Europe/Paris"` — Central European Time (CET)
+- `"Asia/Tokyo"` — Japan Standard Time (JST)
+- `"Australia/Sydney"` — Australian Eastern Time (AEST)
+
 ### Scheduler fields
 
 | Field | Required | Description |
@@ -75,6 +103,7 @@ The concurrency check uses the trigger's `source_type` and `source_id` (`"{works
 | `cron` | Yes | Cron expression (5 or 6 fields) |
 | `task` | Yes | Name of the task to execute |
 | `input` | No | Input values passed to the task |
+| `timezone` | No | IANA timezone name (default: `"UTC"`). Example: `"Europe/Copenhagen"` |
 | `concurrency` | No | What to do when previous runs are active: `allow` (default), `skip`, `cancel_previous` |
 | `enabled` | No | Whether the trigger is active (default: `true`) |
 

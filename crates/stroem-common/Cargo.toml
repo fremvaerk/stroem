@@ -13,6 +13,7 @@ tera.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 croner.workspace = true
+chrono-tz.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -368,6 +368,22 @@ Last updated: 2026-03-13.
 - [x] Auth: 401 without token when auth enabled — `mcp_test.rs`
 - [x] Regression: MCP-created jobs fire hooks correctly — `mcp_test.rs`
 
+## Review: Timezone Support for Cron Triggers (2026-03-16)
+
+### Important
+- [x] Timezone tests use `Utc::now()` — pinned `now` for determinism in scheduler tests; triggers API test uses `Utc::now()` internally (can't inject), documented
+- [x] `test_compute_next_run_with_timezone` now asserts exact UTC offset (01:00 UTC for 02:00 Copenhagen in winter)
+
+### Test Coverage
+- [x] YAML deserialization round-trip for `timezone` field — `workflow.rs`
+- [x] Empty string `timezone: ""` rejected by validation — `validation.rs`
+- [x] Hot-reload timezone removal (Some → None resets state) — `scheduler.rs`
+- [x] `TriggerInfo` JSON serialization includes/omits `timezone` — `triggers.rs`
+- [x] `compute_next_runs` with timezone and count > 1 (ordering) — `triggers.rs`
+- [x] Runtime invalid timezone fallback to UTC in scheduler — `scheduler.rs`
+- [x] DST spring-forward gap: trigger fires at first valid time — `scheduler.rs`
+- [x] DST fall-back ambiguity: trigger fires once — `scheduler.rs`
+
 ## Bugs Found & Fixed
 
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)

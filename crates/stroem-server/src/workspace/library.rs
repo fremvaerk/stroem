@@ -727,6 +727,7 @@ mod tests {
                 input: HashMap::new(),
                 enabled: true,
                 concurrency: Default::default(),
+                timezone: None,
             },
         );
 

@@ -204,6 +204,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Clean shutdown via `tokio_util::sync::CancellationToken` (SIGINT/SIGTERM)
 - Jobs created by triggers have `source_type = "trigger"`, `source_id = "{workspace}/{trigger_name}"`
 - Cron validation at YAML parse time in `validation.rs` (CLI `validate` catches bad expressions)
+- **Timezone support**: Optional `timezone` field (IANA name, e.g., `"Europe/Copenhagen"`) on `TriggerDef::Scheduler`. Defaults to UTC. Uses `chrono-tz` crate. Scheduler converts to local time for cron matching, then back to UTC. DST handled by `croner`. Parsed `Tz` stored in `TriggerState` to avoid re-parsing. Hot-reload resets state when timezone changes.
 - **Concurrency policy**: `ConcurrencyPolicy` enum (`Allow`/`Skip`/`CancelPrevious`) on `TriggerDef::Scheduler`
   - `skip`: `count_active_by_source() > 0` → skip trigger fire
   - `cancel_previous`: `get_active_by_source()` → cancel all active → create new job

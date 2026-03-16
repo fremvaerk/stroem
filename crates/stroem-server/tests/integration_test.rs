@@ -878,6 +878,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::from([("name".to_string(), json!("nightly"))]),
             enabled: true,
             concurrency: Default::default(),
+            timezone: None,
         },
     );
 
@@ -890,6 +891,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::from([("host".to_string(), json!("db.prod"))]),
             enabled: false,
             concurrency: Default::default(),
+            timezone: None,
         },
     );
 
@@ -12787,6 +12789,7 @@ async fn setup_scheduler_workspace(
             input: trigger_input,
             enabled,
             concurrency: Default::default(),
+            timezone: None,
         },
     );
 

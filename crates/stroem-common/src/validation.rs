@@ -205,7 +205,7 @@ fn validate_workflow_config_inner(
         }
 
         match trigger {
-            crate::models::workflow::TriggerDef::Scheduler { cron, .. } => {
+            crate::models::workflow::TriggerDef::Scheduler { cron, timezone, .. } => {
                 // Validate cron expression syntax
                 if croner::parser::CronParser::builder()
                     .seconds(croner::parser::Seconds::Optional)
@@ -218,6 +218,16 @@ fn validate_workflow_config_inner(
                         trigger_name,
                         cron
                     );
+                }
+                // Validate timezone is a valid IANA timezone
+                if let Some(tz_str) = timezone {
+                    if tz_str.parse::<chrono_tz::Tz>().is_err() {
+                        bail!(
+                            "Trigger '{}' has invalid timezone '{}' (must be IANA, e.g., 'Europe/Copenhagen')",
+                            trigger_name,
+                            tz_str
+                        );
+                    }
                 }
             }
             crate::models::workflow::TriggerDef::Webhook {
@@ -1440,6 +1450,7 @@ triggers:
                 input: HashMap::new(),
                 enabled: true,
                 concurrency: Default::default(),
+                timezone: None,
             },
         );
 
@@ -1476,11 +1487,147 @@ triggers:
                 input: HashMap::new(),
                 enabled: true,
                 concurrency: Default::default(),
+                timezone: None,
             },
         );
 
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_trigger_valid_timezone() {
+        let mut config = WorkflowConfig::default();
+        config.tasks.insert(
+            "test".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+                timeout: None,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+        config.triggers.insert(
+            "nightly".to_string(),
+            TriggerDef::Scheduler {
+                cron: "0 2 * * *".to_string(),
+                task: "test".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+                concurrency: Default::default(),
+                timezone: Some("Europe/Copenhagen".to_string()),
+            },
+        );
+
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_trigger_utc_timezone() {
+        let mut config = WorkflowConfig::default();
+        config.tasks.insert(
+            "test".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+                timeout: None,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+        config.triggers.insert(
+            "nightly".to_string(),
+            TriggerDef::Scheduler {
+                cron: "0 2 * * *".to_string(),
+                task: "test".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+                concurrency: Default::default(),
+                timezone: Some("UTC".to_string()),
+            },
+        );
+
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_trigger_invalid_timezone() {
+        let mut config = WorkflowConfig::default();
+        config.tasks.insert(
+            "test".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+                timeout: None,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+        config.triggers.insert(
+            "nightly".to_string(),
+            TriggerDef::Scheduler {
+                cron: "0 2 * * *".to_string(),
+                task: "test".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+                concurrency: Default::default(),
+                timezone: Some("Not/A/Timezone".to_string()),
+            },
+        );
+
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid timezone"));
+    }
+
+    #[test]
+    fn test_validate_trigger_empty_string_timezone() {
+        // Empty string is Some("") which should fail timezone parsing
+        let mut config = WorkflowConfig::default();
+        config.tasks.insert(
+            "test".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input: HashMap::new(),
+                flow: HashMap::new(),
+                timeout: None,
+                on_success: vec![],
+                on_error: vec![],
+            },
+        );
+        config.triggers.insert(
+            "nightly".to_string(),
+            TriggerDef::Scheduler {
+                cron: "0 2 * * *".to_string(),
+                task: "test".to_string(),
+                input: HashMap::new(),
+                enabled: true,
+                concurrency: Default::default(),
+                timezone: Some("".to_string()),
+            },
+        );
+
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid timezone"));
     }
 
     #[test]

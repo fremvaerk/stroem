@@ -403,6 +403,9 @@ pub enum TriggerDef {
         enabled: bool,
         #[serde(default)]
         concurrency: ConcurrencyPolicy,
+        /// IANA timezone name (e.g., "Europe/Copenhagen"). Defaults to UTC when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timezone: Option<String>,
     },
     #[serde(rename = "webhook")]
     Webhook {
@@ -461,6 +464,14 @@ impl TriggerDef {
         match self {
             TriggerDef::Scheduler { concurrency, .. } => *concurrency,
             TriggerDef::Webhook { .. } => ConcurrencyPolicy::Allow,
+        }
+    }
+
+    /// Get the timezone (only meaningful for Scheduler triggers).
+    pub fn timezone(&self) -> Option<&str> {
+        match self {
+            TriggerDef::Scheduler { timezone, .. } => timezone.as_deref(),
+            TriggerDef::Webhook { .. } => None,
         }
     }
 }
@@ -772,6 +783,36 @@ triggers:
         }
         assert_eq!(trigger.task(), "nightly-backup");
         assert!(trigger.enabled());
+    }
+
+    #[test]
+    fn test_parse_trigger_with_timezone() {
+        let yaml = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 2 * * *"
+    task: some-task
+    timezone: "Europe/Copenhagen"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("nightly").unwrap();
+        assert_eq!(trigger.timezone(), Some("Europe/Copenhagen"));
+        assert_eq!(trigger.task(), "some-task");
+    }
+
+    #[test]
+    fn test_parse_trigger_without_timezone_defaults_none() {
+        let yaml = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 2 * * *"
+    task: some-task
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("nightly").unwrap();
+        assert!(trigger.timezone().is_none());
     }
 
     #[test]
