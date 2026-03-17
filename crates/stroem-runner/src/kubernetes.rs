@@ -221,6 +221,9 @@ impl KubeRunner {
     }
 
     /// Inject the startup-scripts ConfigMap as a volume and mount it into the step container.
+    /// Also wraps the step container's command to source the startup scripts before
+    /// running the original command (since setting `command` in K8s overrides the image's
+    /// ENTRYPOINT, bypassing `entrypoint.sh`).
     ///
     /// Called only when `self.startup_configmap` is `Some`. Mutates `pod_json` in-place.
     fn inject_startup_configmap(pod_json: &mut serde_json::Value, cm_name: &str) {
@@ -244,7 +247,7 @@ impl KubeRunner {
             pod_json["spec"]["volumes"] = serde_json::json!([startup_volume]);
         }
 
-        // Add mount to step container
+        // Add mount to step container and wrap command to source startup scripts
         if let Some(containers) = pod_json["spec"]["containers"].as_array_mut() {
             if let Some(step_container) = containers
                 .iter_mut()
@@ -255,8 +258,58 @@ impl KubeRunner {
                 } else {
                     step_container["volumeMounts"] = serde_json::json!([startup_mount]);
                 }
+
+                // Wrap the command to source startup scripts first.
+                // K8s `command` overrides the image ENTRYPOINT, so entrypoint.sh
+                // (which normally sources /etc/stroem/startup.d/*.sh) never runs.
+                // We inline the same sourcing logic here.
+                Self::wrap_command_with_startup(step_container);
             }
         }
+    }
+
+    /// Rewrite a container's `command` array to source startup scripts before
+    /// running the original command. Handles both `["sh", "-c", "..."]` style
+    /// commands and direct invocations like `["python3", "script.py"]`.
+    fn wrap_command_with_startup(container: &mut serde_json::Value) {
+        const STARTUP_PREAMBLE: &str =
+            "for s in /etc/stroem/startup.d/*.sh; do [ -f \"$s\" ] && . \"$s\"; done; ";
+
+        let original_cmd = match container.get("command").and_then(|c| c.as_array()) {
+            Some(arr) => arr.clone(),
+            None => return,
+        };
+
+        if original_cmd.is_empty() {
+            return;
+        }
+
+        // If the command is already ["sh", "-c", "..."], prepend sourcing to the script
+        let is_sh_c = original_cmd.len() >= 3
+            && matches!(original_cmd[0].as_str(), Some("sh" | "bash"))
+            && original_cmd[1].as_str() == Some("-c");
+
+        let wrapped = if is_sh_c {
+            // ["sh", "-c", "echo hello"] → ["sh", "-c", "<preamble>echo hello"]
+            let mut new_cmd = original_cmd.clone();
+            if let Some(script) = new_cmd[2].as_str() {
+                new_cmd[2] = serde_json::Value::String(format!("{STARTUP_PREAMBLE}{script}"));
+            }
+            new_cmd
+        } else {
+            // ["python3", "script.py"] → ["sh", "-c", "<preamble>exec python3 script.py"]
+            let parts: Vec<String> = original_cmd
+                .iter()
+                .filter_map(|v| v.as_str().map(shell_escape))
+                .collect();
+            vec![
+                serde_json::Value::String("sh".to_string()),
+                serde_json::Value::String("-c".to_string()),
+                serde_json::Value::String(format!("{STARTUP_PREAMBLE}exec {}", parts.join(" "))),
+            ]
+        };
+
+        container["command"] = serde_json::Value::Array(wrapped);
     }
 
     /// Build a pod spec for executing a step.
@@ -360,6 +413,17 @@ impl KubeRunner {
             .cloned()
             .unwrap_or_else(|| "default".to_string())
     }
+}
+
+/// Escape a string for safe use as a shell argument.
+/// Wraps in single quotes and escapes any embedded single quotes.
+fn shell_escape(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./=:@".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Deep-merge two JSON values. For objects, keys are merged recursively.
@@ -2129,6 +2193,121 @@ mod tests {
 
         // No volumes in NoWorkspace mode without startup configmap
         assert!(spec.volumes.is_none() || spec.volumes.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_startup_configmap_wraps_sh_c_command() {
+        // When startup scripts are injected, "sh -c <script>" commands should
+        // be rewritten to source the scripts before executing the original command.
+        let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+        };
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        let container = &spec.containers[0];
+        let cmd = container.command.as_ref().unwrap();
+
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert!(
+            cmd[2].starts_with("for s in /etc/stroem/startup.d/*.sh;"),
+            "Command should start with startup preamble, got: {}",
+            cmd[2]
+        );
+        assert!(
+            cmd[2].ends_with("echo hello"),
+            "Command should end with original script, got: {}",
+            cmd[2]
+        );
+    }
+
+    #[test]
+    fn test_startup_configmap_wraps_python_command() {
+        // Python commands go through build_container_script_cmd which produces
+        // ["sh", "-c", "...heredoc..."], so the startup preamble should be prepended.
+        let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
+        let config = RunConfig {
+            cmd: Some("print('hi')".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "script".to_string(),
+            image: Some("python:3".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+        };
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        let container = &spec.containers[0];
+        let cmd = container.command.as_ref().unwrap();
+
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert!(
+            cmd[2].starts_with("for s in /etc/stroem/startup.d/*.sh;"),
+            "Python command should start with startup preamble, got: {}",
+            cmd[2]
+        );
+        assert!(
+            cmd[2].contains("print('hi')"),
+            "Python command should contain the original script, got: {}",
+            cmd[2]
+        );
+    }
+
+    #[test]
+    fn test_no_startup_configmap_command_unchanged() {
+        // Without startup configmap, command should be the original unwrapped.
+        let runner = make_runner(); // no startup configmap
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+        };
+        let pod = runner
+            .build_pod_spec("test-pod", &config, "default", make_labels())
+            .unwrap();
+        let spec = pod.spec.unwrap();
+        let container = &spec.containers[0];
+        let cmd = container.command.as_ref().unwrap();
+
+        // Should be the original sh -c command, not wrapped
+        assert_eq!(cmd, &["sh", "-c", "echo hello"]);
     }
 
     #[test]
