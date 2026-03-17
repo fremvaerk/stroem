@@ -6390,6 +6390,7 @@ async fn setup_multi_workspace() -> Result<(
             source: src_default,
             name: "default".to_string(),
             source_path: PathBuf::from("/dev/null"),
+            load_error: Arc::new(std::sync::RwLock::new(None)),
         },
     );
     entries.insert(
@@ -6399,6 +6400,7 @@ async fn setup_multi_workspace() -> Result<(
             source: src_ops,
             name: "ops".to_string(),
             source_path: PathBuf::from("/dev/null"),
+            load_error: Arc::new(std::sync::RwLock::new(None)),
         },
     );
 

@@ -42,6 +42,10 @@ Last updated: 2026-03-13.
 - [ ] `AppState` is a God Object — no compile-time capability enforcement
 - [x] Error responses — `AppError` enum in `web/error.rs` with `IntoResponse`, all handlers migrated, internal details sanitized
 - [x] Step-level timeout, job-level timeout, and cron concurrency policy
+- [x] Retry failed workspace loads — placeholder entries with `load_error`, watcher retries on each poll cycle
+- [x] Workspace retry: watcher uses `.unwrap()` on `load_error` lock — aligned with `.unwrap_or_else(|e| e.into_inner())` pattern
+- [x] Workspace retry: `get_revision()` gated by `load_error` — returns None for errored workspaces
+- [x] Workspace retry: documented `names()` excludes `GitSource::new()` failures, `list_workspace_info()` includes both
 - [ ] No heartbeat failure → worker re-registration logic
 - [ ] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
 - [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
@@ -165,6 +169,9 @@ Last updated: 2026-03-13.
 - [ ] Playwright: webhook trigger display
 - [ ] Playwright: Dashboard content
 - [x] Full library loading pipeline integration test (2 tests in library.rs: happy path through WorkspaceManager::new + validation failure for missing ref)
+- [x] Workspace retry: watcher healthy→errored→healthy full cycle test
+- [x] Workspace retry: watcher sets error on continued failure test
+- [x] Workspace retry: `get_revision()` returns None for errored-after-healthy workspace test
 - [ ] Git workspace source auth failure test
 
 ## ACL / Authorization

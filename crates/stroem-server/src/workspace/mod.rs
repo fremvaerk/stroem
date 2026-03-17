@@ -44,14 +44,22 @@ pub struct WorkspaceEntry {
     pub source: Arc<dyn WorkspaceSource>,
     pub name: String,
     pub source_path: PathBuf,
+    /// None when healthy, Some(message) when last load failed.
+    /// Uses std::sync::RwLock since it's read from both sync and async contexts.
+    pub load_error: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl std::fmt::Debug for WorkspaceEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkspaceEntry")
-            .field("name", &self.name)
-            .field("source_path", &self.source_path)
-            .finish()
+        let mut s = f.debug_struct("WorkspaceEntry");
+        s.field("name", &self.name)
+            .field("source_path", &self.source_path);
+        if let Ok(err) = self.load_error.read() {
+            if err.is_some() {
+                s.field("load_error", &err);
+            }
+        }
+        s.finish()
     }
 }
 
@@ -157,12 +165,24 @@ impl WorkspaceManager {
                             source,
                             name: name.clone(),
                             source_path,
+                            load_error: Arc::new(std::sync::RwLock::new(None)),
                         },
                     );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to load workspace '{}': {:#}", name, e);
-                    load_errors.insert(name, format!("{:#}", e));
+                    let err_msg = format!("{:#}", e);
+                    tracing::error!("Failed to load workspace '{}': {}", name, err_msg);
+                    let source_path = source.path().to_path_buf();
+                    entries.insert(
+                        name.clone(),
+                        WorkspaceEntry {
+                            config: Arc::new(RwLock::new(Arc::new(WorkspaceConfig::new()))),
+                            source,
+                            name: name.clone(),
+                            source_path,
+                            load_error: Arc::new(std::sync::RwLock::new(Some(err_msg))),
+                        },
+                    );
                 }
             }
         }
@@ -197,6 +217,7 @@ impl WorkspaceManager {
                 source: source as Arc<dyn WorkspaceSource>,
                 name: name.to_string(),
                 source_path: PathBuf::from("/dev/null"),
+                load_error: Arc::new(std::sync::RwLock::new(None)),
             },
         );
         Self {
@@ -206,32 +227,72 @@ impl WorkspaceManager {
         }
     }
 
-    /// Get the workspace config for a given name
+    /// Get the workspace config for a given name.
+    /// Returns None for workspaces with a load error (empty placeholder config).
     pub async fn get_config(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {
         let entry = self.entries.get(name)?;
+        if entry
+            .load_error
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return None;
+        }
         let config = entry.config.read().await;
         Some(Arc::clone(&config))
     }
 
-    /// Get the filesystem path for a workspace
+    /// Get the filesystem path for a workspace.
+    /// Returns None for workspaces with a load error.
     pub fn get_path(&self, name: &str) -> Option<&Path> {
-        self.entries.get(name).map(|e| e.source_path.as_path())
+        let entry = self.entries.get(name)?;
+        if entry
+            .load_error
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return None;
+        }
+        Some(entry.source_path.as_path())
     }
 
-    /// Get the current revision for a workspace
+    /// Get the current revision for a workspace.
+    /// Returns `None` if the workspace does not exist or has a load error.
     pub fn get_revision(&self, name: &str) -> Option<String> {
-        self.entries.get(name).and_then(|e| e.source.revision())
+        let entry = self.entries.get(name)?;
+        if entry
+            .load_error
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return None;
+        }
+        entry.source.revision()
     }
 
-    /// List all workspace names
+    /// List all workspace names (including errored workspaces with placeholder entries).
+    /// Note: source construction failures (e.g. `GitSource::new()`) are not included here
+    /// as they have no entry — use `list_workspace_info()` for the complete list.
     pub fn names(&self) -> Vec<&str> {
         self.entries.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Get all workspace configs as (name, config) pairs
+    /// Get all workspace configs as (name, config) pairs.
+    /// Skips workspaces with load errors.
     pub async fn get_all_configs(&self) -> Vec<(String, Arc<WorkspaceConfig>)> {
         let mut result = Vec::new();
         for (name, entry) in &self.entries {
+            if entry
+                .load_error
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+            {
+                continue;
+            }
             let config = entry.config.read().await;
             result.push((name.clone(), Arc::clone(&config)));
         }
@@ -239,21 +300,44 @@ impl WorkspaceManager {
     }
 
     /// List all workspaces including ones that failed to load.
-    /// Failed workspaces have `error` set and zero counts.
+    /// This includes both placeholder entries (load failures) and source construction
+    /// failures from `load_errors`. Failed workspaces have `error` set and zero counts.
     pub async fn list_workspace_info(&self) -> Vec<WorkspaceInfo> {
         let mut infos = Vec::new();
         for (name, entry) in &self.entries {
+            let error = entry
+                .load_error
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let config = entry.config.read().await;
             infos.push(WorkspaceInfo {
                 name: name.clone(),
-                tasks_count: config.tasks.len(),
-                actions_count: config.actions.len(),
-                triggers_count: config.triggers.len(),
-                connections_count: config.connections.len(),
+                tasks_count: if error.is_some() {
+                    0
+                } else {
+                    config.tasks.len()
+                },
+                actions_count: if error.is_some() {
+                    0
+                } else {
+                    config.actions.len()
+                },
+                triggers_count: if error.is_some() {
+                    0
+                } else {
+                    config.triggers.len()
+                },
+                connections_count: if error.is_some() {
+                    0
+                } else {
+                    config.connections.len()
+                },
                 revision: entry.source.revision(),
-                error: None,
+                error,
             });
         }
+        // Source construction failures (e.g. GitSource::new() failed — no source object)
         for (name, error) in &self.load_errors {
             infos.push(WorkspaceInfo {
                 name: name.clone(),
@@ -270,25 +354,36 @@ impl WorkspaceManager {
 
     /// Reload a specific workspace from its source, updating config and revision.
     /// Library items are re-merged into the workspace config.
+    /// On success, clears any previous load error. On failure, sets the load error.
     pub async fn reload(&self, name: &str) -> Result<()> {
         let entry = self
             .entries
             .get(name)
             .with_context(|| format!("Workspace '{}' not found", name))?;
-        let mut new_config = entry
-            .source
-            .load()
-            .await
-            .with_context(|| format!("Failed to reload workspace '{}'", name))?;
 
-        // Re-merge library items
-        for lib in self.resolved_libraries.values() {
-            merge_library_into_workspace(&mut new_config, lib);
+        match entry.source.load().await {
+            Ok(mut new_config) => {
+                // Re-merge library items
+                for lib in self.resolved_libraries.values() {
+                    merge_library_into_workspace(&mut new_config, lib);
+                }
+
+                let mut config = entry.config.write().await;
+                *config = Arc::new(new_config);
+
+                // Clear any previous error
+                let mut err = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
+                *err = None;
+
+                Ok(())
+            }
+            Err(e) => {
+                let err_msg = format!("{:#}", e);
+                let mut err = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
+                *err = Some(err_msg);
+                Err(e).with_context(|| format!("Failed to reload workspace '{}'", name))
+            }
         }
-
-        let mut config = entry.config.write().await;
-        *config = Arc::new(new_config);
-        Ok(())
     }
 
     /// Get library source paths for tarball building.
@@ -303,6 +398,7 @@ impl WorkspaceManager {
     /// Start background watchers for hot-reload (folder watchers + git pollers).
     /// Only reloads when the source revision changes.
     /// Uses each source's `poll_interval_secs()` for the polling frequency.
+    /// Errored workspaces retry `load()` on each poll cycle until they recover.
     /// Watchers stop cleanly when `cancel_token` is cancelled.
     pub fn start_watchers(&self, cancel_token: CancellationToken) {
         for (name, entry) in &self.entries {
@@ -312,18 +408,31 @@ impl WorkspaceManager {
             let poll_secs = source.poll_interval_secs();
             let libs = self.resolved_libraries.clone();
             let cancel = cancel_token.clone();
+            let load_error = entry.load_error.clone();
+            let needs_initial_load = load_error
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
 
             tokio::spawn(async move {
                 tracing::info!(
-                    "Watcher started for workspace '{}' (poll interval: {}s)",
+                    "Watcher started for workspace '{}' (poll interval: {}s{})",
                     ws_name,
-                    poll_secs
+                    poll_secs,
+                    if needs_initial_load {
+                        ", retrying failed load"
+                    } else {
+                        ""
+                    },
                 );
 
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_secs));
                 let mut last_revision = source.revision();
-                // Skip the first immediate tick — the workspace was just loaded
-                interval.tick().await;
+
+                if !needs_initial_load {
+                    // Skip the first immediate tick — the workspace was just loaded
+                    interval.tick().await;
+                }
 
                 loop {
                     tokio::select! {
@@ -337,25 +446,33 @@ impl WorkspaceManager {
                         }
                     }
 
-                    // Check revision cheaply first. For folder sources this
-                    // hashes file metadata+content without parsing YAML.
-                    // For git sources this does a lightweight ls-remote
-                    // (blocking network call, so wrap in spawn_blocking).
-                    let source_clone = source.clone();
-                    let current_revision =
-                        tokio::task::spawn_blocking(move || source_clone.peek_revision())
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::error!("peek_revision task failed: {:#}", e);
-                                None
-                            });
-                    if current_revision == last_revision && current_revision.is_some() {
-                        continue;
+                    let is_errored = load_error
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some();
+
+                    // For errored entries, skip the peek optimization and always try load()
+                    if !is_errored {
+                        // Check revision cheaply first. For folder sources this
+                        // hashes file metadata+content without parsing YAML.
+                        // For git sources this does a lightweight ls-remote
+                        // (blocking network call, so wrap in spawn_blocking).
+                        let source_clone = source.clone();
+                        let current_revision =
+                            tokio::task::spawn_blocking(move || source_clone.peek_revision())
+                                .await
+                                .unwrap_or_else(|e| {
+                                    tracing::error!("peek_revision task failed: {:#}", e);
+                                    None
+                                });
+                        if current_revision == last_revision && current_revision.is_some() {
+                            continue;
+                        }
+
+                        tracing::info!("Workspace '{}': change detected, reloading...", ws_name);
                     }
 
-                    tracing::info!("Workspace '{}': change detected, reloading...", ws_name);
-
-                    // Revision changed (or source doesn't support peek) — do full reload
+                    // Revision changed (or source doesn't support peek, or errored) — do full reload
                     match source.load().await {
                         Ok(mut new_config) => {
                             // Re-merge library items
@@ -366,15 +483,24 @@ impl WorkspaceManager {
                             let new_revision = source.revision();
                             let mut config = config_lock.write().await;
                             *config = Arc::new(new_config);
-                            tracing::info!(
-                                "Workspace '{}' reloaded (revision: {:?} -> {:?})",
-                                ws_name,
-                                last_revision.as_deref().map(|s| &s[..8.min(s.len())]),
-                                new_revision.as_deref().map(|s| &s[..8.min(s.len())]),
-                            );
+
+                            let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
+                            if err.is_some() {
+                                tracing::info!("Workspace '{}' recovered from load error", ws_name);
+                            } else {
+                                tracing::info!(
+                                    "Workspace '{}' reloaded (revision: {:?} -> {:?})",
+                                    ws_name,
+                                    last_revision.as_deref().map(|s| &s[..8.min(s.len())]),
+                                    new_revision.as_deref().map(|s| &s[..8.min(s.len())]),
+                                );
+                            }
+                            *err = None;
                             last_revision = new_revision;
                         }
                         Err(e) => {
+                            let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
+                            *err = Some(format!("{:#}", e));
                             tracing::warn!("Failed to reload workspace '{}': {:#}", ws_name, e);
                         }
                     }
@@ -844,10 +970,12 @@ tasks:
         );
 
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
-        // Workspace should not be in entries
-        assert_eq!(mgr.names().len(), 0);
+        // Workspace should be in entries (placeholder) but get_config returns None
+        assert_eq!(mgr.names().len(), 1);
+        assert!(mgr.names().contains(&"nonexistent"));
         assert!(mgr.get_config("nonexistent").await.is_none());
-        // But should appear in list_workspace_info with error
+        assert!(mgr.get_path("nonexistent").is_none());
+        // Should appear in list_workspace_info with error
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
         let info = &infos[0];
@@ -976,8 +1104,9 @@ actions:
         );
 
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
-        // Should not crash, but record the error
-        assert_eq!(mgr.names().len(), 0);
+        // Should not crash — entry exists but get_config returns None
+        assert_eq!(mgr.names().len(), 1);
+        assert!(mgr.get_config("bad").await.is_none());
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "bad");
@@ -1170,11 +1299,9 @@ tasks:
 
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
 
-        // Good workspace loaded
-        assert_eq!(mgr.names().len(), 1);
+        // Both entries exist, but only good has a usable config
+        assert_eq!(mgr.names().len(), 2);
         assert!(mgr.get_config("good").await.is_some());
-
-        // Bad workspace not in entries
         assert!(mgr.get_config("bad").await.is_none());
 
         // Both appear in workspace info
@@ -1207,7 +1334,11 @@ tasks:
         );
 
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
-        assert_eq!(mgr.names().len(), 0);
+        assert_eq!(mgr.names().len(), 2);
+
+        // Both have errors, neither has usable config
+        assert!(mgr.get_config("ws1").await.is_none());
+        assert!(mgr.get_config("ws2").await.is_none());
 
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 2);
@@ -1286,5 +1417,278 @@ tasks:
         // test to hang.  Reaching here means the tasks exited (or will exit)
         // cleanly.  The token being cancelled is the definitive assertion.
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_errored_workspace_not_in_get_all_configs() {
+        let good_temp = create_test_workspace_dir();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "good".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: good_temp.path().to_str().unwrap().to_string(),
+            },
+        );
+        defs.insert(
+            "bad".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/path/xyz".to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        let all = mgr.get_all_configs().await;
+        // Only good workspace should be returned
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "good");
+    }
+
+    #[tokio::test]
+    async fn test_reload_clears_error() {
+        // Use a path that doesn't exist yet → load fails
+        let temp = TempDir::new().unwrap();
+        let ws_path = temp.path().join("workspace");
+        let ws_path_str = ws_path.to_str().unwrap().to_string();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ws".to_string(),
+            WorkspaceSourceDef::Folder { path: ws_path_str },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        // Entry exists but errored
+        assert!(mgr.get_config("ws").await.is_none());
+        let infos = mgr.list_workspace_info().await;
+        assert!(infos[0].error.is_some());
+
+        // Fix the workspace by creating the directory with valid files
+        fs::create_dir_all(&ws_path).unwrap();
+        fs::write(
+            ws_path.join("test.yaml"),
+            "actions:\n  a:\n    type: script\n    script: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+        ).unwrap();
+
+        // Reload should succeed and clear the error
+        mgr.reload("ws").await.unwrap();
+        assert!(mgr.get_config("ws").await.is_some());
+        assert!(mgr.get_path("ws").is_some());
+
+        let infos = mgr.list_workspace_info().await;
+        assert!(infos[0].error.is_none());
+        assert_eq!(infos[0].tasks_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_reload_sets_error_on_failure() {
+        let temp = create_test_workspace_dir();
+        let ws_path = temp.path().to_str().unwrap().to_string();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ws".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_path.clone(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        assert!(mgr.get_config("ws").await.is_some());
+
+        // Break the workspace by removing the entire directory
+        fs::remove_dir_all(&ws_path).unwrap();
+
+        // Reload should fail and set the error
+        let result = mgr.reload("ws").await;
+        assert!(result.is_err());
+
+        let infos = mgr.list_workspace_info().await;
+        assert!(infos[0].error.is_some());
+        // get_config should now return None
+        assert!(mgr.get_config("ws").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_failed_workspace_watcher_retries() {
+        use tokio_util::sync::CancellationToken;
+
+        // Use a path that doesn't exist yet → load fails
+        let temp = TempDir::new().unwrap();
+        let ws_path = temp.path().join("workspace");
+        let ws_path_str = ws_path.to_str().unwrap().to_string();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "retry".to_string(),
+            WorkspaceSourceDef::Folder { path: ws_path_str },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        assert!(mgr.get_config("retry").await.is_none());
+
+        // Fix the workspace by creating it with valid content
+        fs::create_dir_all(&ws_path).unwrap();
+        fs::write(
+            ws_path.join("test.yaml"),
+            "actions:\n  a:\n    type: script\n    script: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+        ).unwrap();
+
+        // Start watchers — errored entry should retry immediately (no first-tick skip)
+        let cancel_token = CancellationToken::new();
+        mgr.start_watchers(cancel_token.clone());
+
+        // Wait for the watcher to pick up the fix (folder poll is 30s default,
+        // but errored entries don't skip the first tick, so it fires right away)
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel_token.cancel();
+
+        // Workspace should have recovered
+        assert!(mgr.get_config("retry").await.is_some());
+        let infos = mgr.list_workspace_info().await;
+        let info = infos.iter().find(|i| i.name == "retry").unwrap();
+        assert!(info.error.is_none());
+        assert_eq!(info.tasks_count, 1);
+    }
+
+    /// Tests the full healthy → errored → healthy cycle.
+    ///
+    /// Strategy: use `reload()` to force the error state (avoids the 30-second
+    /// watcher interval for healthy workspaces), fix the files, then start
+    /// watchers.  Because the entry is already errored, the watcher fires
+    /// immediately (no first-tick skip) and recovers.
+    #[tokio::test]
+    async fn test_watcher_healthy_to_errored_to_healthy() {
+        use tokio_util::sync::CancellationToken;
+
+        let temp = create_test_workspace_dir();
+        let ws_path = temp.path().to_path_buf();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "cycle".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_path.to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        // Starts healthy.
+        assert!(mgr.get_config("cycle").await.is_some());
+
+        // Break the workspace and drive it into the error state via reload().
+        // (The watcher for a healthy workspace would wait up to 30 s before
+        // re-checking, making direct use of start_watchers() impractical here.)
+        fs::remove_dir_all(&ws_path).unwrap();
+        let result = mgr.reload("cycle").await;
+        assert!(result.is_err());
+        assert!(mgr.get_config("cycle").await.is_none());
+
+        // Fix the workspace.
+        fs::create_dir_all(ws_path.join(".workflows")).unwrap();
+        fs::write(
+            ws_path.join(".workflows").join("test.yaml"),
+            "actions:\n  a:\n    type: script\n    script: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+        )
+        .unwrap();
+
+        // Start watchers.  The entry is errored, so the watcher retries
+        // immediately without waiting for a full poll interval.
+        let cancel_token = CancellationToken::new();
+        mgr.start_watchers(cancel_token.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel_token.cancel();
+
+        // Should have recovered.
+        assert!(mgr.get_config("cycle").await.is_some());
+        let infos = mgr.list_workspace_info().await;
+        let info = infos.iter().find(|i| i.name == "cycle").unwrap();
+        assert!(info.error.is_none());
+        assert_eq!(info.tasks_count, 1);
+    }
+
+    /// Tests that the watcher's own error-setting code path is exercised when a
+    /// workspace is already broken at startup: the watcher retries immediately,
+    /// fails again, and leaves a non-empty error message.
+    #[tokio::test]
+    async fn test_watcher_sets_error_on_continued_failure() {
+        use tokio_util::sync::CancellationToken;
+
+        // Point at a path that does not exist — initial load fails.
+        let temp = TempDir::new().unwrap();
+        let ws_path = temp.path().join("workspace");
+        let ws_path_str = ws_path.to_str().unwrap().to_string();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "broken".to_string(),
+            WorkspaceSourceDef::Folder { path: ws_path_str },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        assert!(mgr.get_config("broken").await.is_none());
+        let infos = mgr.list_workspace_info().await;
+        assert!(infos[0].error.is_some());
+
+        // Start watchers — the errored entry will retry immediately, fail again,
+        // and update (or keep) the error message.
+        let cancel_token = CancellationToken::new();
+        mgr.start_watchers(cancel_token.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel_token.cancel();
+
+        // Still errored after the watcher ran.
+        assert!(mgr.get_config("broken").await.is_none());
+        let infos = mgr.list_workspace_info().await;
+        let info = infos.iter().find(|i| i.name == "broken").unwrap();
+        assert!(info.error.is_some());
+        assert!(
+            !info.error.as_ref().unwrap().is_empty(),
+            "error message should be non-empty"
+        );
+    }
+
+    /// Tests that `get_revision()` returns `None` for a workspace in the error
+    /// state, and recovers to `Some` once the workspace is healthy again.
+    #[tokio::test]
+    async fn test_get_revision_none_for_errored_workspace() {
+        let temp = create_test_workspace_dir();
+        let ws_path = temp.path().to_str().unwrap().to_string();
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ws".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: ws_path.clone(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        // Initially healthy — revision is available.
+        assert!(
+            mgr.get_revision("ws").is_some(),
+            "healthy workspace should have a revision"
+        );
+
+        // Break the workspace and reload to enter the error state.
+        fs::remove_dir_all(&ws_path).unwrap();
+        let _ = mgr.reload("ws").await;
+
+        // Revision must be None while the workspace is errored.
+        assert!(
+            mgr.get_revision("ws").is_none(),
+            "get_revision should return None for an errored workspace"
+        );
+
+        // Fix the workspace and reload to clear the error.
+        fs::create_dir_all(format!("{ws_path}/.workflows")).unwrap();
+        fs::write(
+            format!("{ws_path}/.workflows/test.yaml"),
+            "actions:\n  a:\n    type: script\n    script: echo ok\ntasks:\n  t:\n    flow:\n      s:\n        action: a\n",
+        )
+        .unwrap();
+        mgr.reload("ws").await.unwrap();
+
+        // Revision should be available again.
+        assert!(
+            mgr.get_revision("ws").is_some(),
+            "revision should be Some after workspace recovers"
+        );
     }
 }
