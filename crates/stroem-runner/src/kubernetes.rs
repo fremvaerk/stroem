@@ -591,7 +591,11 @@ enum PodPhaseStatus {
     /// Pod completed successfully (exit code 0).
     Succeeded,
     /// Pod failed. `exit_code` is extracted from container status, or defaults to 1.
-    Failed { exit_code: i32 },
+    /// `reason` is the Kubernetes termination reason (e.g. "OOMKilled", "Error").
+    Failed {
+        exit_code: i32,
+        reason: Option<String>,
+    },
     /// The step container is running — ready for live log streaming.
     Running,
     /// Pod is still being scheduled / init containers running.
@@ -641,6 +645,7 @@ fn classify_pod_status(pod: &Pod) -> Option<PodPhaseStatus> {
         "Succeeded" => PodPhaseStatus::Succeeded,
         "Failed" => {
             let mut exit_code = 1i32; // default for unresolvable failures
+            let mut termination_reason = None;
             if let Some(container_statuses) = &status.container_statuses {
                 for cs in container_statuses {
                     if cs.name == "step" {
@@ -650,12 +655,16 @@ fn classify_pod_status(pod: &Pod) -> Option<PodPhaseStatus> {
                             exit_code = terminated.exit_code;
                             if let Some(ref reason) = terminated.reason {
                                 tracing::warn!("Step container terminated: reason={}", reason);
+                                termination_reason = Some(reason.clone());
                             }
                         }
                     }
                 }
             }
-            PodPhaseStatus::Failed { exit_code }
+            PodPhaseStatus::Failed {
+                exit_code,
+                reason: termination_reason,
+            }
         }
         "Running" => PodPhaseStatus::Running,
         "Pending" => {
@@ -823,8 +832,23 @@ impl Runner for KubeRunner {
                     pod_terminal = true;
                     break;
                 }
-                Some(PodPhaseStatus::Failed { exit_code: code }) => {
+                Some(PodPhaseStatus::Failed {
+                    exit_code: code,
+                    reason,
+                }) => {
                     exit_code = code;
+                    if let Some(ref reason) = reason {
+                        if let Some(ref cb) = log_callback {
+                            let _ = cb(LogLine {
+                                stream: LogStream::Stderr,
+                                line: format!(
+                                    "Container terminated: {} (exit code {})",
+                                    reason, code
+                                ),
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                    }
                     pod_terminal = true;
                     break;
                 }
@@ -1007,8 +1031,17 @@ impl Runner for KubeRunner {
                         exit_code = 0;
                         break None;
                     }
-                    Some(PodPhaseStatus::Failed { exit_code: code }) => {
+                    Some(PodPhaseStatus::Failed {
+                        exit_code: code,
+                        reason,
+                    }) => {
                         exit_code = code;
+                        if let Some(ref reason) = reason {
+                            stderr_lines.push(format!(
+                                "Container terminated: {} (exit code {})",
+                                reason, code
+                            ));
+                        }
                         break None;
                     }
                     Some(PodPhaseStatus::WaitingError { reason, message }) => {
@@ -2766,7 +2799,10 @@ mod tests {
     fn test_classify_failed_with_exit_code() {
         let pod = make_pod_failed_with_exit(137, Some("OOMKilled"));
         match classify_pod_status(&pod) {
-            Some(PodPhaseStatus::Failed { exit_code }) => assert_eq!(exit_code, 137),
+            Some(PodPhaseStatus::Failed { exit_code, reason }) => {
+                assert_eq!(exit_code, 137);
+                assert_eq!(reason.as_deref(), Some("OOMKilled"));
+            }
             other => panic!("Expected Failed, got {:?}", other.is_some()),
         }
     }
@@ -2776,7 +2812,10 @@ mod tests {
         // Pod failed but no container statuses — e.g. scheduling failure
         let pod = make_pod_with_phase("Failed");
         match classify_pod_status(&pod) {
-            Some(PodPhaseStatus::Failed { exit_code }) => assert_eq!(exit_code, 1),
+            Some(PodPhaseStatus::Failed { exit_code, reason }) => {
+                assert_eq!(exit_code, 1);
+                assert!(reason.is_none());
+            }
             other => panic!("Expected Failed, got {:?}", other.is_some()),
         }
     }
@@ -2786,7 +2825,7 @@ mod tests {
         // Unusual: pod "Failed" but container exit code 0 (init container failure)
         let pod = make_pod_failed_with_exit(0, None);
         match classify_pod_status(&pod) {
-            Some(PodPhaseStatus::Failed { exit_code }) => assert_eq!(exit_code, 0),
+            Some(PodPhaseStatus::Failed { exit_code, .. }) => assert_eq!(exit_code, 0),
             other => panic!("Expected Failed, got {:?}", other.is_some()),
         }
     }
@@ -2944,7 +2983,7 @@ mod tests {
         let pod = make_pod("Failed");
         assert!(matches!(
             classify_pod_status(&pod),
-            Some(PodPhaseStatus::Failed { exit_code: 1 })
+            Some(PodPhaseStatus::Failed { exit_code: 1, .. })
         ));
     }
 
