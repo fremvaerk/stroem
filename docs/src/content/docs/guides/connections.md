@@ -31,7 +31,7 @@ connection_types:
         secret: true
 ```
 
-Supported property types: `string`, `integer`, `number`, `boolean`.
+Supported property types: `string`, `text`, `integer`, `number`, `boolean`, `date`, `datetime`.
 
 ## Connections
 
@@ -59,7 +59,7 @@ Connection values support Tera templates (e.g., `{{ 'ref+...' | vals }}` for sec
 
 ### Untyped Connections
 
-Connections without a `type` field are also valid. They skip type validation and default application but can still be used as task inputs:
+Connections without a `type` field are also valid. Untyped connections skip type validation entirely and can be used for any connection-type input field:
 
 ```yaml
 connections:
@@ -77,6 +77,9 @@ actions:
   run-migration:
     type: script
     script: "migrate --host {{ input.db.host }} --port {{ input.db.port }} --db {{ input.db.database }}"
+    input:
+      db:
+        type: postgres        # Expects a resolved connection object
 
 tasks:
   deploy:
@@ -102,13 +105,29 @@ The system resolves `"prod_db"` to `{ "host": "db.example.com", "port": 5432, "d
 
 In the web UI, connection-type inputs render as a searchable dropdown listing all connections of that type in the workspace — no manual typing required.
 
+When a connection type comes from a library, use the full namespaced name: `type: common.postgres` (where `common` is the library name).
+
 ## Resolution Flow
 
+**Task-level** (at job creation):
 1. `merge_defaults()` runs as normal (fills missing fields, applies defaults)
 2. `resolve_connection_inputs()` scans each task input field:
    - If the field type is a connection type (not `string`/`text`/`integer`/`number`/`boolean`), the provided string value is looked up in workspace connections
    - The string is replaced with the connection's values object
 3. The resolved input is stored in the job — available in all templates
+
+**Action-level** (at step execution):
+Connection inputs on individual actions within a task are resolved when the step is about to execute, during the claim and render phase.
+
+### Direct Object Pass-Through
+
+Instead of passing a connection name string, you can pass a connection object directly:
+
+```json
+{ "db": { "host": "localhost", "port": 5432, "database": "test" } }
+```
+
+When an object is passed instead of a string, the resolution lookup is skipped and the object is used as-is.
 
 ## Validation
 

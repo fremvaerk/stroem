@@ -40,6 +40,29 @@ Task actions are dispatched entirely server-side — workers never see them.
 `type: script` with an `image` field is **rejected** by validation. Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
 :::
 
+## Field validity reference
+
+Quick reference showing which fields are valid for each action type:
+
+| Field | `type: script` | `type: docker` | `type: pod` | `type: task` |
+|-------|----------------|----------------|-------------|--------------|
+| `script` | ✓ (inline) | - | - | - |
+| `source` | ✓ (file path) | - | - | - |
+| `cmd` | - | ✓ | ✓ | - |
+| `entrypoint` | - | ✓ | ✓ | - |
+| `command` | - | ✓ | ✓ | - |
+| `image` | - | ✓ | ✓ | - |
+| `runner` | ✓ (`local`/`docker`/`pod`) | - | - | - |
+| `language` | ✓ (`shell`/`python`/`js`/`ts`/`go`) | - | - | - |
+| `dependencies` | ✓ | - | - | - |
+| `interpreter` | ✓ | - | - | - |
+| `manifest` | ✓ (pod runner only) | - | ✓ | - |
+| `task` | - | - | - | ✓ |
+| `tags` | ✓ | ✓ | ✓ | - |
+| `env` | ✓ | ✓ | ✓ | - |
+| `timeout` | ✓ | ✓ | ✓ | - |
+| `input` | ✓ | ✓ | ✓ | ✓ |
+
 ## Script actions
 
 Script actions run commands or scripts in a runner environment. By default, scripts run as shell commands, but you can use the `language` field to write inline scripts in Python, JavaScript, TypeScript, or Go.
@@ -88,13 +111,13 @@ actions:
 
 Use the `language` field to write inline scripts in languages other than shell. When `language` is set, the `script` content is written to a temporary file and executed with the appropriate interpreter.
 
-| Language | Value | Toolchain preference |
-|----------|-------|---------------------|
-| Shell | `shell` (default) | `bash > sh` |
-| Python | `python` | `uv > python3 > python` |
-| JavaScript | `javascript` | `bun > node` |
-| TypeScript | `typescript` | `bun > deno` |
-| Go | `go` | `go run` |
+| Language | Value | Aliases | Toolchain preference |
+|----------|-------|---------|---------------------|
+| Shell | `shell` (default) | — | `bash > sh` |
+| Python | `python` | — | `uv > python3 > python` |
+| JavaScript | `javascript` | `js` | `bun > node` |
+| TypeScript | `typescript` | `ts` | `bun > deno` |
+| Go | `go` | — | `go run` |
 
 **Python example:**
 
@@ -255,6 +278,18 @@ actions:
       df = pd.read_csv("/workspace/data.csv")
       print(f"OUTPUT: {{\"rows\": {len(df)}}}")
 ```
+
+### Runner image override
+
+Workers can be configured with a default `runner_image` in their configuration. When a `type: script` action with `runner: docker` or `runner: pod` runs, the configured `runner_image` is used instead of the published `stroem-runner` image. If no `runner_image` is configured, the system falls back to the default image.
+
+Set this in your worker's `worker-config.yaml`:
+
+```yaml
+runner_image: "ghcr.io/myorg/custom-runner:latest"
+```
+
+This allows you to pre-bake tools, dependencies, and configurations into a custom runner image tailored to your workflows.
 
 ## Script in Kubernetes (Type 2)
 

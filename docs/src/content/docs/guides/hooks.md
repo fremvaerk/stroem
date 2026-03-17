@@ -111,7 +111,7 @@ tasks:
 ### Rules
 
 - `on_success` and `on_error` are evaluated independently. A task can override one while inheriting the other.
-- Workspace hooks only fire for **top-level jobs** (source type `api`, `trigger`, or `webhook`). Child jobs from `type: task` actions do not trigger workspace hooks.
+- Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, or `mcp` — MCP tool invocations). Child jobs from `type: task` actions do not trigger workspace hooks.
 - If multiple YAML files define workspace-level hooks, they are merged (extended, not replaced).
 - The same `hook.*` template context and `secret.*` variables are available as in task-level hooks.
 

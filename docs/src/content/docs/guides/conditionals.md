@@ -45,8 +45,10 @@ Tera templates render to strings. The following values are considered **falsy** 
 | Value | Skipped? |
 |-------|----------|
 | Empty string `""` | Yes |
-| `"false"` | Yes |
+| `"false"` (case-insensitive: `"False"`, `"FALSE"`, etc.) | Yes |
 | `"0"` | Yes |
+| `"null"` (case-insensitive: `"Null"`, `"NULL"`, etc.) | Yes |
+| `"none"` (case-insensitive: `"None"`, `"NONE"`, etc.) | Yes |
 | `"true"`, `"1"`, any other string | No |
 | Template error (e.g., undefined variable) | Fails the step |
 
