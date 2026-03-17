@@ -50,6 +50,15 @@ Last updated: 2026-03-13.
 - [ ] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
 - [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
 
+## Simplification (from codex review 2026-03-17)
+
+- [x] Workspace load state: add `is_healthy()` helper on `WorkspaceEntry` to eliminate repeated 6-line guard pattern in 5 accessors
+- [x] Extract shared `scan_and_merge_yaml_files()` from `folder.rs` and `library.rs` — deterministic sorted merge order
+- [ ] `useAsyncData`: keep as-is — 3 call sites, acceptable abstraction tax, stale-response guard is non-trivial
+- [x] Merge duplicate API tests: consolidated into `ui/src/lib/__tests__/api.test.ts`, deleted duplicate
+- [x] Delete unused UI components: removed `dropdown-menu`, `select`, `collapsible` (367 lines); kept `sheet` (used by sidebar) and `command` (used by combobox-field)
+- [ ] Trim sidebar.tsx: 772 lines, 24 exports, only 13 used (46% unused) — low priority
+
 ## Code Quality / Rust
 
 - [x] `context(format!(...))` → `with_context(|| ...)`

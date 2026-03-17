@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use stroem_common::models::workflow::WorkspaceConfig;
 
 use crate::config::{GitAuthConfig, LibraryDef};
+use crate::workspace::scan_and_merge_yaml_files;
 
 /// Validate that a library name is safe for filesystem paths, tar entries, and URL segments.
 /// Must start with an alphanumeric char, followed by alphanumeric, underscore, or hyphen.
@@ -125,8 +126,6 @@ impl LibraryResolver {
 
 /// Load workspace config from a library path (same as folder source but without secrets/connections rendering).
 fn load_library_workspace(path: &Path) -> Result<WorkspaceConfig> {
-    use stroem_common::models::workflow::WorkflowConfig;
-
     let workflows_dir = path.join(".workflows");
     let scan_dir = if workflows_dir.exists() && workflows_dir.is_dir() {
         workflows_dir
@@ -134,41 +133,13 @@ fn load_library_workspace(path: &Path) -> Result<WorkspaceConfig> {
         path.to_path_buf()
     };
 
-    let mut workspace = WorkspaceConfig::new();
-
     if !scan_dir.exists() {
-        return Ok(workspace);
+        return Ok(WorkspaceConfig::new());
     }
 
-    let entries = std::fs::read_dir(&scan_dir)
-        .with_context(|| format!("Failed to read directory: {:?}", scan_dir))?;
-
-    for entry in entries {
-        let entry = entry.context("Failed to read directory entry")?;
-        let file_path = entry.path();
-
-        if file_path.is_dir() {
-            continue;
-        }
-
-        if let Some(ext) = file_path.extension() {
-            if ext == "yaml" || ext == "yml" {
-                // Skip SOPS encrypted files in libraries
-                if stroem_common::sops::is_sops_file(&file_path) {
-                    tracing::debug!("Skipping SOPS file in library: {:?}", file_path);
-                    continue;
-                }
-
-                let content = std::fs::read_to_string(&file_path)
-                    .with_context(|| format!("Failed to read file: {:?}", file_path))?;
-
-                let config: WorkflowConfig = serde_yaml::from_str(&content)
-                    .with_context(|| format!("Failed to parse YAML: {:?}", file_path))?;
-
-                workspace.merge(config);
-            }
-        }
-    }
+    // Scan YAML files, skipping SOPS-encrypted files (libraries don't decrypt secrets)
+    let workspace = scan_and_merge_yaml_files(&scan_dir, true)
+        .with_context(|| format!("Failed to scan library directory: {}", scan_dir.display()))?;
 
     // Don't render secrets or connections for libraries — those are workspace-local
     Ok(workspace)

@@ -16,6 +16,82 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
+/// Scans a directory for YAML workflow files, parses them, and merges them into
+/// a [`WorkspaceConfig`].
+///
+/// Files are processed in **sorted filename order** for deterministic merges.
+/// Subdirectories and non-YAML files are silently skipped.
+///
+/// # Parameters
+///
+/// - `scan_dir` — The directory to scan. Must exist; returns an error otherwise.
+/// - `skip_sops` — When `true`, files detected as SOPS-encrypted are skipped
+///   entirely (library mode). When `false`, SOPS files are decrypted via
+///   `stroem_common::sops::read_yaml_file` (workspace folder mode).
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be read, a YAML file cannot be read
+/// (including failed SOPS decryption when `skip_sops` is `false`), or a file
+/// fails YAML parsing.
+pub(crate) fn scan_and_merge_yaml_files(
+    scan_dir: &Path,
+    skip_sops: bool,
+) -> Result<WorkspaceConfig> {
+    use stroem_common::models::workflow::WorkflowConfig;
+
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(scan_dir)
+        .with_context(|| format!("Failed to read directory: {}", scan_dir.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("Failed to read directory entry")?
+        .into_iter()
+        .map(|e| e.path())
+        .filter(|p| !p.is_dir())
+        .filter(|p| {
+            p.extension()
+                .map(|ext| ext == "yaml" || ext == "yml")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Sort by filename for deterministic merge order across platforms
+    entries.sort_by(|a, b| {
+        a.file_name()
+            .unwrap_or_default()
+            .cmp(b.file_name().unwrap_or_default())
+    });
+
+    let mut workspace = WorkspaceConfig::new();
+
+    for file_path in entries {
+        let is_sops = stroem_common::sops::is_sops_file(&file_path);
+
+        if is_sops && skip_sops {
+            tracing::debug!("Skipping SOPS file in library: {}", file_path.display());
+            continue;
+        }
+
+        if is_sops {
+            tracing::debug!(
+                "Loading SOPS-encrypted workflow file: {}",
+                file_path.display()
+            );
+        } else {
+            tracing::debug!("Loading workflow file: {}", file_path.display());
+        }
+
+        let content = stroem_common::sops::read_yaml_file(&file_path)
+            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+
+        let config: WorkflowConfig = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse YAML: {}", file_path.display()))?;
+
+        workspace.merge(config);
+    }
+
+    Ok(workspace)
+}
+
 /// Trait for workspace sources (folder, git, etc.)
 #[async_trait]
 pub trait WorkspaceSource: Send + Sync {
@@ -47,6 +123,16 @@ pub struct WorkspaceEntry {
     /// None when healthy, Some(message) when last load failed.
     /// Uses std::sync::RwLock since it's read from both sync and async contexts.
     pub load_error: Arc<std::sync::RwLock<Option<String>>>,
+}
+
+impl WorkspaceEntry {
+    /// Returns `true` if the workspace loaded successfully (no load error).
+    fn is_healthy(&self) -> bool {
+        self.load_error
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+    }
 }
 
 impl std::fmt::Debug for WorkspaceEntry {
@@ -231,12 +317,7 @@ impl WorkspaceManager {
     /// Returns None for workspaces with a load error (empty placeholder config).
     pub async fn get_config(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {
         let entry = self.entries.get(name)?;
-        if entry
-            .load_error
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
+        if !entry.is_healthy() {
             return None;
         }
         let config = entry.config.read().await;
@@ -247,12 +328,7 @@ impl WorkspaceManager {
     /// Returns None for workspaces with a load error.
     pub fn get_path(&self, name: &str) -> Option<&Path> {
         let entry = self.entries.get(name)?;
-        if entry
-            .load_error
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
+        if !entry.is_healthy() {
             return None;
         }
         Some(entry.source_path.as_path())
@@ -262,12 +338,7 @@ impl WorkspaceManager {
     /// Returns `None` if the workspace does not exist or has a load error.
     pub fn get_revision(&self, name: &str) -> Option<String> {
         let entry = self.entries.get(name)?;
-        if entry
-            .load_error
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
+        if !entry.is_healthy() {
             return None;
         }
         entry.source.revision()
@@ -285,12 +356,7 @@ impl WorkspaceManager {
     pub async fn get_all_configs(&self) -> Vec<(String, Arc<WorkspaceConfig>)> {
         let mut result = Vec::new();
         for (name, entry) in &self.entries {
-            if entry
-                .load_error
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some()
-            {
+            if !entry.is_healthy() {
                 continue;
             }
             let config = entry.config.read().await;
@@ -409,10 +475,7 @@ impl WorkspaceManager {
             let libs = self.resolved_libraries.clone();
             let cancel = cancel_token.clone();
             let load_error = entry.load_error.clone();
-            let needs_initial_load = load_error
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some();
+            let needs_initial_load = !entry.is_healthy();
 
             tokio::spawn(async move {
                 tracing::info!(

@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use blake2::{Blake2s256, Digest};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use stroem_common::models::workflow::{WorkflowConfig, WorkspaceConfig};
+use stroem_common::models::workflow::WorkspaceConfig;
 
-use super::WorkspaceSource;
+use super::{scan_and_merge_yaml_files, WorkspaceSource};
 
 /// Folder-based workspace source
 pub struct FolderSource {
@@ -96,8 +96,6 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         anyhow::bail!("Workspace path does not exist: {}", path);
     }
 
-    let mut workspace = WorkspaceConfig::new();
-
     // Check for .workflows/ subdirectory
     let workflows_dir = base_path.join(".workflows");
     let scan_dir = if workflows_dir.exists() && workflows_dir.is_dir() {
@@ -106,38 +104,9 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         base_path.to_path_buf()
     };
 
-    // Scan for YAML files
-    let entries = std::fs::read_dir(&scan_dir)
-        .with_context(|| format!("Failed to read directory: {:?}", scan_dir))?;
-
-    for entry in entries {
-        let entry = entry.context("Failed to read directory entry")?;
-        let path = entry.path();
-
-        // Skip directories
-        if path.is_dir() {
-            continue;
-        }
-
-        // Check if it's a YAML file
-        if let Some(ext) = path.extension() {
-            if ext == "yaml" || ext == "yml" {
-                if stroem_common::sops::is_sops_file(&path) {
-                    tracing::debug!("Loading SOPS-encrypted workflow file: {:?}", path);
-                } else {
-                    tracing::debug!("Loading workflow file: {:?}", path);
-                }
-
-                let content = stroem_common::sops::read_yaml_file(&path)
-                    .with_context(|| format!("Failed to read file: {:?}", path))?;
-
-                let config: WorkflowConfig = serde_yaml::from_str(&content)
-                    .with_context(|| format!("Failed to parse YAML: {:?}", path))?;
-
-                workspace.merge(config);
-            }
-        }
-    }
+    // Scan YAML files, decrypting SOPS-encrypted files where present
+    let mut workspace = scan_and_merge_yaml_files(&scan_dir, false)
+        .with_context(|| format!("Failed to scan workspace directory: {:?}", scan_dir))?;
 
     // Render secret values through Tera (resolves {{ 'ref+...' | vals }} at load time)
     workspace
