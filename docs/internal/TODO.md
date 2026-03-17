@@ -68,6 +68,20 @@ Last updated: 2026-03-13.
 - [x] `validate_dag` clones all step names into HashMap keys — uses `&str` references
 - [x] `Vec::remove(0)` in topological sort — already uses VecDeque
 - [x] Workspace cache race on concurrent extraction — per-workspace Mutex + atomic rename
+- [x] Workspace cache ENOTEMPTY on concurrent step execution — revision-based immutable directories with RAII ref-counted WorkspaceGuard
+
+### Revision-based workspace cache review (2026-03-16)
+- [x] `revision_refs` key mismatch: `acquire_guard` keys by raw revision, cleanup keys by sanitized dir name — fixed: `revision_ref_count` now sanitizes before keying
+- [x] Empty revision string accepted: creates corrupted layout by extracting into workspace root — fixed: `extract_tarball_inner` rejects empty sanitized revision
+- [x] `.current` file not written atomically: crash mid-write leaves truncated revision string — fixed: `atomic_write` helper uses write-to-tmp + rename
+- [x] `fetch_add` ordering semantically wrong: `Ordering::Acquire` on increment should be `Relaxed` — fixed
+- [x] `copy_dir_all` materializes symlinks as regular files on cross-filesystem fallback path — fixed: symlink branch added
+- [x] `revision_refs` / `per_workspace_locks` DashMaps grow unboundedly — fixed: `cleanup_old_revisions` now prunes stale zero-count entries whose directory no longer exists
+- [x] Test `test_cleanup_removes_old_revisions` uses 50ms sleep for mtime ordering — fixed: replaced with explicit `set_dir_mtime` using `File::set_times`
+- [x] Missing test: empty revision string → `test_empty_revision_rejected`
+- [x] Missing test: revision with special chars → `test_special_char_revision_ref_count_consistency`
+- [x] Missing test: `ensure_up_to_date` 304 path with missing revision directory → already covered by `test_current_revision_returns_none_when_dir_missing`
+- [x] Missing test: all old revisions in-use with `max_retained=0` → `test_cleanup_all_old_revisions_in_use`
 
 ## Performance
 

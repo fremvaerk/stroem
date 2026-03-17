@@ -179,7 +179,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `GitSource`: polls every `poll_interval_secs` (default 60), `peek_revision()` uses ls-remote (via `git2::Remote::connect_auth` + `list`) to check remote HEAD without fetching objects. `block_in_place` wraps the blocking network call.
 - API routes are workspace-scoped: `/api/workspaces/{ws}/tasks/{name}/execute`
 - Workers download workspace tarballs via `GET /worker/workspace/{ws}.tar.gz` with ETag caching
-- `WorkspaceCache` in worker manages per-workspace tarball extraction and revision tracking
+- `WorkspaceCache` in worker uses immutable revision-based directories: `{base_dir}/{workspace}/{revision}/` with a `.current` file tracking the active revision. Multiple steps share the same revision dir read-only. `WorkspaceGuard` (RAII ref-counted) keeps revision directories alive during step execution, preventing cleanup from deleting in-use directories. Old revisions cleaned up lazily via `cleanup_old_revisions()`. Config: `max_retained_revisions` (default 2).
 
 ### Libraries (Actions, Tasks, Connection Types)
 - Libraries import shared actions, tasks, and connection types from Git repos or local folders

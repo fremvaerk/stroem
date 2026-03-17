@@ -26,6 +26,10 @@ pub struct WorkerConfig {
     pub request_timeout_secs: Option<u64>,
     /// HTTP connect timeout in seconds (default: 10)
     pub connect_timeout_secs: Option<u64>,
+    /// Maximum number of old workspace revisions to keep per workspace (default: 2).
+    /// In addition to the current revision, this many old revisions are retained
+    /// to avoid deleting directories still in use by running steps.
+    pub max_retained_revisions: Option<usize>,
 }
 
 impl WorkerConfig {

@@ -62,9 +62,11 @@ pub(crate) async fn execute_claimed_step(
     step: crate::client::ClaimedStep,
     worker_id: Uuid,
 ) {
-    // Ensure workspace is downloaded and up-to-date
-    let ws_dir = match ws_cache.ensure_up_to_date(&client, &step.workspace).await {
-        Ok(dir) => dir,
+    // Ensure workspace is downloaded and up-to-date.
+    // The guard keeps the revision directory alive (ref-counted) for the
+    // duration of step execution, preventing cleanup from deleting it.
+    let ws_guard = match ws_cache.ensure_up_to_date(&client, &step.workspace).await {
+        Ok(guard) => guard,
         Err(e) => {
             let err_msg = format!("Failed to download workspace: {:#}", e);
             tracing::error!("Failed to download workspace '{}': {:#}", step.workspace, e);
@@ -75,7 +77,7 @@ pub(crate) async fn execute_claimed_step(
             return;
         }
     };
-    let ws_dir_str = ws_dir.to_string_lossy().to_string();
+    let ws_dir_str = ws_guard.path().to_string_lossy().to_string();
 
     // Report step start
     if let Err(e) = client
@@ -304,7 +306,10 @@ pub async fn run_worker(
         config.request_timeout_secs,
     ));
     let executor = Arc::new(executor);
-    let workspace_cache = Arc::new(WorkspaceCache::new(&config.workspace_cache_dir));
+    let workspace_cache = Arc::new(WorkspaceCache::new(
+        &config.workspace_cache_dir,
+        config.max_retained_revisions,
+    ));
 
     // Ensure workspace cache base directory exists
     std::fs::create_dir_all(&config.workspace_cache_dir)
@@ -867,7 +872,7 @@ mod tests {
             // Create the cache base dir so workspace extraction works
             std::fs::create_dir_all(temp_dir.path()).unwrap();
             let executor = Arc::new(StepExecutor::new());
-            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap()));
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
 
             let job_id = Uuid::new_v4();
             let step = make_step(job_id, "echo hello");
@@ -914,7 +919,7 @@ mod tests {
 
             let temp_dir = tempfile::tempdir().unwrap();
             let executor = Arc::new(StepExecutor::new());
-            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap()));
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
 
             let job_id = Uuid::new_v4();
             let step = make_step(job_id, "echo hello");
@@ -950,7 +955,7 @@ mod tests {
 
             let temp_dir = tempfile::tempdir().unwrap();
             let executor = Arc::new(StepExecutor::new());
-            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap()));
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
 
             let job_id = Uuid::new_v4();
             // "exit 1" causes non-zero exit code

@@ -279,6 +279,7 @@ impl TestEnv {
             kubernetes: None,
             request_timeout_secs: None,
             connect_timeout_secs: None,
+            max_retained_revisions: None,
         };
 
         let worker_cancel = cancel_token.clone();
