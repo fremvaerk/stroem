@@ -136,7 +136,7 @@ tags:
   - script
   - docker
 
-# Default image for Type 2 script-in-container execution
+# Default image for script-in-container execution (runner: docker/pod)
 # runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
 
 # Optional: Docker runner
@@ -159,7 +159,7 @@ tags:
 | `poll_interval_secs` | No | Poll frequency in seconds (default: 2) |
 | `workspace_cache_dir` | No | Local cache for workspace tarballs |
 | `tags` | No | Tags for step routing (default: `["script"]`) |
-| `runner_image` | No | Default Docker image for Type 2 container steps |
+| `runner_image` | No | Default Docker image for `type: script` container steps |
 | `docker` | No | Enable Docker runner (empty object `{}`) |
 | `kubernetes` | No | Kubernetes runner config |
 | `kubernetes.namespace` | No | Namespace for step pods (default: `default`) |

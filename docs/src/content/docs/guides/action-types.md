@@ -7,37 +7,19 @@ Actions are the smallest execution unit in Strøm. Each action defines what runs
 
 ## Overview
 
-Actions are split into two execution modes:
-
-### Type 1 — Container (run a prepared image)
-
 | Type | Description |
 |------|-------------|
-| `docker` | Runs a Docker image as-is (no workspace mount) |
-| `pod` | Runs an image as a Kubernetes pod (no workspace mount) |
+| `script` | Runs scripts in a runner environment with workspace files. Supports `runner: local` (default), `docker`, or `pod`. |
+| `docker` | Runs a Docker image as-is — no workspace mount. |
+| `pod` | Runs an image as a Kubernetes pod — no workspace mount. |
+| `task` | References another task, creating a child job. Dispatched server-side — workers never see them. |
 
-Type 1 actions require `image`. The image's default entrypoint/cmd runs unless overridden. Use this when you have a self-contained image (e.g., DB migrations, deploy tools).
+**`docker` / `pod`** actions require `image`. The image's default entrypoint/cmd runs unless overridden. Use this when you have a self-contained image (e.g., DB migrations, deploy tools).
 
-### Type 2 — Script (commands in a runner environment)
-
-| Type | Runner | Description |
-|------|--------|-------------|
-| `script` | `local` (default) | Runs directly on the worker host |
-| `script` + `runner: docker` | Runs in a Docker container with workspace at `/workspace` |
-| `script` + `runner: pod` | Runs as a Kubernetes pod with workspace via init container |
-
-Type 2 actions require `script` or `source`. The workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code. Script actions support multiple languages via the `language` field.
-
-### Type 3 — Task (sub-job execution)
-
-| Type | Description |
-|------|-------------|
-| `task` | References another task, creating a child job |
-
-Task actions are dispatched entirely server-side — workers never see them.
+**`script`** actions require `script` (inline code) or `source` (file path). Workspace files are available at `/workspace` (read-only). Use this for build/test/deploy scripts that need your source code. Supports multiple languages via the `language` field.
 
 :::note
-`type: script` with an `image` field is **rejected** by validation. Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
+`type: script` with an `image` field is **rejected** by validation. Use `type: docker` or `type: script` + `runner: docker` instead.
 :::
 
 ## Field validity reference
@@ -214,7 +196,7 @@ actions:
       print(f"Using Python {sys.version}")
 ```
 
-## Docker actions (Type 1)
+## Docker actions
 
 Runs a prepared Docker image as-is. No workspace files are mounted.
 
@@ -239,7 +221,7 @@ actions:
     cmd: "--verbose --env staging"
 ```
 
-## Kubernetes pod actions (Type 1)
+## Kubernetes pod actions
 
 Runs a prepared image as a Kubernetes pod. No workspace files are downloaded.
 
@@ -252,7 +234,7 @@ actions:
     tags: ["gpu"]
 ```
 
-## Script in Docker (Type 2)
+## Script in Docker
 
 Runs scripts in a Docker container with the workspace mounted at `/workspace` (read-only):
 
@@ -291,7 +273,7 @@ runner_image: "ghcr.io/myorg/custom-runner:latest"
 
 This allows you to pre-bake tools, dependencies, and configurations into a custom runner image tailored to your workflows.
 
-## Script in Kubernetes (Type 2)
+## Script in Kubernetes
 
 Runs scripts as a Kubernetes pod with the workspace downloaded via an init container:
 
@@ -308,7 +290,7 @@ actions:
 Pods that remain in `Pending` state for more than 10 minutes are automatically terminated and the step is marked as failed. This prevents jobs from hanging indefinitely when pods can't be scheduled (e.g., insufficient resources, node affinity failures, image pull errors). The error message includes the pod's status reason when available.
 :::
 
-## Task actions (Type 3)
+## Task actions
 
 Actions of `type: task` reference another task by name. When a step using a task action becomes ready, the server creates a child job that runs the referenced task's full flow.
 

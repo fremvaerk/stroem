@@ -95,7 +95,7 @@ A step is only claimed if all of its `required_tags` are present in the worker's
 }
 ```
 
-The `action_spec` contains the fully resolved action definition with templates already rendered. The `runner` field indicates how to execute: `local`, `docker`, `pod`, or `none` (Type 1 container).
+The `action_spec` contains the fully resolved action definition with templates already rendered. The `runner` field indicates how to execute: `local`, `docker`, `pod`, or `none` (for `type: docker`/`type: pod` actions).
 
 **Response (no work):**
 
