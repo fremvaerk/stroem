@@ -143,7 +143,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Action Types and Runners (Type 1 / Type 2 Split)
 - **Type 1 (Container)**: `type: docker` or `type: pod` — runs user's prepared image as-is, no workspace mounting. Uses `cmd` field for entrypoint/command override.
-- **Type 2 (Script)**: `type: script` + `runner: local|docker|pod` — scripts in a runner environment with workspace files. Supports multiple languages via the `language` field: `shell` (default), `python`, `javascript`, `typescript`, `go`. Inline scripts use `script` field; file paths use `source` field. Optional `dependencies` (package list) and `interpreter` (override auto-detected binary) fields. Note: `cmd` is deprecated for Type 2 but still accepted as fallback.
+- **Type 2 (Script)**: `type: script` + `runner: local|docker|pod` — scripts in a runner environment with workspace files. Supports multiple languages via the `language` field: `shell` (default), `python`, `javascript`, `typescript`, `go`. Inline scripts use `script` field; file paths use `source` field. Optional `dependencies` (package list) and `interpreter` (override auto-detected binary) fields.
 - **Type 3 (Sub-job)**: `type: task` — references another task, server creates a child job (see Task Actions below)
 - `type: script` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
 - **Toolchain preferences**: `uv > python3 > python`, `bun > node` (JS), `bun > deno` (TS), `bash > sh`

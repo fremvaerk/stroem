@@ -580,7 +580,7 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   deploy:
     flow:
@@ -996,10 +996,10 @@ tasks:
 actions:
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
   deploy:
     type: script
-    cmd: "make deploy"
+    script: "make deploy"
 tasks:
   ci:
     flow:
@@ -1156,7 +1156,7 @@ actions:
     script: "echo hello"
   build:
     type: script
-    cmd: "make build"
+    script: "make build"
 tasks:
   hello:
     flow:

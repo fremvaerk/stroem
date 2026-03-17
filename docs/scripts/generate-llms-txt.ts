@@ -29,7 +29,7 @@ const HEADER = `# Strøm — Workflow YAML Reference
 When generating Strøm workflow YAML, these constraints are enforced at parse time:
 
 **Action types:**
-- \`type: script\` — requires \`cmd\` or \`script\`. Cannot have \`image\`. Supports \`language\` field: \`shell\` (default), \`python\`, \`javascript\`, \`typescript\`, \`go\`. Optional \`dependencies\` (package list) and \`interpreter\` (override auto-detected binary).
+- \`type: script\` — requires \`script\` or \`source\`. Cannot have \`image\`. Supports \`language\` field: \`shell\` (default), \`python\`, \`javascript\`, \`typescript\`, \`go\`. Optional \`dependencies\` (package list) and \`interpreter\` (override auto-detected binary).
 - \`type: docker\` — requires \`image\`. Runs container as-is (no workspace mount).
 - \`type: pod\` — requires \`image\`. Runs as Kubernetes pod (no workspace mount).
 - \`type: script\` + \`runner: docker\` — scripts inside a Docker container with workspace at \`/workspace\`.

@@ -99,7 +99,7 @@ pub struct ActionDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
 
-    /// Inline command (for docker/pod `cmd:` field, or deprecated usage with type:script).
+    /// Container command override (for docker/pod types only; not valid on type: script)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmd: Option<String>,
     /// Inline script content (for type:script actions). Replaces the old `cmd` field for scripts.
@@ -173,7 +173,7 @@ pub struct HookDef {
 ///
 /// Supports two forms:
 /// - **Reference**: `action: <name>` — references a named action
-/// - **Inline**: `type: script`, `cmd: ...` etc. — defines the action inline
+/// - **Inline**: `type: script`, `script: ...` etc. — defines the action inline
 ///
 /// Inline actions are automatically hoisted to the config's actions map during
 /// `WorkflowConfig` deserialization.
@@ -707,7 +707,7 @@ mod tests {
 actions:
   greet:
     type: script
-    cmd: "echo Hello {{ input.name }}"
+    script: "echo Hello {{ input.name }}"
     input:
       name:
         type: string
@@ -732,7 +732,10 @@ tasks:
 
         let greet = config.actions.get("greet").unwrap();
         assert_eq!(greet.action_type, "script");
-        assert_eq!(greet.cmd.as_ref().unwrap(), "echo Hello {{ input.name }}");
+        assert_eq!(
+            greet.script.as_ref().unwrap(),
+            "echo Hello {{ input.name }}"
+        );
 
         let task = config.tasks.get("hello-world").unwrap();
         assert_eq!(task.mode, "distributed");
@@ -877,7 +880,7 @@ triggers:
 actions:
   action1:
     type: script
-    cmd: "echo test"
+    script: "echo test"
 tasks:
   task1:
     flow:
@@ -892,7 +895,7 @@ tasks:
 actions:
   action2:
     type: script
-    cmd: "echo test2"
+    script: "echo test2"
 tasks:
   task2:
     flow:
@@ -1010,7 +1013,7 @@ secrets:
 actions:
   backup:
     type: script
-    cmd: "pg_dump"
+    script: "pg_dump"
     env:
       DB_PASSWORD: "{{ secret.db_password }}"
 "#;
@@ -1065,7 +1068,7 @@ actions:
   test:
     type: script
     runner: docker
-    cmd: "npm test"
+    script: "npm test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("test").unwrap();
@@ -1080,7 +1083,7 @@ actions:
     type: script
     runner: docker
     tags: ["node-20", "gpu"]
-    cmd: "npm test"
+    script: "npm test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("test").unwrap();
@@ -1115,7 +1118,7 @@ actions:
 actions:
   simple:
     type: script
-    cmd: "echo test"
+    script: "echo test"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
@@ -1134,7 +1137,7 @@ actions:
 
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 
 tasks:
   cleanup-resources:
@@ -1195,7 +1198,7 @@ secrets:
 actions:
   action1:
     type: script
-    cmd: "echo test"
+    script: "echo test"
 "#,
         )
         .unwrap();
@@ -1207,7 +1210,7 @@ secrets:
 actions:
   action2:
     type: script
-    cmd: "echo test2"
+    script: "echo test2"
 "#,
         )
         .unwrap();
@@ -1228,10 +1231,10 @@ actions:
 actions:
   deploy:
     type: script
-    cmd: "make deploy"
+    script: "make deploy"
   notify:
     type: script
-    cmd: "curl $WEBHOOK"
+    script: "curl $WEBHOOK"
     input:
       message:
         type: string
@@ -1350,7 +1353,7 @@ actions:
 actions:
   notify:
     type: script
-    cmd: "curl $WEBHOOK"
+    script: "curl $WEBHOOK"
 
 on_success:
   - action: notify
@@ -1382,7 +1385,7 @@ on_error:
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.on_success.is_empty());
@@ -1396,7 +1399,7 @@ actions:
 actions:
   notify:
     type: script
-    cmd: "curl $WEBHOOK"
+    script: "curl $WEBHOOK"
 on_success:
   - action: notify
     input:
@@ -1543,7 +1546,7 @@ on_error:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
     input:
       env:
         type: string
@@ -1561,7 +1564,7 @@ actions:
 actions:
   deploy:
     type: script
-    cmd: "echo deploy"
+    script: "echo deploy"
     input:
       api_key:
         type: string
@@ -2118,7 +2121,7 @@ tasks:
     flow:
       say-hi:
         type: script
-        cmd: "echo Hello"
+        script: "echo Hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
 
@@ -2126,7 +2129,7 @@ tasks:
         assert_eq!(config.actions.len(), 1);
         let action = config.actions.get("_inline:hello:say-hi").unwrap();
         assert_eq!(action.action_type, "script");
-        assert_eq!(action.cmd.as_deref(), Some("echo Hello"));
+        assert_eq!(action.script.as_deref(), Some("echo Hello"));
 
         // Step should reference the synthetic name
         let step = config
@@ -2146,7 +2149,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
 
 tasks:
   mixed:
@@ -2155,7 +2158,7 @@ tasks:
         action: greet
       inline-step:
         type: script
-        cmd: "echo Inline"
+        script: "echo Inline"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
 
@@ -2180,10 +2183,10 @@ tasks:
     flow:
       first:
         type: script
-        cmd: "echo first"
+        script: "echo first"
       second:
         type: script
-        cmd: "echo {{ input.msg }}"
+        script: "echo {{ input.msg }}"
         depends_on: [first]
         input:
           msg: "hello"
@@ -2198,7 +2201,7 @@ tasks:
         // Action should have empty input schema (not step-level input values)
         let action = config.actions.get("_inline:pipeline:second").unwrap();
         assert!(action.input.is_empty());
-        assert_eq!(action.cmd.as_deref(), Some("echo {{ input.msg }}"));
+        assert_eq!(action.script.as_deref(), Some("echo {{ input.msg }}"));
     }
 
     #[test]
@@ -2237,7 +2240,7 @@ tasks:
     flow:
       cleanup:
         type: script
-        cmd: "rm -rf tmp"
+        script: "rm -rf tmp"
         continue_on_failure: true
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2302,7 +2305,7 @@ tasks:
     flow:
       step1:
         type: script
-        cmd: "echo child"
+        script: "echo child"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
 
@@ -2320,7 +2323,7 @@ tasks:
       run-tests:
         type: script
         runner: docker
-        cmd: "npm test"
+        script: "npm test"
         tags: ["node-20"]
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
@@ -2343,7 +2346,7 @@ tasks:
     flow:
       build:
         type: script
-        cmd: "make build"
+        script: "make build"
       test:
         type: docker
         image: node:20
@@ -2352,7 +2355,7 @@ tasks:
       deploy:
         type: script
         runner: docker
-        cmd: "deploy.sh {{ input.env }}"
+        script: "deploy.sh {{ input.env }}"
         depends_on: [test]
         input:
           env: "{{ input.env }}"
@@ -2396,7 +2399,7 @@ actions:
     name: Greet User
     description: Sends a greeting message to the user
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("greet").unwrap();
@@ -2413,7 +2416,7 @@ actions:
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
 tasks:
   hello:
     name: Hello World
@@ -2437,7 +2440,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
     input:
       name:
         type: string
@@ -2492,7 +2495,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
 tasks:
   hello:
     flow:
@@ -2516,7 +2519,7 @@ tasks:
     flow:
       say-hi:
         type: script
-        cmd: "echo Hello"
+        script: "echo Hello"
         name: Say Hello
         description: Greet the user
 "#;
@@ -2537,7 +2540,7 @@ tasks:
 actions:
   greet:
     type: script
-    cmd: "echo Hello"
+    script: "echo Hello"
     input:
       name:
         type: string
@@ -2675,7 +2678,7 @@ tasks:
 actions:
   analyse:
     type: script
-    cmd: "python analyse.py"
+    script: "python analyse.py"
     language: python
     dependencies:
       - requests
@@ -2695,7 +2698,7 @@ actions:
 actions:
   simple:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();

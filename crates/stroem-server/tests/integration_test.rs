@@ -1140,7 +1140,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         action_name: "greet".to_string(),
         action_type: "script".to_string(),
         action_image: None,
-        action_spec: Some(json!({"cmd": "echo Hello"})),
+        action_spec: Some(json!({"script": "echo Hello"})),
         input: Some(json!({"name": "{{ input.name }}"})),
         status: "ready".to_string(),
         required_tags: vec!["script".to_string()],
@@ -1763,7 +1763,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         action_name: "greet".to_string(),
         action_type: "script".to_string(),
         action_image: None,
-        action_spec: Some(json!({"cmd": "exit 1"})),
+        action_spec: Some(json!({"script": "exit 1"})),
         input: None,
         status: "ready".to_string(),
         required_tags: vec!["script".to_string()],
@@ -1863,7 +1863,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 1"})),
+            action_spec: Some(json!({"script": "echo 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -1877,7 +1877,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 2"})),
+            action_spec: Some(json!({"script": "echo 2"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -1891,7 +1891,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 3"})),
+            action_spec: Some(json!({"script": "echo 3"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -3402,10 +3402,10 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
     Ok(())
 }
 
-// ─── Test 37: Cmd rendering at claim time ─────────────────────────────
+// ─── Test 37: Script rendering at claim time ──────────────────────────
 
 #[tokio::test]
-async fn test_cmd_rendering_at_claim() -> Result<()> {
+async fn test_script_rendering_at_claim() -> Result<()> {
     let (router, pool, _tmp, _container) = setup().await?;
 
     // Execute backup-task - the action has script: "pg_dump -h {{ input.host }}"
@@ -3439,20 +3439,20 @@ async fn test_cmd_rendering_at_claim() -> Result<()> {
         .await?;
     let body = body_json(response).await;
 
-    // Verify cmd was rendered
+    // Verify script was rendered
     let action_spec = &body["action_spec"];
     assert_eq!(action_spec["script"], "pg_dump -h myhost.local");
 
     Ok(())
 }
 
-// ─── Test 37b: Cmd rendering failure fails step at claim time ─────────
+// ─── Test 37b: Script rendering failure fails step at claim time (inline) ─
 
 #[tokio::test]
-async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
+async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
     let (router, pool, _tmp, _container) = setup().await?;
 
-    // Create a job with a step whose cmd references a non-existent variable
+    // Create a job with a step whose script references a non-existent variable
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -3460,7 +3460,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
         "distributed",
         Some(json!({})),
         "api",
-        Some("test/cmd-render-fail"),
+        Some("test/script-render-fail"),
     )
     .await?;
     JobStepRepo::create_steps(
@@ -3471,7 +3471,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
             action_name: "test-action".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo {{ input.nonexistent_var }}"})),
+            action_spec: Some(json!({"script": "echo {{ input.nonexistent_var }}"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -3492,7 +3492,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
     )
     .await?;
 
-    // Claim should fail with 422 because cmd template can't render
+    // Claim should fail with 422 because script template can't render
     let response = router
         .oneshot(worker_request(
             "POST",
@@ -3503,7 +3503,7 @@ async fn test_cmd_rendering_failure_fails_step() -> Result<()> {
     assert_eq!(
         response.status(),
         422,
-        "Claim should return 422 when cmd template rendering fails"
+        "Claim should return 422 when script template rendering fails"
     );
     let body = body_json(response).await;
     assert!(
@@ -3971,7 +3971,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         },
     );
 
-    // Action: broken (step whose cmd will fail to render)
+    // Action: broken (step whose script will fail to render)
     workspace.actions.insert(
         "broken".to_string(),
         ActionDef {
@@ -4418,7 +4418,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
     assert_eq!(env["DB_PASSWORD"], "ref+vault://secret/db#password");
     assert_eq!(env["STATIC_VAR"], "no-template");
 
-    // Verify cmd was rendered
+    // Verify script was rendered
     assert_eq!(action_spec["script"], "pg_dump -h prod-db.internal");
 
     Ok(())
@@ -5052,7 +5052,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 1"})),
+            action_spec: Some(json!({"script": "echo 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5066,7 +5066,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 2"})),
+            action_spec: Some(json!({"script": "echo 2"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5161,7 +5161,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 1"})),
+            action_spec: Some(json!({"script": "echo 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5175,7 +5175,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 2"})),
+            action_spec: Some(json!({"script": "echo 2"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5285,7 +5285,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 1"})),
+            action_spec: Some(json!({"script": "echo 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5299,7 +5299,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 2"})),
+            action_spec: Some(json!({"script": "echo 2"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5313,7 +5313,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo 3"})),
+            action_spec: Some(json!({"script": "echo 3"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5444,7 +5444,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         action_name: "greet".to_string(),
         action_type: "script".to_string(),
         action_image: None,
-        action_spec: Some(json!({"cmd": "exit 1"})),
+        action_spec: Some(json!({"script": "exit 1"})),
         input: None,
         status: "ready".to_string(),
         required_tags: vec!["script".to_string()],
@@ -5578,7 +5578,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo ok"})),
+            action_spec: Some(json!({"script": "echo ok"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5592,7 +5592,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5710,7 +5710,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5724,7 +5724,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo ok"})),
+            action_spec: Some(json!({"script": "echo ok"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5821,7 +5821,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5835,7 +5835,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo ok"})),
+            action_spec: Some(json!({"script": "echo ok"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5939,7 +5939,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -5953,7 +5953,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo ok"})),
+            action_spec: Some(json!({"script": "echo ok"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -6056,7 +6056,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -6070,7 +6070,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -6181,7 +6181,7 @@ async fn test_cascading_skip() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "exit 1"})),
+            action_spec: Some(json!({"script": "exit 1"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -6195,7 +6195,7 @@ async fn test_cascading_skip() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo ok"})),
+            action_spec: Some(json!({"script": "echo ok"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -6209,7 +6209,7 @@ async fn test_cascading_skip() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo ok"})),
+            action_spec: Some(json!({"script": "echo ok"})),
             input: None,
             status: "pending".to_string(),
             required_tags: vec!["script".to_string()],
@@ -6600,7 +6600,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         action_name: "deploy".to_string(),
         action_type: "script".to_string(),
         action_image: None,
-        action_spec: Some(json!({"cmd": "echo deploying..."})),
+        action_spec: Some(json!({"script": "echo deploying..."})),
         input: None,
         status: "ready".to_string(),
         required_tags: vec!["script".to_string()],
@@ -7412,7 +7412,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo Hello"})),
+            action_spec: Some(json!({"script": "echo Hello"})),
             input: Some(json!({"name": "Test"})),
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -7443,7 +7443,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             action_name: "deploy".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo deploying..."})),
+            action_spec: Some(json!({"script": "echo deploying..."})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -9821,7 +9821,7 @@ async fn test_task_action_self_reference_rejected() -> Result<()> {
 actions:
   greet:
     type: script
-    cmd: "echo hello"
+    script: "echo hello"
   run-self:
     type: task
     task: loopy
@@ -13153,7 +13153,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             action_name: "greet".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo Hello"})),
+            action_spec: Some(json!({"script": "echo Hello"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],
@@ -13183,7 +13183,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             action_name: "deploy".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec: Some(json!({"cmd": "echo deploying"})),
+            action_spec: Some(json!({"script": "echo deploying"})),
             input: None,
             status: "ready".to_string(),
             required_tags: vec!["script".to_string()],

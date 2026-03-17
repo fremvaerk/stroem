@@ -153,4 +153,4 @@ Server-side validation (after library resolution) validates fully — all prefix
 1. The server builds workspace tarballs including library source files under `_libraries/{library_name}/`
 2. Workers extract the tarball and use it for step execution
 3. Scripts from library actions are resolved against `_libraries/{library_name}/` instead of the workspace root
-4. `cmd` commands execute in the workspace root regardless of library origin
+4. Inline scripts (`script` field) execute in the workspace root regardless of library origin

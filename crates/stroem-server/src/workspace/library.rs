@@ -1037,7 +1037,7 @@ tasks:
         fs::create_dir(&workflows_dir).unwrap();
         fs::write(
             workflows_dir.join("actions.yaml"),
-            "actions:\n  notify:\n    type: script\n    cmd: echo hi\n",
+            "actions:\n  notify:\n    type: script\n    script: echo hi\n",
         )
         .unwrap();
 

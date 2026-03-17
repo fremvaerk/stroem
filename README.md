@@ -290,13 +290,13 @@ Workflows are defined in YAML files under `workspace/.workflows/`. See the [docu
 actions:
   greet:
     type: script
-    cmd: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
+    script: "echo Hello {{ input.name }} && echo 'OUTPUT: {\"greeting\": \"Hello {{ input.name }}\"}'"
     input:
       name: { type: string, required: true }
 
   shout:
     type: script
-    cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
+    script: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
       message: { type: string, required: true }
 

@@ -161,12 +161,14 @@ impl StepExecutor {
             RunnerMode::NoWorkspace
         };
 
-        // Extract inline code: prefer "script" key, fall back to "cmd" (backward compat)
-        let cmd = action_spec
-            .get("script")
-            .or_else(|| action_spec.get("cmd"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        // Extract inline code: Type 2 (script) uses "script" key, Type 1 (docker/pod) uses "cmd"
+        let cmd = if is_type2 {
+            action_spec.get("script")
+        } else {
+            action_spec.get("cmd")
+        }
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
         // Extract file path: "source" key (renamed from old "script" key)
         let script = action_spec.get("source").and_then(|v| v.as_str()).map(|s| {
@@ -208,7 +210,12 @@ impl StepExecutor {
 
         // Type 2 (script) requires inline code or source file; Type 1 (docker/pod) allows empty (image defaults)
         if is_type2 && cmd.is_none() && script.is_none() {
-            anyhow::bail!("Action spec must contain 'script', 'source', or 'cmd'");
+            if action_spec.get("cmd").is_some() {
+                anyhow::bail!(
+                    "Action spec has 'cmd' but type is 'script' — 'cmd' is no longer valid for script actions, use 'script' or 'source' instead"
+                );
+            }
+            anyhow::bail!("Action spec must contain 'script' or 'source'");
         }
 
         // Determine image: Type 2 uses runner_image, Type 1 uses action image
@@ -303,11 +310,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_with_cmd() {
+    fn test_build_run_config_with_script() {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo hello",
+            "script": "echo hello",
             "env": {
                 "FOO": "bar",
                 "BAZ": "qux"
@@ -383,7 +390,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must contain 'script', 'source', or 'cmd'"));
+            .contains("must contain 'script' or 'source'"));
     }
 
     #[test]
@@ -420,7 +427,7 @@ mod tests {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo test"
+            "script": "echo test"
         })));
 
         let config = executor.build_run_config(&step, "/tmp/test").unwrap();
@@ -437,7 +444,7 @@ mod tests {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo test",
+            "script": "echo test",
             "env": {}
         })));
 
@@ -451,7 +458,7 @@ mod tests {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo test",
+            "script": "echo test",
             "env": {
                 "STR_VAL": "hello",
                 "NUM_VAL": 42,
@@ -479,7 +486,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("must contain 'script', 'source', or 'cmd'"));
+            .contains("must contain 'script' or 'source'"));
     }
 
     #[test]
@@ -487,7 +494,7 @@ mod tests {
         let executor = StepExecutor::new();
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "ls"
+            "script": "ls"
         })));
 
         // Different workspace dirs
@@ -518,7 +525,7 @@ mod tests {
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo hello-from-test"
+            "script": "echo hello-from-test"
         })));
 
         let result = executor
@@ -545,7 +552,7 @@ mod tests {
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "exit 42"
+            "script": "exit 42"
         })));
 
         let result = executor
@@ -562,7 +569,7 @@ mod tests {
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo $TEST_VAR_XYZ",
+            "script": "echo $TEST_VAR_XYZ",
             "env": {
                 "TEST_VAR_XYZ": "test-value-123"
             }
@@ -591,7 +598,7 @@ mod tests {
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
 
         let step = test_step(Some(serde_json::json!({
-            "cmd": "echo error-output >&2"
+            "script": "echo error-output >&2"
         })));
 
         let result = executor
@@ -621,7 +628,7 @@ mod tests {
     #[test]
     fn test_dispatch_shell_no_image() {
         let executor = StepExecutor::new();
-        let step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let step = test_step(Some(serde_json::json!({"script": "echo hi"})));
         // Shell without image should resolve to shell runner
         let runner = executor.select_runner(&step);
         assert!(runner.is_ok());
@@ -630,7 +637,7 @@ mod tests {
     #[test]
     fn test_dispatch_shell_with_docker_runner() {
         let executor = StepExecutor::new();
-        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "echo hi"})));
         step.runner = Some("docker".to_string());
         // Without docker feature/config, should fail gracefully
         let runner = executor.select_runner(&step);
@@ -703,7 +710,7 @@ mod tests {
         let executor =
             StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
 
-        let mut step = test_step(Some(serde_json::json!({"cmd": "npm test"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "npm test"})));
         step.runner = Some("docker".to_string());
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
@@ -734,7 +741,7 @@ mod tests {
     fn test_build_run_config_type2_fallback_to_action_image() {
         // When runner_image is not set, Type 2 should fall back to action_image
         let executor = StepExecutor::new(); // no runner_image
-        let mut step = test_step(Some(serde_json::json!({"cmd": "npm test"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "npm test"})));
         step.runner = Some("docker".to_string());
         step.action_image = Some("node:20-alpine".to_string());
 
@@ -749,7 +756,7 @@ mod tests {
         // When runner_image IS set, it takes precedence over action_image for Type 2
         let executor =
             StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
-        let mut step = test_step(Some(serde_json::json!({"cmd": "npm test"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "npm test"})));
         step.runner = Some("docker".to_string());
         step.action_image = Some("node:20-alpine".to_string());
 
@@ -774,7 +781,7 @@ mod tests {
     #[test]
     fn test_dispatch_shell_pod_runner() {
         let executor = StepExecutor::new();
-        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "echo hi"})));
         step.runner = Some("pod".to_string());
         // Without kubernetes feature/config, should fail gracefully
         let runner = executor.select_runner(&step);
@@ -785,7 +792,7 @@ mod tests {
     fn test_build_run_config_type2_local_no_image() {
         // Type 2 shell+local should not set image even if action_image is present
         let executor = StepExecutor::new();
-        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "echo hi"})));
         step.runner = None; // defaults to "local"
         step.action_image = Some("node:20".to_string());
 
@@ -798,7 +805,7 @@ mod tests {
     #[test]
     fn test_build_run_config_stroem_env_vars() {
         let executor = StepExecutor::new();
-        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let mut step = test_step(Some(serde_json::json!({"script": "echo hi"})));
         step.workspace = "my-workspace".to_string();
         step.task_name = "deploy-task".to_string();
         step.step_name = "deploy-step".to_string();
@@ -822,7 +829,7 @@ mod tests {
     #[test]
     fn test_build_run_config_shell_local_mode() {
         let executor = StepExecutor::new();
-        let step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let step = test_step(Some(serde_json::json!({"script": "echo hi"})));
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
@@ -860,7 +867,7 @@ mod tests {
     #[test]
     fn test_build_run_config_without_manifest() {
         let executor = StepExecutor::new();
-        let step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        let step = test_step(Some(serde_json::json!({"script": "echo hi"})));
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert!(config.pod_manifest_overrides.is_none());
@@ -912,8 +919,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_run_config_script_takes_precedence_over_cmd() {
-        // When both "script" and "cmd" are present, "script" wins (it is checked first).
+    fn test_build_run_config_type2_ignores_cmd_key() {
+        // Type 2 (script) reads only the "script" key; "cmd" is ignored entirely.
         let executor = StepExecutor::new();
         let step = test_step(Some(serde_json::json!({
             "script": "from-script",
@@ -922,6 +929,36 @@ mod tests {
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.cmd, Some("from-script".to_string()));
+    }
+
+    #[test]
+    fn test_build_run_config_type2_cmd_key_gives_actionable_error() {
+        // Type 2 (script) with only a "cmd" key should give a clear migration error.
+        let executor = StepExecutor::new();
+        let step = test_step(Some(serde_json::json!({
+            "cmd": "echo hi"
+        })));
+
+        let result = executor.build_run_config(&step, "/workspace");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("'cmd' is no longer valid for script actions"),
+            "Expected migration hint in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_type1_docker_cmd_flows_through() {
+        let executor = StepExecutor::new();
+        let mut step = test_step(Some(serde_json::json!({"cmd": "echo hi"})));
+        step.action_type = "docker".to_string();
+        step.action_image = Some("alpine:latest".to_string());
+
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.cmd, Some("echo hi".to_string()));
+        assert_eq!(config.runner_mode, RunnerMode::NoWorkspace);
+        assert_eq!(config.image, Some("alpine:latest".to_string()));
     }
 
     #[test]

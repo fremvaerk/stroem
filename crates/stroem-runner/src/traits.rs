@@ -32,7 +32,7 @@ pub enum RunnerMode {
 /// Configuration for a step execution
 #[derive(Debug, Clone)]
 pub struct RunConfig {
-    /// Inline code to execute (from `script` or deprecated `cmd` YAML field)
+    /// Inline code to execute (from `script` YAML field for type: script, or `cmd` for docker/pod)
     pub cmd: Option<String>,
     /// Path to a script file (from `source` YAML field)
     pub script: Option<String>,

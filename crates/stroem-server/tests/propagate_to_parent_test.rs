@@ -225,7 +225,7 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         action_name: "noop".to_string(),
         action_type: "script".to_string(),
         action_image: None,
-        action_spec: Some(json!({"cmd": "true"})),
+        action_spec: Some(json!({"script": "true"})),
         input: None,
         status: status.to_string(),
         required_tags: vec!["script".to_string()],

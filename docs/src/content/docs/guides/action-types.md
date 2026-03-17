@@ -38,8 +38,6 @@ Task actions are dispatched entirely server-side — workers never see them.
 
 :::note
 `type: script` with an `image` field is **rejected** by validation. Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
-
-For backward compatibility, `cmd:` is still accepted on `type: script` actions, but it is deprecated. Use `script:` for inline code and `source:` for file paths instead.
 :::
 
 ## Script actions

@@ -639,10 +639,10 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>>
 fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
-    // Can't have both cmd and script (both are inline code fields)
-    if action.cmd.is_some() && action.script.is_some() {
+    // cmd is not valid on type: script — use 'script' (inline) or 'source' (file)
+    if action.cmd.is_some() {
         bail!(
-            "Action '{}' has both 'cmd' and 'script' — use only 'script' (cmd is deprecated)",
+            "Action '{}': 'cmd' is not valid on type: script — use 'script' (inline) or 'source' (file path)",
             action_name
         );
     }
@@ -654,12 +654,9 @@ fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
     if action.source.as_deref() == Some("") {
         bail!("Action '{}' has empty 'source' field", action_name);
     }
-    if action.cmd.as_deref() == Some("") {
-        bail!("Action '{}' has empty 'cmd' field", action_name);
-    }
 
-    // Script actions accept inline code (script or deprecated cmd) or a source file path
-    let has_inline = action.script.is_some() || action.cmd.is_some();
+    // Script actions accept inline code (script) or a source file path
+    let has_inline = action.script.is_some();
     let has_source = action.source.is_some();
 
     if !has_inline && !has_source {
@@ -674,14 +671,6 @@ fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
             "Action '{}' has both inline script and source file — use only one",
             action_name
         );
-    }
-
-    // Deprecation warning: cmd is accepted but script is preferred
-    if action.cmd.is_some() {
-        warnings.push(format!(
-            "Action '{}': 'cmd' is deprecated for script actions, use 'script' instead",
-            action_name
-        ));
     }
 
     // Script actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
@@ -1135,7 +1124,7 @@ actions:
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("both 'cmd' and 'script'"));
+            .contains("not valid on type: script"));
     }
 
     #[test]
@@ -1180,7 +1169,7 @@ tasks:
     }
 
     #[test]
-    fn test_validate_action_script_cmd_deprecated_warning() {
+    fn test_validate_action_script_cmd_rejected() {
         let yaml = r#"
 actions:
   greet:
@@ -1195,9 +1184,11 @@ tasks:
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
-        assert!(result.is_ok());
-        let warnings = result.unwrap();
-        assert!(warnings.iter().any(|w| w.contains("'cmd' is deprecated")));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not valid on type: script"));
     }
 
     #[test]
@@ -4276,7 +4267,7 @@ tasks:
 
     #[test]
     fn test_validate_action_script_cmd_and_source_rejected() {
-        // cmd + source (no script) — should fail with "both inline script and source file"
+        // cmd is not valid on type: script at all
         let yaml = r#"
 actions:
   my-action:
@@ -4286,19 +4277,19 @@ actions:
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
-        assert!(result.is_err(), "cmd + source should be rejected");
+        assert!(result.is_err(), "cmd on type: script should be rejected");
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("both inline script and source file"),
-            "Error should mention 'both inline script and source file'"
+                .contains("not valid on type: script"),
+            "Error should mention 'not valid on type: script'"
         );
     }
 
     #[test]
     fn test_validate_action_script_all_three_fields_rejected() {
-        // cmd + script + source — should fail on the cmd+script conflict first
+        // cmd is not valid on type: script — error fires before checking script/source
         let yaml = r#"
 actions:
   my-action:
@@ -4309,13 +4300,13 @@ actions:
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
-        assert!(result.is_err(), "cmd + script + source should be rejected");
+        assert!(result.is_err(), "cmd on type: script should be rejected");
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("both 'cmd' and 'script'"),
-            "Error should mention 'both 'cmd' and 'script''"
+                .contains("not valid on type: script"),
+            "Error should mention 'not valid on type: script'"
         );
     }
 
@@ -4365,6 +4356,7 @@ tasks:
 
     #[test]
     fn test_validate_action_script_empty_cmd_field() {
+        // Any cmd on type: script is rejected — empty or not
         let yaml = r#"
 actions:
   my-action:
@@ -4378,10 +4370,13 @@ tasks:
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
-        assert!(result.is_err(), "Empty 'cmd' field should be rejected");
+        assert!(result.is_err(), "'cmd' on type: script should be rejected");
         assert!(
-            result.unwrap_err().to_string().contains("empty 'cmd'"),
-            "Error should mention empty 'cmd'"
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not valid on type: script"),
+            "Error should mention 'not valid on type: script'"
         );
     }
 

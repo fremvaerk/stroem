@@ -405,6 +405,23 @@ Last updated: 2026-03-13.
 - [x] DST spring-forward gap: trigger fires at first valid time — `scheduler.rs`
 - [x] DST fall-back ambiguity: trigger fires once — `scheduler.rs`
 
+## Review: Remove `cmd` from `type: script` (2026-03-17)
+
+### Critical
+- [x] `docs/public/llms.txt` line ~15 says `type: script` requires `cmd` or `script` — must say `script` or `source` (auto-generated from doc sources, fix source + regenerate)
+- [x] `docs/public/llms.txt` line ~420 states `cmd:` is still accepted on `type: script` via backward compat — factually wrong, remove
+- [x] `docs/src/content/docs/reference/worker-api.md` line ~91 — worker API example shows `"cmd"` in `action_spec` for a script step — external worker implementations will use wrong key
+- [x] `workspace-ops/.workflows/healthcheck.yaml` and `notify.yaml` — live workflow YAML files using `type: shell` + `cmd:`, will fail validation on load
+- [x] `crates/stroem-server/src/workspace/library.rs` line ~1040 — test fixture creates `type: script` + `cmd: echo hi`
+
+### Important
+- [x] `crates/stroem-worker/src/executor.rs` lines 211-213 — old in-flight jobs with `"cmd"` in action_spec get misleading error "must contain 'script' or 'source'"; should detect `cmd` key and provide actionable message
+- [x] `crates/stroem-server/tests/integration_test.rs` — test `test_cmd_rendering_failure_fails_step` has stale name and 3+ comments referencing `cmd` instead of `script`
+
+### Minor
+- [x] `crates/stroem-common/src/validation.rs` line ~1172 — test named `test_validate_action_script_cmd_deprecated_warning` but now tests error, not warning
+- [x] No explicit executor test for `type: docker` + `cmd` flowing through to `RunConfig.cmd`
+
 ## Bugs Found & Fixed
 
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)

@@ -88,7 +88,7 @@ A step is only claimed if all of its `required_tags` are present in the worker's
   "action_image": null,
   "runner": "local",
   "action_spec": {
-    "cmd": "echo Hello World",
+    "script": "echo Hello World",
     "env": {}
   },
   "input": { "name": "World" }
