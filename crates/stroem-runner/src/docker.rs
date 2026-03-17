@@ -446,7 +446,7 @@ mod tests {
         };
 
         let container_config = DockerRunner::build_container_config(&config);
-        assert_eq!(container_config.image, Some("alpine:latest".to_string()));
+        assert_eq!(container_config.image, Some("ghcr.io/fremvaerk/stroem-runner:latest".to_string()));
     }
 
     #[test]

@@ -183,6 +183,9 @@ worker:
   resources: {}
 
 runner:
+  image:
+    repository: ghcr.io/fremvaerk/stroem-runner
+    tag: ""  # Defaults to Chart.appVersion
   # Runner-specific startup script. Runs after the shared startupScript
   # via /etc/stroem/startup.d/10-runner.sh. Applies to Docker and Kubernetes runner containers.
   startupScript: ""

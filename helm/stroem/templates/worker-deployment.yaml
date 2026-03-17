@@ -90,6 +90,9 @@ spec:
             - name: DOCKER_TLS_VERIFY
               value: "1"
             {{- end }}
+            # Default runner image for Type 2 script-in-container/pod execution
+            - name: STROEM__RUNNER_IMAGE
+              value: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default .Values.imageTag | default .Chart.AppVersion }}"
             {{- if or .Values.startupScript .Values.runner.startupScript }}
             - name: STROEM__KUBERNETES__RUNNER_STARTUP_CONFIGMAP
               value: {{ include "stroem.fullname" . }}-runner-startup
