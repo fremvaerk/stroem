@@ -171,6 +171,13 @@ impl StepExecutor {
         .map(|s| s.to_string());
 
         // Extract file path: "source" key (renamed from old "script" key)
+        // For container-based runners (docker/pod), the workspace is mounted at /workspace
+        // inside the container, not at the worker's local workspace_dir.
+        let source_base = if is_type2 && (runner_field == "docker" || runner_field == "pod") {
+            "/workspace"
+        } else {
+            workspace_dir
+        };
         let script = action_spec.get("source").and_then(|v| v.as_str()).map(|s| {
             let p = std::path::Path::new(s);
             if p.is_relative() {
@@ -179,11 +186,11 @@ impl StepExecutor {
                 // Library names cannot contain dots, so split_once('.') cleanly
                 // separates "lib_name.action_name".
                 let base = if let Some((lib_name, _action)) = step.action_name.split_once('.') {
-                    std::path::Path::new(workspace_dir)
+                    std::path::Path::new(source_base)
                         .join("_libraries")
                         .join(lib_name)
                 } else {
-                    std::path::Path::new(workspace_dir).to_path_buf()
+                    std::path::Path::new(source_base).to_path_buf()
                 };
                 base.join(s).to_string_lossy().to_string()
             } else {
@@ -516,6 +523,61 @@ mod tests {
         assert_eq!(
             config.script,
             Some("/workspace/actions/deploy/run.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_source_resolved_to_container_path_for_pod_runner() {
+        let executor = StepExecutor::new();
+
+        let mut step = test_step(Some(serde_json::json!({
+            "source": "ml_traffic/main.py"
+        })));
+        step.runner = Some("pod".to_string());
+
+        // Worker's local workspace dir is irrelevant — source should resolve to /workspace
+        let config = executor
+            .build_run_config(&step, "/var/stroem/workspace-cache/jobs/abc123")
+            .unwrap();
+        assert_eq!(
+            config.script,
+            Some("/workspace/ml_traffic/main.py".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_source_resolved_to_container_path_for_docker_runner() {
+        let executor = StepExecutor::new();
+
+        let mut step = test_step(Some(serde_json::json!({
+            "source": "actions/deploy.sh"
+        })));
+        step.runner = Some("docker".to_string());
+
+        let config = executor
+            .build_run_config(&step, "/var/stroem/workspace-cache/jobs/abc123")
+            .unwrap();
+        assert_eq!(
+            config.script,
+            Some("/workspace/actions/deploy.sh".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_run_config_source_uses_local_path_for_local_runner() {
+        let executor = StepExecutor::new();
+
+        let step = test_step(Some(serde_json::json!({
+            "source": "actions/deploy.sh"
+        })));
+        // runner defaults to "local"
+
+        let config = executor
+            .build_run_config(&step, "/var/stroem/workspace-cache/jobs/abc123")
+            .unwrap();
+        assert_eq!(
+            config.script,
+            Some("/var/stroem/workspace-cache/jobs/abc123/actions/deploy.sh".to_string())
         );
     }
 
