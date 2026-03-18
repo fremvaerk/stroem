@@ -7,7 +7,7 @@ use crate::oidc::OidcProvider;
 use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
 use uuid::Uuid;
@@ -68,6 +68,9 @@ pub struct AppState {
     pub cancelled_jobs: Arc<std::sync::RwLock<HashSet<Uuid>>>,
     /// Liveness flags for background tasks (scheduler, recovery sweeper).
     pub background_tasks: BackgroundTasks,
+    /// Unix timestamp (seconds) of the last retention cleanup run.
+    /// Initialized to 0 so the first sweep always triggers a cleanup.
+    pub last_retention_run: Arc<AtomicI64>,
 }
 
 impl AppState {
@@ -91,6 +94,7 @@ impl AppState {
             job_completion: Arc::new(JobCompletionNotifier::new()),
             cancelled_jobs: Arc::new(std::sync::RwLock::new(HashSet::new())),
             background_tasks: BackgroundTasks::new(),
+            last_retention_run: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -146,6 +150,7 @@ mod tests {
                 heartbeat_timeout_secs: 120,
                 sweep_interval_secs: 60,
                 unmatched_step_timeout_secs: 30,
+                ..Default::default()
             },
             acl: None,
             mcp: None,

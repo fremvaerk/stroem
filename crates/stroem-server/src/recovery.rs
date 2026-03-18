@@ -1,8 +1,10 @@
 use crate::job_recovery::orchestrate_after_step;
+use crate::log_storage::JobLogMeta;
 use crate::state::{AliveGuard, AppState};
 use anyhow::Result;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
-use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, RetentionJobInfo, WorkerRepo};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -223,7 +225,90 @@ async fn sweep(state: &AppState) -> Result<()> {
         }
     }
 
+    // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
+    let now = chrono::Utc::now().timestamp();
+    let last = state.last_retention_run.load(Ordering::Relaxed);
+    let interval = state.config.recovery.retention_interval_secs as i64;
+    if now - last >= interval {
+        retention_cleanup(state).await;
+        state.last_retention_run.store(now, Ordering::Relaxed);
+    }
+
     Ok(())
+}
+
+/// Clean up stale workers and old log files based on retention config.
+/// Errors in individual deletions are logged but do not fail the sweep.
+async fn retention_cleanup(state: &AppState) {
+    // Worker retention
+    if let Some(hours) = state.config.recovery.worker_retention_hours {
+        match WorkerRepo::delete_stale(&state.pool, hours as f64).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(
+                    "Retention: deleted {} stale worker(s) (older than {}h)",
+                    count,
+                    hours
+                );
+            }
+            Err(e) => {
+                tracing::error!("Retention: failed to delete stale workers: {:#}", e);
+            }
+            _ => {}
+        }
+    }
+
+    // Log retention — delete old terminal jobs, their local logs, and S3 logs
+    if let Some(days) = state.config.recovery.log_retention_days {
+        const BATCH_SIZE: i64 = 1000;
+        match JobRepo::get_old_terminal_jobs(&state.pool, days as f64, BATCH_SIZE).await {
+            Ok(jobs) if !jobs.is_empty() => {
+                let count = jobs.len();
+                let mut deleted_jobs = 0u64;
+                for RetentionJobInfo {
+                    job_id,
+                    workspace,
+                    task_name,
+                    created_at,
+                } in jobs
+                {
+                    let meta = JobLogMeta {
+                        workspace,
+                        task_name,
+                        created_at,
+                    };
+
+                    // Delete local log files
+                    state.log_storage.delete_local_log(job_id).await;
+
+                    // Delete S3 log
+                    if let Err(e) = state.log_storage.delete_s3_log(job_id, &meta).await {
+                        tracing::warn!(
+                            "Retention: failed to delete S3 log for job {}: {:#}",
+                            job_id,
+                            e
+                        );
+                    }
+
+                    // Delete job + steps from DB
+                    if let Err(e) = JobRepo::delete(&state.pool, job_id).await {
+                        tracing::warn!("Retention: failed to delete job {}: {:#}", job_id, e);
+                    } else {
+                        deleted_jobs += 1;
+                    }
+                }
+                tracing::info!(
+                    "Retention: cleaned up {}/{} old jobs and their logs (older than {}d)",
+                    deleted_jobs,
+                    count,
+                    days
+                );
+            }
+            Err(e) => {
+                tracing::error!("Retention: failed to query old jobs: {:#}", e);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +341,7 @@ mod tests {
                 heartbeat_timeout_secs: 120,
                 sweep_interval_secs: 1,
                 unmatched_step_timeout_secs: 30,
+                ..Default::default()
             },
             acl: None,
             mcp: None,

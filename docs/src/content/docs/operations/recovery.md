@@ -7,12 +7,13 @@ If a worker dies mid-step (crash, OOM, network partition), or a step sits in `re
 
 ## How it works
 
-The recovery sweeper runs on a configurable interval (default: 60s) and performs four phases:
+The recovery sweeper runs on a configurable interval (default: 60s) and performs five phases:
 
 1. **Stale worker detection**: Workers whose last heartbeat exceeds the timeout are marked `inactive`. Running steps assigned to inactive workers are failed.
 2. **Step timeout enforcement**: Running steps that have exceeded their configured `timeout` are failed.
 3. **Job timeout enforcement**: Running jobs that have exceeded their configured `timeout` are cancelled.
 4. **Unmatched step detection**: Steps stuck in `ready` state beyond `unmatched_step_timeout_secs` are checked against active workers. If no active worker has the required tags to claim the step, it is failed with a clear error message.
+5. **Data retention**: If configured, deletes old inactive workers and purges old terminal jobs with their logs (local files, S3 objects, and database records).
 
 After each failure, the orchestrator cascades: dependent steps are skipped, the job is marked failed, and parent jobs are notified.
 
@@ -25,9 +26,13 @@ recovery:
   heartbeat_timeout_secs: 120        # Seconds without heartbeat before stale (default: 120)
   sweep_interval_secs: 60            # How often the sweeper runs (default: 60)
   unmatched_step_timeout_secs: 30    # Seconds a ready step waits before checking for matching workers (default: 30)
+  worker_retention_hours: 2          # Delete inactive workers older than this (optional)
+  log_retention_days: 30             # Delete terminal jobs and their logs older than this (optional)
 ```
 
 When the `recovery` section is omitted, recovery runs with defaults. There is no way to disable it — it's always active.
+
+Retention is disabled by default. When `worker_retention_hours` or `log_retention_days` are set, the sweeper runs cleanup as Phase 5 on each cycle.
 
 The default heartbeat timeout of 120 seconds means a worker must miss 4 consecutive heartbeats (sent every 30s) before being considered stale.
 
@@ -71,6 +76,23 @@ When a worker dies mid-step or a step has no matching worker, the step is **fail
 ## Worker reactivation
 
 If a worker comes back online after being marked inactive, it is automatically reactivated on its next heartbeat. It can then claim new steps normally.
+
+## Data retention
+
+Optional cleanup of old data, configured via the `recovery` section.
+
+### Worker retention (`worker_retention_hours`)
+
+Deletes workers with `status = 'inactive'` whose last heartbeat is older than the configured threshold. Active workers are never deleted.
+
+### Log retention (`log_retention_days`)
+
+For each terminal job (completed, failed, or cancelled) older than the configured threshold:
+1. Deletes local log files (`.jsonl` and legacy `.log`)
+2. Deletes the S3 log object (if S3 is configured)
+3. Deletes the job and its steps from the database (steps are cascade-deleted via FK constraint)
+
+Pending and running jobs are never affected.
 
 ## Recovery visibility
 

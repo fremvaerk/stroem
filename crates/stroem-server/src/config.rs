@@ -193,6 +193,20 @@ pub struct RecoveryConfig {
     /// Seconds a ready step can wait without a matching worker before being failed (default: 30)
     #[serde(default = "default_unmatched_step_timeout")]
     pub unmatched_step_timeout_secs: u64,
+    /// Hours after which inactive workers are deleted (default: disabled).
+    /// Only workers with `status = 'inactive'` and `last_heartbeat` older than
+    /// this threshold are removed.
+    #[serde(default)]
+    pub worker_retention_hours: Option<u64>,
+    /// Days after which local log files for terminal jobs are deleted (default: disabled).
+    /// Only logs for completed, failed, or cancelled jobs are removed.
+    #[serde(default)]
+    pub log_retention_days: Option<u64>,
+    /// How often the retention cleanup runs in seconds (default: 3600 — once per hour).
+    /// The retention cleanup is rate-limited independently of the main sweep interval so
+    /// that frequent sweeps do not trigger expensive deletion scans on every cycle.
+    #[serde(default = "default_retention_interval")]
+    pub retention_interval_secs: u64,
 }
 
 fn default_heartbeat_timeout() -> u64 {
@@ -204,6 +218,9 @@ fn default_sweep_interval() -> u64 {
 fn default_unmatched_step_timeout() -> u64 {
     30
 }
+fn default_retention_interval() -> u64 {
+    3600
+}
 
 impl Default for RecoveryConfig {
     fn default() -> Self {
@@ -211,6 +228,9 @@ impl Default for RecoveryConfig {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
             unmatched_step_timeout_secs: 30,
+            worker_retention_hours: None,
+            log_retention_days: None,
+            retention_interval_secs: 3600,
         }
     }
 }
@@ -261,6 +281,16 @@ impl ServerConfig {
         }
         if self.recovery.unmatched_step_timeout_secs < 5 {
             anyhow::bail!("unmatched_step_timeout_secs must be at least 5");
+        }
+        if let Some(hours) = self.recovery.worker_retention_hours {
+            if hours < 1 {
+                anyhow::bail!("worker_retention_hours must be at least 1");
+            }
+        }
+        if let Some(days) = self.recovery.log_retention_days {
+            if days < 1 {
+                anyhow::bail!("log_retention_days must be at least 1");
+            }
         }
         Ok(())
     }

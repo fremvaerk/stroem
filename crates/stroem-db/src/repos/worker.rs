@@ -112,6 +112,23 @@ impl WorkerRepo {
         Ok(count.0)
     }
 
+    /// Delete inactive workers whose last heartbeat is older than the given threshold.
+    /// Returns the number of deleted rows.
+    pub async fn delete_stale(pool: &PgPool, retention_hours: f64) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM worker
+            WHERE status = 'inactive'
+              AND last_heartbeat < NOW() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(retention_hours * 3600.0)
+        .execute(pool)
+        .await
+        .context("Failed to delete stale workers")?;
+        Ok(result.rows_affected())
+    }
+
     /// List workers ordered by status (active first), then by registered_at descending
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<WorkerRow>> {
         let workers = sqlx::query_as::<_, WorkerRow>(&format!(

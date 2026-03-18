@@ -30,6 +30,18 @@ pub struct JobRow {
     pub timeout_secs: Option<i32>,
 }
 
+/// Lightweight projection returned by [`JobRepo::get_old_terminal_jobs`].
+///
+/// Contains only the fields needed to construct a `JobLogMeta` and to identify
+/// the job for deletion — avoids a secondary per-job `get()` call.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RetentionJobInfo {
+    pub job_id: Uuid,
+    pub workspace: String,
+    pub task_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Repository for job operations
 pub struct JobRepo;
 
@@ -541,6 +553,39 @@ impl JobRepo {
         .await
         .context("get_timed_out_jobs")?;
         Ok(rows)
+    }
+
+    /// Return up to `batch_size` terminal jobs older than the given number of days.
+    ///
+    /// Only considers jobs with status `completed`, `failed`, or `cancelled`.
+    /// Callers should loop until an empty result is returned to process all matching rows.
+    pub async fn get_old_terminal_jobs(
+        pool: &PgPool,
+        retention_days: f64,
+        batch_size: i64,
+    ) -> Result<Vec<RetentionJobInfo>> {
+        let rows = sqlx::query_as::<_, RetentionJobInfo>(
+            "SELECT job_id, workspace, task_name, created_at FROM job \
+             WHERE status IN ('completed', 'failed', 'cancelled') \
+               AND created_at < NOW() - make_interval(secs => $1::double precision) \
+             LIMIT $2",
+        )
+        .bind(retention_days * 86400.0)
+        .bind(batch_size)
+        .fetch_all(pool)
+        .await
+        .context("get_old_terminal_jobs")?;
+        Ok(rows)
+    }
+
+    /// Delete a job by ID. Steps are cascade-deleted via FK constraint.
+    pub async fn delete(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM job WHERE job_id = $1")
+            .bind(job_id)
+            .execute(pool)
+            .await
+            .context("Failed to delete job")?;
+        Ok(())
     }
 
     /// Count pending/running jobs matching the given `source_type` and `source_id`.

@@ -773,6 +773,7 @@ mod tests {
                 heartbeat_timeout_secs: 120,
                 sweep_interval_secs: 60,
                 unmatched_step_timeout_secs: 30,
+                ..Default::default()
             },
             acl: None,
             mcp: None,

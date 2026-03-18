@@ -8286,6 +8286,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
             unmatched_step_timeout_secs: 30,
+            ..Default::default()
         },
         acl: None,
         mcp: None,
@@ -10042,6 +10043,7 @@ async fn setup_recovery() -> Result<(
             heartbeat_timeout_secs: 5, // short for tests
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: 30,
+            ..Default::default()
         },
         acl: None,
         mcp: None,
@@ -10283,6 +10285,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             heartbeat_timeout_secs: 5,
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: 30,
+            ..Default::default()
         },
         acl: None,
         mcp: None,
@@ -13641,6 +13644,7 @@ async fn setup_recovery_with_unmatched_timeout(
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: timeout_secs,
+            ..Default::default()
         },
         acl: None,
         mcp: None,

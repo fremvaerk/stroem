@@ -38,11 +38,13 @@ workspaces:
   #   ref: main
   #   poll_interval_secs: 60
 worker_token: "change-in-production"
-# Optional: worker recovery settings
+# Optional: worker recovery and data retention settings
 # recovery:
 #   heartbeat_timeout_secs: 120
 #   sweep_interval_secs: 60
 #   unmatched_step_timeout_secs: 30
+#   worker_retention_hours: 2       # Delete inactive workers older than 2h
+#   log_retention_days: 30          # Delete terminal jobs and logs older than 30d
 # Optional: authentication
 # auth:
 #   jwt_secret: "your-jwt-secret"

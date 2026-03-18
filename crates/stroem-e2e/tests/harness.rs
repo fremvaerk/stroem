@@ -220,6 +220,7 @@ impl TestEnv {
                 heartbeat_timeout_secs: 5,
                 sweep_interval_secs: 2,
                 unmatched_step_timeout_secs: 30,
+                ..Default::default()
             },
             acl: None,
             mcp: None,

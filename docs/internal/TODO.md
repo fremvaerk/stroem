@@ -431,6 +431,15 @@ Last updated: 2026-03-13.
 - [x] `crates/stroem-common/src/validation.rs` line ~1172 — test named `test_validate_action_script_cmd_deprecated_warning` but now tests error, not warning
 - [x] No explicit executor test for `type: docker` + `cmd` flowing through to `RunConfig.cmd`
 
+## Data Retention (review findings 2026-03-18)
+
+- [x] FK violation on `parent_job_id`: migration 020 adds `ON DELETE SET NULL` to `job.parent_job_id`, `job.worker_id`, `job_step.worker_id`.
+- [x] FK violation on `job.worker_id` and `job_step.worker_id`: same migration.
+- [x] Unbounded result set: `get_old_terminal_jobs()` now takes `batch_size` param with `LIMIT` clause (default 1000).
+- [x] N+1 query: returns `RetentionJobInfo` struct with metadata directly, eliminating per-job `get()`.
+- [x] Zero-value config validation: `worker_retention_hours` and `log_retention_days` must be >= 1 if set.
+- [x] Retention interval: `retention_interval_secs` config (default 3600) with `last_retention_run` atomic tracking in AppState.
+
 ## Bugs Found & Fixed
 
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)

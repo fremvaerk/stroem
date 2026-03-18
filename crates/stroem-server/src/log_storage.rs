@@ -212,6 +212,48 @@ impl LogStorage {
         }
     }
 
+    /// Delete local log files for a job (both .jsonl and legacy .log).
+    /// Returns true if any file was actually deleted.
+    pub async fn delete_local_log(&self, job_id: Uuid) -> bool {
+        self.close_log(job_id).await;
+        let mut deleted = false;
+        let jsonl_path = self.log_path(job_id);
+        if jsonl_path.exists() {
+            if let Err(e) = fs::remove_file(&jsonl_path).await {
+                tracing::warn!("Failed to delete log file {:?}: {}", jsonl_path, e);
+            } else {
+                deleted = true;
+            }
+        }
+        let legacy_path = self.legacy_log_path(job_id);
+        if legacy_path.exists() {
+            if let Err(e) = fs::remove_file(&legacy_path).await {
+                tracing::warn!("Failed to delete legacy log file {:?}: {}", legacy_path, e);
+            } else {
+                deleted = true;
+            }
+        }
+        deleted
+    }
+
+    /// Delete a job's log from S3. No-op if S3 is not configured.
+    #[allow(unused_variables)]
+    pub async fn delete_s3_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
+        #[cfg(feature = "s3")]
+        if let Some(ref s3) = self.s3 {
+            let key = self.s3_key(job_id, meta);
+            s3.client
+                .delete_object()
+                .bucket(&s3.bucket)
+                .key(&key)
+                .send()
+                .await
+                .with_context(|| format!("Failed to delete S3 log: {}", key))?;
+            tracing::debug!("Deleted S3 log: {}", key);
+        }
+        Ok(())
+    }
+
     /// Upload a job's log file to S3 (gzip-compressed). No-op if S3 is not configured.
     #[allow(unused_variables)]
     pub async fn upload_to_s3(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
@@ -1050,5 +1092,50 @@ mod tests {
             key,
             "logs/main/_hook:deploy/notify/2025/06/01/2025-06-01T12-00-00_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
         );
+    }
+
+    #[tokio::test]
+    async fn test_delete_local_log_removes_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LogStorage::new(dir.path());
+        let job_id = Uuid::new_v4();
+
+        // Create a log file
+        storage.ensure_dir().await.unwrap();
+        tokio::fs::write(storage.log_path(job_id), b"test log content")
+            .await
+            .unwrap();
+        assert!(storage.log_path(job_id).exists());
+
+        let deleted = storage.delete_local_log(job_id).await;
+        assert!(deleted);
+        assert!(!storage.log_path(job_id).exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_local_log_removes_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LogStorage::new(dir.path());
+        let job_id = Uuid::new_v4();
+
+        // Create a legacy .log file
+        storage.ensure_dir().await.unwrap();
+        tokio::fs::write(storage.legacy_log_path(job_id), b"legacy content")
+            .await
+            .unwrap();
+
+        let deleted = storage.delete_local_log(job_id).await;
+        assert!(deleted);
+        assert!(!storage.legacy_log_path(job_id).exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_local_log_no_file_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LogStorage::new(dir.path());
+        let job_id = Uuid::new_v4();
+
+        let deleted = storage.delete_local_log(job_id).await;
+        assert!(!deleted);
     }
 }
