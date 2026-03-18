@@ -2794,3 +2794,58 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
 
     Ok(())
 }
+
+/// `create_skipped()` inserts a job with status=skipped, completed_at set,
+/// started_at NULL, and no steps. It must not be counted as active.
+#[tokio::test]
+async fn test_create_skipped_job() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let input = serde_json::json!({"env": "prod"});
+    let job_id = JobRepo::create_skipped(
+        &pool,
+        "default",
+        "deploy",
+        Some(input.clone()),
+        "trigger",
+        Some("default/nightly"),
+    )
+    .await?;
+
+    // Retrieve and verify fields
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("Skipped job should exist");
+    assert_eq!(job.status, "skipped");
+    assert_eq!(job.workspace, "default");
+    assert_eq!(job.task_name, "deploy");
+    assert_eq!(job.mode, "distributed");
+    assert_eq!(job.source_type, "trigger");
+    assert_eq!(job.source_id.as_deref(), Some("default/nightly"));
+    assert_eq!(job.input, Some(input));
+    assert!(job.started_at.is_none(), "started_at must be NULL");
+    assert!(job.completed_at.is_some(), "completed_at must be set");
+    assert!(job.parent_job_id.is_none());
+
+    // No steps should exist
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert!(steps.is_empty(), "Skipped job must have no steps");
+
+    // Must NOT count as active
+    let active = JobRepo::count_active_by_source(&pool, "trigger", "default/nightly").await?;
+    assert_eq!(active, 0, "Skipped job must not count as active");
+
+    // Must appear in terminal job retention sweep
+    // (created_at is NOW(), so use retention_days=0 to catch it)
+    let old_jobs = JobRepo::get_old_terminal_jobs(&pool, 0.0, 100).await?;
+    assert!(
+        old_jobs.iter().any(|j| j.job_id == job_id),
+        "Skipped job must be included in retention sweep"
+    );
+
+    // Status counts should include skipped
+    let counts = JobRepo::get_status_counts(&pool).await?;
+    assert_eq!(*counts.get("skipped").unwrap_or(&0), 1);
+
+    Ok(())
+}

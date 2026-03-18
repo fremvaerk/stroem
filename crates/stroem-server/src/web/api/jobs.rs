@@ -29,7 +29,14 @@ pub struct ListJobsQuery {
     pub offset: i64,
 }
 
-const VALID_STATUSES: &[&str] = &["pending", "running", "completed", "failed", "cancelled"];
+const VALID_STATUSES: &[&str] = &[
+    "pending",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "skipped",
+];
 
 #[derive(Debug, Serialize)]
 pub struct DashboardStats {
@@ -38,6 +45,7 @@ pub struct DashboardStats {
     pub completed: i64,
     pub failed: i64,
     pub cancelled: i64,
+    pub skipped: i64,
 }
 
 /// GET /api/stats - Accurate job status counts for the dashboard
@@ -64,6 +72,7 @@ pub async fn get_stats(
         completed: *counts.get("completed").unwrap_or(&0),
         failed: *counts.get("failed").unwrap_or(&0),
         cancelled: *counts.get("cancelled").unwrap_or(&0),
+        skipped: *counts.get("skipped").unwrap_or(&0),
     };
 
     Ok((StatusCode::OK, Json(stats)))
@@ -835,6 +844,7 @@ mod tests {
             completed: 42,
             failed: 5,
             cancelled: 2,
+            skipped: 7,
         };
 
         let value = serde_json::to_value(&stats).expect("serialization should succeed");
@@ -843,10 +853,11 @@ mod tests {
         assert_eq!(value["completed"], json!(42));
         assert_eq!(value["failed"], json!(5));
         assert_eq!(value["cancelled"], json!(2));
+        assert_eq!(value["skipped"], json!(7));
 
-        // All five fields must be present — no extras, no missing keys.
+        // All six fields must be present — no extras, no missing keys.
         let obj = value.as_object().expect("must be an object");
-        assert_eq!(obj.len(), 5);
+        assert_eq!(obj.len(), 6);
     }
 
     #[test]
@@ -860,11 +871,13 @@ mod tests {
             completed: *counts.get("completed").unwrap_or(&0),
             failed: *counts.get("failed").unwrap_or(&0),
             cancelled: *counts.get("cancelled").unwrap_or(&0),
+            skipped: *counts.get("skipped").unwrap_or(&0),
         };
         assert_eq!(stats.pending, 0);
         assert_eq!(stats.running, 0);
         assert_eq!(stats.completed, 0);
         assert_eq!(stats.failed, 0);
         assert_eq!(stats.cancelled, 0);
+        assert_eq!(stats.skipped, 0);
     }
 }

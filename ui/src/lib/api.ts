@@ -268,6 +268,7 @@ export interface DashboardStats {
   completed: number;
   failed: number;
   cancelled: number;
+  skipped: number;
 }
 
 export async function getStats(): Promise<DashboardStats> {

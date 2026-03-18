@@ -12,6 +12,7 @@ pub enum JobStatus {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 impl fmt::Display for JobStatus {
@@ -28,6 +29,7 @@ impl AsRef<str> for JobStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -41,6 +43,7 @@ impl std::str::FromStr for JobStatus {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "skipped" => Ok(Self::Skipped),
             other => anyhow::bail!("Unknown job status: {}", other),
         }
     }
@@ -249,6 +252,7 @@ mod tests {
         assert_eq!(JobStatus::Completed.to_string(), "completed");
         assert_eq!(JobStatus::Failed.to_string(), "failed");
         assert_eq!(JobStatus::Cancelled.to_string(), "cancelled");
+        assert_eq!(JobStatus::Skipped.to_string(), "skipped");
     }
 
     #[test]
@@ -264,6 +268,7 @@ mod tests {
             "cancelled".parse::<JobStatus>().unwrap(),
             JobStatus::Cancelled
         );
+        assert_eq!("skipped".parse::<JobStatus>().unwrap(), JobStatus::Skipped);
         assert!("invalid".parse::<JobStatus>().is_err());
     }
 
@@ -274,6 +279,12 @@ mod tests {
         assert_eq!(json, r#""completed""#);
         let parsed: JobStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, status);
+
+        let skipped = JobStatus::Skipped;
+        let json_skipped = serde_json::to_string(&skipped).unwrap();
+        assert_eq!(json_skipped, r#""skipped""#);
+        let parsed_skipped: JobStatus = serde_json::from_str(&json_skipped).unwrap();
+        assert_eq!(parsed_skipped, skipped);
     }
 
     #[test]

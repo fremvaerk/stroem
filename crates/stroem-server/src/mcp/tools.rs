@@ -528,7 +528,14 @@ impl StromMcpHandler {
             ));
         }
 
-        let valid_statuses = ["pending", "running", "completed", "failed", "cancelled"];
+        let valid_statuses = [
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "skipped",
+        ];
         if let Some(ref s) = params.status {
             if !valid_statuses.contains(&s.as_str()) {
                 return Err(rmcp::ErrorData::invalid_params(

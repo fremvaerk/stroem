@@ -431,6 +431,15 @@ Last updated: 2026-03-13.
 - [x] `crates/stroem-common/src/validation.rs` line ~1172 — test named `test_validate_action_script_cmd_deprecated_warning` but now tests error, not warning
 - [x] No explicit executor test for `type: docker` + `cmd` flowing through to `RunConfig.cmd`
 
+## Review: Skipped Job Status (2026-03-18)
+
+### Important
+- [x] Scheduler: double serialization of `tstate.input` + `.ok()` inconsistency — reuse `input.clone()` from line 266 instead of re-serializing
+
+### Test Coverage
+- [x] Integration: `create_skipped()` DB test (testcontainers) — assert `completed_at IS NOT NULL`, `started_at IS NULL`, `status = 'skipped'`, no steps, not counted as active, included in retention sweep, appears in status counts
+- [ ] E2E: cron trigger with `concurrency: skip` + active job → verify skipped job appears in `GET /api/jobs?status=skipped` and `GET /api/stats` shows `skipped >= 1`
+
 ## Data Retention (review findings 2026-03-18)
 
 - [x] FK violation on `parent_job_id`: migration 020 adds `ON DELETE SET NULL` to `job.parent_job_id`, `job.worker_id`, `job_step.worker_id`.

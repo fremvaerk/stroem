@@ -172,7 +172,7 @@ describe("apiFetch", () => {
   it("returns parsed JSON on a 200 response", async () => {
     const { getStats } = await import("../api");
 
-    const payload = { pending: 1, running: 2, completed: 10, failed: 0, cancelled: 0 };
+    const payload = { pending: 1, running: 2, completed: 10, failed: 0, cancelled: 0, skipped: 0 };
     setAccessToken("valid-token");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(makeMockResponse(200, payload)));
 
@@ -185,7 +185,7 @@ describe("apiFetch", () => {
 
     setAccessToken("test-bearer-token");
     const fetchMock = vi.fn().mockResolvedValue(
-      makeMockResponse(200, { pending: 0, running: 0, completed: 0, failed: 0, cancelled: 0 }),
+      makeMockResponse(200, { pending: 0, running: 0, completed: 0, failed: 0, cancelled: 0, skipped: 0 }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -239,7 +239,7 @@ describe("apiFetch", () => {
   it("attempts token refresh on 401 and retries the request", async () => {
     const { getStats } = await import("../api");
 
-    const statsPayload = { pending: 3, running: 1, completed: 5, failed: 0, cancelled: 0 };
+    const statsPayload = { pending: 3, running: 1, completed: 5, failed: 0, cancelled: 0, skipped: 0 };
 
     const fetchMock = vi
       .fn()

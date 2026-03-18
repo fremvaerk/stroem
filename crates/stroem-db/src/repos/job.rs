@@ -178,6 +178,38 @@ impl JobRepo {
         Ok(job_id)
     }
 
+    /// Create a bare "skipped" job record with no steps.
+    ///
+    /// Used when a `concurrency: skip` trigger fires but an active job already
+    /// exists — the job is recorded for visibility but never executed.
+    pub async fn create_skipped(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        input: Option<JsonValue>,
+        source_type: &str,
+        source_id: Option<&str>,
+    ) -> Result<Uuid> {
+        let job_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO job (job_id, workspace, task_name, mode, input, status, source_type, source_id, completed_at)
+            VALUES ($1, $2, $3, 'distributed', $4, 'skipped', $5, $6, NOW())
+            "#,
+        )
+        .bind(job_id)
+        .bind(workspace)
+        .bind(task_name)
+        .bind(input)
+        .bind(source_type)
+        .bind(source_id)
+        .execute(pool)
+        .await
+        .context("Failed to create skipped job")?;
+
+        Ok(job_id)
+    }
+
     /// Get job by ID
     pub async fn get(pool: &PgPool, job_id: Uuid) -> Result<Option<JobRow>> {
         let job = sqlx::query_as::<_, JobRow>(&format!(
@@ -566,7 +598,7 @@ impl JobRepo {
     ) -> Result<Vec<RetentionJobInfo>> {
         let rows = sqlx::query_as::<_, RetentionJobInfo>(
             "SELECT job_id, workspace, task_name, created_at FROM job \
-             WHERE status IN ('completed', 'failed', 'cancelled') \
+             WHERE status IN ('completed', 'failed', 'cancelled', 'skipped') \
                AND created_at < NOW() - make_interval(secs => $1::double precision) \
              LIMIT $2",
         )

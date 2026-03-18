@@ -758,4 +758,17 @@ mod tests {
         assert!(actions.contains(&"ws-slack"));
         assert!(actions.contains(&"ws-pagerduty"));
     }
+
+    /// Skipped jobs never fire hooks (not completed/failed/cancelled).
+    #[test]
+    fn test_skipped_status_does_not_fire_hooks() {
+        let task = make_task_def(
+            vec![make_hook("task-notify")],
+            vec![make_hook("task-alert")],
+        );
+        let ws = make_workspace_config(vec![make_hook("ws-notify")], vec![make_hook("ws-alert")]);
+
+        let selected = select_hooks_for_job(&ws, "trigger", "skipped", &task);
+        assert!(selected.is_none(), "skipped jobs should never fire hooks");
+    }
 }

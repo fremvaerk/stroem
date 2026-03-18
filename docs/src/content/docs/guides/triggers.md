@@ -62,7 +62,7 @@ triggers:
 | Policy | Behavior |
 |--------|----------|
 | `allow` | (default) Always create a new job, even if previous runs are still active. |
-| `skip` | Skip the trigger if there is already an active job from this trigger. Logs an info message. |
+| `skip` | Skip the trigger if there is already an active job from this trigger. Creates a job record with `status: skipped` for visibility (no steps are executed). |
 | `cancel_previous` | Cancel all active jobs from this trigger, then create a new job. |
 
 The concurrency check uses the trigger's `source_type` and `source_id` (`"{workspace}/{trigger_name}"`) to identify related jobs.

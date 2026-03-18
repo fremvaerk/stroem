@@ -23,6 +23,7 @@ describe("StatusBadge", () => {
     "completed",
     "failed",
     "cancelled",
+    "skipped",
   ] as const;
 
   statuses.forEach((status) => {
@@ -34,8 +35,8 @@ describe("StatusBadge", () => {
   });
 
   it("renders unknown status text as-is", () => {
-    renderBadge("skipped");
-    expect(screen.getByText("skipped", { exact: false })).toBeInTheDocument();
+    renderBadge("unknown-status");
+    expect(screen.getByText("unknown-status", { exact: false })).toBeInTheDocument();
   });
 
   // ---------------------------------------------------------------------------
@@ -81,6 +82,11 @@ describe("StatusBadge", () => {
   it("applies gray styling for 'cancelled'", () => {
     const el = renderBadge("cancelled");
     expect(el.className).toMatch(/gray/);
+  });
+
+  it("applies slate styling for 'skipped'", () => {
+    const el = renderBadge("skipped");
+    expect(el.className).toMatch(/slate/);
   });
 
   // ---------------------------------------------------------------------------

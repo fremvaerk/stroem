@@ -81,7 +81,10 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
     if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
         if matches!(
             job_after.status.parse::<JobStatus>().ok(),
-            Some(JobStatus::Completed) | Some(JobStatus::Failed) | Some(JobStatus::Cancelled)
+            Some(JobStatus::Completed)
+                | Some(JobStatus::Failed)
+                | Some(JobStatus::Cancelled)
+                | Some(JobStatus::Skipped)
         ) {
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
@@ -188,6 +191,7 @@ async fn propagate_to_parent(
                     Some(JobStatus::Completed)
                         | Some(JobStatus::Failed)
                         | Some(JobStatus::Cancelled)
+                        | Some(JobStatus::Skipped)
                 ) {
                     // Propagate up the chain if parent is also a child
                     if let (Some(grandparent_id), Some(ref grandparent_step)) =
@@ -223,7 +227,10 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         Some(j)
             if matches!(
                 j.status.parse::<JobStatus>().ok(),
-                Some(JobStatus::Completed) | Some(JobStatus::Failed) | Some(JobStatus::Cancelled)
+                Some(JobStatus::Completed)
+                    | Some(JobStatus::Failed)
+                    | Some(JobStatus::Cancelled)
+                    | Some(JobStatus::Skipped)
             ) =>
         {
             j

@@ -22,7 +22,7 @@ import { formatDuration, formatTime } from "@/lib/formatting";
 import type { JobListItem } from "@/lib/types";
 
 const PAGE_SIZE = 20;
-const STATUSES = ["all", "pending", "running", "completed", "failed"] as const;
+const STATUSES = ["all", "pending", "running", "completed", "failed", "cancelled", "skipped"] as const;
 
 export function JobsPage() {
   useTitle("Jobs");

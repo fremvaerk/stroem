@@ -275,6 +275,32 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                         source_id,
                         count
                     );
+                    // Record the skipped trigger fire for visibility
+                    match JobRepo::create_skipped(
+                        &app_state.pool,
+                        &tstate.workspace,
+                        &tstate.task,
+                        Some(input.clone()),
+                        "trigger",
+                        Some(&source_id),
+                    )
+                    .await
+                    {
+                        Ok(job_id) => {
+                            tracing::info!(
+                                "Trigger '{}': recorded skipped job {}",
+                                source_id,
+                                job_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Trigger '{}': failed to record skipped job: {:#}",
+                                source_id,
+                                e
+                            );
+                        }
+                    }
                     return;
                 }
                 Err(e) => {
