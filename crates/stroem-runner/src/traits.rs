@@ -23,9 +23,9 @@ impl RunResult {
 /// Whether a runner should mount workspace files or run the image standalone
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerMode {
-    /// Type 2: Shell in a runner environment — bind-mount workspace, use runner_image
+    /// Script action: runs in a runner environment — bind-mount workspace, use runner_image
     WithWorkspace,
-    /// Type 1: Run user's prepared image as-is — no workspace mount
+    /// Container action (docker/pod): runs user's prepared image as-is — no workspace mount
     NoWorkspace,
 }
 
@@ -44,13 +44,13 @@ pub struct RunConfig {
     pub action_type: String,
     /// Container image (e.g. "python:3.12") — used by docker and pod runners
     pub image: Option<String>,
-    /// Runner mode: WithWorkspace (Type 2) or NoWorkspace (Type 1)
+    /// Runner mode: WithWorkspace (script actions) or NoWorkspace (container actions)
     pub runner_mode: RunnerMode,
-    /// Default runner image for Type 2 shell-in-container execution
+    /// Default runner image for script-in-container execution
     pub runner_image: Option<String>,
-    /// Entrypoint override for Type 1 docker/pod
+    /// Entrypoint override for docker/pod container actions
     pub entrypoint: Option<Vec<String>>,
-    /// Command args for Type 1 docker/pod
+    /// Command args for docker/pod container actions
     pub command: Option<Vec<String>>,
     /// Raw pod manifest overrides (deep-merged into generated pod JSON)
     pub pod_manifest_overrides: Option<serde_json::Value>,

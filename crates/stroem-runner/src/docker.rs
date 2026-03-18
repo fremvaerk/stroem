@@ -43,7 +43,7 @@ impl DockerRunner {
 
         match config.runner_mode {
             RunnerMode::WithWorkspace => {
-                // Type 2: Shell in container with workspace bind-mount
+                // Script action: shell in container with workspace bind-mount
                 let image = config
                     .image
                     .as_deref()
@@ -109,7 +109,7 @@ impl DockerRunner {
                 }
             }
             RunnerMode::NoWorkspace => {
-                // Type 1: Run user's prepared image as-is
+                // Container action: run user's prepared image as-is
                 let image = config
                     .image
                     .as_deref()
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_build_container_config_no_workspace_image_defaults() {
-        // Type 1 with no cmd, no entrypoint — image defaults should apply
+        // Container action (docker) with no cmd, no entrypoint — image defaults should apply
         let config = RunConfig {
             cmd: None,
             script: None,

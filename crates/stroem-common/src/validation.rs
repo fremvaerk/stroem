@@ -673,7 +673,7 @@ fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
         );
     }
 
-    // Script actions must not have 'image' — use type: docker (Type 1) or runner: docker (Type 2) instead
+    // Script actions must not have 'image' — use type: docker (container action) or runner: docker (script-in-container) instead
     if action.image.is_some() {
         bail!(
             "Action '{}' is type 'script' but has 'image' field. Use type: docker for container images, or runner: docker for shell-in-container",
@@ -1934,7 +1934,7 @@ actions:
 
     #[test]
     fn test_validate_docker_no_cmd_ok() {
-        // Type 1: docker with image only (uses image default entrypoint)
+        // docker action with image only (uses image default entrypoint)
         let yaml = r#"
 actions:
   migrate:

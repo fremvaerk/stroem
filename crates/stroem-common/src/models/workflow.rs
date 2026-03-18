@@ -139,7 +139,7 @@ pub struct ActionDef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>, // for docker/pod
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub entrypoint: Option<Vec<String>>, // for docker/pod Type 1
+    pub entrypoint: Option<Vec<String>>, // for docker/pod container actions
 
     // Common fields
     #[serde(skip_serializing_if = "Option::is_none")]

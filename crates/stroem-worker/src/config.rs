@@ -16,7 +16,7 @@ pub struct WorkerConfig {
     /// Worker tags for step routing (e.g. `["script", "docker", "gpu"]`).
     #[serde(default = "default_tags")]
     pub tags: Vec<String>,
-    /// Default runner image for Type 2 (shell-in-container) execution
+    /// Default runner image for script-in-container execution
     pub runner_image: Option<String>,
     /// Docker runner configuration (requires `docker` feature)
     pub docker: Option<DockerRunnerConfig>,

@@ -14,7 +14,7 @@ pub struct StepExecutor {
     docker_runner: Option<stroem_runner::DockerRunner>,
     #[cfg(feature = "kubernetes")]
     kube_runner: Option<stroem_runner::KubeRunner>,
-    /// Default runner image for Type 2 (shell-in-container) execution
+    /// Default runner image for script-in-container execution
     runner_image: Option<String>,
 }
 
@@ -36,7 +36,7 @@ impl StepExecutor {
         Self::default()
     }
 
-    /// Set the default runner image for Type 2 execution
+    /// Set the default runner image for script-in-container execution
     pub fn with_runner_image(mut self, image: String) -> Self {
         self.runner_image = Some(image);
         self
@@ -154,14 +154,14 @@ impl StepExecutor {
             .context("Missing action_spec in claimed step")?;
 
         let runner_field = step.runner.as_deref().unwrap_or("local");
-        let is_type2 = step.action_type == ActionType::Script.as_ref(); // Type 2: script with workspace
+        let is_type2 = step.action_type == ActionType::Script.as_ref(); // script action: runs with workspace
         let runner_mode = if is_type2 {
             RunnerMode::WithWorkspace
         } else {
             RunnerMode::NoWorkspace
         };
 
-        // Extract inline code: Type 2 (script) uses "script" key, Type 1 (docker/pod) uses "cmd"
+        // Extract inline code: script actions use "script" key, container actions (docker/pod) use "cmd"
         let cmd = if is_type2 {
             action_spec.get("script")
         } else {
@@ -215,7 +215,7 @@ impl StepExecutor {
             })
         });
 
-        // Type 2 (script) requires inline code or source file; Type 1 (docker/pod) allows empty (image defaults)
+        // Script actions require inline code or source file; container actions (docker/pod) allow empty (image defaults)
         if is_type2 && cmd.is_none() && script.is_none() {
             if action_spec.get("cmd").is_some() {
                 anyhow::bail!(
@@ -225,7 +225,7 @@ impl StepExecutor {
             anyhow::bail!("Action spec must contain 'script' or 'source'");
         }
 
-        // Determine image: Type 2 uses runner_image, Type 1 uses action image
+        // Determine image: script actions use runner_image, container actions use action image
         let image = if is_type2 && runner_field != "local" {
             self.runner_image
                 .clone()
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type1_no_cmd_allowed() {
-        // Type 1 (docker/pod) doesn't require cmd/script — image defaults run
+        // Container actions (docker/pod) don't require cmd/script — image defaults run
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({})));
         step.action_type = "docker".to_string();
@@ -777,7 +777,7 @@ mod tests {
 
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.runner_mode, RunnerMode::WithWorkspace);
-        // Type 2 uses runner_image, not action_image
+        // Script actions use runner_image, not action_image
         assert_eq!(config.image, Some("ghcr.io/org/runner:latest".to_string()));
     }
 
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type2_fallback_to_action_image() {
-        // When runner_image is not set, Type 2 should fall back to action_image
+        // When runner_image is not set, script actions should fall back to action_image
         let executor = StepExecutor::new(); // no runner_image
         let mut step = test_step(Some(serde_json::json!({"script": "npm test"})));
         step.runner = Some("docker".to_string());
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type2_runner_image_overrides_action_image() {
-        // When runner_image IS set, it takes precedence over action_image for Type 2
+        // When runner_image IS set, it takes precedence over action_image for script actions
         let executor =
             StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
         let mut step = test_step(Some(serde_json::json!({"script": "npm test"})));
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type1_ignores_runner_image() {
-        // Type 1 (docker) should use action_image, not runner_image
+        // Container actions (docker) should use action_image, not runner_image
         let executor =
             StepExecutor::new().with_runner_image("ghcr.io/org/runner:latest".to_string());
         let mut step = test_step(Some(serde_json::json!({})));
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type2_local_no_image() {
-        // Type 2 shell+local should not set image even if action_image is present
+        // Script action with runner: local should not set image even if action_image is present
         let executor = StepExecutor::new();
         let mut step = test_step(Some(serde_json::json!({"script": "echo hi"})));
         step.runner = None; // defaults to "local"
@@ -982,7 +982,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type2_ignores_cmd_key() {
-        // Type 2 (script) reads only the "script" key; "cmd" is ignored entirely.
+        // Script actions read only the "script" key; "cmd" is ignored entirely.
         let executor = StepExecutor::new();
         let step = test_step(Some(serde_json::json!({
             "script": "from-script",
@@ -995,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_build_run_config_type2_cmd_key_gives_actionable_error() {
-        // Type 2 (script) with only a "cmd" key should give a clear migration error.
+        // Script actions with only a "cmd" key should give a clear migration error.
         let executor = StepExecutor::new();
         let step = test_step(Some(serde_json::json!({
             "cmd": "echo hi"

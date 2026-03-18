@@ -53,7 +53,7 @@ impl KubeRunner {
         self
     }
 
-    /// Build the pod JSON for `RunnerMode::WithWorkspace` (Type 2: shell in pod with workspace).
+    /// Build the pod JSON for `RunnerMode::WithWorkspace` (script action: shell in pod with workspace).
     ///
     /// Returns raw `serde_json::Value` so the caller can apply the common tail logic
     /// (startup configmap injection, manifest overrides) before deserialising.
@@ -146,7 +146,7 @@ impl KubeRunner {
         })
     }
 
-    /// Build the pod JSON for `RunnerMode::NoWorkspace` (Type 1: user's prepared image, no init
+    /// Build the pod JSON for `RunnerMode::NoWorkspace` (container action: user's prepared image, no init
     /// container, no workspace volume).
     ///
     /// Returns raw `serde_json::Value` so the caller can apply the common tail logic
@@ -346,8 +346,8 @@ impl KubeRunner {
             }
         };
 
-        // Inject startup scripts volume + mount if configured (Type 2 only —
-        // Type 1 pods run the user's image as-is without the startup entrypoint)
+        // Inject startup scripts volume + mount if configured (script actions only —
+        // container action pods run the user's image as-is without the startup entrypoint)
         if config.runner_mode == RunnerMode::WithWorkspace {
             if let Some(ref cm_name) = self.startup_configmap {
                 Self::inject_startup_configmap(&mut pod_json, cm_name);
@@ -2081,7 +2081,7 @@ mod tests {
 
     #[test]
     fn test_build_pod_spec_with_startup_configmap_no_workspace() {
-        // Type 1 (NoWorkspace) pods should NOT get startup scripts —
+        // Container action (NoWorkspace) pods should NOT get startup scripts —
         // they run the user's image as-is without the startup entrypoint.
         let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
         let config = make_pod_config(None);
@@ -2150,7 +2150,7 @@ mod tests {
     fn test_build_pod_spec_startup_configmap_with_manifest_overrides() {
         // Verify that a manifest override with its own volumes and volumeMounts
         // does not displace the startup-scripts volume/mount injected before the merge.
-        // Uses WithWorkspace because startup scripts are only injected for Type 2 pods.
+        // Uses WithWorkspace because startup scripts are only injected for script action pods.
         let runner = make_runner().with_startup_configmap("stroem-runner-startup".to_string());
         let config = RunConfig {
             cmd: Some("echo hello".to_string()),

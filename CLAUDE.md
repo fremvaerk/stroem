@@ -141,18 +141,18 @@ bun run preview
 ### Workflow YAML structure
 See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
-### Action Types and Runners (Type 1 / Type 2 Split)
-- **Type 1 (Container)**: `type: docker` or `type: pod` — runs user's prepared image as-is, no workspace mounting. Uses `cmd` field for entrypoint/command override.
-- **Type 2 (Script)**: `type: script` + `runner: local|docker|pod` — scripts in a runner environment with workspace files. Supports multiple languages via the `language` field: `shell` (default), `python`, `javascript`, `typescript`, `go`. Inline scripts use `script` field; file paths use `source` field. Optional `dependencies` (package list) and `interpreter` (override auto-detected binary) fields.
-- **Type 3 (Sub-job)**: `type: task` — references another task, server creates a child job (see Task Actions below)
-- `type: script` + `image` is **rejected** by validation (breaking change). Use `type: docker` (Type 1) or `type: script` + `runner: docker` (Type 2) instead.
+### Action Types and Runners
+- **`docker` / `pod`** (container actions): Runs user's prepared image as-is, no workspace mounting. Uses `cmd` field for entrypoint/command override.
+- **`script`** (script actions): `type: script` + `runner: local|docker|pod` — scripts in a runner environment with workspace files. Supports multiple languages via the `language` field: `shell` (default), `python`, `javascript`, `typescript`, `go`. Inline scripts use `script` field; file paths use `source` field. Optional `dependencies` (package list) and `interpreter` (override auto-detected binary) fields.
+- **`task`** (sub-job): References another task, server creates a child job (see Task Actions below)
+- `type: script` + `image` is **rejected** by validation (breaking change). Use `type: docker` or `type: script` + `runner: docker` instead.
 - **Toolchain preferences**: `uv > python3 > python`, `bun > node` (JS), `bun > deno` (TS), `bash > sh`
 - **DB migration**: `014_script_type.sql` renames existing `'shell'` action_type rows to `'script'`
 - **Pod manifest overrides**: `type: pod` and `type: script` + `runner: pod` support a `manifest` field — a raw JSON/YAML object deep-merged into the generated pod spec (service accounts, node selectors, tolerations, resource limits, annotations, sidecars, etc.). See `docs/src/content/docs/guides/action-types.md` for details.
 
 ### Runner Architecture
-- `RunConfig` carries `action_type`, `image`, `runner_mode`, `runner_image`, `entrypoint`, `command`. For Type 2 (script) actions, command is derived from `script` or `source` fields; for Type 1 (docker/pod), `cmd` field overrides defaults.
-- `RunnerMode` enum: `WithWorkspace` (Type 2) or `NoWorkspace` (Type 1)
+- `RunConfig` carries `action_type`, `image`, `runner_mode`, `runner_image`, `entrypoint`, `command`. For script actions, command is derived from `script` or `source` fields; for docker/pod, `cmd` field overrides defaults.
+- `RunnerMode` enum: `WithWorkspace` (script actions) or `NoWorkspace` (docker/pod actions)
 - `StepExecutor::select_runner()` dispatches on `(action_type, runner_field)`:
   - `("script", "local")` → ShellRunner
   - `("script", "docker")` or `("docker", _)` → DockerRunner
