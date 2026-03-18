@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,28 +9,233 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-#[cfg(feature = "s3")]
-use crate::config::S3Config;
-
-#[cfg(feature = "s3")]
-#[derive(Clone)]
-struct S3Backend {
-    client: aws_sdk_s3::Client,
-    bucket: String,
-    prefix: String,
-}
-
-/// Metadata needed to construct structured S3 keys for job logs.
+/// Metadata needed to construct structured archive keys for job logs.
 pub struct JobLogMeta {
     pub workspace: String,
     pub task_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Pluggable archive backend for log storage.
+///
+/// Operates on raw bytes — gzip compression/decompression is handled by
+/// `LogStorage` before calling these methods.
+#[async_trait]
+pub trait LogArchive: Send + Sync {
+    /// Upload raw bytes to the archive under the given key.
+    async fn upload(&self, key: &str, data: &[u8]) -> Result<()>;
+    /// Download raw bytes from the archive. Returns `None` if the key doesn't exist.
+    async fn download(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    /// Delete an object from the archive.
+    async fn delete(&self, key: &str) -> Result<()>;
+}
+
+/// Build a structured archive key from job metadata.
+///
+/// Format: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz`
+pub fn archive_key(prefix: &str, job_id: Uuid, meta: &JobLogMeta) -> String {
+    let dt = meta.created_at;
+    format!(
+        "{}{}/{}/{}/{}/{}_{}.jsonl.gz",
+        prefix,
+        meta.workspace,
+        meta.task_name,
+        dt.format("%Y"),
+        dt.format("%m/%d"),
+        dt.format("%Y-%m-%dT%H-%M-%S"),
+        job_id,
+    )
+}
+
+// ─── S3 Archive Backend ──────────────────────────────────────────────────
+
+#[cfg(feature = "s3")]
+pub use s3_archive::S3Archive;
+
+#[cfg(feature = "s3")]
+mod s3_archive {
+    use super::*;
+    use crate::config::ArchiveConfig;
+
+    /// S3-backed archive implementation.
+    pub struct S3Archive {
+        client: aws_sdk_s3::Client,
+        bucket: String,
+    }
+
+    impl S3Archive {
+        /// Create from an `ArchiveConfig` (production init — builds AWS SDK client).
+        pub async fn from_config(config: &ArchiveConfig) -> Result<Self> {
+            let region = config
+                .region
+                .as_deref()
+                .context("S3 archive requires 'region' field")?;
+            let bucket = config
+                .bucket
+                .as_deref()
+                .context("S3 archive requires 'bucket' field")?;
+
+            let mut aws_config_builder =
+                aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_sdk_s3::config::Region::new(region.to_string()));
+
+            if let Some(ref endpoint) = config.endpoint {
+                aws_config_builder = aws_config_builder.endpoint_url(endpoint);
+            }
+
+            let aws_config = aws_config_builder.load().await;
+            let s3_sdk_config = aws_sdk_s3::config::Builder::from(&aws_config)
+                .force_path_style(config.endpoint.is_some())
+                .build();
+            let client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
+
+            tracing::info!("S3 log archival enabled: bucket={}", bucket);
+
+            Ok(Self {
+                client,
+                bucket: bucket.to_string(),
+            })
+        }
+
+        /// Create from a pre-built client (for testing).
+        pub fn from_client(client: aws_sdk_s3::Client, bucket: String) -> Self {
+            Self { client, bucket }
+        }
+    }
+
+    #[async_trait]
+    impl LogArchive for S3Archive {
+        async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .content_type("application/gzip")
+                .body(data.to_vec().into())
+                .send()
+                .await
+                .with_context(|| format!("Failed to upload log to S3: {}", key))?;
+            tracing::info!("Uploaded logs to S3: s3://{}/{}", self.bucket, key);
+            Ok(())
+        }
+
+        async fn download(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            match self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(output) => {
+                    let bytes = output
+                        .body
+                        .collect()
+                        .await
+                        .context("Failed to read S3 object body")?
+                        .into_bytes();
+                    Ok(Some(bytes.to_vec()))
+                }
+                Err(sdk_err) => {
+                    if let aws_sdk_s3::error::SdkError::ServiceError(ref service_err) = sdk_err {
+                        if service_err.err().is_no_such_key() {
+                            return Ok(None);
+                        }
+                    }
+                    tracing::warn!("S3 log lookup failed (non-fatal): {}", sdk_err);
+                    Ok(None)
+                }
+            }
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .with_context(|| format!("Failed to delete S3 log: {}", key))?;
+            tracing::debug!("Deleted S3 log: {}", key);
+            Ok(())
+        }
+    }
+}
+
+// ─── Local Archive Backend ───────────────────────────────────────────────
+
+/// Local filesystem archive backend.
+///
+/// Maps archive keys to files under `base_path` — the key's `/` separators
+/// become subdirectories.
+pub struct LocalArchive {
+    base_path: PathBuf,
+}
+
+impl LocalArchive {
+    pub fn new(base_path: impl AsRef<Path>) -> Self {
+        Self {
+            base_path: base_path.as_ref().to_path_buf(),
+        }
+    }
+
+    fn key_path(&self, key: &str) -> Result<PathBuf> {
+        // Reject keys with path traversal components
+        if key.contains("..") || key.starts_with('/') {
+            anyhow::bail!("Invalid archive key (path traversal attempt): {}", key);
+        }
+        Ok(self.base_path.join(key))
+    }
+}
+
+#[async_trait]
+impl LogArchive for LocalArchive {
+    async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+        let path = self.key_path(key)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create archive dir: {:?}", parent))?;
+        }
+        fs::write(&path, data)
+            .await
+            .with_context(|| format!("Failed to write archive file: {:?}", path))?;
+        tracing::debug!("Archived log to local file: {:?}", path);
+        Ok(())
+    }
+
+    async fn download(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.key_path(key)?;
+        match fs::read(&path).await {
+            Ok(data) => Ok(Some(data)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("Failed to read archive file: {:?}", path)),
+        }
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        let path = self.key_path(key)?;
+        match fs::remove_file(&path).await {
+            Ok(()) => {
+                tracing::debug!("Deleted local archive file: {:?}", path);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("Failed to delete archive file: {:?}", path)),
+        }
+    }
+}
+
+// ─── LogStorage ──────────────────────────────────────────────────────────
+
 /// A cached, buffered file handle for a single job's log file.
 type CachedHandle = Arc<Mutex<BufWriter<File>>>;
 
 /// Log storage handles writing and reading job logs.
+///
+/// Live logs are always written to local disk as JSONL files. An optional
+/// archive backend handles long-term storage (S3, local filesystem, etc.).
 ///
 /// File handles are kept open and buffered across multiple [`append_log`] calls,
 /// eliminating the open/close overhead on every chunk. Call [`close_log`] when a
@@ -41,8 +247,10 @@ pub struct LogStorage {
     dir_created: Arc<AtomicBool>,
     /// Open, buffered file handles keyed by job UUID.
     file_cache: Arc<DashMap<Uuid, CachedHandle>>,
-    #[cfg(feature = "s3")]
-    s3: Option<S3Backend>,
+    /// Pluggable archive backend (S3, local, etc.).
+    archive: Option<Arc<dyn LogArchive>>,
+    /// Key prefix for archive objects.
+    archive_prefix: String,
 }
 
 impl LogStorage {
@@ -52,75 +260,16 @@ impl LogStorage {
             base_dir: base_dir.as_ref().to_path_buf(),
             dir_created: Arc::new(AtomicBool::new(false)),
             file_cache: Arc::new(DashMap::new()),
-            #[cfg(feature = "s3")]
-            s3: None,
+            archive: None,
+            archive_prefix: String::new(),
         }
     }
 
-    /// Configure S3 backend for log archival.
-    #[cfg(feature = "s3")]
-    pub async fn with_s3(mut self, s3_config: &S3Config) -> Result<Self> {
-        let mut aws_config_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_sdk_s3::config::Region::new(s3_config.region.clone()));
-
-        if let Some(ref endpoint) = s3_config.endpoint {
-            aws_config_builder = aws_config_builder.endpoint_url(endpoint);
-        }
-
-        let aws_config = aws_config_builder.load().await;
-        let s3_sdk_config = aws_sdk_s3::config::Builder::from(&aws_config)
-            .force_path_style(s3_config.endpoint.is_some())
-            .build();
-        let client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
-
-        self.s3 = Some(S3Backend {
-            client,
-            bucket: s3_config.bucket.clone(),
-            prefix: s3_config.prefix.clone(),
-        });
-
-        tracing::info!(
-            "S3 log archival enabled: bucket={}, prefix={}",
-            s3_config.bucket,
-            s3_config.prefix
-        );
-
-        Ok(self)
-    }
-
-    /// Configure S3 backend with a pre-built client (for testing).
-    #[cfg(feature = "s3")]
-    pub fn with_s3_client(
-        mut self,
-        client: aws_sdk_s3::Client,
-        bucket: String,
-        prefix: String,
-    ) -> Self {
-        self.s3 = Some(S3Backend {
-            client,
-            bucket,
-            prefix,
-        });
+    /// Attach an archive backend with the given key prefix.
+    pub fn with_archive(mut self, archive: Arc<dyn LogArchive>, prefix: String) -> Self {
+        self.archive = Some(archive);
+        self.archive_prefix = prefix;
         self
-    }
-
-    /// Build a structured S3 key from job metadata.
-    ///
-    /// Format: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz`
-    #[cfg(feature = "s3")]
-    fn s3_key(&self, job_id: Uuid, meta: &JobLogMeta) -> String {
-        let prefix = self.s3.as_ref().map(|s| s.prefix.as_str()).unwrap_or("");
-        let dt = meta.created_at;
-        format!(
-            "{}{}/{}/{}/{}/{}_{}.jsonl.gz",
-            prefix,
-            meta.workspace,
-            meta.task_name,
-            dt.format("%Y"),
-            dt.format("%m/%d"),
-            dt.format("%Y-%m-%dT%H-%M-%S"),
-            job_id,
-        )
     }
 
     /// Get the JSONL log file path for a job.
@@ -236,32 +385,27 @@ impl LogStorage {
         deleted
     }
 
-    /// Delete a job's log from S3. No-op if S3 is not configured.
-    #[allow(unused_variables)]
-    pub async fn delete_s3_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
-        #[cfg(feature = "s3")]
-        if let Some(ref s3) = self.s3 {
-            let key = self.s3_key(job_id, meta);
-            s3.client
-                .delete_object()
-                .bucket(&s3.bucket)
-                .key(&key)
-                .send()
-                .await
-                .with_context(|| format!("Failed to delete S3 log: {}", key))?;
-            tracing::debug!("Deleted S3 log: {}", key);
+    /// Delete a job's log from the archive. No-op if no archive is configured.
+    pub async fn delete_archive_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
+        if let Some(ref archive) = self.archive {
+            let key = archive_key(&self.archive_prefix, job_id, meta);
+            archive.delete(&key).await?;
         }
         Ok(())
     }
 
-    /// Upload a job's log file to S3 (gzip-compressed). No-op if S3 is not configured.
-    #[allow(unused_variables)]
-    pub async fn upload_to_s3(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
-        #[cfg(feature = "s3")]
-        if let Some(ref s3) = self.s3 {
+    /// Upload a job's log file to the archive (gzip-compressed). No-op if no archive is configured.
+    pub async fn upload_to_archive(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<()> {
+        // Defensive flush: ensure any buffered writes are on disk before reading.
+        self.close_log(job_id).await;
+
+        if let Some(ref archive) = self.archive {
             let path = self.log_path(job_id);
             if !path.exists() {
-                tracing::debug!("No local log file for job {}, skipping S3 upload", job_id);
+                tracing::debug!(
+                    "No local log file for job {}, skipping archive upload",
+                    job_id
+                );
                 return Ok(());
             }
 
@@ -272,7 +416,10 @@ impl LogStorage {
                 use std::io::Write;
 
                 let raw = std::fs::read(&path_clone).with_context(|| {
-                    format!("Failed to read log file for S3 upload: {:?}", path_clone)
+                    format!(
+                        "Failed to read log file for archive upload: {:?}",
+                        path_clone
+                    )
                 })?;
                 let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
                 encoder
@@ -285,76 +432,41 @@ impl LogStorage {
             .await
             .context("spawn_blocking panicked")??;
 
-            let key = self.s3_key(job_id, meta);
-            s3.client
-                .put_object()
-                .bucket(&s3.bucket)
-                .key(&key)
-                .content_type("application/gzip")
-                .body(compressed.into())
-                .send()
-                .await
-                .with_context(|| format!("Failed to upload log to S3: {}", key))?;
-
-            tracing::info!("Uploaded logs to S3: s3://{}/{}", s3.bucket, key);
-            return Ok(());
+            let key = archive_key(&self.archive_prefix, job_id, meta);
+            archive.upload(&key, &compressed).await?;
         }
 
         Ok(())
     }
 
-    /// Download a job's log from S3 (gzip-compressed). Returns `None` if the key doesn't exist.
-    #[cfg(feature = "s3")]
-    async fn get_log_from_s3(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<Option<String>> {
-        if let Some(ref s3) = self.s3 {
-            let key = self.s3_key(job_id, meta);
-            match s3
-                .client
-                .get_object()
-                .bucket(&s3.bucket)
-                .key(&key)
-                .send()
-                .await
-            {
-                Ok(output) => {
-                    let bytes = output
-                        .body
-                        .collect()
-                        .await
-                        .context("Failed to read S3 object body")?
-                        .into_bytes();
+    /// Download a job's log from the archive (gzip-compressed). Returns `None` if
+    /// the key doesn't exist or no archive is configured.
+    async fn get_log_from_archive(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+    ) -> Result<Option<String>> {
+        if let Some(ref archive) = self.archive {
+            let key = archive_key(&self.archive_prefix, job_id, meta);
+            if let Some(bytes) = archive.download(&key).await? {
+                use flate2::read::GzDecoder;
+                use std::io::Read;
 
-                    // Gzip decompress
-                    use flate2::read::GzDecoder;
-                    use std::io::Read;
+                let mut decoder = GzDecoder::new(&bytes[..]);
+                let mut content = String::new();
+                decoder
+                    .read_to_string(&mut content)
+                    .context("Failed to gzip-decompress archive log content")?;
 
-                    let mut decoder = GzDecoder::new(&bytes[..]);
-                    let mut content = String::new();
-                    decoder
-                        .read_to_string(&mut content)
-                        .context("Failed to gzip-decompress S3 log content")?;
-
-                    Ok(Some(content))
-                }
-                Err(sdk_err) => {
-                    if let aws_sdk_s3::error::SdkError::ServiceError(ref service_err) = sdk_err {
-                        if service_err.err().is_no_such_key() {
-                            return Ok(None);
-                        }
-                    }
-                    tracing::warn!("S3 log lookup failed (non-fatal): {}", sdk_err);
-                    Ok(None)
-                }
+                return Ok(Some(content));
             }
-        } else {
-            Ok(None)
         }
+        Ok(None)
     }
 
     /// Get the full log contents for a job.
     ///
-    /// Checks for `.jsonl` first, falls back to legacy `.log` file, then S3.
-    #[allow(unused_variables)]
+    /// Checks for `.jsonl` first, falls back to legacy `.log` file, then archive.
     pub async fn get_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<String> {
         let path = self.log_path(job_id);
 
@@ -368,9 +480,8 @@ impl LogStorage {
             return Self::read_file(&legacy_path).await;
         }
 
-        // Fallback to S3
-        #[cfg(feature = "s3")]
-        if let Some(content) = self.get_log_from_s3(job_id, meta).await? {
+        // Fallback to archive
+        if let Some(content) = self.get_log_from_archive(job_id, meta).await? {
             return Ok(content);
         }
 
@@ -394,7 +505,7 @@ impl LogStorage {
     /// Get log lines for a specific step within a job.
     ///
     /// Reads local files line-by-line to avoid loading the entire log into
-    /// memory. Falls back to S3 when no local file is found.
+    /// memory. Falls back to archive when no local file is found.
     pub async fn get_step_log(
         &self,
         job_id: Uuid,
@@ -411,8 +522,10 @@ impl LogStorage {
             return self.filter_step_from_file(&legacy_path, step_name).await;
         }
 
-        #[cfg(feature = "s3")]
-        if let Some(result) = self.get_step_log_from_s3(job_id, step_name, meta).await? {
+        if let Some(result) = self
+            .get_step_log_from_archive(job_id, step_name, meta)
+            .await?
+        {
             return Ok(result);
         }
 
@@ -458,35 +571,20 @@ impl LogStorage {
         }
     }
 
-    /// Stream-decompress an S3 gzip object and return only lines matching `step_name`.
-    #[cfg(feature = "s3")]
-    async fn get_step_log_from_s3(
+    /// Download from archive, decompress, and return only lines matching `step_name`.
+    async fn get_step_log_from_archive(
         &self,
         job_id: Uuid,
         step_name: &str,
         meta: &JobLogMeta,
     ) -> Result<Option<String>> {
-        let Some(ref s3) = self.s3 else {
+        let Some(ref archive) = self.archive else {
             return Ok(None);
         };
 
-        let key = self.s3_key(job_id, meta);
-        match s3
-            .client
-            .get_object()
-            .bucket(&s3.bucket)
-            .key(&key)
-            .send()
-            .await
-        {
-            Ok(output) => {
-                let bytes = output
-                    .body
-                    .collect()
-                    .await
-                    .context("Failed to read S3 object body")?
-                    .into_bytes();
-
+        let key = archive_key(&self.archive_prefix, job_id, meta);
+        match archive.download(&key).await? {
+            Some(bytes) => {
                 use flate2::read::GzDecoder;
                 use std::io::{BufRead, BufReader};
 
@@ -504,18 +602,7 @@ impl LogStorage {
 
                 Ok(Some(result))
             }
-            Err(sdk_err) => {
-                if let aws_sdk_s3::error::SdkError::ServiceError(ref service_err) = sdk_err {
-                    if service_err.err().is_no_such_key() {
-                        return Ok(None);
-                    }
-                }
-                // Log but don't fail — S3 fallback is best-effort.
-                // Active jobs won't have S3 logs yet, and misconfigured S3
-                // shouldn't break log viewing.
-                tracing::warn!("S3 step log lookup failed (non-fatal): {}", sdk_err);
-                Ok(None)
-            }
+            None => Ok(None),
         }
     }
 
@@ -528,7 +615,9 @@ impl LogStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
+    use tokio::sync::Mutex as TokioMutex;
 
     fn jsonl_line(step: &str, stream: &str, line: &str) -> String {
         serde_json::json!({
@@ -547,6 +636,95 @@ mod tests {
             created_at: chrono::Utc::now(),
         }
     }
+
+    /// In-memory archive backend for testing.
+    struct MockArchive {
+        store: TokioMutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl MockArchive {
+        fn new() -> Self {
+            Self {
+                store: TokioMutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LogArchive for MockArchive {
+        async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+            self.store
+                .lock()
+                .await
+                .insert(key.to_string(), data.to_vec());
+            Ok(())
+        }
+        async fn download(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            Ok(self.store.lock().await.get(key).cloned())
+        }
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.store.lock().await.remove(key);
+            Ok(())
+        }
+    }
+
+    // ─── archive_key tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_archive_key_format() {
+        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let meta = JobLogMeta {
+            workspace: "production".to_string(),
+            task_name: "deploy".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-03-15T14:30:45Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let key = archive_key("logs/", job_id, &meta);
+        assert_eq!(
+            key,
+            "logs/production/deploy/2025/03/15/2025-03-15T14-30-45_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
+        );
+    }
+
+    #[test]
+    fn test_archive_key_no_prefix() {
+        let job_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let meta = JobLogMeta {
+            workspace: "main".to_string(),
+            task_name: "build".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let key = archive_key("", job_id, &meta);
+        assert_eq!(
+            key,
+            "main/build/2025/01/02/2025-01-02T03-04-05_11111111-2222-3333-4444-555555555555.jsonl.gz"
+        );
+    }
+
+    #[test]
+    fn test_archive_key_with_slash_in_task_name() {
+        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let meta = JobLogMeta {
+            workspace: "main".to_string(),
+            task_name: "_hook:deploy/notify".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let key = archive_key("logs/", job_id, &meta);
+        assert_eq!(
+            key,
+            "logs/main/_hook:deploy/notify/2025/06/01/2025-06-01T12-00-00_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
+        );
+    }
+
+    // ─── LogStorage tests ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_append_and_read_log() {
@@ -783,7 +961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_upload_to_s3_noop_without_config() {
+    async fn test_upload_to_archive_noop_without_config() {
         let temp_dir = TempDir::new().unwrap();
         let storage = LogStorage::new(temp_dir.path());
         let job_id = Uuid::new_v4();
@@ -799,25 +977,28 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        // upload_to_s3 should be a no-op (no S3 configured) and return Ok
-        storage.upload_to_s3(job_id, &test_meta()).await.unwrap();
+        // upload_to_archive should be a no-op (no archive configured) and return Ok
+        storage
+            .upload_to_archive(job_id, &test_meta())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn test_upload_to_s3_no_local_file() {
+    async fn test_upload_to_archive_no_local_file() {
         let temp_dir = TempDir::new().unwrap();
         let storage = LogStorage::new(temp_dir.path());
         let job_id = Uuid::new_v4();
 
-        // No local file written — upload_to_s3 should return Ok (graceful skip)
-        storage.upload_to_s3(job_id, &test_meta()).await.unwrap();
+        // No local file written — upload_to_archive should return Ok (graceful skip)
+        storage
+            .upload_to_archive(job_id, &test_meta())
+            .await
+            .unwrap();
     }
 
-    // --- New tests for the file handle cache ---
+    // --- File handle cache tests ---
 
-    /// Verify that appending multiple chunks to the same job produces the
-    /// correct concatenated content (i.e. the cached handle is reused and no
-    /// data is lost between calls).
     #[tokio::test]
     async fn test_file_handle_reused_across_appends() {
         let temp_dir = TempDir::new().unwrap();
@@ -830,7 +1011,6 @@ mod tests {
             storage.append_log(job_id, chunk).await.unwrap();
         }
 
-        // Confirm the cache contains exactly one entry for this job.
         assert!(
             storage.file_cache.contains_key(&job_id),
             "handle should still be cached before close_log"
@@ -838,21 +1018,17 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        // The handle must be gone after close.
         assert!(
             !storage.file_cache.contains_key(&job_id),
             "handle should be evicted after close_log"
         );
 
-        // Read back and verify all chunks are present in order.
         let content = tokio::fs::read_to_string(storage.log_path(job_id))
             .await
             .unwrap();
         assert_eq!(content, "alpha\nbeta\ngamma\ndelta\n");
     }
 
-    /// Verify that `close_log` flushes buffered data to disk and removes the
-    /// entry from the cache.
     #[tokio::test]
     async fn test_close_log_flushes_and_evicts() {
         let temp_dir = TempDir::new().unwrap();
@@ -874,15 +1050,12 @@ mod tests {
             "cache entry must be gone after close_log"
         );
 
-        // The file must be readable and contain the expected content.
         let on_disk = tokio::fs::read_to_string(storage.log_path(job_id))
             .await
             .unwrap();
         assert!(on_disk.contains("important data"));
     }
 
-    /// Verify that concurrent appends to *different* jobs are independent and
-    /// produce correct content for each job.
     #[tokio::test]
     async fn test_concurrent_appends_different_jobs() {
         let temp_dir = TempDir::new().unwrap();
@@ -925,11 +1098,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Each job should have exactly 20 lines.
         assert_eq!(content_a.lines().count(), 20, "job-a should have 20 lines");
         assert_eq!(content_b.lines().count(), 20, "job-b should have 20 lines");
 
-        // No cross-contamination.
         assert!(
             !content_a.contains("job-b"),
             "job-a must not contain job-b data"
@@ -939,84 +1110,12 @@ mod tests {
             "job-b must not contain job-a data"
         );
 
-        // All lines for each job are present.
         for i in 0_u32..20 {
             assert!(content_a.contains(&format!("job-a line {i}")));
             assert!(content_b.contains(&format!("job-b line {i}")));
         }
     }
 
-    #[cfg(feature = "s3")]
-    #[test]
-    fn test_s3_key_format() {
-        let storage = LogStorage::new("/tmp/unused");
-        // Give it a fake S3 backend so prefix is used
-        let storage = storage.with_s3_client(
-            {
-                let creds = aws_sdk_s3::config::Credentials::new("x", "x", None, None, "t");
-                let config = aws_sdk_s3::Config::builder()
-                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
-                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
-                    .credentials_provider(creds)
-                    .build();
-                aws_sdk_s3::Client::from_conf(config)
-            },
-            "bucket".to_string(),
-            "logs/".to_string(),
-        );
-
-        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
-        let meta = JobLogMeta {
-            workspace: "production".to_string(),
-            task_name: "deploy".to_string(),
-            created_at: chrono::DateTime::parse_from_rfc3339("2025-03-15T14:30:45Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        };
-
-        let key = storage.s3_key(job_id, &meta);
-        assert_eq!(
-            key,
-            "logs/production/deploy/2025/03/15/2025-03-15T14-30-45_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
-        );
-    }
-
-    #[cfg(feature = "s3")]
-    #[test]
-    fn test_s3_key_no_prefix() {
-        let storage = LogStorage::new("/tmp/unused");
-        let storage = storage.with_s3_client(
-            {
-                let creds = aws_sdk_s3::config::Credentials::new("x", "x", None, None, "t");
-                let config = aws_sdk_s3::Config::builder()
-                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
-                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
-                    .credentials_provider(creds)
-                    .build();
-                aws_sdk_s3::Client::from_conf(config)
-            },
-            "bucket".to_string(),
-            "".to_string(),
-        );
-
-        let job_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
-        let meta = JobLogMeta {
-            workspace: "main".to_string(),
-            task_name: "build".to_string(),
-            created_at: chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        };
-
-        let key = storage.s3_key(job_id, &meta);
-        assert_eq!(
-            key,
-            "main/build/2025/01/02/2025-01-02T03-04-05_11111111-2222-3333-4444-555555555555.jsonl.gz"
-        );
-    }
-
-    /// Verify that multiple async tasks appending to the *same* job concurrently
-    /// all succeed and that no lines are lost or corrupted.
     #[tokio::test]
     async fn test_concurrent_appends_same_job() {
         let temp_dir = TempDir::new().unwrap();
@@ -1047,7 +1146,6 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 100, "expected 100 lines (5 tasks × 20 lines)");
 
-        // Verify every line from every task is present.
         for t in 0..5_u32 {
             for i in 0..20_u32 {
                 assert!(
@@ -1058,49 +1156,12 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "s3")]
-    #[test]
-    fn test_s3_key_with_slash_in_task_name() {
-        let storage = LogStorage::new("/tmp/unused");
-        let storage = storage.with_s3_client(
-            {
-                let creds = aws_sdk_s3::config::Credentials::new("x", "x", None, None, "t");
-                let config = aws_sdk_s3::Config::builder()
-                    .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
-                    .region(aws_sdk_s3::config::Region::new("us-east-1"))
-                    .credentials_provider(creds)
-                    .build();
-                aws_sdk_s3::Client::from_conf(config)
-            },
-            "bucket".to_string(),
-            "logs/".to_string(),
-        );
-
-        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
-        // Hook task names contain colons and may reference actions with slashes
-        let meta = JobLogMeta {
-            workspace: "main".to_string(),
-            task_name: "_hook:deploy/notify".to_string(),
-            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        };
-
-        let key = storage.s3_key(job_id, &meta);
-        // Slashes in task name create extra path segments — this is fine for S3
-        assert_eq!(
-            key,
-            "logs/main/_hook:deploy/notify/2025/06/01/2025-06-01T12-00-00_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl.gz"
-        );
-    }
-
     #[tokio::test]
     async fn test_delete_local_log_removes_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         let storage = LogStorage::new(dir.path());
         let job_id = Uuid::new_v4();
 
-        // Create a log file
         storage.ensure_dir().await.unwrap();
         tokio::fs::write(storage.log_path(job_id), b"test log content")
             .await
@@ -1118,7 +1179,6 @@ mod tests {
         let storage = LogStorage::new(dir.path());
         let job_id = Uuid::new_v4();
 
-        // Create a legacy .log file
         storage.ensure_dir().await.unwrap();
         tokio::fs::write(storage.legacy_log_path(job_id), b"legacy content")
             .await
@@ -1137,5 +1197,437 @@ mod tests {
 
         let deleted = storage.delete_local_log(job_id).await;
         assert!(!deleted);
+    }
+
+    // ─── MockArchive tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_upload_to_archive_with_mock() {
+        let temp_dir = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(temp_dir.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+
+        let job_id = Uuid::new_v4();
+        let meta = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let content = format!("{}\n", jsonl_line("build", "stdout", "hello"));
+        storage.append_log(job_id, &content).await.unwrap();
+        storage.close_log(job_id).await;
+
+        storage.upload_to_archive(job_id, &meta).await.unwrap();
+
+        // Verify the archive received compressed data
+        let key = archive_key("", job_id, &meta);
+        let store = mock.store.lock().await;
+        assert!(store.contains_key(&key), "archive should have the key");
+
+        // Decompress and verify
+        let compressed = store.get(&key).unwrap();
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut decoder = GzDecoder::new(&compressed[..]);
+        let mut decompressed = String::new();
+        decoder.read_to_string(&mut decompressed).unwrap();
+        assert_eq!(decompressed, content);
+    }
+
+    #[tokio::test]
+    async fn test_archive_read_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(temp_dir.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "pfx/".to_string());
+
+        let job_id = Uuid::new_v4();
+        let meta = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let content = format!("{}\n", jsonl_line("build", "stdout", "archived"));
+
+        // Write, upload, then delete local
+        storage.append_log(job_id, &content).await.unwrap();
+        storage.close_log(job_id).await;
+        storage.upload_to_archive(job_id, &meta).await.unwrap();
+
+        // Delete local file
+        let local_path = storage.log_path(job_id);
+        tokio::fs::remove_file(&local_path).await.unwrap();
+        assert!(!local_path.exists());
+
+        // get_log should fall back to archive
+        let log = storage.get_log(job_id, &meta).await.unwrap();
+        assert_eq!(log, content);
+    }
+
+    #[tokio::test]
+    async fn test_archive_step_log_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(temp_dir.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+
+        let job_id = Uuid::new_v4();
+        let meta = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let build_line = jsonl_line("build", "stdout", "compiling...");
+        let test_line = jsonl_line("test", "stdout", "testing...");
+        let content = format!("{}\n{}\n", build_line, test_line);
+
+        storage.append_log(job_id, &content).await.unwrap();
+        storage.close_log(job_id).await;
+        storage.upload_to_archive(job_id, &meta).await.unwrap();
+
+        // Delete local
+        tokio::fs::remove_file(storage.log_path(job_id))
+            .await
+            .unwrap();
+
+        // Step log should filter from archived data
+        let build_logs = storage.get_step_log(job_id, "build", &meta).await.unwrap();
+        assert_eq!(build_logs, format!("{}\n", build_line));
+
+        let test_logs = storage.get_step_log(job_id, "test", &meta).await.unwrap();
+        assert_eq!(test_logs, format!("{}\n", test_line));
+    }
+
+    #[tokio::test]
+    async fn test_delete_archive_log() {
+        let temp_dir = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(temp_dir.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+
+        let job_id = Uuid::new_v4();
+        let meta = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        // Upload then delete
+        storage
+            .append_log(job_id, &format!("{}\n", jsonl_line("s", "stdout", "x")))
+            .await
+            .unwrap();
+        storage.close_log(job_id).await;
+        storage.upload_to_archive(job_id, &meta).await.unwrap();
+
+        let key = archive_key("", job_id, &meta);
+        assert!(mock.store.lock().await.contains_key(&key));
+
+        storage.delete_archive_log(job_id, &meta).await.unwrap();
+        assert!(!mock.store.lock().await.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn test_delete_archive_log_noop_without_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LogStorage::new(temp_dir.path());
+        let job_id = Uuid::new_v4();
+
+        // No archive configured — should be a no-op
+        storage
+            .delete_archive_log(job_id, &test_meta())
+            .await
+            .unwrap();
+    }
+
+    // ─── LocalArchive tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_local_archive_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = LocalArchive::new(dir.path());
+
+        let data = b"hello world compressed";
+        archive
+            .upload("ws/task/2025/01/01/file.jsonl.gz", data)
+            .await
+            .unwrap();
+
+        let downloaded = archive
+            .download("ws/task/2025/01/01/file.jsonl.gz")
+            .await
+            .unwrap();
+        assert_eq!(downloaded.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn test_local_archive_download_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = LocalArchive::new(dir.path());
+
+        let result = archive.download("nonexistent/key").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_local_archive_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = LocalArchive::new(dir.path());
+
+        archive.upload("key.gz", b"data").await.unwrap();
+        assert!(archive.download("key.gz").await.unwrap().is_some());
+
+        archive.delete("key.gz").await.unwrap();
+        assert!(archive.download("key.gz").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_local_archive_delete_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = LocalArchive::new(dir.path());
+
+        // Should not error
+        archive.delete("nonexistent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_local_archive_creates_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = LocalArchive::new(dir.path());
+
+        archive.upload("a/b/c/d/file.gz", b"nested").await.unwrap();
+
+        let result = archive.download("a/b/c/d/file.gz").await.unwrap();
+        assert_eq!(result.unwrap(), b"nested");
+    }
+
+    // ─── LogStorageConfig::effective_archive tests ───────────────────────
+
+    #[test]
+    fn test_effective_archive_prefers_archive_over_s3() {
+        use crate::config::{ArchiveConfig, LogStorageConfig, S3Config};
+        let config = LogStorageConfig {
+            local_dir: "/tmp/logs".to_string(),
+            s3: Some(S3Config {
+                bucket: "legacy-bucket".to_string(),
+                region: "us-east-1".to_string(),
+                prefix: "old/".to_string(),
+                endpoint: None,
+            }),
+            archive: Some(ArchiveConfig {
+                archive_type: "local".to_string(),
+                bucket: None,
+                region: None,
+                endpoint: None,
+                path: Some("/mnt/archive".to_string()),
+                prefix: "new/".to_string(),
+            }),
+        };
+        let effective = config.effective_archive().unwrap();
+        assert_eq!(effective.archive_type, "local");
+        assert_eq!(effective.prefix, "new/");
+    }
+
+    #[test]
+    fn test_effective_archive_returns_none_when_neither_set() {
+        use crate::config::LogStorageConfig;
+        let config = LogStorageConfig {
+            local_dir: "/tmp/logs".to_string(),
+            s3: None,
+            archive: None,
+        };
+        assert!(config.effective_archive().is_none());
+    }
+
+    // ─── Corrupt archive data ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_log_returns_error_on_corrupt_archive_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(temp_dir.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+
+        let job_id = Uuid::new_v4();
+        let meta = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        // Insert non-gzip bytes directly into the mock archive
+        let key = archive_key("", job_id, &meta);
+        mock.store
+            .lock()
+            .await
+            .insert(key, b"this is not gzip data".to_vec());
+
+        // get_log should return an error (not an empty string)
+        let result = storage.get_log(job_id, &meta).await;
+        assert!(result.is_err(), "corrupt gzip data should produce an error");
+    }
+
+    // ─── LocalArchive end-to-end wired into LogStorage ───────────────────
+
+    #[tokio::test]
+    async fn test_local_archive_end_to_end_with_log_storage() {
+        let live_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive = Arc::new(LocalArchive::new(archive_dir.path()));
+        let storage = LogStorage::new(live_dir.path())
+            .with_archive(archive as Arc<dyn LogArchive>, "".to_string());
+
+        let job_id = Uuid::new_v4();
+        let meta = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+
+        let content = format!(
+            "{}\n",
+            jsonl_line("build", "stdout", "hello from local archive")
+        );
+
+        // Write, close, archive
+        storage.append_log(job_id, &content).await.unwrap();
+        storage.close_log(job_id).await;
+        storage.upload_to_archive(job_id, &meta).await.unwrap();
+
+        // Delete local file
+        storage.delete_local_log(job_id).await;
+        assert!(!storage.log_path(job_id).exists());
+
+        // Read should fall back to local archive
+        let log = storage.get_log(job_id, &meta).await.unwrap();
+        assert_eq!(log, content);
+
+        // Step log should also work from archive
+        let step_log = storage.get_step_log(job_id, "build", &meta).await.unwrap();
+        assert_eq!(step_log, content);
+    }
+
+    // ─── S3Archive::from_config validation ───────────────────────────────
+
+    #[cfg(feature = "s3")]
+    #[tokio::test]
+    async fn test_s3_archive_from_config_missing_region() {
+        use super::S3Archive;
+        use crate::config::ArchiveConfig;
+        let config = ArchiveConfig {
+            archive_type: "s3".to_string(),
+            bucket: Some("my-bucket".to_string()),
+            region: None,
+            endpoint: None,
+            path: None,
+            prefix: "".to_string(),
+        };
+        let result = S3Archive::from_config(&config).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().expect("expected Err from from_config"));
+        assert!(
+            err_msg.contains("region"),
+            "error should mention region: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(feature = "s3")]
+    #[tokio::test]
+    async fn test_s3_archive_from_config_missing_bucket() {
+        use super::S3Archive;
+        use crate::config::ArchiveConfig;
+        let config = ArchiveConfig {
+            archive_type: "s3".to_string(),
+            bucket: None,
+            region: Some("us-east-1".to_string()),
+            endpoint: None,
+            path: None,
+            prefix: "".to_string(),
+        };
+        let result = S3Archive::from_config(&config).await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().expect("expected Err from from_config"));
+        assert!(
+            err_msg.contains("bucket"),
+            "error should mention bucket: {}",
+            err_msg
+        );
+    }
+
+    // ─── line_matches_step substring false-positive guard ────────────────
+
+    #[tokio::test]
+    async fn test_step_log_no_substring_false_positive() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LogStorage::new(temp_dir.path());
+        let job_id = Uuid::new_v4();
+
+        let build_line = jsonl_line("build", "stdout", "compiling...");
+        let build_notify_line =
+            jsonl_line("build-notify", "stdout", "sending notification about build");
+
+        storage
+            .append_log(job_id, &format!("{}\n{}\n", build_line, build_notify_line))
+            .await
+            .unwrap();
+        storage.close_log(job_id).await;
+
+        // "build" must NOT match "build-notify" lines
+        let build_logs = storage
+            .get_step_log(job_id, "build", &test_meta())
+            .await
+            .unwrap();
+        assert_eq!(build_logs, format!("{}\n", build_line));
+
+        // "build-notify" must NOT match "build" lines
+        let notify_logs = storage
+            .get_step_log(job_id, "build-notify", &test_meta())
+            .await
+            .unwrap();
+        assert_eq!(notify_logs, format!("{}\n", build_notify_line));
+    }
+
+    // ─── archive_key uniqueness ───────────────────────────────────────────
+
+    #[test]
+    fn test_archive_key_different_dates_produce_distinct_keys() {
+        let job_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let meta1 = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+        let meta2 = JobLogMeta {
+            workspace: "ws".to_string(),
+            task_name: "task".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-15T12:30:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        };
+        let key1 = archive_key("", job_id, &meta1);
+        let key2 = archive_key("", job_id, &meta2);
+        assert_ne!(
+            key1, key2,
+            "same job with different timestamps must produce different keys"
+        );
     }
 }

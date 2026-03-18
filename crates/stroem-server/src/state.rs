@@ -140,6 +140,7 @@ mod tests {
             log_storage: LogStorageConfig {
                 local_dir: log_dir.to_string_lossy().to_string(),
                 s3: None,
+                archive: None,
             },
             workspaces: HashMap::new(),
             libraries: HashMap::new(),

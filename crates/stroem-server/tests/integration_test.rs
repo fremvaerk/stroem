@@ -962,6 +962,7 @@ async fn setup() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -1996,6 +1997,7 @@ async fn test_task_detail_connections() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -4043,6 +4045,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         log_storage: stroem_server::config::LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -4268,6 +4271,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         log_storage: stroem_server::config::LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -4490,6 +4494,7 @@ async fn setup_with_auth() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -6329,6 +6334,7 @@ async fn setup_multi_workspace() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([
             (
@@ -6719,6 +6725,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -6884,6 +6891,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -6967,6 +6975,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -7066,6 +7075,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -7200,6 +7210,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -7971,6 +7982,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8044,6 +8056,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8110,6 +8123,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -8276,6 +8290,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         log_storage: LogStorageConfig {
             local_dir: temp_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -10028,6 +10043,7 @@ async fn setup_recovery() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -10270,6 +10286,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -11977,6 +11994,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12288,6 +12306,7 @@ async fn setup_sync_webhook() -> Result<(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),
@@ -12826,6 +12845,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -12907,6 +12927,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -12970,6 +12991,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -13039,6 +13061,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: std::env::temp_dir().to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
@@ -13385,6 +13408,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([
             (
@@ -13629,6 +13653,7 @@ async fn setup_recovery_with_unmatched_timeout(
         log_storage: LogStorageConfig {
             local_dir: log_dir.to_string_lossy().to_string(),
             s3: None,
+            archive: None,
         },
         workspaces: HashMap::from([(
             "default".to_string(),

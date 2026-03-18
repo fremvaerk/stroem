@@ -131,17 +131,45 @@ async fn main() -> Result<()> {
         std::collections::HashMap::new()
     };
 
-    // Initialize log storage
-    let log_storage = LogStorage::new(&config.log_storage.local_dir);
-
-    #[cfg(feature = "s3")]
-    let log_storage = if let Some(ref s3_config) = config.log_storage.s3 {
-        log_storage
-            .with_s3(s3_config)
-            .await
-            .context("Failed to initialize S3 log backend")?
-    } else {
-        log_storage
+    // Initialize log storage with optional archive backend
+    let log_storage = {
+        let base = LogStorage::new(&config.log_storage.local_dir);
+        if let Some(archive_config) = config.log_storage.effective_archive() {
+            let prefix = archive_config.prefix.clone();
+            match archive_config.archive_type.as_str() {
+                #[cfg(feature = "s3")]
+                "s3" => {
+                    let archive =
+                        stroem_server::log_storage::S3Archive::from_config(&archive_config)
+                            .await
+                            .context("Failed to initialize S3 archive backend")?;
+                    base.with_archive(std::sync::Arc::new(archive), prefix)
+                }
+                #[cfg(not(feature = "s3"))]
+                "s3" => {
+                    anyhow::bail!(
+                        "Archive type 's3' requires the 's3' cargo feature to be enabled"
+                    );
+                }
+                "local" => {
+                    let path = archive_config
+                        .path
+                        .as_deref()
+                        .context("Local archive requires 'path' field")?;
+                    let archive = stroem_server::log_storage::LocalArchive::new(path);
+                    tracing::info!("Local log archival enabled: path={}", path);
+                    base.with_archive(std::sync::Arc::new(archive), prefix)
+                }
+                other => {
+                    anyhow::bail!(
+                        "Unknown archive type: '{}' (expected 's3' or 'local')",
+                        other
+                    );
+                }
+            }
+        } else {
+            base
+        }
     };
 
     // Build application state

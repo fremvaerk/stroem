@@ -8,7 +8,7 @@ pub struct DbConfig {
     pub url: String,
 }
 
-/// S3 configuration for log archival
+/// S3 configuration for log archival (legacy format, still supported)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3Config {
@@ -19,12 +19,60 @@ pub struct S3Config {
     pub endpoint: Option<String>,
 }
 
-/// Log storage configuration
+/// Archive backend configuration.
+///
+/// Flat struct with `archive_type` discriminator + optional fields per backend.
+/// Using a flat struct instead of `#[serde(tag = "type")]` enum to avoid issues
+/// with the `config` crate's env var override mechanism.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArchiveConfig {
+    /// Backend type: `"s3"` or `"local"`
+    #[serde(rename = "type")]
+    pub archive_type: String,
+
+    // --- S3 fields ---
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub endpoint: Option<String>,
+
+    // --- Local fields ---
+    pub path: Option<String>,
+
+    // --- Shared ---
+    #[serde(default)]
+    pub prefix: String,
+}
+
+/// Log storage configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogStorageConfig {
     pub local_dir: String,
+    /// Legacy S3 config — use `archive` instead for new deployments.
     pub s3: Option<S3Config>,
+    /// New pluggable archive config (takes precedence over `s3`).
+    #[serde(default)]
+    pub archive: Option<ArchiveConfig>,
+}
+
+impl LogStorageConfig {
+    /// Resolve the effective archive configuration.
+    ///
+    /// `archive` takes precedence over legacy `s3`. Returns `None` if neither is set.
+    pub fn effective_archive(&self) -> Option<ArchiveConfig> {
+        if let Some(ref archive) = self.archive {
+            return Some(archive.clone());
+        }
+        // Convert legacy s3 config to ArchiveConfig
+        self.s3.as_ref().map(|s3| ArchiveConfig {
+            archive_type: "s3".to_string(),
+            bucket: Some(s3.bucket.clone()),
+            region: Some(s3.region.clone()),
+            endpoint: s3.endpoint.clone(),
+            path: None,
+            prefix: s3.prefix.clone(),
+        })
+    }
 }
 
 /// Git auth configuration for workspace sources

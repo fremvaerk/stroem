@@ -331,8 +331,12 @@ async fn run_terminal_job_actions(
     let log_storage = state.log_storage.clone();
     let meta = meta_from_job(job);
     tokio::spawn(async move {
-        if let Err(e) = log_storage.upload_to_s3(job_id, &meta).await {
-            tracing::warn!("Failed to upload logs to S3 for job {}: {:#}", job_id, e);
+        if let Err(e) = log_storage.upload_to_archive(job_id, &meta).await {
+            tracing::warn!(
+                "Failed to upload logs to archive for job {}: {:#}",
+                job_id,
+                e
+            );
         }
     });
 }

@@ -281,9 +281,9 @@ async fn retention_cleanup(state: &AppState) {
                     state.log_storage.delete_local_log(job_id).await;
 
                     // Delete S3 log
-                    if let Err(e) = state.log_storage.delete_s3_log(job_id, &meta).await {
+                    if let Err(e) = state.log_storage.delete_archive_log(job_id, &meta).await {
                         tracing::warn!(
-                            "Retention: failed to delete S3 log for job {}: {:#}",
+                            "Retention: failed to delete archive log for job {}: {:#}",
                             job_id,
                             e
                         );
@@ -331,6 +331,7 @@ mod tests {
             log_storage: LogStorageConfig {
                 local_dir: "/tmp/test-logs".to_string(),
                 s3: None,
+                archive: None,
             },
             workspaces: HashMap::new(),
             libraries: HashMap::new(),

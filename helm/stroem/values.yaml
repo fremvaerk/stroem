@@ -96,6 +96,14 @@ server:
       url: "postgres://stroem:stroem@postgres:5432/stroem"
     log_storage:
       local_dir: /var/stroem/logs
+      # Archive backend for long-term log storage (optional):
+      # archive:
+      #   type: s3        # "s3" or "local"
+      #   bucket: my-logs
+      #   region: us-east-1
+      #   prefix: "logs/"
+      #   # endpoint: http://minio:9000  # for S3-compatible storage
+      #   # path: /mnt/archive           # for local archive
     workspaces: {}
     # Example:
     #   default:

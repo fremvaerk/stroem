@@ -1,7 +1,8 @@
 #![cfg(feature = "s3")]
 
 use anyhow::Result;
-use stroem_server::log_storage::{JobLogMeta, LogStorage};
+use std::sync::Arc;
+use stroem_server::log_storage::{JobLogMeta, LogStorage, S3Archive};
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::minio::MinIO;
@@ -60,11 +61,8 @@ fn make_log_storage(
     bucket: &str,
     prefix: &str,
 ) -> LogStorage {
-    LogStorage::new(temp_dir.path()).with_s3_client(
-        client.clone(),
-        bucket.to_string(),
-        prefix.to_string(),
-    )
+    let archive = S3Archive::from_client(client.clone(), bucket.to_string());
+    LogStorage::new(temp_dir.path()).with_archive(Arc::new(archive), prefix.to_string())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -86,7 +84,7 @@ async fn test_s3_upload_and_download() -> Result<()> {
     let content = format!("{}\n{}\n", line1, line2);
 
     storage.append_log(job_id, &content).await?;
-    storage.upload_to_s3(job_id, &meta).await?;
+    storage.upload_to_archive(job_id, &meta).await?;
 
     // Verify the object exists in MinIO with structured key and is gzipped
     let key = format!(
@@ -124,7 +122,7 @@ async fn test_s3_read_fallback_when_local_missing() -> Result<()> {
 
     // Write locally and upload to S3
     storage.append_log(job_id, &content).await?;
-    storage.upload_to_s3(job_id, &meta).await?;
+    storage.upload_to_archive(job_id, &meta).await?;
 
     // Delete local file
     let local_path = temp_dir.path().join(format!("{}.jsonl", job_id));
@@ -198,7 +196,7 @@ async fn test_s3_key_with_prefix() -> Result<()> {
     let content = format!("{}\n", jsonl_line("build", "stdout", "prefixed"));
 
     storage.append_log(job_id, &content).await?;
-    storage.upload_to_s3(job_id, &meta).await?;
+    storage.upload_to_archive(job_id, &meta).await?;
 
     // Verify S3 key has the prefix and structured path
     let key = format!(
@@ -237,7 +235,7 @@ async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
 
     // Write and upload
     storage.append_log(job_id, &content).await?;
-    storage.upload_to_s3(job_id, &meta).await?;
+    storage.upload_to_archive(job_id, &meta).await?;
 
     // Delete local file
     let local_path = temp_dir.path().join(format!("{}.jsonl", job_id));

@@ -763,6 +763,7 @@ mod tests {
             log_storage: LogStorageConfig {
                 local_dir: "/tmp/test-logs".to_string(),
                 s3: None,
+                archive: None,
             },
             workspaces: HashMap::new(),
             libraries: HashMap::new(),
