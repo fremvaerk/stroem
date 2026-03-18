@@ -9,7 +9,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, DeleteParams, LogParams, PostParams};
 use kube::Client;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use stroem_common::language::ScriptLanguage;
 use tokio_util::sync::CancellationToken;
@@ -740,6 +740,249 @@ async fn drain_log_stream(
     (stdout_lines, stderr_lines, parsed_output)
 }
 
+/// Maximum number of reconnect attempts for the follow log stream.
+const MAX_LOG_RECONNECTS: usize = 10;
+
+/// Stream pod logs with automatic reconnection on stream errors.
+///
+/// Always requests timestamps so we can track per-second dedup state across reconnects.
+/// On reconnect, uses `since_time` (truncated to second precision by the Kubernetes API)
+/// and skips any content lines that were already seen in the final second of the previous
+/// stream, avoiding the duplicates that `since_time`'s inclusive boundary produces.
+///
+/// This handles transient failures like network hiccups, API server restarts, and
+/// node-level log rotation that can disconnect the `follow` stream while the container
+/// is still running.
+async fn stream_logs_with_reconnect(
+    pods: &Api<Pod>,
+    pod_name: &str,
+    log_callback: &Option<Arc<LogCallback>>,
+    stop_token: CancellationToken,
+) -> (Vec<String>, Vec<String>, Option<serde_json::Value>) {
+    let mut all_stdout = Vec::new();
+    let mut all_stderr = Vec::new();
+    let mut parsed_output = None;
+
+    // Full nanosecond timestamp of the last received line; used as `since_time` on reconnect.
+    let mut last_timestamp: Option<String> = None;
+
+    // Content lines (without timestamp prefix) seen in the last observed second.
+    // On reconnect the Kubernetes API returns ALL lines from that second again
+    // (since_time is second-precision and inclusive), so we need to skip any line
+    // whose content appears in this set AND whose truncated timestamp matches
+    // `dedup_second`.
+    let mut dedup_set: HashSet<String> = HashSet::new();
+    let mut dedup_second: Option<String> = None;
+
+    let mut attempt: usize = 0;
+    loop {
+        // Always request timestamps so we can parse them for dedup and reconnect anchoring.
+        let log_params = if let Some(ref ts) = last_timestamp {
+            let since_time = parse_k8s_timestamp(ts);
+            if since_time.is_none() {
+                tracing::warn!(
+                    "Failed to parse timestamp '{}' for reconnect, falling back to since_seconds=5",
+                    ts
+                );
+            }
+            LogParams {
+                follow: true,
+                container: Some("step".to_string()),
+                since_time,
+                since_seconds: if since_time.is_none() { Some(5) } else { None },
+                timestamps: true,
+                ..Default::default()
+            }
+        } else {
+            // First connection: no since_time, but still request timestamps for consistent tracking.
+            LogParams {
+                follow: true,
+                container: Some("step".to_string()),
+                timestamps: true,
+                ..Default::default()
+            }
+        };
+
+        let is_reconnect = last_timestamp.is_some();
+        let mut stream_broken = false;
+        // Whether we received any data on this attempt (including lines skipped by dedup).
+        let mut received_any_data = false;
+
+        // Use select! so we abort the API call if the pod exits while we're connecting.
+        let stream_result = tokio::select! {
+            result = pods.log_stream(pod_name, &log_params) => result,
+            _ = stop_token.cancelled() => {
+                tracing::info!("Pod {} exited while connecting log stream, stopping", pod_name);
+                break;
+            }
+        };
+        match stream_result {
+            Ok(stream) => {
+                let reader = futures_util::io::BufReader::new(stream);
+                let mut lines_stream =
+                    <futures_util::io::BufReader<_> as futures_util::AsyncBufReadExt>::lines(
+                        reader,
+                    );
+
+                while let Some(line_result) = futures_util::StreamExt::next(&mut lines_stream).await
+                {
+                    let raw_line = match line_result {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Log stream error for pod {} (attempt {}): {:#}",
+                                pod_name,
+                                attempt,
+                                e
+                            );
+                            stream_broken = true;
+                            break;
+                        }
+                    };
+
+                    // All streams use timestamps. Strip the prefix and track for dedup.
+                    // Format: "2006-01-02T15:04:05.999999999Z <content>"
+                    let (ts, content) = split_timestamp_line(&raw_line);
+                    received_any_data = true;
+
+                    if is_reconnect && !ts.is_empty() {
+                        // Skip lines already seen in the last second of the previous stream.
+                        let truncated = truncate_to_second(ts);
+                        if dedup_second.as_deref() == Some(truncated.as_str())
+                            && dedup_set.contains(content)
+                        {
+                            // Already forwarded this line; update dedup state and move on.
+                            last_timestamp = Some(ts.to_string());
+                            continue;
+                        }
+                    }
+
+                    let line = content.to_string();
+
+                    // Update dedup tracking for the current second.
+                    if !ts.is_empty() {
+                        let truncated = truncate_to_second(ts);
+                        if dedup_second.as_deref() != Some(truncated.as_str()) {
+                            // Crossed a second boundary — start a fresh dedup set.
+                            dedup_set.clear();
+                            dedup_second = Some(truncated);
+                        }
+                        dedup_set.insert(line.clone());
+                        last_timestamp = Some(ts.to_string());
+                    }
+
+                    if let Some(parsed) = parse_output_line(&line) {
+                        parsed_output = Some(parsed);
+                    }
+
+                    all_stdout.push(line.clone());
+
+                    if let Some(ref cb) = log_callback {
+                        cb(LogLine {
+                            stream: LogStream::Stdout,
+                            line,
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                }
+
+                if !stream_broken {
+                    // Clean EOF — container exited, stream ended naturally.
+                    break;
+                }
+
+                // Stream successfully delivered data before breaking — reset the
+                // consecutive-failure counter so long-running pods don't exhaust
+                // the reconnect budget over their lifetime.
+                if received_any_data {
+                    attempt = 0;
+                }
+
+                // Stream broke — if the stop token is cancelled (pod exited), no point reconnecting.
+                if stop_token.is_cancelled() {
+                    break;
+                }
+
+                // If this reconnect attempt produced no new data,
+                // the container likely already exited before we could reconnect.
+                if !received_any_data && attempt > 0 {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to start log stream for pod {} (attempt {}): {:#}",
+                    pod_name,
+                    attempt,
+                    e
+                );
+                if attempt == 0 {
+                    all_stderr.push(format!("Failed to retrieve logs: {:#}", e));
+                }
+            }
+        }
+
+        // Stop reconnecting if the pod has exited or we've hit too many consecutive failures
+        if stop_token.is_cancelled() || attempt >= MAX_LOG_RECONNECTS {
+            break;
+        }
+
+        attempt += 1;
+        let backoff_secs = std::cmp::min(1u64 << attempt.min(5), 30);
+        tracing::info!(
+            "Reconnecting log stream for pod {} (attempt {}, backoff {}s)",
+            pod_name,
+            attempt + 1,
+            backoff_secs
+        );
+        // Sleep with cancellation awareness — stop waiting if the pod exits
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+            _ = stop_token.cancelled() => {
+                tracing::info!("Pod {} exited during reconnect backoff, stopping log stream", pod_name);
+                break;
+            }
+        }
+    }
+
+    (all_stdout, all_stderr, parsed_output)
+}
+
+/// Split a timestamped log line into `(timestamp, content)`.
+///
+/// Kubernetes log lines with `timestamps: true` are formatted as:
+/// `"2006-01-02T15:04:05.999999999Z <content>"`.
+///
+/// Returns `("", line)` when no space separator is found (malformed line).
+fn split_timestamp_line(line: &str) -> (&str, &str) {
+    if let Some(space_pos) = line.find(' ') {
+        (&line[..space_pos], &line[space_pos + 1..])
+    } else {
+        ("", line)
+    }
+}
+
+/// Truncate an RFC 3339 timestamp to second precision for dedup grouping.
+///
+/// `"2026-03-18T18:16:07.740962643Z"` → `"2026-03-18T18:16:07"`
+///
+/// The kube-core library uses second precision for `since_time`, so all lines
+/// within the same second may be replayed on reconnect.
+fn truncate_to_second(ts: &str) -> String {
+    if let Some(dot_pos) = ts.find('.') {
+        ts[..dot_pos].to_string()
+    } else if let Some(stripped) = ts.strip_suffix('Z') {
+        stripped.to_string()
+    } else {
+        ts.to_string()
+    }
+}
+
+/// Parse a Kubernetes log timestamp string into a `k8s_openapi::jiff::Timestamp` for `LogParams::since_time`.
+fn parse_k8s_timestamp(ts: &str) -> Option<k8s_openapi::jiff::Timestamp> {
+    ts.parse::<k8s_openapi::jiff::Timestamp>().ok()
+}
+
 #[async_trait]
 impl Runner for KubeRunner {
     async fn execute(
@@ -974,27 +1217,17 @@ impl Runner for KubeRunner {
         } else {
             // Container is running — stream logs live while polling for terminal state.
             // The follow stream ends naturally when the container exits.
-            let log_params = LogParams {
-                follow: true,
-                container: Some("step".to_string()),
-                ..Default::default()
-            };
-
+            // On stream errors (network hiccups, API server timeouts), reconnect
+            // using `since_time` to resume from the last received log timestamp.
             let pods_log = pods.clone();
             let pod_name_log = pod_name.clone();
             let log_cb = log_callback.clone();
+            // The log_stop token is cancelled when the poll loop detects pod termination,
+            // telling the reconnect loop to stop retrying and exit.
+            let log_stop = CancellationToken::new();
+            let log_stop_clone = log_stop.clone();
             let log_task = tokio::spawn(async move {
-                match pods_log.log_stream(&pod_name_log, &log_params).await {
-                    Ok(stream) => drain_log_stream(stream, &log_cb).await,
-                    Err(e) => {
-                        tracing::warn!("Failed to stream pod logs: {:#}", e);
-                        (
-                            Vec::new(),
-                            vec![format!("Failed to retrieve logs: {:#}", e)],
-                            None,
-                        )
-                    }
-                }
+                stream_logs_with_reconnect(&pods_log, &pod_name_log, &log_cb, log_stop_clone).await
             });
             let log_abort = log_task.abort_handle();
 
@@ -1063,11 +1296,17 @@ impl Runner for KubeRunner {
                 }
             };
 
+            // Signal the log reconnect loop that the pod has exited — it should stop
+            // retrying and drain any remaining buffered lines.
+            log_stop.cancel();
+
             // Wait for log stream to finish draining (with timeout as safety net).
             match tokio::time::timeout(std::time::Duration::from_secs(10), log_task).await {
                 Ok(Ok((stdout, stderr, output))) => {
                     stdout_lines = stdout;
-                    stderr_lines = stderr;
+                    // Extend rather than overwrite: preserve any "Container terminated: ..."
+                    // messages pushed by the poll loop before the log task finished.
+                    stderr_lines.extend(stderr);
                     parsed_output = output;
                 }
                 Ok(Err(e)) => {
@@ -2924,6 +3163,82 @@ mod tests {
         let (stdout, _stderr, output) = drain_log_stream(cursor, &None).await;
         assert_eq!(stdout.len(), 2);
         assert!(output.is_none()); // invalid JSON is silently ignored
+    }
+
+    // --- log reconnect helper tests ---
+
+    #[test]
+    fn test_split_timestamp_line_normal() {
+        let (ts, content) = split_timestamp_line("2026-03-18T18:16:07.123Z hello world");
+        assert_eq!(ts, "2026-03-18T18:16:07.123Z");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_split_timestamp_line_no_space() {
+        let (ts, content) = split_timestamp_line("no-space-here");
+        assert_eq!(ts, "");
+        assert_eq!(content, "no-space-here");
+    }
+
+    #[test]
+    fn test_split_timestamp_line_empty() {
+        let (ts, content) = split_timestamp_line("");
+        assert_eq!(ts, "");
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn test_truncate_to_second_with_nanos() {
+        assert_eq!(
+            truncate_to_second("2026-03-18T18:16:07.740962643Z"),
+            "2026-03-18T18:16:07"
+        );
+    }
+
+    #[test]
+    fn test_truncate_to_second_no_fraction() {
+        assert_eq!(
+            truncate_to_second("2026-03-18T18:16:07Z"),
+            "2026-03-18T18:16:07"
+        );
+    }
+
+    #[test]
+    fn test_truncate_to_second_with_millis() {
+        assert_eq!(
+            truncate_to_second("2026-03-18T18:16:07.123Z"),
+            "2026-03-18T18:16:07"
+        );
+    }
+
+    #[test]
+    fn test_truncate_to_second_no_z_suffix() {
+        // Timestamps without Z or sub-second portion pass through unchanged.
+        assert_eq!(
+            truncate_to_second("2026-03-18T18:16:07"),
+            "2026-03-18T18:16:07"
+        );
+    }
+
+    // --- parse_k8s_timestamp tests ---
+
+    #[test]
+    fn test_parse_k8s_timestamp_valid_rfc3339() {
+        let ts = parse_k8s_timestamp("2026-03-18T18:16:07.740962643Z");
+        assert!(ts.is_some());
+    }
+
+    #[test]
+    fn test_parse_k8s_timestamp_valid_no_nanos() {
+        let ts = parse_k8s_timestamp("2026-03-18T18:16:07Z");
+        assert!(ts.is_some());
+    }
+
+    #[test]
+    fn test_parse_k8s_timestamp_invalid() {
+        let ts = parse_k8s_timestamp("not-a-timestamp");
+        assert!(ts.is_none());
     }
 
     // --- classify_pod_status tests ---

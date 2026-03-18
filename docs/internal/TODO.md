@@ -327,6 +327,27 @@ Last updated: 2026-03-13.
 ### Minor
 - [x] Test 12 comment says "skipped as unreachable" but cascade-skip now happens in `promote_ready_steps` — update comment — `orchestrator_test.rs`
 
+## Review: KubeRunner Log Stream Reconnection
+
+### Critical
+- [x] Dedup only skips 1 line but `sinceTime` is second-precision — Fixed: HashSet dedup over entire last second, timestamps enabled on all connections — `kubernetes.rs`
+
+### Important
+- [x] `parse_k8s_timestamp` failure silently drops `since_time` — Fixed: log warning + fall back to `since_seconds: Some(5)` — `kubernetes.rs`
+- [x] No exponential backoff — Fixed: `min(1 << attempt, 30)` seconds — `kubernetes.rs`
+- [x] `stderr_lines = stderr` overwrites termination reason — Fixed: `stderr_lines.extend(stderr)` — `kubernetes.rs`
+
+### Minor
+- [x] Lines without space in reconnect mode — Fixed: always use timestamps, consistent parsing — `kubernetes.rs`
+- [x] `saw_any_line` semantics — Fixed: renamed to `received_any_data`, set before dedup skip — `kubernetes.rs`
+
+### Test Coverage
+- [x] Unit: `split_timestamp_line` normal + no-space + empty
+- [x] Unit: `truncate_to_second` with nanos, no fraction, millis, no-Z
+- [x] Unit: `parse_k8s_timestamp` valid RFC3339, valid no-nanos, invalid
+- [ ] Integration: dedup with multiple lines at same timestamp (needs mock K8s API)
+- [ ] Integration: clean EOF path, max reconnect exhaustion (needs mock K8s API)
+
 ## Review: Health Check + AppError Migration (2026-03-15)
 
 ### Critical
