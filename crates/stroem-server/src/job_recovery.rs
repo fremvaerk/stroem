@@ -60,11 +60,53 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
         }
     };
 
+    // Check if this is a loop instance completing — handle sequential promotion
+    // and loop completion before running the orchestrator
+    if let Err(e) =
+        crate::job_creator::check_loop_completion(&state.pool, job_id, step_name, &task).await
+    {
+        tracing::error!(
+            "Failed to check loop completion for job {} step '{}': {:#}",
+            job_id,
+            step_name,
+            e
+        );
+        state
+            .append_server_log(
+                job_id,
+                &format!("[orchestration] Failed to check loop completion: {:#}", e),
+            )
+            .await;
+    }
+
     // Run orchestrator: promote steps, skip unreachable, check terminal
     orchestrator::on_step_completed(&state.pool, job_id, step_name, &task, Some(&workspace))
         .await?;
 
-    // Handle any newly-promoted type: task steps
+    // Expand any for_each steps that became eligible after orchestration
+    if let Err(e) = crate::job_creator::expand_for_each_steps(
+        &state.pool,
+        &workspace,
+        &job.workspace,
+        job_id,
+        &task,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to expand for_each steps for job {}: {:#}",
+            job_id,
+            e
+        );
+        state
+            .append_server_log(
+                job_id,
+                &format!("[orchestration] Failed to expand for_each steps: {:#}", e),
+            )
+            .await;
+    }
+
+    // Handle any newly-promoted type: task steps (including loop instances)
     if let Err(e) =
         crate::job_creator::handle_task_steps(&state.pool, &workspace, &job.workspace, job_id).await
     {
@@ -165,6 +207,23 @@ async fn propagate_to_parent(
                 }
             };
 
+            // Check if the completed parent step is a loop instance — handle
+            // sequential promotion and loop completion before orchestrating
+            if let Err(e) = crate::job_creator::check_loop_completion(
+                &state.pool,
+                parent_job_id,
+                parent_step,
+                &parent_task,
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to check loop completion for parent step '{}': {:#}",
+                    parent_step,
+                    e
+                );
+            }
+
             // Run orchestrator for parent job
             orchestrator::on_step_completed(
                 &state.pool,
@@ -174,6 +233,23 @@ async fn propagate_to_parent(
                 Some(&parent_ws),
             )
             .await?;
+
+            // Expand any for_each steps in the parent job
+            if let Err(e) = crate::job_creator::expand_for_each_steps(
+                &state.pool,
+                &parent_ws,
+                &parent_job.workspace,
+                parent_job_id,
+                &parent_task,
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to expand for_each steps for parent job {}: {:#}",
+                    parent_job_id,
+                    e
+                );
+            }
 
             // Handle any newly-promoted task steps in the parent
             crate::job_creator::handle_task_steps(
@@ -364,6 +440,8 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -426,6 +504,11 @@ mod tests {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }
     }
 

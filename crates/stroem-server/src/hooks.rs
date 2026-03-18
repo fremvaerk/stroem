@@ -314,6 +314,11 @@ async fn fire_single_hook(
         runner,
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     };
 
     JobStepRepo::create_steps(pool, &[step])

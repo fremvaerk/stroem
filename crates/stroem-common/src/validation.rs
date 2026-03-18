@@ -147,6 +147,63 @@ fn validate_workflow_config_inner(
                 }
             }
 
+            // Validate step name does not contain brackets (reserved for for_each instances)
+            if step_name.contains('[') || step_name.contains(']') {
+                bail!(
+                    "Task '{}' step '{}' name must not contain '[' or ']' (reserved for for_each instances)",
+                    task_name,
+                    step_name
+                );
+            }
+
+            // Validate for_each expression
+            if let Some(ref for_each) = step.for_each {
+                match for_each {
+                    serde_json::Value::String(expr) => {
+                        // Validate as Tera template (same two-pass strategy as `when`)
+                        if tera::Tera::one_off(expr, &tera::Context::new(), false).is_err() {
+                            let mut test_tera = tera::Tera::default();
+                            if let Err(e) = test_tera.add_raw_template("__for_each__", expr) {
+                                bail!(
+                                    "Task '{}' step '{}' has invalid for_each expression '{}': {}",
+                                    task_name,
+                                    step_name,
+                                    expr,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    serde_json::Value::Array(arr) => {
+                        if arr.len() > 10000 {
+                            bail!(
+                                "Task '{}' step '{}' for_each literal array has {} items (max 10000)",
+                                task_name,
+                                step_name,
+                                arr.len()
+                            );
+                        }
+                    }
+                    _ => {
+                        bail!(
+                            "Task '{}' step '{}' for_each must be a string (Tera template) or array, got {:?}",
+                            task_name,
+                            step_name,
+                            for_each
+                        );
+                    }
+                }
+            }
+
+            // Warn if sequential without for_each
+            if step.sequential && step.for_each.is_none() {
+                warnings.push(format!(
+                    "Task '{}' step '{}' has sequential: true but no for_each — sequential has no effect",
+                    task_name,
+                    step_name
+                ));
+            }
+
             // Validate step timeout (max 24h = 86400s)
             if let Some(ref timeout) = step.timeout {
                 if timeout.as_secs() > 86400 {
@@ -4471,5 +4528,192 @@ tasks:
             "Tera logic in when should pass: {:?}",
             result
         );
+    }
+
+    // --- for_each validation tests ---
+
+    #[test]
+    fn test_for_each_string_expression_valid() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      fetch:
+        action: process
+      loop-step:
+        action: process
+        depends_on: [fetch]
+        for_each: "{{ fetch.output.items }}"
+        input:
+          item: "{{ each.item }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Valid for_each string should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_for_each_literal_array_valid() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: echo deploy
+tasks:
+  main:
+    flow:
+      deploy:
+        action: deploy
+        for_each: ["us-east-1", "eu-west-1", "ap-south-1"]
+        input:
+          region: "{{ each.item }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Valid for_each array should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_for_each_invalid_type_rejected() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        for_each: 42
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "for_each: 42 should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("for_each must be a string"),
+            "Error should mention 'for_each must be a string'"
+        );
+    }
+
+    #[test]
+    fn test_for_each_invalid_tera_syntax() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        for_each: "{% if %}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "Invalid Tera syntax in for_each should be rejected"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid for_each expression"),
+            "Error should mention 'invalid for_each expression'"
+        );
+    }
+
+    #[test]
+    fn test_step_name_with_brackets_rejected() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      "step[0]":
+        action: process
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Step name with '[' should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not contain '['"),
+            "Error should mention that '[' is not allowed"
+        );
+    }
+
+    #[test]
+    fn test_sequential_without_for_each_warns() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        sequential: true
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("sequential") && w.contains("no for_each")),
+            "Expected warning about sequential without for_each, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_for_each_with_sequential() {
+        let yaml = r#"
+actions:
+  migrate:
+    type: script
+    script: echo migrate
+tasks:
+  main:
+    flow:
+      migrate:
+        action: migrate
+        for_each: ["schema1", "schema2"]
+        sequential: true
+        input:
+          schema: "{{ each.item }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "for_each with sequential should be valid: {:?}",
+            result
+        );
+        assert!(result.unwrap().is_empty(), "Expected no warnings");
     }
 }

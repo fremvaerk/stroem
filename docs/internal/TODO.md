@@ -235,7 +235,8 @@ Last updated: 2026-03-13.
 ## Phase 5: Advanced Flow Control
 
 - [x] 5a: Conditional flow steps (`when` expressions) — model, template evaluation, orchestrator, DB migration, validation, API, UI, docs, tests
-- [ ] 5b: For-each loops (fan-out/fan-in)
+- [x] 5b: For-each loops (fan-out/fan-in) — `for_each` + `sequential` on FlowStep, expand/check/aggregate in job_creator.rs, `each` variable, DB migration 022, validation, API, UI, docs
+- [x] 5b review fixes (see Review section below)
 - [ ] 5c: While loops (retry-until patterns)
 - [ ] 5d: Suspend/Resume + Approval gates
 
@@ -280,6 +281,48 @@ Last updated: 2026-03-13.
 - [x] Truthy `when` + all-deps-skipped → cascade-skip takes precedence — Test 26 `orchestrator_test.rs`
 - [x] 3+ dep fan-in with heterogeneous statuses (1 completed + 2 skipped → runs) — Test 27 `orchestrator_test.rs`
 - [x] `skip_unreachable_steps` does NOT treat skipped dep as blocking (regression guard) — `job_step_status_tests.rs`
+
+## Review: Phase 5b For-Each Loops
+
+### Critical
+- [x] `type: task` + `for_each` broken — `propagate_to_parent` does not call `check_loop_completion` or `expand_for_each_steps` on parent job. Fixed: wired both into `propagate_to_parent` — `job_recovery.rs`
+- [x] Non-atomic expansion — `expand_for_each_steps` did INSERT + N UPDATEs + mark_running separately. Fixed: added loop fields to `NewJobStep`/`StepInsertRow`, single INSERT — `job_step.rs`, `job_creator.rs`
+- [x] DAG renders loop instance steps — Fixed: filter `loop_source !== null` before building nodes — `workflow-dag.tsx`
+
+### Important
+- [x] `mark_running_server` has no status guard — Fixed: added `AND status = 'pending'` — `job_step.rs`
+- [x] Cancellation doesn't handle for_each placeholders — Fixed: added `cancel_server_managed_steps()` for running steps with `worker_id IS NULL` — `job_step.rs`, `cancellation.rs`
+- [x] Progress badge only counts `completed` — Fixed: counts all terminal, shows failed count separately — `step-timeline.tsx`
+- [x] `instancesExpanded` state resets on re-render — Fixed: lifted to `StepTimeline` level, keyed by step name — `step-timeline.tsx`
+- [x] Dead `placeholderNames` set — Fixed: removed — `step-timeline.tsx`
+- [x] Missing index on `loop_source` — Fixed: added partial index — `022_for_each.sql`
+- [x] `skip_unreachable_steps` doesn't guard for_each placeholders — Fixed: added `for_each_expr.is_some()` guard — `job_step.rs`
+- [x] `set_loop_metadata` removed — no longer needed after atomic expansion fix
+- [x] Aria: "show N iterations" button — Fixed: added `aria-expanded` — `step-timeline.tsx`
+- [x] `indented` padding — Fixed: uses `cn()` — `step-timeline.tsx`
+- [x] `for_each` display truncation — Fixed: shows `[N items]` for arrays > 5 — `task-detail.tsx`
+
+### Minor
+- [x] `each.total` not exposed — Fixed: added to template context — `rendering.rs`, `job_creator.rs`
+- [x] Instance step names leak into `build_step_render_context` — Fixed: filtered out `loop_source.is_some()` — `job_creator.rs`
+- [x] `for_each_expr` stores JSON-serialized value — Fixed: stores raw string for templates, JSON for arrays — `job_creator.rs`
+- [ ] `loop_total` redundantly stored per-instance row — derivable from COUNT, can drift on partial retries — `022_for_each.sql`
+- [x] No empty-loop state in UI — Fixed: shows "0 iterations" badge — `step-timeline.tsx`
+
+### Missing Test Coverage
+- [ ] Integration: parallel for_each expansion + completion + output aggregation
+- [ ] Integration: sequential for_each — promotion chain + failure stops remaining
+- [ ] Integration: `type: task` + `for_each` (child job per instance, propagation)
+- [ ] Integration: for_each with `continue_on_failure: true` and some failed instances
+- [ ] Integration: cancellation mid-loop (all instances + placeholder cleaned up)
+- [ ] Integration: recovery sweep with for_each instances
+- [ ] Integration: concurrent expansion idempotency
+- [ ] Integration: for_each root step (no deps)
+- [ ] Integration: nested for_each (loop depends on loop)
+- [ ] Integration: for_each with `when` condition false → step skipped without expansion
+- [ ] Integration: for_each with empty array → step skipped
+- [ ] Integration: for_each with dynamic template expression from upstream output
+- [ ] Unit: `check_loop_completion` output aggregation ordered by loop_index
 
 ### Minor
 - [x] Test 12 comment says "skipped as unreachable" but cascade-skip now happens in `promote_ready_steps` — update comment — `orchestrator_test.rs`

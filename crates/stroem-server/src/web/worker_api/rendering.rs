@@ -31,9 +31,18 @@ pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value
         Some(t) => t,
         None => return Ok(ctx.step.input.clone()),
     };
+    // For loop instance steps (e.g. "process[0]"), fall back to looking up by loop_source
     let flow_step = match task.flow.get(&ctx.step.step_name) {
         Some(fs) => fs,
-        None => return Ok(ctx.step.input.clone()),
+        None => match ctx
+            .step
+            .loop_source
+            .as_ref()
+            .and_then(|src| task.flow.get(src))
+        {
+            Some(fs) => fs,
+            None => return Ok(ctx.step.input.clone()),
+        },
     };
 
     if flow_step.input.is_empty() {
@@ -64,6 +73,18 @@ pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value
         context.insert(safe_name, serde_json::Value::Object(step_ctx));
     }
 
+    // Inject `each` variable for loop instance steps
+    if let (Some(ref loop_item), Some(loop_index)) = (&ctx.step.loop_item, ctx.step.loop_index) {
+        context.insert(
+            "each".to_string(),
+            serde_json::json!({
+                "item": loop_item,
+                "index": loop_index,
+                "total": ctx.step.loop_total,
+            }),
+        );
+    }
+
     let context_value = serde_json::Value::Object(context);
     let rendered = render_input_map(&flow_step.input, &context_value)
         .context("Failed to render step input template")?;
@@ -83,9 +104,18 @@ pub fn prepare_step_action_input(
         Some(t) => t,
         None => return Ok(rendered_input),
     };
+    // For loop instance steps, fall back to looking up by loop_source
     let flow_step = match task.flow.get(&ctx.step.step_name) {
         Some(fs) => fs,
-        None => return Ok(rendered_input),
+        None => match ctx
+            .step
+            .loop_source
+            .as_ref()
+            .and_then(|src| task.flow.get(src))
+        {
+            Some(fs) => fs,
+            None => return Ok(rendered_input),
+        },
     };
     let action = match ctx.workspace.actions.get(&flow_step.action) {
         Some(a) => a,
@@ -323,6 +353,8 @@ mod tests {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         }
     }
@@ -346,6 +378,11 @@ mod tests {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }
     }
 

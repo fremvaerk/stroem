@@ -136,6 +136,8 @@ fn make_workspace_config() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -152,6 +154,8 @@ fn make_workspace_config() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -216,6 +220,11 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
         runner: "none".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }
 }
 
@@ -234,6 +243,11 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }
 }
 
@@ -525,6 +539,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -556,6 +572,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -587,6 +605,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -679,6 +699,11 @@ async fn deep_nesting_three_levels() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -699,6 +724,11 @@ async fn deep_nesting_three_levels() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -816,6 +846,8 @@ async fn parent_with_mixed_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -830,6 +862,8 @@ async fn parent_with_mixed_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -846,6 +880,8 @@ async fn parent_with_mixed_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -926,6 +962,11 @@ async fn parent_with_mixed_steps() -> Result<()> {
                 runner: "none".to_string(),
                 timeout_secs: None,
                 when_condition: None,
+                for_each_expr: None,
+                loop_source: None,
+                loop_index: None,
+                loop_total: None,
+                loop_item: None,
             },
         ],
     )

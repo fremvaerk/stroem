@@ -109,10 +109,18 @@ pub async fn on_step_completed(
             .context("Failed to get failed step names")?;
 
         if !failed_names.is_empty() {
-            // Check if ALL failures are tolerable (continue_on_failure steps)
+            // Check if ALL failures are tolerable (continue_on_failure steps).
+            // Loop instance steps (e.g. "process[0]") are not in task.flow —
+            // look up by their source name instead. Loop instance failures
+            // are managed by `check_loop_completion` via the placeholder step.
             let all_tolerable = failed_names.iter().all(|name| {
+                let flow_name = if let Some(bracket) = name.find('[') {
+                    &name[..bracket]
+                } else {
+                    name.as_str()
+                };
                 task.flow
-                    .get(name)
+                    .get(flow_name)
                     .map(|fs| fs.continue_on_failure)
                     .unwrap_or(false)
             });

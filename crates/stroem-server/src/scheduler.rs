@@ -480,6 +480,8 @@ mod tests {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );

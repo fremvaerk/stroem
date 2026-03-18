@@ -154,6 +154,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -203,6 +205,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -219,6 +223,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -266,6 +272,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -280,6 +288,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -294,6 +304,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -326,6 +338,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -340,6 +354,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -354,6 +370,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -368,6 +386,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -400,6 +420,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -434,6 +456,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -452,6 +476,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -499,6 +525,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -513,6 +541,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -527,6 +557,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -545,6 +577,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -634,6 +668,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -787,6 +823,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -803,6 +841,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -850,6 +890,8 @@ fn test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -1148,6 +1190,11 @@ async fn test_worker_register_and_claim() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1730,6 +1777,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -1771,6 +1820,11 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1801,6 +1855,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -1815,6 +1871,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -1829,6 +1887,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -1871,6 +1931,11 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -1885,6 +1950,11 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -1899,6 +1969,11 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2152,6 +2227,8 @@ async fn test_task_detail_connections() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -2199,6 +2276,8 @@ async fn test_task_detail_connections() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -3480,6 +3559,11 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -3565,6 +3649,11 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -3641,6 +3730,11 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -3724,6 +3818,11 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             runner: "pod".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -3801,6 +3900,11 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -4016,6 +4120,8 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -4186,6 +4292,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -4246,6 +4354,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5008,6 +5118,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5022,6 +5134,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5064,6 +5178,11 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5078,6 +5197,11 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5117,6 +5241,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5131,6 +5257,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5173,6 +5301,11 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5187,6 +5320,11 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5227,6 +5365,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5241,6 +5381,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5255,6 +5397,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -5297,6 +5441,11 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5311,6 +5460,11 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5325,6 +5479,11 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5456,6 +5615,11 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -5534,6 +5698,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5548,6 +5714,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5590,6 +5758,11 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5604,6 +5777,11 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5666,6 +5844,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5680,6 +5860,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5722,6 +5904,11 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5736,6 +5923,11 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5777,6 +5969,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5791,6 +5985,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 continue_on_failure: true,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5833,6 +6029,11 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5847,6 +6048,11 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5895,6 +6101,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 continue_on_failure: true,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5909,6 +6117,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -5951,6 +6161,11 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -5965,6 +6180,11 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6012,6 +6232,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 continue_on_failure: true,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -6026,6 +6248,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -6068,6 +6292,11 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -6082,6 +6311,11 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6123,6 +6357,8 @@ async fn test_cascading_skip() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -6137,6 +6373,8 @@ async fn test_cascading_skip() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -6151,6 +6389,8 @@ async fn test_cascading_skip() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -6193,6 +6433,11 @@ async fn test_cascading_skip() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -6207,6 +6452,11 @@ async fn test_cascading_skip() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -6221,6 +6471,11 @@ async fn test_cascading_skip() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6289,6 +6544,8 @@ fn test_workspace_ops() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -6613,6 +6870,11 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -7430,6 +7692,11 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -7461,6 +7728,11 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -7753,6 +8025,8 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8334,6 +8608,8 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8445,6 +8721,8 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8539,6 +8817,8 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8614,6 +8894,8 @@ async fn test_hook_input_contains_context() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8705,6 +8987,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             continue_on_failure: true,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8719,6 +9003,8 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8835,6 +9121,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             continue_on_failure: true,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8849,6 +9137,8 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             continue_on_failure: true,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -8961,6 +9251,8 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9075,6 +9367,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9183,6 +9477,8 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -9306,6 +9602,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9338,6 +9636,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9352,6 +9652,8 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9399,6 +9701,8 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9607,6 +9911,11 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         runner: "none".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     };
     JobStepRepo::create_steps(&pool, &[step]).await?;
 
@@ -9673,6 +9982,8 @@ async fn test_task_action_input_rendered() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9755,6 +10066,8 @@ async fn test_task_action_in_hook() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9882,6 +10195,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -9942,6 +10257,8 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -12128,6 +12445,8 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -12267,6 +12586,8 @@ async fn setup_sync_webhook() -> Result<(
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -12786,6 +13107,8 @@ async fn setup_scheduler_workspace(
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -13186,6 +13509,11 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -13216,6 +13544,11 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -14045,6 +14378,8 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
             continue_on_failure: false,
             timeout: None,
             when: Some("false".to_string()),
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -14059,6 +14394,8 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -14115,6 +14452,8 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: Some("true".to_string()),
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -14216,6 +14555,8 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -14246,6 +14587,8 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             continue_on_failure: false,
             timeout: None,
             when: Some("false".to_string()),
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -14323,6 +14666,8 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -14337,6 +14682,8 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: Some("{{ input.should_deploy }}".to_string()),
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );

@@ -69,6 +69,11 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }
 }
 
@@ -98,6 +103,8 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         continue_on_failure: false,
         timeout: None,
         when: None,
+        for_each: None,
+        sequential: false,
         inline_action: None,
     }
 }

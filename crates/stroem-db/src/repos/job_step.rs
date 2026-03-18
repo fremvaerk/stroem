@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -29,6 +29,11 @@ pub struct JobStepRow {
     pub runner: String,
     pub timeout_secs: Option<i32>,
     pub when_condition: Option<String>,
+    pub for_each_expr: Option<String>,
+    pub loop_source: Option<String>,
+    pub loop_index: Option<i32>,
+    pub loop_total: Option<i32>,
+    pub loop_item: Option<JsonValue>,
 }
 
 /// New job step for creation
@@ -46,6 +51,11 @@ pub struct NewJobStep {
     pub runner: String,
     pub timeout_secs: Option<i32>,
     pub when_condition: Option<String>,
+    pub for_each_expr: Option<String>,
+    pub loop_source: Option<String>,
+    pub loop_index: Option<i32>,
+    pub loop_total: Option<i32>,
+    pub loop_item: Option<JsonValue>,
 }
 
 /// Bind parameters for a single row in the batch INSERT inside [`JobStepRepo::create_steps_tx`].
@@ -66,6 +76,11 @@ struct StepInsertRow {
     timeout_secs: Option<i32>,
     ready_at: Option<DateTime<Utc>>,
     when_condition: Option<String>,
+    for_each_expr: Option<String>,
+    loop_source: Option<String>,
+    loop_index: Option<i32>,
+    loop_total: Option<i32>,
+    loop_item: Option<JsonValue>,
 }
 
 /// A stale running step with its job info for recovery.
@@ -100,7 +115,7 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at, when_condition)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item)
             VALUES
             "#,
         );
@@ -110,9 +125,9 @@ impl JobStepRepo {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 13;
+            let base = i * 18;
             query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
                 base + 1,
                 base + 2,
                 base + 3,
@@ -125,7 +140,12 @@ impl JobStepRepo {
                 base + 10,
                 base + 11,
                 base + 12,
-                base + 13
+                base + 13,
+                base + 14,
+                base + 15,
+                base + 16,
+                base + 17,
+                base + 18
             ));
             let required_tags = serde_json::to_value(&step.required_tags).unwrap_or_default();
             let ready_at = if step.status == "ready" {
@@ -147,6 +167,11 @@ impl JobStepRepo {
                 timeout_secs: step.timeout_secs,
                 ready_at,
                 when_condition: step.when_condition.clone(),
+                for_each_expr: step.for_each_expr.clone(),
+                loop_source: step.loop_source.clone(),
+                loop_index: step.loop_index,
+                loop_total: step.loop_total,
+                loop_item: step.loop_item.clone(),
             });
         }
 
@@ -165,7 +190,12 @@ impl JobStepRepo {
                 .bind(row.runner)
                 .bind(row.timeout_secs)
                 .bind(row.ready_at)
-                .bind(row.when_condition);
+                .bind(row.when_condition)
+                .bind(row.for_each_expr)
+                .bind(row.loop_source)
+                .bind(row.loop_index)
+                .bind(row.loop_total)
+                .bind(row.loop_item);
         }
 
         q.execute(executor)
@@ -251,7 +281,7 @@ impl JobStepRepo {
             r#"
             UPDATE job_step
             SET status = 'running', started_at = NOW()
-            WHERE job_id = $1 AND step_name = $2
+            WHERE job_id = $1 AND step_name = $2 AND status IN ('pending', 'ready')
             "#,
         )
         .bind(job_id)
@@ -261,6 +291,23 @@ impl JobStepRepo {
         .context("Failed to mark step as running (server-side)")?;
 
         Ok(())
+    }
+
+    /// Cancel running server-managed steps (for_each placeholders, type:task steps).
+    /// These have no worker to kill — just transition from running to cancelled.
+    pub async fn cancel_server_managed_steps(pool: &PgPool, job_id: Uuid) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'cancelled', error_message = 'Job cancelled', completed_at = NOW()
+            WHERE job_id = $1 AND status = 'running' AND worker_id IS NULL
+            "#,
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .context("Failed to cancel server-managed steps")?;
+        Ok(result.rows_affected())
     }
 
     /// Mark step as completed with output
@@ -443,6 +490,10 @@ impl JobStepRepo {
                 Some(fs) => fs,
                 None => continue,
             };
+            // Skip for_each placeholder steps — they are expanded by expand_for_each_steps()
+            if step.for_each_expr.is_some() {
+                continue;
+            }
             // Skipped deps always count as satisfied; failed/cancelled only
             // with continue_on_failure.
             let deps_met = flow_step.depends_on.iter().all(|dep| {
@@ -603,6 +654,10 @@ impl JobStepRepo {
             .filter(|s| s.status == StepStatus::Pending.as_ref())
             .filter_map(|step| {
                 let flow_step = flow.get(&step.step_name)?;
+                // Skip for_each placeholder steps — they are handled by expand_for_each_steps()
+                if step.for_each_expr.is_some() {
+                    return None;
+                }
                 if flow_step.continue_on_failure {
                     return None;
                 }

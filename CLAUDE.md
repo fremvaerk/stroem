@@ -9,7 +9,8 @@ Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-emb
 Phase 3 complete: Multi-workspace support, tarball distribution, Docker and Kubernetes runners, libraries.
 Phase 4 complete: Advanced features (pod actions, secrets, connections, DAG visualization, ACL/RBAC).
 Phase 5a complete: Conditional flow steps (`when` expressions).
-Phase 5b-d: For-each loops, while loops, approval gates.
+Phase 5b complete: For-each loops (`for_each` + `sequential`).
+Phase 5c-d: While loops, approval gates.
 Phase 6: Shared storage & worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -233,6 +234,25 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Validation: Tera syntax checked at YAML parse time in `validation.rs`
 - `orchestrator::on_step_completed()` takes optional `&WorkspaceConfig` for building render context with secrets
 - UI: "condition" badge on skipped conditional steps, "when" badge on active ones, `when` expression shown in task detail
+
+### For-Each Loops (`for_each`)
+- `FlowStep.for_each: Option<serde_json::Value>` — Tera template string or literal JSON array
+- `FlowStep.sequential: bool` — when true, instances run one at a time (default: parallel)
+- **Expansion**: `expand_for_each_steps()` in `job_creator.rs` — evaluates expression, creates N instance steps (`step[0]`, `step[1]`, ...)
+- **Placeholder lifecycle**: pending → (deps met) → `expand_for_each_steps()` creates instances → placeholder marked `running` → all instances complete → placeholder marked `completed`/`failed`
+- **Instance steps**: `loop_source` = placeholder name, `loop_index` = 0..N, `loop_total` = N, `loop_item` = array element
+- **`each` variable**: injected at claim time (`rendering.rs`) and in `handle_task_steps()` — `each.item` + `each.index`
+- **Sequential mode**: instance `[0]` starts ready, others pending; `check_loop_completion()` promotes `[i+1]` after `[i]` completes
+- **Output aggregation**: `check_loop_completion()` collects outputs ordered by index into an array on the placeholder
+- **Fan-in**: downstream steps depend on placeholder name, see `{{ step.output }}` as aggregated array
+- **`when` + `for_each`**: `when` evaluated first; if falsy, step skipped without expansion
+- **`type: task` + `for_each`**: each instance creates a child sub-job via `handle_task_steps()`
+- **Flow step lookup fallback**: `loop_source` used when instance name not in `task.flow` (rendering.rs, jobs.rs)
+- DB: migration `022_for_each.sql` adds `for_each_expr`, `loop_source`, `loop_index`, `loop_total`, `loop_item` to `job_step`
+- Validation: Tera syntax check, bracket-free step names, max 10000 items, sequential-without-for_each warning
+- `promote_ready_steps()` skips for_each placeholders (handled by expansion logic)
+- Orchestrator: `check_loop_completion()` called before `on_step_completed()`, `expand_for_each_steps()` called after
+- Empty array → step skipped; non-array → step fails; instance failure → placeholder fails (unless `continue_on_failure`)
 
 ### MCP Server (Model Context Protocol)
 - Feature-gated: `mcp` cargo feature on `stroem-server` (enabled by default alongside `s3`)

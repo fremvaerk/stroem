@@ -397,6 +397,15 @@ export function TaskDetailPage() {
                     {step.when && (
                       <> &middot; when: <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{step.when}</code></>
                     )}
+                    {step.for_each !== undefined && (
+                      <> &middot; for each: <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{
+                        typeof step.for_each === "string"
+                          ? step.for_each
+                          : Array.isArray(step.for_each) && step.for_each.length > 5
+                            ? `[${step.for_each.length} items]`
+                            : JSON.stringify(step.for_each)
+                      }</code></>
+                    )}
                   </p>
                 </div>
               </div>

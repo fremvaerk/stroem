@@ -239,6 +239,10 @@ pub async fn get_job(
                 "completed_at": step.completed_at,
                 "error_message": step.error_message,
                 "when_condition": step.when_condition,
+                "for_each_expr": step.for_each_expr,
+                "loop_source": step.loop_source,
+                "loop_index": step.loop_index,
+                "loop_total": step.loop_total,
                 "depends_on": serde_json::Value::Array(vec![]),
             })
         })
@@ -285,20 +289,40 @@ pub async fn get_job(
                 .enumerate()
                 .map(|(i, &n)| (n, i))
                 .collect();
-            steps_json.sort_by_key(|s| {
-                s["step_name"]
-                    .as_str()
-                    .and_then(|n| pos.get(n).copied())
-                    .unwrap_or(usize::MAX)
+            // Sort by topo position. Loop instance steps (e.g. "process[0]")
+            // get the same position as their placeholder, sub-sorted by loop_index.
+            steps_json.sort_by(|a, b| {
+                let get_sort_key = |s: &serde_json::Value| -> (usize, i64) {
+                    let name = s["step_name"].as_str().unwrap_or("");
+                    // Check if this is a loop instance step
+                    if let Some(bracket_pos) = name.find('[') {
+                        let source = &name[..bracket_pos];
+                        let topo_pos = pos.get(source).copied().unwrap_or(usize::MAX);
+                        let loop_index = s["loop_index"].as_i64().unwrap_or(0);
+                        // Instance steps sort after their placeholder (add 1 fractionally via sub-key)
+                        (topo_pos, loop_index + 1)
+                    } else {
+                        let topo_pos = pos.get(name).copied().unwrap_or(usize::MAX);
+                        (topo_pos, 0) // Placeholder sorts before instances
+                    }
+                };
+                get_sort_key(a).cmp(&get_sort_key(b))
             });
 
             // Enrich steps with depends_on from task flow.
+            // Loop instance steps inherit depends_on from their placeholder.
             // when_condition is already set from the DB (captured at job creation)
             // and must not be overwritten here.
             for step_json in &mut steps_json {
                 if let Some(step_name) = step_json["step_name"].as_str() {
                     if let Some(flow_step) = task.flow.get(step_name) {
                         step_json["depends_on"] = json!(&flow_step.depends_on);
+                    } else if let Some(bracket_pos) = step_name.find('[') {
+                        // Loop instance — look up by source name
+                        let source = &step_name[..bracket_pos];
+                        if let Some(flow_step) = task.flow.get(source) {
+                            step_json["depends_on"] = json!(&flow_step.depends_on);
+                        }
                     }
                 }
             }
@@ -761,6 +785,8 @@ mod tests {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -775,6 +801,8 @@ mod tests {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );
@@ -789,6 +817,8 @@ mod tests {
                 continue_on_failure: false,
                 timeout: None,
                 when: None,
+                for_each: None,
+                sequential: false,
                 inline_action: None,
             },
         );

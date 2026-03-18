@@ -166,6 +166,11 @@ async fn test_create_steps_and_claim() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -180,6 +185,11 @@ async fn test_create_steps_and_claim() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
 
@@ -258,6 +268,11 @@ async fn test_claim_concurrency() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         });
     }
 
@@ -346,6 +361,11 @@ async fn test_step_lifecycle() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
 
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -410,6 +430,11 @@ async fn test_update_input() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -459,6 +484,11 @@ async fn test_promote_ready_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -473,6 +503,11 @@ async fn test_promote_ready_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -487,6 +522,11 @@ async fn test_promote_ready_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -501,6 +541,11 @@ async fn test_promote_ready_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
 
@@ -519,6 +564,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -533,6 +580,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -547,6 +596,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -561,6 +612,8 @@ async fn test_promote_ready_steps() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -662,6 +715,11 @@ async fn test_all_steps_terminal() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -676,6 +734,11 @@ async fn test_all_steps_terminal() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
 
@@ -725,6 +788,11 @@ async fn test_any_step_failed() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -739,6 +807,11 @@ async fn test_any_step_failed() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
 
@@ -786,6 +859,11 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -902,6 +980,11 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -916,6 +999,11 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -1010,6 +1098,11 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -1069,6 +1162,11 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -1125,6 +1223,11 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -1169,6 +1272,11 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -1244,6 +1352,11 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 runner: "local".to_string(),
                 timeout_secs: None,
                 when_condition: None,
+                for_each_expr: None,
+                loop_source: None,
+                loop_index: None,
+                loop_total: None,
+                loop_item: None,
             },
             NewJobStep {
                 job_id,
@@ -1258,6 +1371,11 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 runner: "local".to_string(),
                 timeout_secs: None,
                 when_condition: None,
+                for_each_expr: None,
+                loop_source: None,
+                loop_index: None,
+                loop_total: None,
+                loop_item: None,
             },
         ],
     )
@@ -1316,6 +1434,11 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         }],
     )
     .await?;
@@ -1974,6 +2097,11 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }];
 
     JobStepRepo::create_steps_tx(&mut *tx, &steps).await?;
@@ -2242,6 +2370,11 @@ async fn test_cancel_pending_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2256,6 +2389,11 @@ async fn test_cancel_pending_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2270,6 +2408,11 @@ async fn test_cancel_pending_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2338,6 +2481,11 @@ async fn test_get_running_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2352,6 +2500,11 @@ async fn test_get_running_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2366,6 +2519,11 @@ async fn test_get_running_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2380,6 +2538,11 @@ async fn test_get_running_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2394,6 +2557,11 @@ async fn test_get_running_steps() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2464,6 +2632,11 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2478,6 +2651,11 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2564,6 +2742,11 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
         NewJobStep {
             job_id,
@@ -2578,6 +2761,11 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2757,6 +2945,11 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
         })
         .collect();
     JobStepRepo::create_steps(&pool, &steps).await?;

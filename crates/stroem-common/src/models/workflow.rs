@@ -199,6 +199,14 @@ pub struct FlowStep {
     /// If the rendered result is falsy ("", "false", "0"), the step is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// For-each loop: Tera template string or literal JSON array.
+    /// String is rendered at promotion time and must produce a JSON array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_each: Option<serde_json::Value>,
+    /// When true, loop instances run one at a time (each depends on the previous).
+    /// Default: false (all instances run in parallel).
+    #[serde(default)]
+    pub sequential: bool,
     /// Temporary storage for inline action definitions during deserialization.
     /// Automatically moved to `config.actions` during `WorkflowConfig` deserialization.
     #[serde(skip)]
@@ -246,6 +254,10 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 timeout: Option<HumanDuration>,
                 #[serde(default)]
                 when: Option<String>,
+                #[serde(default)]
+                for_each: Option<serde_json::Value>,
+                #[serde(default)]
+                sequential: bool,
             }
             let ref_step: RefStep =
                 serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
@@ -259,6 +271,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 continue_on_failure: ref_step.continue_on_failure,
                 timeout: ref_step.timeout,
                 when: ref_step.when,
+                for_each: ref_step.for_each,
+                sequential: ref_step.sequential,
                 inline_action: None,
             })
         } else if has_type {
@@ -271,6 +285,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 "continue_on_failure",
                 "timeout",
                 "when",
+                "for_each",
+                "sequential",
             ];
 
             let mut step_map = serde_yaml::Mapping::new();
@@ -327,6 +343,21 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .get(serde_yaml::Value::String("when".into()))
                 .and_then(|v| serde_yaml::from_value(v.clone()).ok());
 
+            let for_each: Option<serde_json::Value> = step_map
+                .get(serde_yaml::Value::String("for_each".into()))
+                .and_then(|v| {
+                    let json_str = serde_json::to_string(
+                        &serde_yaml::from_value::<serde_json::Value>(v.clone()).ok()?,
+                    )
+                    .ok()?;
+                    serde_json::from_str(&json_str).ok()
+                });
+
+            let sequential: bool = step_map
+                .get(serde_yaml::Value::String("sequential".into()))
+                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
+                .unwrap_or(false);
+
             Ok(FlowStep {
                 action: String::new(), // placeholder — set by hoist_inline_actions()
                 name,
@@ -336,6 +367,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 continue_on_failure,
                 timeout,
                 when,
+                for_each,
+                sequential,
                 inline_action: Some(action_def),
             })
         } else {
@@ -2802,5 +2835,146 @@ tasks:
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("pipeline").unwrap();
         assert!(task.flow.get("check").unwrap().when.is_none());
+    }
+
+    // --- for_each / sequential deserialization tests ---
+
+    #[test]
+    fn test_flow_step_for_each_string_deserialization() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      loop-step:
+        action: process
+        for_each: "{{ fetch.output.items }}"
+        input:
+          item: "{{ each.item }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("loop-step").unwrap();
+        assert_eq!(step.action, "process");
+        assert!(step.for_each.is_some());
+        let for_each = step.for_each.as_ref().unwrap();
+        assert!(for_each.is_string());
+        assert_eq!(for_each.as_str().unwrap(), "{{ fetch.output.items }}");
+        assert!(!step.sequential);
+    }
+
+    #[test]
+    fn test_flow_step_for_each_array_deserialization() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: echo deploy
+tasks:
+  main:
+    flow:
+      deploy:
+        action: deploy
+        for_each: ["us-east-1", "eu-west-1"]
+        input:
+          region: "{{ each.item }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("deploy").unwrap();
+        assert!(step.for_each.is_some());
+        let for_each = step.for_each.as_ref().unwrap();
+        assert!(for_each.is_array());
+        let arr = for_each.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].as_str().unwrap(), "us-east-1");
+        assert_eq!(arr[1].as_str().unwrap(), "eu-west-1");
+    }
+
+    #[test]
+    fn test_flow_step_sequential_deserialization() {
+        let yaml = r#"
+actions:
+  migrate:
+    type: script
+    script: echo migrate
+tasks:
+  main:
+    flow:
+      migrate:
+        action: migrate
+        for_each: ["a", "b", "c"]
+        sequential: true
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("migrate").unwrap();
+        assert!(step.sequential);
+    }
+
+    #[test]
+    fn test_flow_step_sequential_defaults_false() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      process:
+        action: process
+        for_each: ["a", "b"]
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("process").unwrap();
+        assert!(!step.sequential);
+    }
+
+    #[test]
+    fn test_flow_step_for_each_absent_is_none() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("step").unwrap();
+        assert!(step.for_each.is_none());
+        assert!(!step.sequential);
+    }
+
+    #[test]
+    fn test_inline_step_for_each_and_sequential() {
+        let yaml = r#"
+tasks:
+  main:
+    flow:
+      process:
+        type: script
+        script: echo hello
+        for_each: ["x", "y"]
+        sequential: true
+        input:
+          val: "{{ each.item }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("process").unwrap();
+        assert!(step.for_each.is_some());
+        assert!(step.sequential);
+        // Inline action is auto-hoisted; the step references it
+        assert!(!step.action.is_empty());
     }
 }

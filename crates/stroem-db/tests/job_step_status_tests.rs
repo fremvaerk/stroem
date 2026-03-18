@@ -39,6 +39,11 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
     }
 }
 
@@ -496,6 +501,8 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -510,6 +517,8 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -553,6 +562,8 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -568,6 +579,8 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             continue_on_failure: true,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -797,6 +810,8 @@ async fn test_skip_unreachable_steps_does_not_block_on_skipped_dep() -> Result<(
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );
@@ -811,6 +826,8 @@ async fn test_skip_unreachable_steps_does_not_block_on_skipped_dep() -> Result<(
             continue_on_failure: false,
             timeout: None,
             when: None,
+            for_each: None,
+            sequential: false,
             inline_action: None,
         },
     );

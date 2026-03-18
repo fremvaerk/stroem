@@ -9,7 +9,7 @@ import {
   Position,
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
-import { Circle, Play, Flag } from "lucide-react";
+import { Circle, Play, Flag, Repeat } from "lucide-react";
 import { cn, formatActionName } from "@/lib/utils";
 import { statusIconsSmall } from "@/lib/status-icons";
 import type { JobStep, FlowStep } from "@/lib/types";
@@ -39,6 +39,7 @@ interface StepNodeData {
   action?: string;
   status?: string;
   selected: boolean;
+  hasForEach?: boolean;
   [key: string]: unknown;
 }
 
@@ -67,6 +68,9 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
         <span className="truncate font-mono text-sm font-medium">
           {data.label}
         </span>
+        {data.hasForEach && (
+          <Repeat className="h-3 w-3 shrink-0 text-violet-500" />
+        )}
       </div>
       {data.action && (
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
@@ -195,8 +199,10 @@ export function WorkflowDag({
     const hasDeps = new Set<string>();
 
     if (steps) {
-      const statusMap = new Map(steps.map((s) => [s.step_name, s.status]));
-      for (const step of steps) {
+      // Filter out loop instance steps — only show placeholders in the DAG
+      const visibleSteps = steps.filter((s) => s.loop_source === null);
+      const statusMap = new Map(visibleSteps.map((s) => [s.step_name, s.status]));
+      for (const step of visibleSteps) {
         rawNodes.push({
           id: step.step_name,
           type: "step",
@@ -227,7 +233,7 @@ export function WorkflowDag({
         }
       }
 
-      const allIds = new Set(steps.map((s) => s.step_name));
+      const allIds = new Set(visibleSteps.map((s) => s.step_name));
       const roots = [...allIds].filter((id) => !hasDeps.has(id));
       const leaves = [...allIds].filter((id) => !targets.has(id));
 
@@ -278,6 +284,7 @@ export function WorkflowDag({
             label: flowStep.name ?? name,
             action: flowStep.action,
             selected: false,
+            hasForEach: flowStep.for_each !== undefined,
           } satisfies StepNodeData,
         });
         for (const dep of flowStep.depends_on ?? []) {

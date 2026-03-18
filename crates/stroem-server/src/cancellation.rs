@@ -59,6 +59,19 @@ pub async fn cancel_job(state: &AppState, job_id: Uuid) -> Result<CancelResult> 
         job_id
     );
 
+    // Cancel server-managed running steps (for_each placeholders, type:task steps).
+    // These have no worker to signal — transition them directly to cancelled.
+    let server_managed_count = JobStepRepo::cancel_server_managed_steps(&state.pool, job_id)
+        .await
+        .context("Failed to cancel server-managed steps")?;
+    if server_managed_count > 0 {
+        tracing::info!(
+            "Cancelled {} server-managed running steps for job {}",
+            server_managed_count,
+            job_id
+        );
+    }
+
     // Get running steps — these need active kill from the worker
     let running_steps = JobStepRepo::get_running_steps(&state.pool, job_id)
         .await

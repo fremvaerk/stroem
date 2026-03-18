@@ -38,6 +38,8 @@ export interface FlowStep {
   depends_on?: string[];
   continue_on_failure?: boolean;
   when?: string;
+  for_each?: string | string[] | unknown[];
+  sequential?: boolean;
 }
 
 export interface TriggerInfo {
@@ -92,6 +94,10 @@ export interface JobStep {
   error_message: string | null;
   when_condition: string | null;
   depends_on: string[];
+  for_each_expr: string | null;
+  loop_source: string | null;
+  loop_index: number | null;
+  loop_total: number | null;
 }
 
 export interface JobDetail {

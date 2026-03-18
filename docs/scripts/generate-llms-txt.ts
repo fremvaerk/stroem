@@ -46,6 +46,10 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`action\` must reference an existing action.
 - \`depends_on\` must reference existing steps within the same flow.
 - No cycles allowed in the dependency graph.
+- Step names must not contain \`[\` or \`]\` (reserved for for_each instances).
+- \`for_each\`: Tera template string (renders to JSON array) or literal array. Max 10,000 items.
+- \`sequential: true\`: run loop instances one at a time (default: parallel).
+- Inside loop instances: \`each.item\` = current element, \`each.index\` = zero-based index.
 
 **Triggers:**
 - \`type: scheduler\` — \`cron\` must be a valid 5-field or 6-field cron expression.
@@ -80,6 +84,7 @@ const sections: { file: string; title: string }[] = [
   { file: "guides/input-and-output.md", title: "Input & Output" },
   { file: "guides/templating.md", title: "Templating" },
   { file: "guides/conditionals.md", title: "Conditional Flow Steps" },
+  { file: "guides/loops.md", title: "For-Each Loops" },
   { file: "guides/triggers.md", title: "Triggers" },
   { file: "guides/hooks.md", title: "Hooks" },
   { file: "guides/connections.md", title: "Connections" },
