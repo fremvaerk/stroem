@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router";
-import { ArrowLeft, LayoutList, Network, TriangleAlert, XCircle } from "lucide-react";
+import { ArrowLeft, ChevronUp, ChevronDown, Network, TriangleAlert, XCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { InfoGrid } from "@/components/info-grid";
 import { StepTimeline } from "@/components/step-timeline";
-import { StepDetail } from "@/components/step-detail";
 import { WorkflowDag } from "@/components/workflow-dag";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
@@ -16,59 +15,7 @@ import { getJob, cancelJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration } from "@/lib/formatting";
-import type { JobDetail, JobStep } from "@/lib/types";
-
-function DagDetailPanel({
-  jobId,
-  steps,
-  selectedStep,
-  onSelectStep,
-  workerNames,
-}: {
-  jobId: string;
-  steps: JobStep[];
-  selectedStep: string | null;
-  onSelectStep: (name: string | null) => void;
-  workerNames: Map<string, string>;
-}) {
-  if (!selectedStep) return null;
-
-  const selected = steps.find((s) => s.step_name === selectedStep);
-  if (!selected) return null;
-
-  // Check if selected step is a loop placeholder or an instance of one
-  const isLoopPlaceholder = selected.loop_total !== null || selected.for_each_expr !== null;
-  const isLoopInstance = selected.loop_source !== null;
-  const placeholderName = isLoopPlaceholder
-    ? selectedStep
-    : isLoopInstance
-      ? selected.loop_source
-      : null;
-
-  if (placeholderName) {
-    const instances = steps
-      .filter((s) => s.loop_source === placeholderName)
-      .sort((a, b) => (a.loop_index ?? 0) - (b.loop_index ?? 0));
-    if (instances.length === 0) return null;
-    return (
-      <div className="mt-4 border-t pt-4">
-        <StepTimeline
-          jobId={jobId}
-          steps={instances}
-          selectedStep={isLoopInstance ? selectedStep : null}
-          onSelectStep={(name) => onSelectStep(name ?? placeholderName)}
-          workerNames={workerNames}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="mt-4 border-t pt-4">
-      <StepDetail jobId={jobId} step={selected} />
-    </div>
-  );
-}
+import type { JobDetail } from "@/lib/types";
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -78,7 +25,7 @@ export function JobDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"timeline" | "dag">("timeline");
+  const [graphOpen, setGraphOpen] = useState(true);
   const [cancelling, setCancelling] = useState(false);
 
   const load = useCallback(async () => {
@@ -104,6 +51,13 @@ export function JobDetailPage() {
     const interval = setInterval(load, hasRunningSteps ? 3000 : 8000);
     return () => clearInterval(interval);
   }, [job, load]);
+
+  // Show graph only when there are multiple top-level steps (excluding loop instances)
+  const showGraph = useMemo(() => {
+    if (!job) return false;
+    const topLevel = job.steps.filter((s) => s.loop_source === null);
+    return topLevel.length > 1;
+  }, [job]);
 
   if (loading) {
     return <LoadingSpinner />;
@@ -245,53 +199,46 @@ export function JobDetailPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">Steps</CardTitle>
-            <div className="flex gap-1 rounded-md border p-1">
+            {showGraph && (
               <Button
-                variant={viewMode === "timeline" ? "secondary" : "ghost"}
+                variant="ghost"
                 size="sm"
-                onClick={() => setViewMode("timeline")}
-              >
-                <LayoutList className="mr-1.5 h-3.5 w-3.5" />
-                Timeline
-              </Button>
-              <Button
-                variant={viewMode === "dag" ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setViewMode("dag")}
+                onClick={() => setGraphOpen((prev) => !prev)}
               >
                 <Network className="mr-1.5 h-3.5 w-3.5" />
                 Graph
+                {graphOpen ? (
+                  <ChevronUp className="ml-1 h-3.5 w-3.5" />
+                ) : (
+                  <ChevronDown className="ml-1 h-3.5 w-3.5" />
+                )}
               </Button>
-            </div>
+            )}
           </div>
         </CardHeader>
         <CardContent>
           {job.steps.length === 0 ? (
             <p className="text-sm text-muted-foreground">No steps</p>
-          ) : viewMode === "timeline" ? (
-            <StepTimeline
-              jobId={job.job_id}
-              steps={job.steps}
-              selectedStep={selectedStep}
-              onSelectStep={setSelectedStep}
-              workerNames={workerNames}
-            />
           ) : (
             <>
-              <ErrorBoundary
-                fallback={
-                  <p className="py-8 text-center text-sm text-muted-foreground">
-                    DAG visualization failed to render.
-                  </p>
-                }
-              >
-                <WorkflowDag
-                  steps={job.steps}
-                  selectedStep={selectedStep}
-                  onSelectStep={setSelectedStep}
-                />
-              </ErrorBoundary>
-              <DagDetailPanel
+              {showGraph && graphOpen && (
+                <ErrorBoundary
+                  fallback={
+                    <p className="py-8 text-center text-sm text-muted-foreground">
+                      DAG visualization failed to render.
+                    </p>
+                  }
+                >
+                  <div className="mb-4">
+                    <WorkflowDag
+                      steps={job.steps}
+                      selectedStep={selectedStep}
+                      onSelectStep={setSelectedStep}
+                    />
+                  </div>
+                </ErrorBoundary>
+              )}
+              <StepTimeline
                 jobId={job.job_id}
                 steps={job.steps}
                 selectedStep={selectedStep}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import {
   AlertCircle,
@@ -42,7 +42,7 @@ function StepRow({
   indented,
 }: StepRowProps) {
   return (
-    <div>
+    <div id={`step-${step.step_name}`}>
       <div
         role="button"
         tabIndex={0}
@@ -169,7 +169,7 @@ function LoopGroup({
     (instances.length === 0 && terminalStatuses.includes(placeholder.status));
 
   return (
-    <div>
+    <div id={`step-${placeholder.step_name}`}>
       {/* Placeholder row header */}
       <div
         role="button"
@@ -289,8 +289,30 @@ export function StepTimeline({
   onSelectStep,
   workerNames,
 }: StepTimelineProps) {
-  // Expanded state for loop instance lists, keyed by placeholder step name
+  // User-toggled loop expansion state, keyed by placeholder step name
   const [expandedLoops, setExpandedLoops] = useState<Record<string, boolean>>({});
+
+  // Auto-expand: if the selected step is a loop placeholder or instance, include its group
+  const effectiveExpandedLoops = useMemo(() => {
+    if (!selectedStep) return expandedLoops;
+    const step = steps.find((s) => s.step_name === selectedStep);
+    if (!step) return expandedLoops;
+    const isLoopPlaceholder = step.loop_total !== null || step.for_each_expr !== null;
+    const loopKey = isLoopPlaceholder ? selectedStep : step.loop_source;
+    if (loopKey && expandedLoops[loopKey] === undefined) {
+      return { ...expandedLoops, [loopKey]: true };
+    }
+    return expandedLoops;
+  }, [expandedLoops, selectedStep, steps]);
+
+  // Scroll selected step into view after DOM updates
+  useEffect(() => {
+    if (!selectedStep) return;
+    const handle = requestAnimationFrame(() => {
+      document.getElementById(`step-${selectedStep}`)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => cancelAnimationFrame(handle);
+  }, [selectedStep]);
 
   // Separate placeholder steps (loop_source === null but loop_total !== null)
   // from instance steps (loop_source !== null).
@@ -328,9 +350,9 @@ export function StepTimeline({
               onSelectStep={onSelectStep}
               workerNames={workerNames}
               isLast={isLast}
-              instancesExpanded={expandedLoops[step.step_name] ?? false}
+              instancesExpanded={effectiveExpandedLoops[step.step_name] ?? false}
               onToggleInstances={() => {
-                const wasExpanded = expandedLoops[step.step_name] ?? false;
+                const wasExpanded = effectiveExpandedLoops[step.step_name] ?? false;
                 setExpandedLoops((prev) => ({
                   ...prev,
                   [step.step_name]: !wasExpanded,
