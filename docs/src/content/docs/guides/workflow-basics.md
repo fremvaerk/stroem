@@ -291,7 +291,7 @@ The list can also come from a template expression referencing task input or a pr
 flow:
   get-targets:
     type: script
-    script: "echo '[\"svc-a\", \"svc-b\"]'"
+    script: "echo 'OUTPUT: [\"svc-a\", \"svc-b\"]'"
   restart:
     action: restart-service
     depends_on: [get-targets]

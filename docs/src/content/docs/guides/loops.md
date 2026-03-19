@@ -21,10 +21,12 @@ Steps can iterate over a list using `for_each`, running the same action for each
 actions:
   get-items:
     type: script
-    script: echo '["a","b","c"]'
+    script: echo 'OUTPUT: {"items": ["a","b","c"]}'
   process-item:
     type: script
-    script: echo "Processing {{ input.item }}"
+    script: |
+      echo "Processing {{ input.item }}"
+      echo 'OUTPUT: {"result": "done-{{ input.item }}"}'
 
 tasks:
   main:
@@ -50,7 +52,7 @@ tasks:
 When the job runs:
 1. `fetch` completes and outputs `{ "items": ["a", "b", "c"] }`
 2. `process` expands into `process[0]`, `process[1]`, `process[2]` — all run in parallel
-3. `aggregate` waits for all 3 instances, then sees `process.output` as `["result0", "result1", "result2"]`
+3. `aggregate` waits for all 3 instances, then sees `process.output` as `[{"result":"done-a"}, {"result":"done-b"}, {"result":"done-c"}]`
 
 ### Literal array
 
