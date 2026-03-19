@@ -138,7 +138,7 @@ fn load_library_workspace(path: &Path) -> Result<WorkspaceConfig> {
     }
 
     // Scan YAML files, skipping SOPS-encrypted files (libraries don't decrypt secrets)
-    let workspace = scan_and_merge_yaml_files(&scan_dir, true)
+    let workspace = scan_and_merge_yaml_files(&scan_dir, true, false)
         .with_context(|| format!("Failed to scan library directory: {}", scan_dir.display()))?;
 
     // Don't render secrets or connections for libraries — those are workspace-local

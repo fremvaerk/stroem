@@ -19,8 +19,8 @@ use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 /// Scans a directory for YAML workflow files, parses them, and merges them into
 /// a [`WorkspaceConfig`].
 ///
-/// Files are processed in **sorted filename order** for deterministic merges.
-/// Subdirectories and non-YAML files are silently skipped.
+/// Recursively scans subdirectories. Files are processed in **sorted path order**
+/// for deterministic merges. Non-YAML files are silently skipped.
 ///
 /// # Parameters
 ///
@@ -28,6 +28,9 @@ use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 /// - `skip_sops` — When `true`, files detected as SOPS-encrypted are skipped
 ///   entirely (library mode). When `false`, SOPS files are decrypted via
 ///   `stroem_common::sops::read_yaml_file` (workspace folder mode).
+/// - `infer_folders` — When `true`, tasks without an explicit `folder` field
+///   inherit a folder from their file's path relative to `scan_dir`
+///   (e.g. `data/etl.yaml` → `folder: "data"`). Disabled for libraries.
 ///
 /// # Errors
 ///
@@ -37,29 +40,16 @@ use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 pub(crate) fn scan_and_merge_yaml_files(
     scan_dir: &Path,
     skip_sops: bool,
+    infer_folders: bool,
 ) -> Result<WorkspaceConfig> {
     use stroem_common::models::workflow::WorkflowConfig;
 
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(scan_dir)
-        .with_context(|| format!("Failed to read directory: {}", scan_dir.display()))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("Failed to read directory entry")?
-        .into_iter()
-        .map(|e| e.path())
-        .filter(|p| !p.is_dir())
-        .filter(|p| {
-            p.extension()
-                .map(|ext| ext == "yaml" || ext == "yml")
-                .unwrap_or(false)
-        })
-        .collect();
+    // Collect YAML files recursively from scan_dir and all subdirectories.
+    let mut entries: Vec<PathBuf> = Vec::new();
+    collect_yaml_files(scan_dir, &mut entries, 0)?;
 
-    // Sort by filename for deterministic merge order across platforms
-    entries.sort_by(|a, b| {
-        a.file_name()
-            .unwrap_or_default()
-            .cmp(b.file_name().unwrap_or_default())
-    });
+    // Sort by full path for deterministic merge order across platforms
+    entries.sort();
 
     let mut workspace = WorkspaceConfig::new();
 
@@ -83,13 +73,65 @@ pub(crate) fn scan_and_merge_yaml_files(
         let content = stroem_common::sops::read_yaml_file(&file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
-        let config: WorkflowConfig = serde_yaml::from_str(&content)
+        let mut config: WorkflowConfig = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse YAML: {}", file_path.display()))?;
+
+        // For files in subdirectories, infer task folder from the relative path
+        // (e.g., .workflows/data/etl.yaml → folder "data").
+        // Only applies when the task has no explicit folder set.
+        if infer_folders {
+            if let Some(rel_dir) = file_path
+                .parent()
+                .and_then(|p| p.strip_prefix(scan_dir).ok())
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                let folder = rel_dir.to_string_lossy().replace('\\', "/");
+                for task in config.tasks.values_mut() {
+                    if task.folder.is_none() {
+                        task.folder = Some(folder.clone());
+                    }
+                }
+            }
+        }
 
         workspace.merge(config);
     }
 
     Ok(workspace)
+}
+
+/// Maximum recursion depth for subdirectory scanning (matches `compute_revision`).
+const MAX_SCAN_DEPTH: usize = 10;
+
+/// Recursively collect YAML files from a directory and its subdirectories.
+fn collect_yaml_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
+    if depth > MAX_SCAN_DEPTH {
+        tracing::warn!(
+            "Skipping directory (max depth {}): {}",
+            MAX_SCAN_DEPTH,
+            dir.display()
+        );
+        return Ok(());
+    }
+
+    let read_dir = std::fs::read_dir(dir)
+        .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
+
+    for entry in read_dir {
+        let entry = entry.context("Failed to read directory entry")?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_yaml_files(&path, out, depth + 1)?;
+        } else if path
+            .extension()
+            .map(|ext| ext == "yaml" || ext == "yml")
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+
+    Ok(())
 }
 
 /// Trait for workspace sources (folder, git, etc.)

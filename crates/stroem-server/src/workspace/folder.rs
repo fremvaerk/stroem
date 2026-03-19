@@ -105,7 +105,7 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
     };
 
     // Scan YAML files, decrypting SOPS-encrypted files where present
-    let mut workspace = scan_and_merge_yaml_files(&scan_dir, false)
+    let mut workspace = scan_and_merge_yaml_files(&scan_dir, false, true)
         .with_context(|| format!("Failed to scan workspace directory: {:?}", scan_dir))?;
 
     // Render secret values through Tera (resolves {{ 'ref+...' | vals }} at load time)
@@ -674,6 +674,137 @@ tasks:
         assert_eq!(
             task.flow.get("inline-step").unwrap().action,
             "_inline:mixed:inline-step"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subdirectory_infers_task_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let workflows_dir = temp_dir.path().join(".workflows");
+        let data_dir = workflows_dir.join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // Task in root — no folder inferred
+        fs::write(
+            workflows_dir.join("root.yaml"),
+            r#"
+actions:
+  greet:
+    type: script
+    script: "echo hi"
+tasks:
+  root-task:
+    flow:
+      step1:
+        action: greet
+"#,
+        )
+        .unwrap();
+
+        // Task in data/ subdirectory — folder "data" inferred
+        fs::write(
+            data_dir.join("etl.yaml"),
+            r#"
+tasks:
+  etl-job:
+    flow:
+      step1:
+        action: greet
+"#,
+        )
+        .unwrap();
+
+        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let root_task = workspace.tasks.get("root-task").unwrap();
+        assert_eq!(
+            root_task.folder, None,
+            "Root-level tasks should have no folder"
+        );
+
+        let etl_task = workspace.tasks.get("etl-job").unwrap();
+        assert_eq!(
+            etl_task.folder,
+            Some("data".to_string()),
+            "Subdirectory tasks should get folder from path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subdirectory_does_not_override_explicit_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let workflows_dir = temp_dir.path().join(".workflows");
+        let sub_dir = workflows_dir.join("infra");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        fs::write(
+            workflows_dir.join("actions.yaml"),
+            "actions:\n  deploy:\n    type: script\n    script: echo deploy\n",
+        )
+        .unwrap();
+
+        // Task with explicit folder in a subdirectory — explicit wins
+        fs::write(
+            sub_dir.join("deploy.yaml"),
+            r#"
+tasks:
+  deploy-prod:
+    folder: production
+    flow:
+      step1:
+        action: deploy
+"#,
+        )
+        .unwrap();
+
+        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let task = workspace.tasks.get("deploy-prod").unwrap();
+        assert_eq!(
+            task.folder,
+            Some("production".to_string()),
+            "Explicit folder should not be overridden by subdirectory path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_subdirectory_folder() {
+        let temp_dir = TempDir::new().unwrap();
+        let workflows_dir = temp_dir.path().join(".workflows");
+        let nested_dir = workflows_dir.join("deploy").join("staging");
+        fs::create_dir_all(&nested_dir).unwrap();
+
+        fs::write(
+            workflows_dir.join("actions.yaml"),
+            "actions:\n  run:\n    type: script\n    script: echo run\n",
+        )
+        .unwrap();
+
+        fs::write(
+            nested_dir.join("tasks.yaml"),
+            r#"
+tasks:
+  staging-deploy:
+    flow:
+      step1:
+        action: run
+"#,
+        )
+        .unwrap();
+
+        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        let task = workspace.tasks.get("staging-deploy").unwrap();
+        assert_eq!(
+            task.folder,
+            Some("deploy/staging".to_string()),
+            "Nested subdirectory should produce slash-separated folder path"
         );
     }
 }

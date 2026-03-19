@@ -52,11 +52,10 @@ export function JobDetailPage() {
     return () => clearInterval(interval);
   }, [job, load]);
 
-  // Show graph only when there are multiple top-level steps (excluding loop instances)
+  // Show graph when there are any top-level steps (excluding loop instances)
   const showGraph = useMemo(() => {
     if (!job) return false;
-    const topLevel = job.steps.filter((s) => s.loop_source === null);
-    return topLevel.length > 1;
+    return job.steps.some((s) => s.loop_source === null);
   }, [job]);
 
   if (loading) {
