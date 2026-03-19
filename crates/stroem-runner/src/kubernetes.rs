@@ -740,7 +740,12 @@ async fn drain_log_stream(
     (stdout_lines, stderr_lines, parsed_output)
 }
 
-/// Maximum number of reconnect attempts for the follow log stream.
+/// Maximum number of consecutive reconnect attempts when the log stream cannot
+/// deliver any data.  This guards against infinite retries when the pod has
+/// exited without the stop-token being cancelled (orphan safety net).
+/// While the stop-token is live the counter resets after every successful
+/// connection (even if that connection produced no new lines), so long-running
+/// pods with quiet periods will not exhaust this budget.
 const MAX_LOG_RECONNECTS: usize = 10;
 
 /// Stream pod logs with automatic reconnection on stream errors.
@@ -805,8 +810,6 @@ async fn stream_logs_with_reconnect(
 
         let is_reconnect = last_timestamp.is_some();
         let mut stream_broken = false;
-        // Whether we received any data on this attempt (including lines skipped by dedup).
-        let mut received_any_data = false;
 
         // Use select! so we abort the API call if the pod exits while we're connecting.
         let stream_result = tokio::select! {
@@ -843,7 +846,6 @@ async fn stream_logs_with_reconnect(
                     // All streams use timestamps. Strip the prefix and track for dedup.
                     // Format: "2006-01-02T15:04:05.999999999Z <content>"
                     let (ts, content) = split_timestamp_line(&raw_line);
-                    received_any_data = true;
 
                     if is_reconnect && !ts.is_empty() {
                         // Skip lines already seen in the last second of the previous stream.
@@ -891,23 +893,17 @@ async fn stream_logs_with_reconnect(
                     break;
                 }
 
-                // Stream successfully delivered data before breaking — reset the
-                // consecutive-failure counter so long-running pods don't exhaust
-                // the reconnect budget over their lifetime.
-                if received_any_data {
-                    attempt = 0;
-                }
-
                 // Stream broke — if the stop token is cancelled (pod exited), no point reconnecting.
                 if stop_token.is_cancelled() {
                     break;
                 }
 
-                // If this reconnect attempt produced no new data,
-                // the container likely already exited before we could reconnect.
-                if !received_any_data && attempt > 0 {
-                    break;
-                }
+                // We successfully opened a follow stream (Ok path) but it broke.
+                // This includes both data-producing streams and idle-timeout disconnects
+                // during quiet computation periods. Always reset the failure counter:
+                // only actual connection failures (Err path below) should count toward
+                // the reconnect limit.
+                attempt = 0;
             }
             Err(e) => {
                 tracing::warn!(
