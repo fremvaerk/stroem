@@ -89,6 +89,7 @@ const sections: { file: string; title: string }[] = [
   { file: "guides/hooks.md", title: "Hooks" },
   { file: "guides/connections.md", title: "Connections" },
   { file: "guides/secrets.md", title: "Secrets & Encryption" },
+  { file: "reference/workflow-yaml.md", title: "Workflow YAML Reference" },
   { file: "examples/hello-world.md", title: "Example: Hello World" },
   { file: "examples/deploy-pipeline.md", title: "Example: Deploy Pipeline" },
   { file: "examples/ci-pipeline.md", title: "Example: CI Pipeline" },

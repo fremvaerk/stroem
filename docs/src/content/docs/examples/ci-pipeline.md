@@ -120,6 +120,75 @@ curl -X POST http://localhost:8080/api/workspaces/default/tasks/ci-pipeline/exec
 stroem trigger ci-pipeline --input '{"body": {"ref": "refs/heads/main"}}'
 ```
 
+## Test matrix with `for_each`
+
+Use [`for_each`](/guides/loops/) to run the same tests across multiple Node.js versions:
+
+```yaml
+actions:
+  lint:
+    type: script
+    runner: docker
+    script: |
+      cd /workspace
+      npm ci
+      npm run lint
+
+  test-version:
+    type: docker
+    image: "node:{{ input.node_version }}"
+    cmd: |
+      cd /app && npm ci && npm test &&
+      echo "OUTPUT: {\"node\": \"{{ input.node_version }}\", \"passed\": true}"
+    input:
+      node_version: { type: string }
+
+  build:
+    type: script
+    runner: docker
+    script: |
+      cd /workspace
+      npm ci
+      npm run build
+      echo "OUTPUT: {\"artifact\": \"dist/app.tar.gz\"}"
+
+  notify-ci:
+    type: script
+    script: |
+      echo "CI result: {{ input.status }}"
+      echo "Test results: {{ input.results }}"
+    input:
+      status: { type: string }
+      results: { type: string }
+
+tasks:
+  ci-matrix:
+    mode: distributed
+    input:
+      body: { type: string }
+    flow:
+      lint:
+        action: lint
+      test:
+        action: test-version
+        for_each: ["18", "20", "22"]
+        input:
+          node_version: "{{ each.item }}"
+      # lint and test run in parallel; build waits for both
+      build:
+        action: build
+        depends_on: [lint, test]
+      notify:
+        action: notify-ci
+        depends_on: [build]
+        continue_on_failure: true
+        input:
+          status: "success"
+          results: "{{ test.output }}"
+```
+
+This creates `test[0]` (Node 18), `test[1]` (Node 20), `test[2]` (Node 22) — all running in parallel alongside lint. The `test-version` action uses `type: docker` to run each Node.js version's image directly — note that `type: docker` does **not** mount workspace files, so the application source must be baked into the image. The `lint` and `build` actions use `type: script` + `runner: docker` instead, which mounts the workspace at `/workspace`. The notify step receives `test.output` as an aggregated array of results.
+
 ## Adding error hooks
 
 ```yaml

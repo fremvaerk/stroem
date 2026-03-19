@@ -270,6 +270,40 @@ The `continue_on_failure` flag has dual semantics (similar to GitHub Actions' `c
 
 You do **not** need `continue_on_failure` to handle skipped dependencies from conditional branches — those are automatically treated as satisfied.
 
+### Loops (for_each)
+
+Use `for_each` to fan out a step across a list of items. Each item spawns its own step instance, running in parallel by default:
+
+```yaml
+flow:
+  deploy:
+    action: deploy-app
+    for_each: ["us-east-1", "eu-west-1", "ap-south-1"]
+    input:
+      region: "{{ each.item }}"
+```
+
+This creates `deploy[0]`, `deploy[1]`, `deploy[2]` — one per region. Inside the step, use `each.item` for the current value and `each.index` for the position.
+
+The list can also come from a template expression referencing task input or a previous step's output:
+
+```yaml
+flow:
+  get-targets:
+    type: script
+    script: "echo '[\"svc-a\", \"svc-b\"]'"
+  restart:
+    action: restart-service
+    depends_on: [get-targets]
+    for_each: "{{ get_targets.output }}"
+    input:
+      service: "{{ each.item }}"
+```
+
+Add `sequential: true` to run instances one at a time instead of in parallel. Downstream steps that depend on a `for_each` step receive the aggregated outputs as an array.
+
+See the [Loops guide](/guides/loops/) for sequential mode, error handling, sub-job fan-out, and combining loops with conditional steps.
+
 ### DAG visualization
 
 The web UI provides an interactive graph view for step dependencies:
@@ -318,5 +352,7 @@ The validator checks:
 - Dependencies reference existing steps within the same flow
 - No cycles in the dependency graph
 - Step `when` conditions have valid Tera template syntax
+- Step `for_each` expressions have valid Tera template syntax
+- Step names don't contain `[` or `]` (reserved for loop instances)
 - Trigger cron expressions are valid
 - Hook action references exist

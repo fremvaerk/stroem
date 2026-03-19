@@ -40,6 +40,7 @@ interface StepNodeData {
   status?: string;
   selected: boolean;
   hasForEach?: boolean;
+  loopInfo?: string;
   [key: string]: unknown;
 }
 
@@ -77,9 +78,19 @@ function StepNode({ data }: NodeProps<Node<StepNodeData>>) {
           {formatActionName(data.action)}
         </p>
       )}
-      {data.status && (
+      {data.status && !data.loopInfo && (
         <p className="mt-0.5 text-xs capitalize text-muted-foreground">
           {data.status}
+        </p>
+      )}
+      {data.loopInfo && (
+        <p className={cn(
+          "mt-0.5 text-xs",
+          data.loopInfo.includes("failed")
+            ? "text-red-600 dark:text-red-400"
+            : "text-violet-600 dark:text-violet-400",
+        )}>
+          {data.loopInfo}
         </p>
       )}
       <Handle
@@ -202,7 +213,26 @@ export function WorkflowDag({
       // Filter out loop instance steps — only show placeholders in the DAG
       const visibleSteps = steps.filter((s) => s.loop_source === null);
       const statusMap = new Map(visibleSteps.map((s) => [s.step_name, s.status]));
+
+      // Count instances per placeholder for loop info
+      const instanceCounts = new Map<string, { done: number; failed: number; total: number }>();
+      for (const s of steps) {
+        if (s.loop_source !== null) {
+          const entry = instanceCounts.get(s.loop_source) ?? { done: 0, failed: 0, total: 0 };
+          entry.total++;
+          if (s.status === "completed" || s.status === "failed" || s.status === "skipped" || s.status === "cancelled") {
+            entry.done++;
+          }
+          if (s.status === "failed" || s.status === "cancelled") {
+            entry.failed++;
+          }
+          instanceCounts.set(s.loop_source, entry);
+        }
+      }
+
       for (const step of visibleSteps) {
+        const loopCount = instanceCounts.get(step.step_name);
+        const isLoop = step.loop_total !== null || step.for_each_expr !== null;
         rawNodes.push({
           id: step.step_name,
           type: "step",
@@ -212,6 +242,12 @@ export function WorkflowDag({
             action: step.action_name,
             status: step.status,
             selected: false,
+            hasForEach: isLoop,
+            loopInfo: loopCount
+              ? `${loopCount.done}/${loopCount.total} iterations${loopCount.failed > 0 ? ` (${loopCount.failed} failed)` : ""}`
+              : isLoop && step.loop_total === 0
+                ? "0 iterations"
+                : undefined,
           } satisfies StepNodeData,
         });
         for (const dep of step.depends_on ?? []) {

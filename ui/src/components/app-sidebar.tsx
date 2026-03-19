@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Link, useLocation } from "react-router";
 import {
+  BookOpen,
   FolderOpen,
   LayoutDashboard,
   ListChecks,
@@ -111,6 +112,18 @@ export function AppSidebar() {
               </SidebarMenuButton>
             </SidebarMenuItem>
           ))}
+          <SidebarMenuItem>
+            <SidebarMenuButton asChild tooltip="Documentation">
+              <a
+                href="https://fremvaerk.github.io/stroem/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <BookOpen />
+                <span>Documentation</span>
+              </a>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
         </SidebarMenu>
         {authRequired && user && (
           <>

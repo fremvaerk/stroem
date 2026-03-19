@@ -36,6 +36,7 @@ export default defineConfig({
             { label: "Runners", slug: "guides/runners" },
             { label: "Templating", slug: "guides/templating" },
             { label: "Conditional Flow Steps", slug: "guides/conditionals" },
+            { label: "Loops", slug: "guides/loops" },
             { label: "Input & Output", slug: "guides/input-and-output" },
             { label: "Triggers", slug: "guides/triggers" },
             { label: "Hooks", slug: "guides/hooks" },
@@ -44,6 +45,7 @@ export default defineConfig({
               label: "Secrets & Encryption",
               slug: "guides/secrets",
             },
+            { label: "Libraries", slug: "guides/libraries" },
             { label: "Multi-Workspace", slug: "guides/multi-workspace" },
             { label: "MCP Integration", slug: "guides/mcp" },
           ],
@@ -74,6 +76,7 @@ export default defineConfig({
           label: "Reference",
           collapsed: true,
           items: [
+            { label: "Workflow YAML", slug: "reference/workflow-yaml" },
             { label: "CLI", slug: "reference/cli" },
             { label: "API", slug: "reference/api" },
             { label: "Webhook API", slug: "reference/webhook-api" },

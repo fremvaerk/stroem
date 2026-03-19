@@ -150,7 +150,8 @@ function LoopGroup({
   instancesExpanded,
   onToggleInstances,
 }: LoopGroupProps) {
-  const isPlaceholderExpanded = selectedStep === placeholder.step_name;
+  // Placeholder steps have no logs/input of their own — toggling expands iterations instead
+  const isPlaceholderExpanded = instancesExpanded;
 
   const completedCount = instances.filter(
     (s) => s.status === "completed" || s.status === "skipped",
@@ -176,13 +177,11 @@ function LoopGroup({
         aria-label={`${placeholder.step_name}, status: ${placeholder.status}`}
         aria-expanded={isPlaceholderExpanded}
         className="flex w-full gap-3 text-left hover:bg-muted/50 rounded-md px-1 -mx-1 transition-colors cursor-pointer"
-        onClick={() =>
-          onSelectStep(isPlaceholderExpanded ? null : placeholder.step_name)
-        }
+        onClick={onToggleInstances}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            onSelectStep(isPlaceholderExpanded ? null : placeholder.step_name);
+            onToggleInstances();
           }
         }}
       >
@@ -192,7 +191,7 @@ function LoopGroup({
               <Circle className="h-4 w-4 text-muted-foreground" />
             )}
           </div>
-          {(!isLast || isPlaceholderExpanded || instances.length > 0) && (
+          {(!isLast || isPlaceholderExpanded) && (
             <div className="w-px flex-1 bg-border" />
           )}
         </div>
@@ -254,51 +253,29 @@ function LoopGroup({
         </div>
       </div>
 
-      {isPlaceholderExpanded && (
-        <div className="ml-9 mb-4">
-          <StepDetail jobId={jobId} step={placeholder} />
-        </div>
-      )}
-
-      {/* Collapsible instance list */}
-      {instances.length > 0 && (
+      {/* Instance list — shown directly when placeholder is expanded */}
+      {instances.length > 0 && instancesExpanded && (
         <div className="ml-6">
-          <button
-            type="button"
-            aria-expanded={instancesExpanded}
-            className="flex items-center gap-1.5 mb-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-            onClick={onToggleInstances}
-          >
-            {instancesExpanded ? (
-              <ChevronDown className="h-3 w-3" />
-            ) : (
-              <ChevronRight className="h-3 w-3" />
-            )}
-            {instancesExpanded ? "hide" : "show"} {instances.length} iteration
-            {instances.length !== 1 ? "s" : ""}
-          </button>
-          {instancesExpanded && (
-            <div className="border-l pl-3 ml-2 space-y-0">
-              {instances.map((instance, idx) => (
-                <StepRow
-                  key={instance.step_name}
-                  jobId={jobId}
-                  step={instance}
-                  isExpanded={selectedStep === instance.step_name}
-                  onToggle={() =>
-                    onSelectStep(
-                      selectedStep === instance.step_name
-                        ? null
-                        : instance.step_name,
-                    )
-                  }
-                  workerNames={workerNames}
-                  isLast={idx === instances.length - 1}
-                  indented
-                />
-              ))}
-            </div>
-          )}
+          <div className="border-l pl-3 ml-2 space-y-0">
+            {instances.map((instance, idx) => (
+              <StepRow
+                key={instance.step_name}
+                jobId={jobId}
+                step={instance}
+                isExpanded={selectedStep === instance.step_name}
+                onToggle={() =>
+                  onSelectStep(
+                    selectedStep === instance.step_name
+                      ? null
+                      : instance.step_name,
+                  )
+                }
+                workerNames={workerNames}
+                isLast={idx === instances.length - 1}
+                indented
+              />
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -326,6 +303,10 @@ export function StepTimeline({
       instancesBySource.set(step.loop_source, existing);
     }
   }
+  // Sort instances by loop_index so they render in order regardless of API order
+  for (const arr of instancesBySource.values()) {
+    arr.sort((a, b) => (a.loop_index ?? 0) - (b.loop_index ?? 0));
+  }
 
   // Top-level steps: not an instance step themselves.
   const topLevelSteps = steps.filter((s) => s.loop_source === null);
@@ -348,12 +329,20 @@ export function StepTimeline({
               workerNames={workerNames}
               isLast={isLast}
               instancesExpanded={expandedLoops[step.step_name] ?? false}
-              onToggleInstances={() =>
+              onToggleInstances={() => {
+                const wasExpanded = expandedLoops[step.step_name] ?? false;
                 setExpandedLoops((prev) => ({
                   ...prev,
-                  [step.step_name]: !(prev[step.step_name] ?? false),
-                }))
-              }
+                  [step.step_name]: !wasExpanded,
+                }));
+                // Clear orphaned instance selection when collapsing
+                if (wasExpanded && selectedStep !== null) {
+                  const sel = steps.find((s) => s.step_name === selectedStep);
+                  if (sel?.loop_source === step.step_name) {
+                    onSelectStep(null);
+                  }
+                }
+              }}
             />
           );
         }

@@ -16,7 +16,59 @@ import { getJob, cancelJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration } from "@/lib/formatting";
-import type { JobDetail } from "@/lib/types";
+import type { JobDetail, JobStep } from "@/lib/types";
+
+function DagDetailPanel({
+  jobId,
+  steps,
+  selectedStep,
+  onSelectStep,
+  workerNames,
+}: {
+  jobId: string;
+  steps: JobStep[];
+  selectedStep: string | null;
+  onSelectStep: (name: string | null) => void;
+  workerNames: Map<string, string>;
+}) {
+  if (!selectedStep) return null;
+
+  const selected = steps.find((s) => s.step_name === selectedStep);
+  if (!selected) return null;
+
+  // Check if selected step is a loop placeholder or an instance of one
+  const isLoopPlaceholder = selected.loop_total !== null || selected.for_each_expr !== null;
+  const isLoopInstance = selected.loop_source !== null;
+  const placeholderName = isLoopPlaceholder
+    ? selectedStep
+    : isLoopInstance
+      ? selected.loop_source
+      : null;
+
+  if (placeholderName) {
+    const instances = steps
+      .filter((s) => s.loop_source === placeholderName)
+      .sort((a, b) => (a.loop_index ?? 0) - (b.loop_index ?? 0));
+    if (instances.length === 0) return null;
+    return (
+      <div className="mt-4 border-t pt-4">
+        <StepTimeline
+          jobId={jobId}
+          steps={instances}
+          selectedStep={isLoopInstance ? selectedStep : null}
+          onSelectStep={(name) => onSelectStep(name ?? placeholderName)}
+          workerNames={workerNames}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 border-t pt-4">
+      <StepDetail jobId={jobId} step={selected} />
+    </div>
+  );
+}
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -239,15 +291,13 @@ export function JobDetailPage() {
                   onSelectStep={setSelectedStep}
                 />
               </ErrorBoundary>
-              {selectedStep &&
-                job.steps.find((s) => s.step_name === selectedStep) && (
-                  <div className="mt-4 border-t pt-4">
-                    <StepDetail
-                      jobId={job.job_id}
-                      step={job.steps.find((s) => s.step_name === selectedStep)!}
-                    />
-                  </div>
-                )}
+              <DagDetailPanel
+                jobId={job.job_id}
+                steps={job.steps}
+                selectedStep={selectedStep}
+                onSelectStep={setSelectedStep}
+                workerNames={workerNames}
+              />
             </>
           )}
         </CardContent>
