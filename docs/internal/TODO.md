@@ -246,7 +246,7 @@ Last updated: 2026-03-13.
 ## Phase 7: AI Agent Actions
 
 ### 7A: Single-turn agent (in progress)
-- [x] ActionDef fields (provider, model, system_prompt, prompt, output_schema, temperature, max_tokens, tools, max_turns)
+- [x] ActionDef fields (provider, model, system_prompt, prompt, output via OutputDef, temperature, max_tokens, tools, max_turns)
 - [x] AgentToolRef enum (Task + Mcp variants)
 - [x] ActionType::Agent variant
 - [x] validate_agent_action() with 14 unit tests
@@ -256,7 +256,7 @@ Last updated: 2026-03-13.
 - [x] ServerConfig: AgentsConfig + AgentProviderConfig
 - [x] Agent dispatch module (handle_agent_steps) with rig-core integration
 - [x] Integration into orchestrate_after_step / propagate_to_parent
-- [x] Structured output via output_schema (prompt engineering + JSON parsing)
+- [x] Structured output via OutputDef → JSON Schema (prompt engineering + JSON parsing)
 - [ ] Token usage tracking (rig's Prompt trait doesn't expose it — investigate lower-level completion API)
 - [x] Retry logic for transient LLM errors (429, 500, 502, 503, 529 + connection/timeout)
 - [x] Temperature / max_tokens passthrough to rig agent builder
@@ -310,6 +310,24 @@ Last updated: 2026-03-13.
 - [x] `strip_code_fences` with no closing fence (malformed input)
 - [ ] Empty prompt after template rendering → step fails
 - [ ] `dispatch_initial_agent_steps` unknown provider → step marked failed
+
+### OutputDef Unification Review Fixes (2026-03-20)
+
+#### Critical
+- [x] `OutputDef.properties` missing `#[serde(default)]` — fixed: added `#[serde(default)]` — `workflow.rs`
+
+#### Important
+- [x] Non-deterministic property order in `to_json_schema()` — fixed: changed `HashMap` to `BTreeMap` — `workflow.rs`
+- [x] Output field type validation only runs for `type: agent` — fixed: moved to `validate_action()` for all types — `validation.rs`
+
+#### Tests Added
+- [x] Backward compat: YAML with `output_schema:` parses but `action.output` is `None` — `workflow.rs`
+- [x] Empty properties: `to_json_schema()` on empty `properties` map produces valid schema — `workflow.rs`
+- [x] All-required fields: every field `required: true`, verify `required` array fully populated — `workflow.rs`
+- [x] Non-agent action with output: `type: script` + `output` with invalid type now rejected — `validation.rs`
+- [x] `type: text` rejected on agent output: tests InputFieldDef/OutputFieldDef type divergence — `validation.rs`
+- [x] Mixed-type `options` array round-trips through `to_json_schema()` — `workflow.rs`
+- [x] `OutputDef` parses from YAML without `properties` key (serde default) — `workflow.rs`
 
 ### 7B: Multi-turn + tools + ask_user (depends on 5d + 7A)
 - [ ] Strom task tools via rig Tool trait (StromTaskTool)

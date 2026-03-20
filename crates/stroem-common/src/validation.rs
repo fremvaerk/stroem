@@ -704,6 +704,22 @@ fn check_task_self_reference(
 
 /// Validates a single action definition. Dispatches to a per-type helper.
 fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>> {
+    // Validate output field types if present — applies to all action types
+    if let Some(ref output_def) = action.output {
+        let valid_types = ["string", "integer", "number", "boolean", "array", "object"];
+        for (field_name, field) in &output_def.properties {
+            if !valid_types.contains(&field.field_type.as_str()) {
+                bail!(
+                    "Action '{}' output field '{}' has invalid type '{}'. Valid types: {}",
+                    action_name,
+                    field_name,
+                    field.field_type,
+                    valid_types.join(", ")
+                );
+            }
+        }
+    }
+
     match action.action_type.as_str() {
         "script" => validate_script_action(action, action_name),
         "docker" => validate_docker_action(action, action_name),
@@ -1169,16 +1185,6 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
         );
     }
 
-    // Validate output_schema is a JSON object if present
-    if let Some(ref schema) = action.output_schema {
-        if !schema.is_object() {
-            bail!(
-                "Action '{}' output_schema must be a JSON object",
-                action_name
-            );
-        }
-    }
-
     // Validate temperature range
     if let Some(temp) = action.temperature {
         if !(0.0..=2.0).contains(&temp) {
@@ -1303,12 +1309,7 @@ fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec
             action_name
         );
     }
-    if action.output_schema.is_some() {
-        bail!(
-            "Action '{}' is type 'approval' but has 'output_schema' field",
-            action_name
-        );
-    }
+    // Note: `output` is allowed on approval actions (it's documentation, not enforcement)
     if action.temperature.is_some() {
         bail!(
             "Action '{}' is type 'approval' but has 'temperature' field",
@@ -5056,8 +5057,7 @@ actions:
     temperature: 0.7
     max_tokens: 2048
     max_turns: 5
-    output_schema:
-      type: object
+    output:
       properties:
         result:
           type: string
@@ -5220,25 +5220,75 @@ actions:
     }
 
     #[test]
-    fn test_validate_agent_action_output_schema_not_object() {
+    fn test_validate_agent_action_output_invalid_field_type() {
         let yaml = r#"
 actions:
   bad:
     type: agent
     provider: openai
     prompt: "Do something"
-    output_schema: "not an object"
+    output:
+      properties:
+        result:
+          type: invalid_type
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
-        assert!(result.is_err(), "Non-object output_schema should fail");
+        assert!(result.is_err(), "Invalid output field type should fail");
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("output_schema must be a JSON object"),
-            "Error should mention output_schema"
+                .contains("invalid type 'invalid_type'"),
+            "Error should mention invalid type"
         );
+    }
+
+    #[test]
+    fn test_validate_agent_action_output_rejects_text_type() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "Do something"
+    output:
+      properties:
+        result:
+          type: text
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "type: text must be rejected for output fields"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid type 'text'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_validate_script_action_output_invalid_type_rejected() {
+        let yaml = r#"
+actions:
+  export:
+    type: script
+    script: "echo done"
+    output:
+      properties:
+        result:
+          type: invalid_type
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "script action with invalid output type should now fail"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid type 'invalid_type'"));
     }
 
     #[test]

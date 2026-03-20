@@ -45,13 +45,17 @@ actions:
       Classify this ticket:
       Subject: {{ input.subject }}
       Body: {{ input.body }}
-    output_schema:
-      type: object
+    output:
       properties:
-        category: { type: string, enum: [bug, feature_request, question] }
-        confidence: { type: number }
-        summary: { type: string }
-      required: [category, confidence]
+        category:
+          type: string
+          required: true
+          options: [bug, feature_request, question]
+        confidence:
+          type: number
+          required: true
+        summary:
+          type: string
     input:
       subject: { type: string, required: true }
       body: { type: string, required: true }
@@ -156,7 +160,7 @@ agents:
 | `provider` | Yes | String | Provider ID from config |
 | `prompt` | Yes | String | Tera template for the user message |
 | `system_prompt` | No | String | Tera template for system/instruction message |
-| `output_schema` | No | JSON Schema | Schema for structured output parsing |
+| `output` | No | OutputDef | Structured output schema (converted to JSON Schema at dispatch time) |
 | `model` | No | String | Override provider's default model |
 | `max_tokens` | No | Integer | Override provider's max tokens |
 | `temperature` | No | Number | Override provider's temperature |
@@ -165,9 +169,19 @@ agents:
 
 ## Structured Output
 
-When `output_schema` is set, the LLM response is parsed as JSON against the schema. If parsing fails, the step fails with an error.
+When `output` is set, it is converted to JSON Schema at dispatch time and the LLM is instructed to respond with JSON matching the schema. If parsing fails, the step fails with an error.
 
-### With output_schema
+### Output field properties
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | String | Required | `string`, `integer`, `number`, `boolean`, `array`, `object` |
+| `description` | String | — | Human-readable description (included in JSON Schema) |
+| `required` | Boolean | `false` | Whether the field must be present in the response |
+| `default` | Any | — | Default value (included in JSON Schema) |
+| `options` | Array | — | Allowed values (maps to JSON Schema `enum`) |
+
+### With output
 
 ```yaml
 actions:
@@ -175,12 +189,16 @@ actions:
     type: agent
     provider: anthropic-main
     prompt: "Analyze this data: {{ input.data }}"
-    output_schema:
-      type: object
+    output:
       properties:
-        sentiment: { type: string, enum: [positive, negative, neutral] }
-        keywords: { type: array, items: { type: string } }
-        score: { type: number, minimum: 0, maximum: 1 }
+        sentiment:
+          type: string
+          required: true
+          options: [positive, negative, neutral]
+        keywords:
+          type: array
+        score:
+          type: number
 ```
 
 **Output:**
@@ -202,7 +220,7 @@ actions:
 }
 ```
 
-### Without output_schema
+### Without output
 
 ```yaml
 actions:
@@ -210,7 +228,7 @@ actions:
     type: agent
     provider: anthropic-main
     prompt: "Summarize: {{ input.text }}"
-    # No output_schema — response captured as text
+    # No output — response captured as text
 ```
 
 **Output:**
@@ -230,7 +248,7 @@ actions:
 }
 ```
 
-> **Note:** The `_meta` key is reserved. If your `output_schema` defines a `_meta` property, it will be overwritten by the system metadata.
+> **Note:** The `_meta` key is reserved. If your `output` defines a `_meta` property, it will be overwritten by the system metadata.
 
 ### Using _meta in downstream steps
 
@@ -290,7 +308,7 @@ Agent actions can fail for several reasons. Each produces a specific error messa
 | `Provider '{id}' not found` | `provider` ID doesn't exist in config | Check provider ID in action and config |
 | `Template rendering error: ...` | `prompt` or `system_prompt` syntax invalid | Fix Tera template syntax or variable references |
 | `LLM API error: ...` | Network error, API quota exceeded, invalid key | Check API credentials, rate limits, network connectivity |
-| `JSON parsing failed: ...` | Response doesn't match `output_schema` | Adjust schema or prompt to guide LLM response format |
+| `JSON parsing failed: ...` | Response doesn't match `output` | Adjust schema or prompt to guide LLM response format |
 | `Step timeout exceeded` | LLM call took longer than `timeout` | Increase timeout or reduce `max_tokens` |
 
 **Example: Handling LLM failures with conditions**
@@ -333,10 +351,12 @@ actions:
     type: agent
     provider: anthropic-main
     prompt: "Classify this GitHub issue: {{ input.issue_body }}"
-    output_schema:
-      type: object
+    output:
       properties:
-        category: { type: string, enum: [bug, feature, documentation, wontfix] }
+        category:
+          type: string
+          required: true
+          options: [bug, feature, documentation, wontfix]
 
 tasks:
   issue-workflow:
@@ -373,8 +393,7 @@ actions:
       {{ input.text }}
 
       Return as JSON with name, email, phone.
-    output_schema:
-      type: object
+    output:
       properties:
         name: { type: string }
         email: { type: string }
@@ -406,10 +425,12 @@ actions:
     type: agent
     provider: anthropic-main
     prompt: "Analyze sentiment of: {{ input.text }}"
-    output_schema:
-      type: object
+    output:
       properties:
-        sentiment: { type: string, enum: [positive, negative, neutral] }
+        sentiment:
+          type: string
+          required: true
+          options: [positive, negative, neutral]
         score: { type: number }
 
 tasks:

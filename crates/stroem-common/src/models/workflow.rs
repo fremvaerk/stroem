@@ -1,7 +1,7 @@
 use crate::duration::HumanDuration;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Connection type property definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,13 +64,64 @@ pub struct InputFieldDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputFieldDef {
     #[serde(rename = "type")]
-    pub field_type: String,
+    pub field_type: String, // "string", "integer", "number", "boolean", "array", "object"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    /// Allowed values — maps to JSON Schema `enum`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<serde_json::Value>>,
 }
 
 /// Output schema for actions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputDef {
-    pub properties: HashMap<String, OutputFieldDef>,
+    #[serde(default)]
+    pub properties: BTreeMap<String, OutputFieldDef>,
+}
+
+impl OutputDef {
+    /// Convert to JSON Schema for LLM structured output.
+    pub fn to_json_schema(&self) -> serde_json::Value {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+
+        for (name, field) in &self.properties {
+            let mut prop = serde_json::Map::new();
+            prop.insert(
+                "type".to_string(),
+                serde_json::Value::String(field.field_type.clone()),
+            );
+            if let Some(ref desc) = field.description {
+                prop.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(desc.clone()),
+                );
+            }
+            if let Some(ref default) = field.default {
+                prop.insert("default".to_string(), default.clone());
+            }
+            if let Some(ref opts) = field.options {
+                prop.insert("enum".to_string(), serde_json::json!(opts));
+            }
+            properties.insert(name.clone(), serde_json::Value::Object(prop));
+            if field.required {
+                required.push(serde_json::json!(name));
+            }
+        }
+
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": properties,
+        });
+        if !required.is_empty() {
+            schema["required"] = serde_json::json!(required);
+        }
+        schema
+    }
 }
 
 /// Resource limits for actions
@@ -183,10 +234,6 @@ pub struct ActionDef {
     /// User prompt template (for type: agent). Tera-rendered with standard context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-
-    /// Structured output JSON schema (for type: agent)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<serde_json::Value>,
 
     /// Temperature override (for type: agent, 0.0-2.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -790,6 +837,216 @@ fn render_secret_value(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_output_def_to_json_schema_basic() {
+        let output = OutputDef {
+            properties: BTreeMap::from([
+                (
+                    "category".to_string(),
+                    OutputFieldDef {
+                        field_type: "string".to_string(),
+                        description: Some("The category".to_string()),
+                        required: true,
+                        default: None,
+                        options: Some(vec![json!("bug"), json!("feature"), json!("question")]),
+                    },
+                ),
+                (
+                    "confidence".to_string(),
+                    OutputFieldDef {
+                        field_type: "number".to_string(),
+                        description: None,
+                        required: true,
+                        default: None,
+                        options: None,
+                    },
+                ),
+                (
+                    "notes".to_string(),
+                    OutputFieldDef {
+                        field_type: "string".to_string(),
+                        description: None,
+                        required: false,
+                        default: Some(json!("")),
+                        options: None,
+                    },
+                ),
+            ]),
+        };
+
+        let schema = output.to_json_schema();
+        assert_eq!(schema["type"], "object");
+
+        let props = schema["properties"].as_object().unwrap();
+        assert_eq!(props["category"]["type"], "string");
+        assert_eq!(props["category"]["description"], "The category");
+        assert_eq!(
+            props["category"]["enum"],
+            json!(["bug", "feature", "question"])
+        );
+        assert_eq!(props["confidence"]["type"], "number");
+        assert_eq!(props["notes"]["default"], "");
+
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("category")));
+        assert!(required.contains(&json!("confidence")));
+        assert!(!required.contains(&json!("notes")));
+    }
+
+    #[test]
+    fn test_output_def_to_json_schema_no_required() {
+        let output = OutputDef {
+            properties: BTreeMap::from([(
+                "text".to_string(),
+                OutputFieldDef {
+                    field_type: "string".to_string(),
+                    description: None,
+                    required: false,
+                    default: None,
+                    options: None,
+                },
+            )]),
+        };
+
+        let schema = output.to_json_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_output_def_yaml_round_trip() {
+        let yaml = r#"
+properties:
+  category:
+    type: string
+    required: true
+    description: "The ticket category"
+    options: [bug, feature, question]
+  score:
+    type: number
+    default: 0.5
+"#;
+        let output: OutputDef = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(output.properties.len(), 2);
+
+        let cat = output.properties.get("category").unwrap();
+        assert_eq!(cat.field_type, "string");
+        assert!(cat.required);
+        assert_eq!(cat.description.as_deref(), Some("The ticket category"));
+        assert_eq!(
+            cat.options.as_ref().unwrap(),
+            &vec![json!("bug"), json!("feature"), json!("question")]
+        );
+
+        let score = output.properties.get("score").unwrap();
+        assert_eq!(score.field_type, "number");
+        assert!(!score.required);
+        assert_eq!(score.default, Some(json!(0.5)));
+    }
+
+    #[test]
+    fn test_output_schema_key_silently_ignored() {
+        // Breaking change: output_schema was removed from ActionDef.
+        // Without deny_unknown_fields, serde silently ignores it.
+        // This test documents the current behavior.
+        let yaml = r#"
+actions:
+  classify:
+    type: agent
+    provider: openai
+    prompt: "Classify {{ input.text }}"
+    output_schema:
+      type: object
+      properties:
+        category:
+          type: string
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("classify").unwrap();
+        assert!(
+            action.output.is_none(),
+            "output_schema is silently dropped — structured output disabled for unmigrated YAML"
+        );
+    }
+
+    #[test]
+    fn test_output_def_to_json_schema_empty_properties() {
+        let output = OutputDef {
+            properties: Default::default(),
+        };
+        let schema = output.to_json_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 0);
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_output_def_to_json_schema_all_required() {
+        let output = OutputDef {
+            properties: [
+                (
+                    "a".to_string(),
+                    OutputFieldDef {
+                        field_type: "string".to_string(),
+                        description: None,
+                        required: true,
+                        default: None,
+                        options: None,
+                    },
+                ),
+                (
+                    "b".to_string(),
+                    OutputFieldDef {
+                        field_type: "integer".to_string(),
+                        description: None,
+                        required: true,
+                        default: None,
+                        options: None,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let schema = output.to_json_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 2);
+        assert!(required.contains(&json!("a")));
+        assert!(required.contains(&json!("b")));
+    }
+
+    #[test]
+    fn test_output_def_to_json_schema_mixed_type_options() {
+        let output = OutputDef {
+            properties: [(
+                "priority".to_string(),
+                OutputFieldDef {
+                    field_type: "string".to_string(),
+                    description: None,
+                    required: false,
+                    default: None,
+                    options: Some(vec![json!(1), json!("high"), json!(true)]),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let schema = output.to_json_schema();
+        let enum_vals = schema["properties"]["priority"]["enum"].as_array().unwrap();
+        assert_eq!(enum_vals.len(), 3);
+        assert!(enum_vals.contains(&json!(1)));
+        assert!(enum_vals.contains(&json!("high")));
+        assert!(enum_vals.contains(&json!(true)));
+    }
+
+    #[test]
+    fn test_output_def_parses_without_properties_key() {
+        // output: {} should work thanks to #[serde(default)] on properties
+        let yaml = "{}";
+        let output: OutputDef = serde_yaml::from_str(yaml).unwrap();
+        assert!(output.properties.is_empty());
+    }
 
     #[test]
     fn test_parse_simple_workflow() {

@@ -483,7 +483,6 @@ mod tests {
                 model: None,
                 system_prompt: None,
                 prompt: None,
-                output_schema: None,
                 temperature: None,
                 max_tokens: None,
                 tools: vec![],

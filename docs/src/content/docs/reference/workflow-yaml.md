@@ -211,7 +211,7 @@ When `type` is not a primitive, it references a [connection type](#connection-ty
 
 ## Output Fields
 
-Output schemas describe the structured output of an action. Actions emit output by printing `OUTPUT: {json}` to stdout.
+Output schemas describe the structured output of an action. Script actions emit output by printing `OUTPUT: {json}` to stdout. Agent actions use `output` to instruct the LLM to respond with structured JSON.
 
 ```yaml
 actions:
@@ -228,9 +228,19 @@ actions:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `output.properties` | map | Map of field names to `{ type: string }` definitions |
+| `output.properties` | map | Map of field names to output field definitions |
 
-Supported output types: `string`, `integer`, `number`, `boolean`, `object`, `array`.
+**Output field properties:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | String | Required | `string`, `integer`, `number`, `boolean`, `array`, `object` |
+| `description` | String | — | Human-readable description |
+| `required` | Boolean | `false` | Whether the field must be present |
+| `default` | Any | — | Default value |
+| `options` | Array | — | Allowed values (maps to JSON Schema `enum`) |
+
+For agent actions, `output` is converted to JSON Schema at dispatch time and injected into the system prompt.
 
 ---
 

@@ -144,7 +144,7 @@ bun run preview
 See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Action Types and Runners
-- **`agent`** (AI agent actions): Calls an LLM provider (Anthropic, OpenAI) with a rendered prompt. Server-side dispatch, no worker involved. Supports structured output via `output_schema`.
+- **`agent`** (AI agent actions): Calls an LLM provider (Anthropic, OpenAI) with a rendered prompt. Server-side dispatch, no worker involved. Supports structured output via `output` (converted to JSON Schema at dispatch time).
 - **`docker` / `pod`** (container actions): Runs user's prepared image as-is, no workspace mounting. Uses `cmd` field for entrypoint/command override.
 - **`script`** (script actions): `type: script` + `runner: local|docker|pod` — scripts in a runner environment with workspace files. Supports multiple languages via the `language` field: `shell` (default), `python`, `javascript`, `typescript`, `go`. Inline scripts use `script` field; file paths use `source` field. Optional `dependencies` (package list) and `interpreter` (override auto-detected binary) fields.
 - **`task`** (sub-job): References another task, server creates a child job (see Task Actions below)
@@ -312,9 +312,9 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 ### Agent Actions (type: agent — LLM Calls)
 - `type: agent` — LLM call as a workflow step, server-side dispatch (like `type: task`)
 - Config: `agents.providers` in `server-config.yaml` with `provider_type` (anthropic/openai), `api_key`, `model`, `max_tokens`, `temperature`, `max_retries`
-- `ActionDef` fields: `provider`, `model`, `system_prompt`, `prompt` (Tera templates), `output_schema` (JSON Schema), `temperature`, `max_tokens`
+- `ActionDef` fields: `provider`, `model`, `system_prompt`, `prompt` (Tera templates), `output` (OutputDef, converted to JSON Schema at dispatch), `temperature`, `max_tokens`
 - `prompt` and `system_prompt` are Tera templates rendered at dispatch time with standard context (input, step outputs, secrets)
-- **Structured output**: when `output_schema` is set, response is parsed as JSON; output includes `_meta` with model, provider, tokens, latency
+- **Structured output**: when `output` is set, `OutputDef::to_json_schema()` produces a JSON Schema injected into the system prompt; response is parsed as JSON; output includes `_meta` with model, provider, tokens, latency
 - Server-side dispatch: `handle_agent_steps()` in `agent/dispatch.rs`, called from `orchestrate_after_step` and at job creation
 - Workers never claim agent steps (filtered in claim SQL alongside `type: task`)
 - Uses `rig-core` (v0.33) for LLM provider abstraction (Anthropic, OpenAI, custom endpoints)

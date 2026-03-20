@@ -48,7 +48,7 @@ actions:
       You are a support ticket classifier.
     prompt: |
       Classify this ticket: {{ input.ticket_text }}
-    output_schema:
+    output:
       type: object
       properties:
         category:
@@ -70,7 +70,7 @@ actions:
       - task: check-logs
       - task: get-pod-status
     max_turns: 20
-    output_schema:
+    output:
       type: object
       properties:
         root_cause: { type: string }
@@ -121,7 +121,7 @@ tasks:
 }
 ```
 
-Without `output_schema`: `{ "text": "...", "_meta": { ... } }`.
+Without `output`: `{ "text": "...", "_meta": { ... } }`.
 Downstream: `{{ classify.output.category }}` works as usual.
 
 ---
@@ -137,7 +137,7 @@ Add to `ActionDef`:
 - `model: Option<String>` — overrides provider default
 - `system_prompt: Option<String>` — Tera template
 - `prompt: Option<String>` — Tera template (required for agent)
-- `output_schema: Option<serde_json::Value>` — JSON Schema for structured output
+- `output: Option<serde_json::Value>` — JSON Schema for structured output
 - `temperature: Option<f32>` — 0.0-2.0
 - `max_tokens: Option<u32>` — overrides provider default
 - `tools: Vec<AgentToolRef>` — tool references (Phase B, add to model now)
@@ -194,7 +194,7 @@ Same in `get_unmatched_ready_steps` (recovery Phase 4 should skip agent steps).
 New `validate_agent_action()`:
 - Required: `provider`, `prompt`
 - Forbidden: `cmd`, `script`, `source`, `image`, `runner`, `manifest`, `task`, `language`, `entrypoint`, `dependencies`, `interpreter`
-- `output_schema` must be a JSON object
+- `output` must be a JSON object
 - `temperature` must be 0.0-2.0
 - `prompt` and `system_prompt` must be valid Tera syntax
 
@@ -243,11 +243,11 @@ fn create_rig_client(config: &AgentProviderConfig) -> Result<Box<dyn CompletionM
 ```
 
 **Structured output via JSON Schema:**
-The YAML `output_schema` is already JSON Schema syntax (`type`, `properties`, `enum`, etc.). At dispatch time, normalize it into a full JSON Schema (add `title`, ensure `type: "object"` at root) and pass it to rig's extractor API. Rig handles the provider-specific mechanics:
+The YAML `output` is already JSON Schema syntax (`type`, `properties`, `enum`, etc.). At dispatch time, normalize it into a full JSON Schema (add `title`, ensure `type: "object"` at root) and pass it to rig's extractor API. Rig handles the provider-specific mechanics:
 - Anthropic: tool_use pattern with forced tool choice
 - OpenAI: `response_format` with `json_schema`
 
-For unstructured output (no `output_schema`): use rig's standard `.prompt()` API directly.
+For unstructured output (no `output`): use rig's standard `.prompt()` API directly.
 
 **Retry logic**: Wrap rig calls with a shared retry helper. Retry on transient errors (429, 500, 502, 503, 529). Exponential backoff 1s/2s/4s with jitter. Up to `max_retries` per provider config.
 

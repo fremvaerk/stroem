@@ -287,7 +287,7 @@ pub async fn handle_agent_steps(
                 // Build output with _meta
                 let mut output = response.content;
                 if let Some(obj) = output.as_object_mut() {
-                    // Note: `_meta` is a reserved key. If the LLM response or output_schema
+                    // Note: `_meta` is a reserved key. If the LLM response or output
                     // defines a `_meta` field, it will be overwritten. This is documented
                     // behavior — see agent-actions.md.
                     obj.insert(
@@ -661,11 +661,12 @@ struct LlmResponse {
 ///
 /// Values from `action` take precedence over `provider_config` defaults.
 ///
-/// # Structured output (`output_schema`)
+/// # Structured output (`output`)
 ///
-/// When `action.output_schema` is set, the system prompt is augmented with
-/// instructions to return a JSON object matching the schema. The response is
-/// then parsed as a JSON object; if parsing fails the call returns an error.
+/// When `action.output` is set, `OutputDef::to_json_schema()` converts it to
+/// JSON Schema and the system prompt is augmented with instructions to return a
+/// JSON object matching the schema. The response is then parsed as a JSON
+/// object; if parsing fails the call returns an error.
 ///
 /// # Token tracking
 ///
@@ -694,9 +695,11 @@ async fn call_llm(
     // Resolve max_tokens: action override takes precedence over provider default.
     let max_tokens = action.max_tokens.unwrap_or(provider_config.max_tokens);
 
-    // If output_schema is set, augment the system prompt with JSON schema instructions.
-    let schema_suffix: Option<String> = action.output_schema.as_ref().map(|schema| {
-        let schema_str = serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+    // If output is set, convert to JSON Schema and augment the system prompt.
+    let schema_suffix: Option<String> = action.output.as_ref().map(|output_def| {
+        let schema = output_def.to_json_schema();
+        let schema_str =
+            serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
         format!(
             "\n\nYou must respond with a JSON object matching this schema:\n{}\nReturn ONLY the JSON object, no other text, no markdown code fences.",
             schema_str
@@ -759,8 +762,8 @@ async fn call_llm(
         other => bail!("Unknown agent provider type: {}", other),
     };
 
-    // When output_schema is set, the response must be a valid JSON object.
-    let content = if action.output_schema.is_some() {
+    // When output is set, the response must be a valid JSON object.
+    let content = if action.output.is_some() {
         let trimmed = response_text.trim();
         // Strip markdown code fences if the model wrapped the JSON anyway
         let json_str = strip_code_fences(trimmed);
@@ -768,13 +771,13 @@ async fn call_llm(
             Ok(json) if json.is_object() => json,
             Ok(json) => {
                 bail!(
-                    "output_schema requires a JSON object but got {}",
+                    "output requires a JSON object but got {}",
                     json_type_name(&json)
                 );
             }
             Err(e) => {
                 bail!(
-                    "output_schema requires a JSON object but response could not be parsed: {}. Response was: {}",
+                    "output requires a JSON object but response could not be parsed: {}. Response was: {}",
                     e,
                     truncate_for_error(trimmed, 200)
                 );
@@ -848,14 +851,14 @@ mod tests {
     use super::*;
     use stroem_common::models::workflow::ActionDef;
 
-    fn make_action(output_schema: Option<serde_json::Value>) -> ActionDef {
+    fn make_action(output: Option<serde_json::Value>) -> ActionDef {
         let mut val = serde_json::json!({
             "type": "agent",
             "provider": "test-provider",
             "prompt": "test prompt"
         });
-        if let Some(schema) = output_schema {
-            val["output_schema"] = schema;
+        if let Some(output_def) = output {
+            val["output"] = output_def;
         }
         serde_json::from_value(val).expect("ActionDef from test JSON")
     }
