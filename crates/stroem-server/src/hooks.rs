@@ -8,6 +8,18 @@ use stroem_common::template::render_input_map;
 use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 
+/// Context available to `on_suspended` hook templates as `hook.*`
+#[derive(Debug, Serialize)]
+pub struct SuspendedHookContext {
+    pub workspace: String,
+    pub task_name: String,
+    pub job_id: String,
+    pub step_name: String,
+    pub message: String,
+    pub source_type: String,
+    pub source_id: Option<String>,
+}
+
 /// Context available to hook templates as `hook.*`
 #[derive(Debug, Serialize)]
 pub struct HookContext {
@@ -153,6 +165,100 @@ pub async fn fire_hooks(
     }
 }
 
+/// Fire `on_suspended` hooks when an approval step enters the `suspended` state.
+///
+/// - Recursion guard: jobs with `source_type = "hook"` never trigger further hooks.
+/// - Task-level `on_suspended` hooks take priority; workspace-level fallback fires for top-level jobs.
+/// - Each hook creates a new single-step job with `source_type = "hook"`.
+/// - Failures are logged but never affect the original job or step.
+#[tracing::instrument(skip(state, workspace_config, task))]
+pub async fn fire_suspended_hooks(
+    state: &AppState,
+    workspace_config: &WorkspaceConfig,
+    job: &stroem_db::JobRow,
+    task: &TaskDef,
+    step_name: &str,
+    rendered_message: &str,
+) {
+    // Recursion guard: hook jobs never trigger further hooks
+    if job.source_type == SourceType::Hook.as_ref() {
+        return;
+    }
+
+    // Select task-level then workspace-level on_suspended hooks
+    let is_top_level = matches!(
+        job.source_type.as_str(),
+        "api" | "user" | "trigger" | "webhook" | "mcp"
+    );
+    let hooks: &[HookDef] = if !task.on_suspended.is_empty() {
+        &task.on_suspended
+    } else if is_top_level && !workspace_config.on_suspended.is_empty() {
+        &workspace_config.on_suspended
+    } else {
+        return;
+    };
+
+    if hooks.is_empty() {
+        return;
+    }
+
+    let ctx = SuspendedHookContext {
+        workspace: job.workspace.clone(),
+        task_name: job.task_name.clone(),
+        job_id: job.job_id.to_string(),
+        step_name: step_name.to_string(),
+        message: rendered_message.to_string(),
+        source_type: job.source_type.clone(),
+        source_id: job.source_id.clone(),
+    };
+
+    let ctx_value = match serde_json::to_value(&ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to serialize suspended hook context: {:#}", e);
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!("[hooks] Failed to serialize on_suspended context: {:#}", e),
+                )
+                .await;
+            return;
+        }
+    };
+
+    let source_id = job.job_id.to_string();
+    for (i, hook) in hooks.iter().enumerate() {
+        if let Err(e) = fire_single_hook(
+            &state.pool,
+            workspace_config,
+            &job.workspace,
+            hook,
+            &ctx_value,
+            &source_id,
+            job.revision.as_deref(),
+        )
+        .await
+        {
+            tracing::error!(
+                "Failed to fire on_suspended hook[{}] for job {} step '{}': {:#}",
+                i,
+                job.job_id,
+                step_name,
+                e
+            );
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!(
+                        "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {:#}",
+                        i, hook.action, e
+                    ),
+                )
+                .await;
+        }
+    }
+}
+
 async fn build_hook_context(
     pool: &PgPool,
     job: &stroem_db::JobRow,
@@ -226,6 +332,8 @@ async fn fire_single_hook(
     source_id: &str,
     revision: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Note: `state` is not available here — fire_initial_suspended_hooks is called
+    // by the top-level callers of create_job_for_task which do have AppState.
     // Resolve action
     let action = workspace_config
         .actions
@@ -581,6 +689,7 @@ mod tests {
             timeout: None,
             on_success,
             on_error,
+            on_suspended: vec![],
         }
     }
 
@@ -780,5 +889,48 @@ mod tests {
 
         let selected = select_hooks_for_job(&ws, "trigger", "skipped", &task);
         assert!(selected.is_none(), "skipped jobs should never fire hooks");
+    }
+
+    // ─── SuspendedHookContext serialization tests ─────────────────────────────
+
+    #[test]
+    fn test_suspended_hook_context_serialization() {
+        let ctx = SuspendedHookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            step_name: "approve-deploy".to_string(),
+            message: "Please approve the deployment to production".to_string(),
+            source_type: "api".to_string(),
+            source_id: Some("user@example.com".to_string()),
+        };
+
+        let value = serde_json::to_value(&ctx).unwrap();
+        assert_eq!(value["workspace"], "prod");
+        assert_eq!(value["task_name"], "deploy");
+        assert_eq!(value["job_id"], "abc-123");
+        assert_eq!(value["step_name"], "approve-deploy");
+        assert_eq!(
+            value["message"],
+            "Please approve the deployment to production"
+        );
+        assert_eq!(value["source_type"], "api");
+        assert_eq!(value["source_id"], "user@example.com");
+    }
+
+    #[test]
+    fn test_suspended_hook_context_source_id_optional() {
+        let ctx = SuspendedHookContext {
+            workspace: "dev".to_string(),
+            task_name: "test".to_string(),
+            job_id: "xyz-789".to_string(),
+            step_name: "gate".to_string(),
+            message: String::new(),
+            source_type: "trigger".to_string(),
+            source_id: None,
+        };
+
+        let value = serde_json::to_value(&ctx).unwrap();
+        assert!(value["source_id"].is_null());
     }
 }

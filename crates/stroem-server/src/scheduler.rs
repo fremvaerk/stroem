@@ -382,6 +382,16 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
     {
         Ok(job_id) => {
             tracing::info!("Trigger '{}' created job {}", source_id, job_id);
+            // Fire on_suspended hooks for any root-level approval steps that were
+            // suspended during job creation (FIX 2).
+            crate::job_creator::fire_initial_suspended_hooks(
+                app_state,
+                &config,
+                &tstate.workspace,
+                &tstate.task,
+                job_id,
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!("Trigger '{}' failed to create job: {:#}", source_id, e);
@@ -478,6 +488,7 @@ mod tests {
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                message: None,
             },
         );
 
@@ -510,6 +521,7 @@ mod tests {
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(

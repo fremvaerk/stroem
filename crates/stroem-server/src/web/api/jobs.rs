@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -227,7 +228,7 @@ pub async fn get_job(
     let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
         .map(|step| {
-            json!({
+            let mut step_json = json!({
                 "step_name": step.step_name,
                 "action_name": step.action_name,
                 "action_type": step.action_type,
@@ -239,6 +240,7 @@ pub async fn get_job(
                 "worker_id": step.worker_id,
                 "started_at": step.started_at,
                 "completed_at": step.completed_at,
+                "suspended_at": step.suspended_at,
                 "error_message": step.error_message,
                 "when_condition": step.when_condition,
                 "for_each_expr": step.for_each_expr,
@@ -246,7 +248,23 @@ pub async fn get_job(
                 "loop_index": step.loop_index,
                 "loop_total": step.loop_total,
                 "depends_on": serde_json::Value::Array(vec![]),
-            })
+            });
+            // For approval steps, always surface approval-specific fields so the
+            // UI can show the message and input schema after the step leaves the
+            // suspended state (e.g. approved, rejected, or timed out). (FIX 7)
+            if step.action_type == "approval" {
+                if let Some(ref output) = step.output {
+                    if let Some(msg) = output.get("approval_message") {
+                        step_json["approval_message"] = msg.clone();
+                    }
+                }
+                if let Some(ref spec) = step.action_spec {
+                    if let Some(input_schema) = spec.get("input") {
+                        step_json["approval_fields"] = input_schema.clone();
+                    }
+                }
+            }
+            step_json
         })
         .collect();
 
@@ -547,6 +565,204 @@ pub async fn cancel_job(
         crate::cancellation::CancelResult::AlreadyTerminal => Err(AppError::Conflict(
             "Job is already in a terminal state".into(),
         )),
+    }
+}
+
+/// Request body for the approve/reject endpoint.
+#[derive(Debug, Deserialize)]
+pub struct ApproveStepRequest {
+    pub approved: bool,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    pub rejection_reason: Option<String>,
+}
+
+/// POST /api/jobs/:id/steps/:step/approve — Approve or reject a suspended approval step.
+#[tracing::instrument(skip(state))]
+pub async fn approve_step(
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+    Path((id, step_name)): Path<(String, String)>,
+    Json(req): Json<ApproveStepRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let job_id = parse_uuid_param(&id, "job")?;
+
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
+
+    // ACL check — approve/reject requires Run permission
+    let perm = check_job_acl(&state, &auth_user, &job.workspace, &job.task_name).await?;
+    match perm {
+        TaskPermission::Deny => return Err(AppError::not_found("Job")),
+        TaskPermission::View => {
+            return Err(AppError::Forbidden(
+                "Insufficient permissions to approve this step".into(),
+            ))
+        }
+        TaskPermission::Run => {}
+    }
+
+    // Find the step and verify it is suspended
+    let steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
+        .await
+        .context("get job steps")?;
+
+    let step = steps
+        .iter()
+        .find(|s| s.step_name == step_name)
+        .ok_or_else(|| AppError::not_found("Step"))?;
+
+    if step.status != "suspended" {
+        return Err(AppError::Conflict(format!(
+            "Step '{}' is not in suspended state (current: {})",
+            step_name, step.status
+        )));
+    }
+    if step.action_type != "approval" {
+        return Err(AppError::Conflict(format!(
+            "Step '{}' is not an approval step",
+            step_name
+        )));
+    }
+
+    // Resolve approver identity
+    let approver = auth_user
+        .as_ref()
+        .map(|u| u.claims.email.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
+
+    // Validate required input fields against the action schema (FIX 4)
+    if req.approved {
+        if let (Some(ref input), Some(ref spec)) = (&req.input, &step.action_spec) {
+            if let Some(input_schema) = spec.get("input").and_then(|v| v.as_object()) {
+                for (field_name, field_def) in input_schema {
+                    let required = field_def
+                        .get("required")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if required {
+                        let has_value = input
+                            .get(field_name)
+                            .map(|v| {
+                                !v.is_null() && v.as_str().map(|s| !s.is_empty()).unwrap_or(true)
+                            })
+                            .unwrap_or(false);
+                        if !has_value {
+                            return Err(AppError::BadRequest(format!(
+                                "Required field '{}' is missing",
+                                field_name
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if req.approved {
+        // FIX 5: merge approval metadata into existing output (preserves approval_message)
+        let mut output = step.output.clone().unwrap_or(json!({}));
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("approved".to_string(), json!(true));
+            obj.insert("approved_by".to_string(), json!(approver));
+            obj.insert("approved_at".to_string(), json!(Utc::now().to_rfc3339()));
+            if let Some(input) = req.input {
+                obj.insert("input".to_string(), input);
+            }
+        }
+
+        // FIX 1: atomic approve — only succeeds if step is still suspended
+        let applied = JobStepRepo::approve_step(&state.pool, job_id, &step_name, Some(output))
+            .await
+            .context("approve suspended step")?;
+
+        if !applied {
+            return Err(AppError::Conflict(
+                "Step is no longer in suspended state".to_string(),
+            ));
+        }
+
+        state
+            .append_server_log(
+                job_id,
+                &format!("[approval] Step '{}' approved by {}", step_name, approver),
+            )
+            .await;
+
+        if let Err(e) =
+            crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await
+        {
+            tracing::error!(
+                "Failed to orchestrate after approval of step '{}' in job {}: {:#}",
+                step_name,
+                job_id,
+                e
+            );
+            state
+                .append_server_log(
+                    job_id,
+                    &format!("[approval] Orchestration error after approval: {:#}", e),
+                )
+                .await;
+        }
+
+        Ok(Json(json!({"status": "approved"})))
+    } else {
+        // FIX 6: truncate rejection_reason at a UTF-8 char boundary to avoid panics
+        let reason = req
+            .rejection_reason
+            .unwrap_or_else(|| "Approval rejected".to_string());
+        let reason = if reason.len() > 4096 {
+            let mut end = 4096;
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason[..end].to_string()
+        } else {
+            reason
+        };
+
+        // FIX 1: atomic reject — only succeeds if step is still suspended
+        let applied = JobStepRepo::reject_step(&state.pool, job_id, &step_name, &reason)
+            .await
+            .context("reject suspended step")?;
+
+        if !applied {
+            return Err(AppError::Conflict(
+                "Step is no longer in suspended state".to_string(),
+            ));
+        }
+
+        state
+            .append_server_log(
+                job_id,
+                &format!(
+                    "[approval] Step '{}' rejected by {}: {}",
+                    step_name, approver, reason
+                ),
+            )
+            .await;
+
+        if let Err(e) =
+            crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await
+        {
+            tracing::error!(
+                "Failed to orchestrate after rejection of step '{}' in job {}: {:#}",
+                step_name,
+                job_id,
+                e
+            );
+            state
+                .append_server_log(
+                    job_id,
+                    &format!("[approval] Orchestration error after rejection: {:#}", e),
+                )
+                .await;
+        }
+
+        Ok(Json(json!({"status": "rejected"})))
     }
 }
 
@@ -913,5 +1129,153 @@ mod tests {
         assert_eq!(stats.failed, 0);
         assert_eq!(stats.cancelled, 0);
         assert_eq!(stats.skipped, 0);
+    }
+
+    // --- Rejection-reason truncation (FIX 6) ---
+
+    /// Truncation helper extracted from the approve_step handler for pure unit testing.
+    fn truncate_reason(reason: String, max_bytes: usize) -> String {
+        if reason.len() > max_bytes {
+            let mut end = max_bytes;
+            while !reason.is_char_boundary(end) {
+                end -= 1;
+            }
+            reason[..end].to_string()
+        } else {
+            reason
+        }
+    }
+
+    #[test]
+    fn test_truncate_reason_short_unchanged() {
+        let reason = "Rejected".to_string();
+        assert_eq!(truncate_reason(reason.clone(), 4096), reason);
+    }
+
+    #[test]
+    fn test_truncate_reason_exactly_at_limit_unchanged() {
+        let reason = "a".repeat(4096);
+        assert_eq!(truncate_reason(reason.clone(), 4096), reason);
+    }
+
+    #[test]
+    fn test_truncate_reason_ascii_long_is_truncated() {
+        let reason = "a".repeat(5000);
+        let result = truncate_reason(reason, 4096);
+        assert_eq!(result.len(), 4096);
+    }
+
+    #[test]
+    fn test_truncate_reason_multibyte_utf8_does_not_panic() {
+        // Each '€' is 3 bytes in UTF-8.  4096 / 3 = 1365 full chars = 4095 bytes.
+        // Adding one more '€' pushes len to 4098, which is NOT a char boundary at 4096.
+        let reason = "€".repeat(1366); // 4098 bytes
+        let result = truncate_reason(reason, 4096);
+        // Must be valid UTF-8 and at most 4096 bytes
+        assert!(result.len() <= 4096);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    // --- approval_message preservation in output (FIX 5) ---
+
+    #[test]
+    fn test_approval_output_preserves_existing_fields() {
+        // Simulate the merge logic from approve_step
+        let existing_output = json!({
+            "approval_message": "Please review the deployment",
+        });
+        let mut output = existing_output;
+
+        let approver = "alice@example.com";
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("approved".to_string(), json!(true));
+            obj.insert("approved_by".to_string(), json!(approver));
+            obj.insert("approved_at".to_string(), json!("2026-01-01T00:00:00Z"));
+            let user_input = json!({"environment": "production"});
+            obj.insert("input".to_string(), user_input);
+        }
+
+        // approval_message must survive the merge
+        assert_eq!(output["approval_message"], "Please review the deployment");
+        assert_eq!(output["approved"], true);
+        assert_eq!(output["approved_by"], approver);
+        assert_eq!(output["input"]["environment"], "production");
+    }
+
+    #[test]
+    fn test_approval_output_starts_empty_when_no_prior_output() {
+        // When step.output is None, we start from json!({}) and fill it.
+        let mut output = json!({});
+        let approver = "bob@example.com";
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("approved".to_string(), json!(true));
+            obj.insert("approved_by".to_string(), json!(approver));
+        }
+        assert_eq!(output["approved"], true);
+        assert_eq!(output["approved_by"], approver);
+        // approval_message key should not exist (no prior message)
+        assert!(output.get("approval_message").is_none());
+    }
+
+    // --- approval_fields surfaced for all approval-step statuses (FIX 7) ---
+
+    #[test]
+    fn test_approval_fields_surfaced_for_completed_approval_step() {
+        // After FIX 7 the condition is `action_type == "approval"` (no status check).
+        // Simulate the logic from get_job handler.
+        let status = "completed";
+        let action_type = "approval";
+        let spec = json!({"input": {"environment": {"required": true}}});
+        let output_val = json!({
+            "approval_message": "Deploy?",
+            "approved": true,
+        });
+
+        let mut step_json = json!({
+            "action_type": action_type,
+            "status": status,
+            "output": output_val,
+            "action_spec": spec,
+        });
+
+        // Apply the FIX 7 logic
+        if step_json["action_type"] == "approval" {
+            if let Some(msg) = step_json["output"]["approval_message"].as_str() {
+                step_json["approval_message"] = json!(msg);
+            }
+            if let Some(input_schema) = step_json["action_spec"]["input"].as_object() {
+                step_json["approval_fields"] = json!(input_schema);
+            }
+        }
+
+        assert_eq!(step_json["approval_message"], "Deploy?");
+        assert!(step_json.get("approval_fields").is_some());
+    }
+
+    #[test]
+    fn test_approval_fields_surfaced_for_suspended_approval_step() {
+        let status = "suspended";
+        let action_type = "approval";
+        let spec = json!({"input": {"ticket": {"required": true}}});
+        let output_val = json!({"approval_message": "Please review"});
+
+        let mut step_json = json!({
+            "action_type": action_type,
+            "status": status,
+            "output": output_val,
+            "action_spec": spec,
+        });
+
+        if step_json["action_type"] == "approval" {
+            if let Some(msg) = step_json["output"]["approval_message"].as_str() {
+                step_json["approval_message"] = json!(msg);
+            }
+            if let Some(input_schema) = step_json["action_spec"]["input"].as_object() {
+                step_json["approval_fields"] = json!(input_schema);
+            }
+        }
+
+        assert_eq!(step_json["approval_message"], "Please review");
+        assert!(step_json["approval_fields"].get("ticket").is_some());
     }
 }

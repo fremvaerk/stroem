@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use sqlx::PgPool;
+use sqlx::{self, PgPool};
 use std::collections::HashMap;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::WorkspaceConfig;
@@ -214,6 +214,17 @@ fn create_job_for_task_inner<'a>(
 
         // Handle any initially-ready type: task steps
         handle_task_steps(pool, workspace_config, workspace_name, job_id).await?;
+
+        // Handle any initially-ready type: approval steps
+        if let Err(e) =
+            handle_approval_steps(pool, workspace_config, workspace_name, job_id, task).await
+        {
+            tracing::error!(
+                job_id = %job_id,
+                "Failed to handle initial approval steps: {:#}",
+                e
+            );
+        }
 
         // Handle any initially-ready type: agent steps (server-side LLM dispatch)
         if let Some(cfg) = agents_config {
@@ -774,6 +785,196 @@ pub async fn check_loop_completion(
     Ok(())
 }
 
+/// Suspend any "ready" approval steps in a job.
+///
+/// Called after job creation and after the orchestrator promotes steps.
+/// Renders the approval message through Tera, stores it as step output,
+/// and transitions the step from `ready` to `suspended`.
+#[tracing::instrument(skip(pool, workspace_config))]
+pub async fn handle_approval_steps(
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job_id: Uuid,
+    task: &stroem_common::models::workflow::TaskDef,
+) -> Result<()> {
+    let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
+    let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
+
+    for step in &steps {
+        if step.status != StepStatus::Ready.as_ref() || step.action_type != "approval" {
+            continue;
+        }
+
+        // Get the message template from action_spec
+        let raw_message = step
+            .action_spec
+            .as_ref()
+            .and_then(|spec| spec["message"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Build render context (same pattern as handle_task_steps)
+        let mut context_value = build_step_render_context(&job, &steps, workspace_config);
+
+        // For loop instances, inject `each` variable into render context
+        if let (Some(ref loop_item), Some(loop_index)) = (&step.loop_item, step.loop_index) {
+            if let Some(ctx_obj) = context_value.as_object_mut() {
+                ctx_obj.insert(
+                    "each".to_string(),
+                    serde_json::json!({
+                        "item": loop_item,
+                        "index": loop_index,
+                        "total": step.loop_total,
+                    }),
+                );
+            }
+        }
+
+        // Warn when no message template is configured — action_spec may be missing
+        // or the action was defined without a `message` field. (FIX 8)
+        if raw_message.is_empty() {
+            tracing::warn!(
+                job_id = %job_id,
+                step = %step.step_name,
+                "Approval step has no message template — action_spec may be missing or malformed"
+            );
+        }
+
+        // Render the message template through Tera
+        let rendered_message = if raw_message.is_empty() {
+            String::new()
+        } else {
+            match stroem_common::template::render_template(&raw_message, &context_value) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    let err = format!(
+                        "Failed to render approval message for step '{}': {:#}",
+                        step.step_name, e
+                    );
+                    tracing::error!("{}", err);
+                    JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                    continue;
+                }
+            }
+        };
+
+        // Transition step to suspended
+        JobStepRepo::mark_suspended(pool, job_id, &step.step_name).await?;
+
+        // Store the rendered message as output so it is visible to the API/UI
+        sqlx::query("UPDATE job_step SET output = $1 WHERE job_id = $2 AND step_name = $3")
+            .bind(serde_json::json!({ "approval_message": rendered_message }))
+            .bind(job_id)
+            .bind(&step.step_name)
+            .execute(pool)
+            .await
+            .context("Failed to store approval message")?;
+
+        // Transition job to running if still pending
+        JobRepo::mark_running_if_pending_server(pool, job_id).await?;
+
+        tracing::info!(
+            job_id = %job_id,
+            workspace = %workspace_name,
+            step = %step.step_name,
+            "Approval step suspended, waiting for approval"
+        );
+    }
+
+    Ok(())
+}
+
+/// Fire `on_suspended` hooks for any approval steps that are already suspended
+/// when a job is first created.
+///
+/// Called immediately after [`create_job_for_task`] from every call-site that
+/// has access to [`AppState`] (API handler, scheduler, webhook handler, MCP
+/// tools, and `fire_single_hook` for type:task hooks).
+///
+/// Root-level approval steps (no dependencies) are suspended inside
+/// `create_job_for_task_inner`, but at that point we only have a `&PgPool` and
+/// cannot call into the hooks module.  This function bridges the gap by doing a
+/// lightweight post-creation sweep.
+#[tracing::instrument(skip(state, workspace_config))]
+pub async fn fire_initial_suspended_hooks(
+    state: &crate::state::AppState,
+    workspace_config: &stroem_common::models::workflow::WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    job_id: uuid::Uuid,
+) {
+    let steps = match JobStepRepo::get_steps_for_job(&state.pool, job_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                job_id = %job_id,
+                "fire_initial_suspended_hooks: failed to load steps: {:#}",
+                e
+            );
+            return;
+        }
+    };
+
+    let job = match JobRepo::get(&state.pool, job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            tracing::warn!(job_id = %job_id, "fire_initial_suspended_hooks: job not found");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                job_id = %job_id,
+                "fire_initial_suspended_hooks: failed to load job: {:#}",
+                e
+            );
+            return;
+        }
+    };
+
+    let task = match workspace_config.tasks.get(task_name) {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                job_id = %job_id,
+                task = %task_name,
+                "fire_initial_suspended_hooks: task not found in workspace"
+            );
+            return;
+        }
+    };
+
+    for step in &steps {
+        if step.status != stroem_common::models::job::StepStatus::Suspended.as_ref() {
+            continue;
+        }
+
+        let rendered_message = step
+            .output
+            .as_ref()
+            .and_then(|o| o["approval_message"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        state
+            .append_server_log(
+                job_id,
+                &format!("[approval] Step '{}' waiting for approval", step.step_name),
+            )
+            .await;
+
+        crate::hooks::fire_suspended_hooks(
+            state,
+            workspace_config,
+            &job,
+            task,
+            &step.step_name,
+            &rendered_message,
+        )
+        .await;
+    }
+}
+
 /// Build a template render context from a job and its steps.
 /// Same logic as claim_job but without DB access (steps already loaded).
 /// Includes workspace secrets under the `secret` key.
@@ -814,6 +1015,13 @@ pub fn build_step_render_context(
             if let Some(ref err) = s.error_message {
                 step_ctx.insert("error".to_string(), serde_json::Value::String(err.clone()));
             }
+            let safe_name = s.step_name.replace('-', "_");
+            ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
+        } else if s.status == StepStatus::Suspended.as_ref() {
+            // Include suspended (approval) steps with null output so downstream
+            // `when` expressions can reference them without Tera undefined errors.
+            let mut step_ctx = serde_json::Map::new();
+            step_ctx.insert("output".to_string(), serde_json::Value::Null);
             let safe_name = s.step_name.replace('-', "_");
             ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
         }
@@ -900,6 +1108,7 @@ mod tests {
             loop_total: None,
             loop_item: None,
             agent_state: None,
+            suspended_at: None,
         }
     }
 
@@ -1020,6 +1229,25 @@ mod tests {
         assert_eq!(ctx["step1"]["output"]["result"], "ok");
         assert!(ctx.get("step2").is_none());
         assert!(ctx.get("step3").is_none());
+    }
+
+    #[test]
+    fn test_build_step_render_context_suspended_step_has_null_output() {
+        // Suspended approval steps should be included with null output so
+        // downstream `when` expressions don't get Tera "undefined variable" errors.
+        let job = make_job(None);
+        let steps = vec![
+            make_step(job.job_id, "build", "completed", Some(json!({"tag": "v1"}))),
+            make_step(job.job_id, "approve", "suspended", None),
+        ];
+        let ws = WorkspaceConfig::new();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        assert_eq!(ctx["build"]["output"]["tag"], "v1");
+        // Suspended step should be present with null output
+        assert!(ctx.get("approve").is_some());
+        assert!(ctx["approve"]["output"].is_null());
     }
 
     // --- parse_for_each_items tests ---

@@ -92,6 +92,7 @@ export interface JobStep {
   worker_id: string | null;
   started_at: string | null;
   completed_at: string | null;
+  suspended_at: string | null;
   error_message: string | null;
   when_condition: string | null;
   depends_on: string[];
@@ -99,6 +100,8 @@ export interface JobStep {
   loop_source: string | null;
   loop_index: number | null;
   loop_total: number | null;
+  approval_message: string | null;
+  approval_fields: Record<string, unknown> | null;
 }
 
 export interface JobDetail {

@@ -801,6 +801,7 @@ tasks:
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                message: None,
             },
         );
 
@@ -835,6 +836,7 @@ tasks:
 
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 
@@ -887,6 +889,7 @@ tasks:
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                message: None,
             },
         );
 
@@ -920,6 +923,7 @@ tasks:
 
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 
@@ -957,6 +961,7 @@ tasks:
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                message: None,
             },
         );
 
@@ -990,6 +995,7 @@ tasks:
 
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 

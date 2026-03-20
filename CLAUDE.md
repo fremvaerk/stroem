@@ -10,7 +10,8 @@ Phase 3 complete: Multi-workspace support, tarball distribution, Docker and Kube
 Phase 4 complete: Advanced features (pod actions, secrets, connections, DAG visualization, ACL/RBAC).
 Phase 5a complete: Conditional flow steps (`when` expressions).
 Phase 5b complete: For-each loops (`for_each` + `sequential`).
-Phase 5c-d: While loops, approval gates.
+Phase 5c: While loops.
+Phase 5d complete: Approval gates (`type: approval`, `suspended` status, approve/reject API).
 Phase 6: Shared storage & worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -320,6 +321,22 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Feature-gated: `agent` cargo feature on stroem-server (enabled by default)
 - DB: migration `023_agent_type.sql` adds `'agent'` to action_type CHECK + `agent_state` JSONB column
 - Future: Phase 7B adds multi-turn with tools + ask_user (depends on Phase 5d approval gates)
+
+### Approval Gates (type: approval — Human-in-the-Loop)
+- `type: approval` — pauses execution for human approve/reject, server-side dispatch (like `type: task`)
+- `ActionDef.message: Option<String>` — Tera template rendered at suspension time, shown to approver
+- `StepStatus::Suspended` — new step status for steps waiting for human input
+- `handle_approval_steps()` in `job_creator.rs` — renders message, marks step `suspended`, stores rendered message in output
+- `POST /api/jobs/{id}/steps/{step}/approve` — approve (`approved: true`) or reject with `rejection_reason`
+- Approve output: `{ "approved": true, "approved_by": "email", "approved_at": "ISO8601", "input": {...} }`
+- Reject: step fails, downstream steps cascade-skip, `on_error` hooks fire
+- `on_suspended` hooks: `TaskDef.on_suspended` and workspace-level fallback, fire when step enters `suspended`
+- `SuspendedHookContext`: `workspace`, `task_name`, `job_id`, `step_name`, `message`
+- Recovery: `get_timed_out_suspended_steps()` in sweep Phase 2.5 — fails steps past their `timeout`
+- Cancellation: `cancel_pending_steps()` includes `'suspended'` status
+- Workers never claim approval steps (filtered in claim SQL alongside `task`/`agent`)
+- DB: migration `024_approval_gates.sql` adds `'suspended'` to status CHECK, `'approval'` to action_type CHECK, `suspended_at` column
+- Frontend: `ApprovalCard` component with message display, form fields, approve/reject buttons
 
 ### Task Actions (type: task — Sub-Job Execution)
 - `ActionDef.task: Option<String>` — references another task by name

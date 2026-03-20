@@ -349,7 +349,11 @@ pub async fn execute_task(
         }
     })?;
 
-    // 5. Return job_id
+    // 5. Fire on_suspended hooks for any root-level approval steps that were
+    //    suspended during job creation (FIX 2).
+    crate::job_creator::fire_initial_suspended_hooks(&state, &workspace, &ws, &name, job_id).await;
+
+    // 6. Return job_id
     Ok(Json(ExecuteTaskResponse {
         job_id: job_id.to_string(),
     }))

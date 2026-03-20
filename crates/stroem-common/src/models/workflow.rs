@@ -203,6 +203,10 @@ pub struct ActionDef {
     /// Maximum conversation turns (safety limit for multi-turn agents)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+
+    /// Approval prompt message (for type: approval). Tera template rendered at suspension time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Hook definition — an action to run when a job completes or fails
@@ -446,6 +450,8 @@ pub struct TaskDef {
     pub on_success: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_error: Vec<HookDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_suspended: Vec<HookDef>,
 }
 
 fn default_mode() -> String {
@@ -579,6 +585,8 @@ pub struct WorkflowConfig {
     pub on_success: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_error: Vec<HookDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_suspended: Vec<HookDef>,
 }
 
 /// Raw deserialization target for WorkflowConfig — converted via `From` to auto-hoist
@@ -601,6 +609,8 @@ struct WorkflowConfigRaw {
     on_success: Vec<HookDef>,
     #[serde(default)]
     on_error: Vec<HookDef>,
+    #[serde(default)]
+    on_suspended: Vec<HookDef>,
 }
 
 impl From<WorkflowConfigRaw> for WorkflowConfig {
@@ -614,6 +624,7 @@ impl From<WorkflowConfigRaw> for WorkflowConfig {
             triggers: raw.triggers,
             on_success: raw.on_success,
             on_error: raw.on_error,
+            on_suspended: raw.on_suspended,
         };
         config.hoist_inline_actions();
         config
@@ -662,6 +673,7 @@ pub struct WorkspaceConfig {
     pub triggers: HashMap<String, TriggerDef>,
     pub on_success: Vec<HookDef>,
     pub on_error: Vec<HookDef>,
+    pub on_suspended: Vec<HookDef>,
 }
 
 impl WorkspaceConfig {
@@ -680,6 +692,7 @@ impl WorkspaceConfig {
         self.triggers.extend(config.triggers);
         self.on_success.extend(config.on_success);
         self.on_error.extend(config.on_error);
+        self.on_suspended.extend(config.on_suspended);
     }
 
     /// Render secret values through Tera templates.

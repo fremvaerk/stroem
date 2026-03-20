@@ -161,6 +161,55 @@ async fn sweep(state: &AppState) -> Result<()> {
         }
     }
 
+    // Phase 2.5: Fail suspended approval steps that exceeded their timeout
+    let timed_out_suspended = JobStepRepo::get_timed_out_suspended_steps(&state.pool).await?;
+    for step_info in &timed_out_suspended {
+        let error_msg = "Approval timed out";
+
+        state
+            .append_server_log(
+                step_info.job_id,
+                &format!(
+                    "[recovery] Approval step '{}' timed out, marking as failed",
+                    step_info.step_name
+                ),
+            )
+            .await;
+
+        tracing::warn!(
+            "Approval step '{}/{}' timed out, failing",
+            step_info.job_id,
+            step_info.step_name
+        );
+
+        JobStepRepo::mark_failed(
+            &state.pool,
+            step_info.job_id,
+            &step_info.step_name,
+            error_msg,
+        )
+        .await?;
+
+        if let Err(e) = orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
+        {
+            tracing::error!(
+                "Failed to orchestrate after approval timeout '{}/{}': {:#}",
+                step_info.job_id,
+                step_info.step_name,
+                e
+            );
+            state
+                .append_server_log(
+                    step_info.job_id,
+                    &format!(
+                        "[recovery] Failed to orchestrate after approval timeout '{}': {:#}",
+                        step_info.step_name, e
+                    ),
+                )
+                .await;
+        }
+    }
+
     // Phase 3: Cancel jobs that exceeded their timeout
     let timed_out_jobs = JobRepo::get_timed_out_jobs(&state.pool).await?;
     for job_id in &timed_out_jobs {

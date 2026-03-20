@@ -45,10 +45,13 @@ export function JobDetailPage() {
   }, [load]);
 
   // Auto-refresh while pending or running (adaptive interval)
+  // A job with suspended steps has status "running", so this covers approval gates too.
   useEffect(() => {
     if (!job || (job.status !== "pending" && job.status !== "running")) return;
-    const hasRunningSteps = job.steps.some((s) => s.status === "running");
-    const interval = setInterval(load, hasRunningSteps ? 3000 : 8000);
+    const hasActiveSteps = job.steps.some(
+      (s) => s.status === "running" || s.status === "suspended",
+    );
+    const interval = setInterval(load, hasActiveSteps ? 3000 : 8000);
     return () => clearInterval(interval);
   }, [job, load]);
 
@@ -255,6 +258,7 @@ export function JobDetailPage() {
                 selectedStep={selectedStep}
                 onSelectStep={setSelectedStep}
                 workerNames={workerNames}
+                onRefresh={load}
               />
             </>
           )}

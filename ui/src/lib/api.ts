@@ -386,3 +386,19 @@ export async function deleteApiKey(prefix: string): Promise<void> {
     { method: "DELETE" },
   );
 }
+
+export async function approveStep(
+  jobId: string,
+  stepName: string,
+  approved: boolean,
+  input?: Record<string, unknown>,
+  rejectionReason?: string,
+): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>(
+    `/api/jobs/${encodeURIComponent(jobId)}/steps/${encodeURIComponent(stepName)}/approve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ approved, input, rejection_reason: rejectionReason }),
+    },
+  );
+}

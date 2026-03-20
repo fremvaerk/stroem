@@ -20,6 +20,7 @@ describe("StatusBadge", () => {
     "pending",
     "ready",
     "running",
+    "suspended",
     "completed",
     "failed",
     "cancelled",
@@ -89,11 +90,22 @@ describe("StatusBadge", () => {
     expect(el.className).toMatch(/slate/);
   });
 
+  it("applies amber styling for 'suspended'", () => {
+    const el = renderBadge("suspended");
+    expect(el.className).toMatch(/amber/);
+  });
+
   // ---------------------------------------------------------------------------
   // Running indicator
   // ---------------------------------------------------------------------------
-  it("renders an animated pulse indicator only for 'running'", () => {
+  it("renders an animated pulse indicator for 'running'", () => {
     const { container } = render(<StatusBadge status="running" />);
+    const pulseEl = container.querySelector(".animate-pulse");
+    expect(pulseEl).toBeInTheDocument();
+  });
+
+  it("renders an animated pulse indicator for 'suspended'", () => {
+    const { container } = render(<StatusBadge status="suspended" />);
     const pulseEl = container.querySelector(".animate-pulse");
     expect(pulseEl).toBeInTheDocument();
   });

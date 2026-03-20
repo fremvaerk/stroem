@@ -7,15 +7,17 @@ import {
 } from "@/components/ui/tabs";
 import { LogViewer } from "@/components/log-viewer";
 import { JsonViewer } from "@/components/json-viewer";
+import { ApprovalCard } from "@/components/approval-card";
 import { getStepLogs } from "@/lib/api";
 import type { JobStep } from "@/lib/types";
 
 interface StepDetailProps {
   jobId: string;
   step: JobStep;
+  onRefresh?: () => void;
 }
 
-export function StepDetail({ jobId, step }: StepDetailProps) {
+export function StepDetail({ jobId, step, onRefresh }: StepDetailProps) {
   const [logs, setLogs] = useState("");
   const [loadingLogs, setLoadingLogs] = useState(true);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -48,29 +50,40 @@ export function StepDetail({ jobId, step }: StepDetailProps) {
   }, [fetchLogs, step.status]);
 
   const isStreaming = step.status === "running";
+  const isSuspendedApproval =
+    step.status === "suspended" && step.action_type === "approval";
 
   return (
-    <Tabs defaultValue="logs" className="w-full">
-      <TabsList>
-        <TabsTrigger value="logs">Logs</TabsTrigger>
-        <TabsTrigger value="input">Input</TabsTrigger>
-        <TabsTrigger value="output">Output</TabsTrigger>
-      </TabsList>
-      <TabsContent value="logs">
-        {loadingLogs ? (
-          <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-primary" />
-          </div>
-        ) : (
-          <LogViewer logs={logs} isStreaming={isStreaming} />
-        )}
-      </TabsContent>
-      <TabsContent value="input">
-        <JsonViewer data={step.input} />
-      </TabsContent>
-      <TabsContent value="output">
-        <JsonViewer data={step.output} />
-      </TabsContent>
-    </Tabs>
+    <div className="space-y-3">
+      {isSuspendedApproval && (
+        <ApprovalCard
+          jobId={jobId}
+          step={step}
+          onAction={onRefresh ?? (() => {})}
+        />
+      )}
+      <Tabs defaultValue="logs" className="w-full">
+        <TabsList>
+          <TabsTrigger value="logs">Logs</TabsTrigger>
+          <TabsTrigger value="input">Input</TabsTrigger>
+          <TabsTrigger value="output">Output</TabsTrigger>
+        </TabsList>
+        <TabsContent value="logs">
+          {loadingLogs ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-primary" />
+            </div>
+          ) : (
+            <LogViewer logs={logs} isStreaming={isStreaming} />
+          )}
+        </TabsContent>
+        <TabsContent value="input">
+          <JsonViewer data={step.input} />
+        </TabsContent>
+        <TabsContent value="output">
+          <JsonViewer data={step.output} />
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }

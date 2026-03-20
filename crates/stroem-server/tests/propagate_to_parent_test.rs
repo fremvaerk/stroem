@@ -105,6 +105,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
     actions.insert(
@@ -140,6 +141,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -193,6 +195,7 @@ fn make_workspace_config() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
     tasks.insert(
@@ -208,6 +211,7 @@ fn make_workspace_config() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -221,6 +225,7 @@ fn make_workspace_config() -> WorkspaceConfig {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     }
 }
 
@@ -525,6 +530,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
     for (action_name, task_name) in &[
@@ -564,6 +570,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                message: None,
             },
         );
     }
@@ -600,6 +607,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -633,6 +641,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -666,6 +675,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -679,6 +689,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let state = setup_state(pool.clone(), ws_config, temp_dir.path());
@@ -860,6 +871,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
     actions.insert(
@@ -895,6 +907,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -964,6 +977,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
     tasks.insert(
@@ -979,6 +993,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -992,6 +1007,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let state = setup_state(pool.clone(), ws_config, temp_dir.path());

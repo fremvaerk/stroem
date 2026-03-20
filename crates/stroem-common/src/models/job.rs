@@ -61,6 +61,8 @@ pub enum StepStatus {
     Failed,
     Skipped,
     Cancelled,
+    /// Approval gate is waiting for a human to approve or reject.
+    Suspended,
 }
 
 impl fmt::Display for StepStatus {
@@ -80,6 +82,7 @@ impl AsRef<str> for StepStatus {
             Self::Failed => "failed",
             Self::Skipped => "skipped",
             Self::Cancelled => "cancelled",
+            Self::Suspended => "suspended",
         }
     }
 }
@@ -96,6 +99,7 @@ impl std::str::FromStr for StepStatus {
             "failed" => Ok(Self::Failed),
             "skipped" => Ok(Self::Skipped),
             "cancelled" => Ok(Self::Cancelled),
+            "suspended" => Ok(Self::Suspended),
             other => anyhow::bail!("Unknown step status: {}", other),
         }
     }
@@ -156,6 +160,8 @@ pub enum ActionType {
     Pod,
     Task,
     Agent,
+    /// Human approval gate — suspends the job until a reviewer approves or rejects.
+    Approval,
 }
 
 impl fmt::Display for ActionType {
@@ -172,6 +178,7 @@ impl AsRef<str> for ActionType {
             Self::Pod => "pod",
             Self::Task => "task",
             Self::Agent => "agent",
+            Self::Approval => "approval",
         }
     }
 }
@@ -185,6 +192,7 @@ impl std::str::FromStr for ActionType {
             "pod" => Ok(Self::Pod),
             "task" => Ok(Self::Task),
             "agent" => Ok(Self::Agent),
+            "approval" => Ok(Self::Approval),
             other => anyhow::bail!("Unknown action type: {}", other),
         }
     }
@@ -300,6 +308,7 @@ mod tests {
         assert_eq!(StepStatus::Failed.to_string(), "failed");
         assert_eq!(StepStatus::Skipped.to_string(), "skipped");
         assert_eq!(StepStatus::Cancelled.to_string(), "cancelled");
+        assert_eq!(StepStatus::Suspended.to_string(), "suspended");
     }
 
     #[test]
@@ -329,6 +338,10 @@ mod tests {
         assert_eq!(
             "cancelled".parse::<StepStatus>().unwrap(),
             StepStatus::Cancelled
+        );
+        assert_eq!(
+            "suspended".parse::<StepStatus>().unwrap(),
+            StepStatus::Suspended
         );
         assert!("invalid".parse::<StepStatus>().is_err());
     }
@@ -395,6 +408,7 @@ mod tests {
         assert_eq!(ActionType::Pod.to_string(), "pod");
         assert_eq!(ActionType::Task.to_string(), "task");
         assert_eq!(ActionType::Agent.to_string(), "agent");
+        assert_eq!(ActionType::Approval.to_string(), "approval");
     }
 
     #[test]
@@ -404,6 +418,10 @@ mod tests {
         assert_eq!("pod".parse::<ActionType>().unwrap(), ActionType::Pod);
         assert_eq!("task".parse::<ActionType>().unwrap(), ActionType::Task);
         assert_eq!("agent".parse::<ActionType>().unwrap(), ActionType::Agent);
+        assert_eq!(
+            "approval".parse::<ActionType>().unwrap(),
+            ActionType::Approval
+        );
         assert!("invalid".parse::<ActionType>().is_err());
     }
 
@@ -420,6 +438,22 @@ mod tests {
         assert_eq!(json, r#""agent""#);
         let parsed: ActionType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, agent_type);
+
+        let approval_type = ActionType::Approval;
+        let json = serde_json::to_string(&approval_type).unwrap();
+        assert_eq!(json, r#""approval""#);
+        let parsed: ActionType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, approval_type);
+    }
+
+    #[test]
+    fn test_step_status_suspended_serialization() {
+        let status = StepStatus::Suspended;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, r#""suspended""#);
+
+        let deserialized: StepStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, StepStatus::Suspended);
     }
 
     #[test]

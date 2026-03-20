@@ -270,6 +270,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
+        .route("/jobs/{id}/steps/{step}/approve", post(jobs::approve_step))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
         .merge(api_key_create)

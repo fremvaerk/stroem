@@ -133,6 +133,71 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             .await;
     }
 
+    // Handle any newly-promoted type: approval steps and fire on_suspended hooks
+    {
+        // Snapshot steps before suspension to detect which steps just became suspended
+        let steps_before = stroem_db::JobStepRepo::get_steps_for_job(&state.pool, job_id).await?;
+        let previously_suspended: std::collections::HashSet<&str> = steps_before
+            .iter()
+            .filter(|s| s.status == stroem_common::models::job::StepStatus::Suspended.as_ref())
+            .map(|s| s.step_name.as_str())
+            .collect();
+
+        if let Err(e) = crate::job_creator::handle_approval_steps(
+            &state.pool,
+            &workspace,
+            &job.workspace,
+            job_id,
+            &task,
+        )
+        .await
+        {
+            tracing::error!(
+                "Failed to handle approval steps for job {}: {:#}",
+                job_id,
+                e
+            );
+            state
+                .append_server_log(
+                    job_id,
+                    &format!("[orchestration] Failed to handle approval steps: {:#}", e),
+                )
+                .await;
+        }
+
+        // Fire on_suspended hooks for steps that newly entered suspended state
+        let steps_after = stroem_db::JobStepRepo::get_steps_for_job(&state.pool, job_id).await?;
+        for step in &steps_after {
+            if step.status == stroem_common::models::job::StepStatus::Suspended.as_ref()
+                && !previously_suspended.contains(step.step_name.as_str())
+            {
+                let rendered_message = step
+                    .output
+                    .as_ref()
+                    .and_then(|o| o["approval_message"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                state
+                    .append_server_log(
+                        job_id,
+                        &format!("[approval] Step '{}' waiting for approval", step.step_name),
+                    )
+                    .await;
+
+                crate::hooks::fire_suspended_hooks(
+                    state,
+                    &workspace,
+                    &job,
+                    &task,
+                    &step.step_name,
+                    &rendered_message,
+                )
+                .await;
+            }
+        }
+    }
+
     // Check if job reached terminal state
     if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
         if matches!(
@@ -289,6 +354,71 @@ async fn propagate_to_parent(
                     parent_job_id,
                     e
                 );
+            }
+
+            // Handle any newly-promoted approval steps in the parent,
+            // and fire on_suspended hooks for steps that just became suspended (FIX 3).
+            {
+                let steps_before =
+                    stroem_db::JobStepRepo::get_steps_for_job(&state.pool, parent_job_id).await?;
+                let pre_suspended: std::collections::HashSet<&str> = steps_before
+                    .iter()
+                    .filter(|s| {
+                        s.status == stroem_common::models::job::StepStatus::Suspended.as_ref()
+                    })
+                    .map(|s| s.step_name.as_str())
+                    .collect();
+
+                if let Err(e) = crate::job_creator::handle_approval_steps(
+                    &state.pool,
+                    &parent_ws,
+                    &parent_job.workspace,
+                    parent_job_id,
+                    &parent_task,
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to handle approval steps for parent job {}: {:#}",
+                        parent_job_id,
+                        e
+                    );
+                }
+
+                let steps_after =
+                    stroem_db::JobStepRepo::get_steps_for_job(&state.pool, parent_job_id).await?;
+                for step in &steps_after {
+                    if step.status == stroem_common::models::job::StepStatus::Suspended.as_ref()
+                        && !pre_suspended.contains(step.step_name.as_str())
+                    {
+                        let rendered_message = step
+                            .output
+                            .as_ref()
+                            .and_then(|o| o["approval_message"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        state
+                            .append_server_log(
+                                parent_job_id,
+                                &format!(
+                                    "[approval] Step '{}' waiting for approval",
+                                    step.step_name
+                                ),
+                            )
+                            .await;
+
+                        crate::hooks::fire_suspended_hooks(
+                            state,
+                            &parent_ws,
+                            parent_job,
+                            &parent_task,
+                            &step.step_name,
+                            &rendered_message,
+                        )
+                        .await;
+                    }
+                }
             }
 
             // Check if parent job is now terminal — propagate recursively
@@ -487,6 +617,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
         timeout: None,
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     })
 }
 
@@ -541,6 +672,7 @@ mod tests {
             loop_total: None,
             loop_item: None,
             agent_state: None,
+            suspended_at: None,
         }
     }
 

@@ -19,6 +19,7 @@ interface StepTimelineProps {
   selectedStep: string | null;
   onSelectStep: (stepName: string | null) => void;
   workerNames?: Map<string, string>;
+  onRefresh?: () => void;
 }
 
 interface StepRowProps {
@@ -30,6 +31,7 @@ interface StepRowProps {
   isLast: boolean;
   /** When true, renders with indentation (instance step inside a loop group) */
   indented?: boolean;
+  onRefresh?: () => void;
 }
 
 function StepRow({
@@ -40,6 +42,7 @@ function StepRow({
   workerNames,
   isLast,
   indented,
+  onRefresh,
 }: StepRowProps) {
   return (
     <div id={`step-${step.step_name}`}>
@@ -83,6 +86,11 @@ function StepRow({
             <span className="text-xs text-muted-foreground">
               {formatActionName(step.action_name)}
             </span>
+            {step.status === "suspended" && (
+              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                awaiting approval
+              </span>
+            )}
             {step.when_condition && step.status === "skipped" && (
               <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
                 condition
@@ -120,7 +128,7 @@ function StepRow({
       </div>
       {isExpanded && (
         <div className="ml-9 mb-4">
-          <StepDetail jobId={jobId} step={step} />
+          <StepDetail jobId={jobId} step={step} onRefresh={onRefresh} />
         </div>
       )}
     </div>
@@ -137,6 +145,7 @@ interface LoopGroupProps {
   isLast: boolean;
   instancesExpanded: boolean;
   onToggleInstances: () => void;
+  onRefresh?: () => void;
 }
 
 function LoopGroup({
@@ -149,6 +158,7 @@ function LoopGroup({
   isLast,
   instancesExpanded,
   onToggleInstances,
+  onRefresh,
 }: LoopGroupProps) {
   // Placeholder steps have no logs/input of their own — toggling expands iterations instead
   const isPlaceholderExpanded = instancesExpanded;
@@ -273,6 +283,7 @@ function LoopGroup({
                 workerNames={workerNames}
                 isLast={idx === instances.length - 1}
                 indented
+                onRefresh={onRefresh}
               />
             ))}
           </div>
@@ -288,6 +299,7 @@ export function StepTimeline({
   selectedStep,
   onSelectStep,
   workerNames,
+  onRefresh,
 }: StepTimelineProps) {
   // User-toggled loop expansion state, keyed by placeholder step name
   const [expandedLoops, setExpandedLoops] = useState<Record<string, boolean>>({});
@@ -365,6 +377,7 @@ export function StepTimeline({
                   }
                 }
               }}
+              onRefresh={onRefresh}
             />
           );
         }
@@ -382,6 +395,7 @@ export function StepTimeline({
             }
             workerNames={workerNames}
             isLast={isLast}
+            onRefresh={onRefresh}
           />
         );
       })}

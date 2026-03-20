@@ -331,7 +331,45 @@ Last updated: 2026-03-13.
 - [x] 5b: For-each loops (fan-out/fan-in) — `for_each` + `sequential` on FlowStep, expand/check/aggregate in job_creator.rs, `each` variable, DB migration 022, validation, API, UI, docs
 - [x] 5b review fixes (see Review section below)
 - [ ] 5c: While loops (retry-until patterns)
-- [ ] 5d: Suspend/Resume + Approval gates
+- [x] 5d: Approval gates — `type: approval` action, `suspended` step status, `message` Tera template, `on_suspended` hooks, approve/reject API, recovery timeout, cancellation, frontend approval card
+
+### 5d Review Fixes (2026-03-20)
+
+#### Critical
+- [x] Race condition: `approve_step`/`reject_step` repo methods with `WHERE status = 'suspended'` guard — `job_step.rs`
+- [x] `on_suspended` hooks fire for root approval steps — `fire_initial_suspended_hooks()` called from all callers (tasks.rs, scheduler.rs, hooks.rs, mcp/tools.rs) — `job_creator.rs`
+- [x] `on_suspended` hooks fire from `propagate_to_parent` — snapshot-diff pattern added — `job_recovery.rs`
+
+#### Important
+- [x] Input validation on approve — required fields enforced server-side against action's input schema — `jobs.rs`
+- [x] `approval_message` preserved after approve — output merged not overwritten — `jobs.rs`
+- [x] `rejection_reason` truncated to 4096 bytes (UTF-8 safe) — `jobs.rs`
+- [x] `approval_message`/`approval_fields` surfaced unconditionally for `action_type == "approval"` — `jobs.rs`
+
+#### Minor
+- [x] Frontend: client-side validation of required approval fields before submit — `approval-card.tsx`
+- [x] Frontend: `options` field renders as ComboboxField — `approval-card.tsx`
+- [x] Frontend: `boolean` field renders as Checkbox — `approval-card.tsx`
+- [x] Frontend: static indicator on suspended badge (no pulse) — `status-badge.tsx`
+- [x] Frontend: "Waiting since" shown on suspended steps — `approval-card.tsx`
+- [x] Warning log when approval message template is missing — `job_creator.rs`
+- [ ] Design doc migration number stale (says 023, actual is 024)
+
+#### Tests
+- [x] Integration: approval happy path (suspend → approve → downstream runs)
+- [x] Integration: rejection path (reject → step fails → downstream skipped → job fails)
+- [x] Integration: cancel job with suspended step → step cancelled
+- [x] Integration: root step suspends immediately
+- [x] Integration: approval message in API response
+- [x] Unit: `approve_step` returns 409 for non-suspended step
+- [x] Unit: `approve_step` returns 404 for missing step
+- [x] Unit: rejection reason truncation (ASCII, multi-byte UTF-8, exact boundary)
+- [x] Unit: approval output merge preserves message
+- [ ] Integration: approval timeout → recovery sweeper fails step (needs mock time)
+- [ ] Integration: `on_suspended` hooks fire (needs hook workspace setup)
+- [ ] Unit: `approve_step` returns 403 for View-only user (needs auth setup)
+- [ ] Unit: approval step with `when: false` is skipped not suspended
+- [ ] Unit: `for_each` + approval: `each` variable in message template rendering
 
 ## Review: Phase 5a Conditional Flow Steps (2026-03-12)
 

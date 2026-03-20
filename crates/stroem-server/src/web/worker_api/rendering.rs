@@ -349,6 +349,7 @@ mod tests {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         }
     }
 
@@ -393,6 +394,7 @@ mod tests {
             loop_total: None,
             loop_item: None,
             agent_state: None,
+            suspended_at: None,
         }
     }
 
@@ -428,6 +430,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         task.flow.insert(
             "other-step".to_string(),
@@ -462,6 +465,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         // flow step has no input mapping
         task.flow.insert(
@@ -497,6 +501,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         task.flow
             .insert("step1".to_string(), make_flow_step("my-action", flow_input));
@@ -531,6 +536,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         task.flow
             .insert("step1".to_string(), make_flow_step("my-action", flow_input));
@@ -569,6 +575,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         task.flow
             .insert("step2".to_string(), make_flow_step("my-action", flow_input));
@@ -606,6 +613,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         task.flow
             .insert("step1".to_string(), make_flow_step("my-action", flow_input));
@@ -786,6 +794,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         task.flow.insert(
             "step1".to_string(),
@@ -830,6 +839,7 @@ mod tests {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         };
         // flow step only maps "sql", not "extra"
         let flow_input = HashMap::from([("sql".to_string(), json!("SELECT 1"))]);

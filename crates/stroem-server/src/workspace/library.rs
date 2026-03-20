@@ -407,6 +407,7 @@ mod tests {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         }
     }
 
@@ -442,6 +443,7 @@ mod tests {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         }
     }
 
@@ -499,6 +501,7 @@ mod tests {
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 
@@ -568,6 +571,7 @@ mod tests {
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
                 }],
+                on_suspended: vec![],
             },
         );
 
@@ -601,6 +605,7 @@ mod tests {
 
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 
@@ -682,6 +687,7 @@ mod tests {
 
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 
@@ -752,6 +758,7 @@ mod tests {
 
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
 
@@ -1107,6 +1114,7 @@ tasks:
 
             on_success: ws.on_success,
             on_error: ws.on_error,
+            on_suspended: ws.on_suspended,
         }
     }
 

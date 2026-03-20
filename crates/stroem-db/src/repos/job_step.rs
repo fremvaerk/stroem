@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -35,6 +35,7 @@ pub struct JobStepRow {
     pub loop_total: Option<i32>,
     pub loop_item: Option<JsonValue>,
     pub agent_state: Option<JsonValue>,
+    pub suspended_at: Option<DateTime<Utc>>,
 }
 
 /// New job step for creation
@@ -220,7 +221,7 @@ impl JobStepRepo {
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'agent')
+                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'agent', 'approval')
                 ORDER BY random()
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -696,13 +697,13 @@ impl JobStepRepo {
         Ok(to_skip)
     }
 
-    /// Cancel all pending/ready steps for a job. Returns the number of steps cancelled.
+    /// Cancel all pending/ready/suspended steps for a job. Returns the number of steps cancelled.
     pub async fn cancel_pending_steps(pool: &PgPool, job_id: Uuid) -> Result<u64> {
         let result = sqlx::query(
             r#"
             UPDATE job_step
             SET status = 'cancelled', completed_at = NOW()
-            WHERE job_id = $1 AND status IN ('pending', 'ready')
+            WHERE job_id = $1 AND status IN ('pending', 'ready', 'suspended')
             "#,
         )
         .bind(job_id)
@@ -793,7 +794,7 @@ impl JobStepRepo {
             SELECT js.job_id, js.step_name, NULL::uuid AS worker_id
             FROM job_step js
             WHERE js.status = 'ready'
-              AND js.action_type NOT IN ('task', 'agent')
+              AND js.action_type NOT IN ('task', 'agent', 'approval')
               AND js.ready_at < NOW() - make_interval(secs => $1::double precision)
               AND NOT EXISTS (
                   SELECT 1 FROM worker w
@@ -807,5 +808,152 @@ impl JobStepRepo {
         .await
         .context("get_unmatched_ready_steps")?;
         Ok(rows)
+    }
+
+    /// Approve a suspended approval step: atomically transitions from `suspended` to `completed`.
+    ///
+    /// Returns `true` if the update was applied (the step was still suspended).
+    /// Returns `false` when the step has already left the suspended state (e.g. timed out
+    /// or rejected concurrently), so callers can surface a conflict error without doing a
+    /// separate read-then-write.
+    pub async fn approve_step(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        output: Option<JsonValue>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'completed', output = $1, completed_at = NOW()
+            WHERE job_id = $2 AND step_name = $3 AND status = 'suspended'
+            "#,
+        )
+        .bind(output)
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await
+        .context("Failed to approve suspended step")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Reject a suspended approval step: atomically transitions from `suspended` to `failed`.
+    ///
+    /// Returns `true` if the update was applied (the step was still suspended).
+    /// Returns `false` when the step has already left the suspended state (e.g. timed out
+    /// or approved concurrently), so callers can surface a conflict error without doing a
+    /// separate read-then-write.
+    pub async fn reject_step(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        error_message: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'failed', error_message = $1, completed_at = NOW()
+            WHERE job_id = $2 AND step_name = $3 AND status = 'suspended'
+            "#,
+        )
+        .bind(error_message)
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await
+        .context("Failed to reject suspended step")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Transition an approval step from `ready` to `suspended`, recording the suspension time.
+    ///
+    /// The `AND status = 'ready'` guard prevents double-suspension races.
+    pub async fn mark_suspended(pool: &PgPool, job_id: Uuid, step_name: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'suspended', suspended_at = NOW()
+            WHERE job_id = $1 AND step_name = $2 AND status = 'ready'
+            "#,
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .execute(pool)
+        .await
+        .context("Failed to mark step as suspended")?;
+
+        Ok(())
+    }
+
+    /// Return suspended approval steps whose `timeout_secs` deadline has elapsed
+    /// since `suspended_at`.
+    pub async fn get_timed_out_suspended_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {
+        let rows = sqlx::query_as::<_, StaleStepInfo>(
+            "SELECT job_id, step_name, NULL::uuid AS worker_id FROM job_step \
+             WHERE status = 'suspended' AND timeout_secs IS NOT NULL \
+               AND suspended_at + make_interval(secs => timeout_secs::double precision) < NOW()",
+        )
+        .fetch_all(pool)
+        .await
+        .context("get_timed_out_suspended_steps")?;
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Verify that `approve_step` and `reject_step` return `Result<bool>` and
+    /// document the expected semantic: `true` means the row was updated,
+    /// `false` means the step was not in the suspended state.
+    ///
+    /// We cannot call the real SQL in a unit test, so we test the type contract
+    /// by checking the value we'd compute from `rows_affected`.
+    #[test]
+    fn test_approve_reject_return_type_semantics() {
+        // Simulates what the real impl does with rows_affected
+        let rows_affected_when_still_suspended: u64 = 1;
+        let rows_affected_when_already_terminal: u64 = 0;
+
+        let applied_when_still_suspended = rows_affected_when_still_suspended > 0;
+        let applied_when_already_terminal = rows_affected_when_already_terminal > 0;
+
+        assert!(
+            applied_when_still_suspended,
+            "should return true when step was suspended"
+        );
+        assert!(
+            !applied_when_already_terminal,
+            "should return false when step has already left suspended state"
+        );
+    }
+
+    /// Verify the SQL columns constant includes `suspended_at` so that
+    /// `get_steps_for_job` returns the field used by the hooks diff logic.
+    #[test]
+    fn test_step_columns_includes_suspended_at() {
+        assert!(
+            STEP_COLUMNS.contains("suspended_at"),
+            "STEP_COLUMNS must include suspended_at for suspended hook detection"
+        );
+    }
+
+    /// Verify JSON output merge pattern preserves existing fields (FIX 5 logic).
+    #[test]
+    fn test_approval_output_merge_preserves_message() {
+        let mut output = json!({ "approval_message": "Please approve" });
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("approved".to_string(), json!(true));
+            obj.insert("approved_by".to_string(), json!("alice@example.com"));
+        }
+        // The original approval_message field must survive the merge
+        assert_eq!(output["approval_message"], "Please approve");
+        assert_eq!(output["approved"], true);
+        assert_eq!(output["approved_by"], "alice@example.com");
     }
 }

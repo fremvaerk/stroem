@@ -88,6 +88,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -140,6 +141,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -190,6 +192,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -228,6 +231,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
                 input: hook_input,
             }],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 

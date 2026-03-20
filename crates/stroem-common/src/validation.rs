@@ -70,6 +70,14 @@ fn validate_workflow_config_inner(
         for (i, hook) in task.on_error.iter().enumerate() {
             check_task_self_reference(config, task_name, &hook.action, &format!("on_error[{i}]"))?;
         }
+        for (i, hook) in task.on_suspended.iter().enumerate() {
+            check_task_self_reference(
+                config,
+                task_name,
+                &hook.action,
+                &format!("on_suspended[{i}]"),
+            )?;
+        }
     }
 
     // Validate each task
@@ -249,6 +257,14 @@ fn validate_workflow_config_inner(
                 libraries_resolved,
             )?;
         }
+        for (i, hook) in task.on_suspended.iter().enumerate() {
+            validate_hook_action_exists(
+                &format!("Task '{task_name}' on_suspended[{i}]"),
+                &hook.action,
+                config,
+                libraries_resolved,
+            )?;
+        }
     }
 
     // Validate triggers reference existing tasks
@@ -343,6 +359,14 @@ fn validate_workflow_config_inner(
     for (i, hook) in config.on_error.iter().enumerate() {
         validate_hook_action_exists(
             &format!("Workspace on_error[{i}]"),
+            &hook.action,
+            config,
+            libraries_resolved,
+        )?;
+    }
+    for (i, hook) in config.on_suspended.iter().enumerate() {
+        validate_hook_action_exists(
+            &format!("Workspace on_suspended[{i}]"),
             &hook.action,
             config,
             libraries_resolved,
@@ -686,8 +710,9 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>>
         "pod" => validate_pod_action(action, action_name),
         "task" => validate_task_action(action, action_name),
         "agent" => validate_agent_action(action, action_name),
+        "approval" => validate_approval_action(action, action_name),
         other => bail!(
-            "Action '{}' has invalid type '{}' (expected: script, docker, pod, task, agent)",
+            "Action '{}' has invalid type '{}' (expected: script, docker, pod, task, agent, approval)",
             action_name,
             other
         ),
@@ -1196,6 +1221,140 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
     Ok(warnings)
 }
 
+fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    // message is required for approval actions
+    if action.message.is_none() {
+        bail!(
+            "Action '{}' is type 'approval' but missing 'message' field",
+            action_name
+        );
+    }
+
+    // Forbidden fields — approval gates have no execution context
+    if action.cmd.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'cmd' field",
+            action_name
+        );
+    }
+    if action.script.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'script' field",
+            action_name
+        );
+    }
+    if action.source.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'source' field",
+            action_name
+        );
+    }
+    if action.image.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'image' field",
+            action_name
+        );
+    }
+    if action.runner.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'runner' field",
+            action_name
+        );
+    }
+    if action.manifest.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'manifest' field",
+            action_name
+        );
+    }
+    if action.task.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'task' field",
+            action_name
+        );
+    }
+    if action.entrypoint.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'entrypoint' field",
+            action_name
+        );
+    }
+    if action.command.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'command' field",
+            action_name
+        );
+    }
+    if action.provider.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'provider' field",
+            action_name
+        );
+    }
+    if action.prompt.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'prompt' field",
+            action_name
+        );
+    }
+    if action.system_prompt.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'system_prompt' field",
+            action_name
+        );
+    }
+    if action.output_schema.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'output_schema' field",
+            action_name
+        );
+    }
+    if action.temperature.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'temperature' field",
+            action_name
+        );
+    }
+    if action.max_tokens.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'max_tokens' field",
+            action_name
+        );
+    }
+    if !action.tools.is_empty() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'tools' field",
+            action_name
+        );
+    }
+    if action.max_turns.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'max_turns' field",
+            action_name
+        );
+    }
+    if action.language.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'language' field",
+            action_name
+        );
+    }
+    if !action.dependencies.is_empty() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'dependencies' field",
+            action_name
+        );
+    }
+    if action.interpreter.is_some() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'interpreter' field",
+            action_name
+        );
+    }
+
+    Ok(vec![])
+}
+
 /// Validates that a hook references an existing action (or a library action).
 fn validate_hook_action_exists(
     label: &str,
@@ -1215,8 +1374,11 @@ fn validate_hook_action_exists(
 /// Compute the required worker tags for an action.
 /// These tags must all be present on a worker for it to claim a step using this action.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
-    // Task and agent actions are handled server-side, not by workers
-    if action.action_type == "task" || action.action_type == "agent" {
+    // Task, agent, and approval actions are handled server-side, not by workers
+    if action.action_type == "task"
+        || action.action_type == "agent"
+        || action.action_type == "approval"
+    {
         return vec![];
     }
 
@@ -1246,7 +1408,7 @@ pub fn derive_runner(action: &ActionDef) -> String {
     match action.action_type.as_str() {
         "script" => action.runner.as_deref().unwrap_or("local").to_string(),
         "docker" | "pod" => "none".to_string(),
-        "task" | "agent" => "none".to_string(),
+        "task" | "agent" | "approval" => "none".to_string(),
         _ => "local".to_string(),
     }
 }
@@ -1626,6 +1788,7 @@ triggers:
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(
@@ -1663,6 +1826,7 @@ triggers:
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(
@@ -1696,6 +1860,7 @@ triggers:
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(
@@ -1729,6 +1894,7 @@ triggers:
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(
@@ -1762,6 +1928,7 @@ triggers:
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(
@@ -1797,6 +1964,7 @@ triggers:
                 timeout: None,
                 on_success: vec![],
                 on_error: vec![],
+                on_suspended: vec![],
             },
         );
         config.triggers.insert(
@@ -5148,5 +5316,273 @@ prompt: "Do something"
         )
         .unwrap();
         assert_eq!(derive_runner(&action), "none");
+    }
+
+    // ---- approval action tests ----
+
+    #[test]
+    fn test_validate_approval_action_valid() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Please review the deployment before proceeding."
+
+tasks:
+  deploy:
+    flow:
+      gate:
+        action: gate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected ok but got: {:?}", result);
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_approval_action_missing_message() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing 'message'"),
+            "expected missing message error"
+        );
+    }
+
+    #[test]
+    fn test_validate_approval_action_rejects_cmd() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+    cmd: "echo bad"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'cmd' field"));
+    }
+
+    #[test]
+    fn test_validate_approval_action_rejects_script() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+    script: "echo bad"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'script' field"));
+    }
+
+    #[test]
+    fn test_validate_approval_action_rejects_image() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+    image: "ubuntu:22.04"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'image' field"));
+    }
+
+    #[test]
+    fn test_validate_approval_action_rejects_runner() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+    runner: docker
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'runner' field"));
+    }
+
+    #[test]
+    fn test_validate_approval_action_rejects_task_field() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+    task: other-task
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'task' field"));
+    }
+
+    #[test]
+    fn test_validate_approval_action_rejects_provider() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+    provider: openai
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("'provider' field"));
+    }
+
+    #[test]
+    fn test_compute_required_tags_approval() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yaml::from_str(
+            r#"
+type: approval
+message: "Please review"
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_derive_runner_approval() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yaml::from_str(
+            r#"
+type: approval
+message: "Please review"
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "none");
+    }
+
+    #[test]
+    fn test_validate_approval_inline_in_flow() {
+        let yaml = r#"
+tasks:
+  deploy:
+    flow:
+      gate:
+        type: approval
+        message: "Approve the deployment to production?"
+      run:
+        depends_on: [gate]
+        type: script
+        script: "echo deploying"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected ok but got: {:?}", result);
+    }
+
+    #[test]
+    fn test_validate_on_suspended_hook_valid() {
+        let yaml = r#"
+actions:
+  notify:
+    type: script
+    script: "echo notifying"
+  gate:
+    type: approval
+    message: "Approve?"
+
+tasks:
+  deploy:
+    on_suspended:
+      - action: notify
+    flow:
+      gate:
+        action: gate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected ok but got: {:?}", result);
+    }
+
+    #[test]
+    fn test_validate_on_suspended_hook_missing_action() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve?"
+
+tasks:
+  deploy:
+    on_suspended:
+      - action: nonexistent_action
+    flow:
+      gate:
+        action: gate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("nonexistent_action"),
+            "expected missing action error"
+        );
+    }
+
+    #[test]
+    fn test_validate_workspace_on_suspended_hook_valid() {
+        let yaml = r#"
+actions:
+  notify:
+    type: script
+    script: "echo notifying"
+  gate:
+    type: approval
+    message: "Approve?"
+
+on_suspended:
+  - action: notify
+
+tasks:
+  deploy:
+    flow:
+      gate:
+        action: gate
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected ok but got: {:?}", result);
+    }
+
+    #[test]
+    fn test_validate_workspace_on_suspended_hook_missing_action() {
+        let yaml = r#"
+on_suspended:
+  - action: does_not_exist
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("does_not_exist"),
+            "expected missing action error"
+        );
     }
 }

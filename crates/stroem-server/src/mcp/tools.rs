@@ -409,6 +409,17 @@ impl StromMcpHandler {
         .await
         .map_err(|e| internal_err(format!("Failed to create job: {e}")))?;
 
+        // Fire on_suspended hooks for any root-level approval steps that were
+        // suspended during job creation (FIX 2).
+        crate::job_creator::fire_initial_suspended_hooks(
+            &self.state,
+            &ws_config,
+            &params.workspace,
+            &params.task_name,
+            job_id,
+        )
+        .await;
+
         Ok(json_result(
             &serde_json::json!({ "job_id": job_id.to_string() }),
         ))

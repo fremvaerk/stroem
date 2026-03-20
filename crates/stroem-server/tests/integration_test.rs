@@ -85,6 +85,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -122,6 +123,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -163,6 +165,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -214,6 +217,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -283,6 +287,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -349,6 +354,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -431,6 +437,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -465,6 +472,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -536,6 +544,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -622,6 +631,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -686,6 +696,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -737,6 +748,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -804,6 +816,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -859,6 +872,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -928,6 +942,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -962,6 +977,7 @@ fn test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -1851,6 +1867,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -1962,6 +1979,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -2223,6 +2241,7 @@ async fn test_task_detail_connections() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -2314,6 +2333,7 @@ async fn test_task_detail_connections() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -2363,6 +2383,7 @@ async fn test_task_detail_connections() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -4166,6 +4187,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -4203,6 +4225,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -4243,6 +4266,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
                 action: "notify".to_string(),
                 input: hook_input,
             }],
+            on_suspended: vec![],
         },
     );
 
@@ -4387,6 +4411,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -4421,6 +4446,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -4458,6 +4484,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -4492,6 +4519,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -5276,6 +5304,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -5400,6 +5429,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -5541,6 +5571,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -5860,6 +5891,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         }
     };
 
@@ -6007,6 +6039,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         }
     };
 
@@ -6133,6 +6166,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         }
     };
 
@@ -6266,6 +6300,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         }
     };
 
@@ -6398,6 +6433,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         }
     };
 
@@ -6540,6 +6576,7 @@ async fn test_cascading_skip() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         }
     };
 
@@ -6674,6 +6711,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -6707,6 +6745,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -8203,6 +8242,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -8651,6 +8691,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -8688,6 +8729,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -8740,6 +8782,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -8827,6 +8870,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
                 input: hook_input,
             }],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -8942,6 +8986,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
                 action: "notify".to_string(),
                 input: hook_input,
             }],
+            on_suspended: vec![],
         },
     );
 
@@ -9035,6 +9080,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
                 input: HashMap::new(),
             }],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -9118,6 +9164,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
                 input: hook_input,
             }],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -9226,6 +9273,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
                 action: "notify".to_string(),
                 input: hook_input,
             }],
+            on_suspended: vec![],
         },
     );
 
@@ -9364,6 +9412,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
                 input: hook_input,
             }],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -9479,6 +9528,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
                 action: "notify".to_string(),
                 input: hook_input,
             }],
+            on_suspended: vec![],
         },
     );
 
@@ -9596,6 +9646,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 action: "notify".to_string(),
                 input: hook_input,
             }],
+            on_suspended: vec![],
         },
     );
 
@@ -9702,6 +9753,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
 
         on_success: vec![],
         on_error: vec![],
+        on_suspended: vec![],
     };
 
     // Orchestrator should mark the hook job as completed
@@ -9775,6 +9827,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -9812,6 +9865,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -9846,6 +9900,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -9896,6 +9951,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -9945,6 +10001,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -10212,6 +10269,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -10263,6 +10321,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -10337,6 +10396,7 @@ async fn test_task_action_in_hook() -> Result<()> {
                 action: "run-cleanup".to_string(),
                 input: HashMap::new(),
             }],
+            on_suspended: vec![],
         },
     );
 
@@ -10465,6 +10525,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -10502,6 +10563,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -10536,6 +10598,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -12686,6 +12749,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -12753,6 +12817,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -12869,6 +12934,7 @@ async fn setup_sync_webhook() -> Result<(
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -12902,6 +12968,7 @@ async fn setup_sync_webhook() -> Result<(
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -13400,6 +13467,7 @@ async fn setup_scheduler_workspace(
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -13433,6 +13501,7 @@ async fn setup_scheduler_workspace(
 
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -14676,6 +14745,7 @@ fn when_test_workspace_with_flow(
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
     workspace.tasks.insert(
@@ -14690,6 +14760,7 @@ fn when_test_workspace_with_flow(
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
     workspace
@@ -14863,6 +14934,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -14899,6 +14971,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            message: None,
         },
     );
 
@@ -14931,6 +15004,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -14963,6 +15037,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -15866,6 +15941,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
                 input: HashMap::new(),
             }],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -15973,6 +16049,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
             timeout: None,
             on_success: vec![],
             on_error: vec![],
+            on_suspended: vec![],
         },
     );
 
@@ -16119,6 +16196,960 @@ async fn test_job_revision_null_when_no_workspace_revision() -> Result<()> {
         body["revision"].is_null(),
         "job detail revision must be null when the workspace source reports no revision, got: {:?}",
         body["revision"]
+    );
+
+    Ok(())
+}
+
+// ─── Approval Gate Tests ──────────────────────────────────────────────────────
+//
+// These tests verify the Phase 5d approval gate feature end-to-end:
+// - Approval steps are suspended when their dependencies are met
+// - Approving a suspended step continues the flow
+// - Rejecting a suspended step fails the step (and cascades)
+// - Attempting to approve a non-suspended step returns 409
+// - Root-level approval steps suspend immediately on job creation
+// - Cancelling a job with a suspended approval step works correctly
+// - The job detail API surfaces the approval_message and suspended_at fields
+
+/// Build a workspace with a 3-step approval flow:
+///   greet (script) → review (approval) → deploy (script)
+///
+/// The approval step has a Tera message that references the greet step's output.
+fn test_workspace_with_approval() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    // Action: greet (script)
+    workspace.actions.insert(
+        "greet".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo hello".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            message: None,
+        },
+    );
+
+    // Action: review (approval)
+    workspace.actions.insert(
+        "review".to_string(),
+        ActionDef {
+            action_type: "approval".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            message: Some(
+                "Please approve the deployment. Greet output: {{ greet.output }}".to_string(),
+            ),
+        },
+    );
+
+    // Task: deploy-flow (greet → review → deploy)
+    let mut flow = HashMap::new();
+    flow.insert(
+        "greet".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+    flow.insert(
+        "review".to_string(),
+        FlowStep {
+            action: "review".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["greet".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+    flow.insert(
+        "deploy".to_string(),
+        FlowStep {
+            action: "greet".to_string(), // reuse greet action
+            name: None,
+            description: None,
+            depends_on: vec!["review".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "deploy-flow".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    workspace
+}
+
+/// Build a workspace with a single root-level approval step (no dependencies).
+/// The approval step is the first (and only) step in the flow — it should
+/// be suspended immediately when the job is created.
+fn test_workspace_with_root_approval() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    workspace.actions.insert(
+        "gate".to_string(),
+        ActionDef {
+            action_type: "approval".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            message: Some("Gate approval required before continuing.".to_string()),
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "gate".to_string(),
+        FlowStep {
+            action: "gate".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "gated-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    workspace
+}
+
+/// Spin up a router backed by `workspace` against a fresh Postgres container.
+async fn setup_with_workspace(
+    workspace: WorkspaceConfig,
+) -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        acl: None,
+        mcp: None,
+        agents: None,
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
+// ─── Test: approval step reaches suspended after its dependency completes ─────
+
+#[tokio::test]
+async fn test_approval_step_reaches_suspended() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create the deploy-flow job
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    // Initial state: greet=ready, review=pending, deploy=pending
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let statuses: HashMap<_, _> = steps
+        .iter()
+        .map(|s| (s.step_name.as_str(), s.status.as_str()))
+        .collect();
+    assert_eq!(statuses["greet"], "ready");
+    assert_eq!(statuses["review"], "pending");
+    assert_eq!(statuses["deploy"], "pending");
+
+    // Complete the greet step — the complete handler also triggers orchestration,
+    // which calls handle_approval_steps and suspends the review step
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // After orchestration: review must be suspended, deploy still pending
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let statuses: HashMap<_, _> = steps
+        .iter()
+        .map(|s| (s.step_name.as_str(), s.status.as_str()))
+        .collect();
+    assert_eq!(
+        statuses["review"], "suspended",
+        "approval step should be suspended after its dependency completes"
+    );
+    assert_eq!(
+        statuses["deploy"], "pending",
+        "deploy should still be pending while review is suspended"
+    );
+
+    // The review step must have a non-null suspended_at timestamp
+    let review_step = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert!(
+        review_step.suspended_at.is_some(),
+        "suspended approval step must have suspended_at set"
+    );
+
+    // The approval message must have been rendered and stored in the step output
+    let output = review_step
+        .output
+        .as_ref()
+        .expect("review step should have output");
+    let msg = output["approval_message"].as_str().unwrap_or("");
+    assert!(
+        !msg.is_empty(),
+        "approval_message should be stored in step output"
+    );
+
+    Ok(())
+}
+
+// ─── Test: approving a suspended step continues the flow ──────────────────────
+
+#[tokio::test]
+async fn test_approval_approve_continues_flow() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job and complete greet step to get review into suspended state
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Confirm review is suspended before approving
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let review = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert_eq!(review.status, "suspended");
+
+    // Approve the suspended review step
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/review/approve", job_id),
+            json!({"approved": true}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["status"].as_str().unwrap(),
+        "approved",
+        "approve endpoint must return status=approved"
+    );
+
+    // Review step must now be completed with approval output
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let review = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert_eq!(
+        review.status, "completed",
+        "review step must be completed after approval"
+    );
+    let output = review
+        .output
+        .as_ref()
+        .expect("review output must be set after approval");
+    assert_eq!(
+        output["approved"],
+        json!(true),
+        "output.approved must be true"
+    );
+    assert!(
+        output["approved_by"].is_string(),
+        "output.approved_by must be a string"
+    );
+
+    // Deploy step must have been promoted to ready after approval
+    let deploy = steps.iter().find(|s| s.step_name == "deploy").unwrap();
+    assert_eq!(
+        deploy.status, "ready",
+        "deploy step must be promoted to ready after approval"
+    );
+
+    Ok(())
+}
+
+// ─── Test: rejecting a suspended step fails the job ──────────────────────────
+
+#[tokio::test]
+async fn test_approval_reject_fails_job() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job and advance to suspended review step
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Confirm review is suspended
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps
+            .iter()
+            .find(|s| s.step_name == "review")
+            .unwrap()
+            .status,
+        "suspended"
+    );
+
+    // Reject the approval step with a reason
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/review/approve", job_id),
+            json!({"approved": false, "rejection_reason": "Plan looks wrong"}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["status"].as_str().unwrap(),
+        "rejected",
+        "approve endpoint must return status=rejected when approved=false"
+    );
+
+    // Review step must be failed with the rejection reason as error_message
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let review = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert_eq!(
+        review.status, "failed",
+        "review step must be failed after rejection"
+    );
+    assert_eq!(
+        review.error_message.as_deref(),
+        Some("Plan looks wrong"),
+        "error_message must carry the rejection reason"
+    );
+
+    // Deploy step must be skipped (cascade from failed dependency)
+    let deploy = steps.iter().find(|s| s.step_name == "deploy").unwrap();
+    assert_eq!(
+        deploy.status, "skipped",
+        "deploy step must be cascade-skipped after review rejection"
+    );
+
+    // Job must be failed because a step failed without continue_on_failure
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "job must be failed after step rejection"
+    );
+
+    Ok(())
+}
+
+// ─── Test: approving a non-suspended step returns 409 ────────────────────────
+
+#[tokio::test]
+async fn test_approval_returns_409_for_non_suspended_step() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job — greet is ready (not suspended)
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    // Verify greet is ready (not suspended)
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps
+            .iter()
+            .find(|s| s.step_name == "greet")
+            .unwrap()
+            .status,
+        "ready"
+    );
+
+    // Attempt to approve the greet step (script type, not suspended)
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/greet/approve", job_id),
+            json!({"approved": true}),
+        ))
+        .await?;
+
+    // Must return 409 Conflict because the step is not in suspended state
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "approving a non-suspended step must return 409"
+    );
+
+    Ok(())
+}
+
+// ─── Test: root-level approval step suspends immediately on job creation ──────
+
+#[tokio::test]
+async fn test_approval_root_step_suspends_immediately() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_root_approval()).await?;
+
+    // Create the gated-task job — the single approval step has no dependencies
+    // so create_job_for_task calls handle_approval_steps immediately after creation
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/gated-task/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    // The gate step must be suspended immediately after job creation
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 1);
+    let gate = &steps[0];
+    assert_eq!(gate.step_name, "gate");
+    assert_eq!(
+        gate.status, "suspended",
+        "root-level approval step must be suspended immediately after job creation"
+    );
+    assert!(
+        gate.suspended_at.is_some(),
+        "suspended step must have suspended_at timestamp"
+    );
+
+    // The approval message must be stored in the output
+    let output = gate.output.as_ref().expect("gate step must have output");
+    assert!(
+        output["approval_message"].is_string(),
+        "approval_message must be stored in output"
+    );
+    assert!(
+        !output["approval_message"].as_str().unwrap_or("").is_empty(),
+        "approval_message must not be empty"
+    );
+
+    // Job must be running (not pending) — handle_approval_steps transitions it
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "running",
+        "job must be running while an approval step is suspended"
+    );
+
+    Ok(())
+}
+
+// ─── Test: cancelling a job with a suspended approval step ───────────────────
+
+#[tokio::test]
+async fn test_cancel_job_with_suspended_step() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job and complete greet to reach suspended review
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Confirm review is suspended
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps
+            .iter()
+            .find(|s| s.step_name == "review")
+            .unwrap()
+            .status,
+        "suspended"
+    );
+
+    // Cancel the job
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/cancel", job_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"].as_str().unwrap(), "cancelled");
+
+    // Review step must be cancelled
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let review = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert_eq!(
+        review.status, "cancelled",
+        "suspended approval step must be cancelled when the job is cancelled"
+    );
+
+    // Deploy step must be cancelled too
+    let deploy = steps.iter().find(|s| s.step_name == "deploy").unwrap();
+    assert_eq!(
+        deploy.status, "cancelled",
+        "pending step downstream of a suspended approval must also be cancelled"
+    );
+
+    // Job must be cancelled
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "cancelled");
+
+    Ok(())
+}
+
+// ─── Test: job detail API surfaces approval_message and suspended_at ─────────
+
+#[tokio::test]
+async fn test_approval_message_in_api_response() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job and complete greet to reach suspended review
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Fetch the job detail via the API
+    let resp = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    // Find the review step in the response
+    let steps = body["steps"].as_array().expect("steps must be an array");
+    let review_step = steps
+        .iter()
+        .find(|s| s["step_name"].as_str() == Some("review"))
+        .expect("review step must appear in job detail response");
+
+    // The step must be suspended
+    assert_eq!(review_step["status"].as_str().unwrap(), "suspended");
+
+    // suspended_at must be present and non-null
+    assert!(
+        !review_step["suspended_at"].is_null(),
+        "review step must have a non-null suspended_at in the API response"
+    );
+
+    // approval_message must be surfaced at the step level (not just inside output)
+    assert!(
+        review_step["approval_message"].is_string(),
+        "approval step must have approval_message field in the API response"
+    );
+    assert!(
+        !review_step["approval_message"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "approval_message must not be empty"
+    );
+
+    Ok(())
+}
+
+// ─── Test: rejection without explicit reason falls back to default message ────
+
+#[tokio::test]
+async fn test_approval_reject_default_reason() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job and advance to suspended review step
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Reject without providing a rejection_reason
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/review/approve", job_id),
+            json!({"approved": false}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await["status"].as_str().unwrap(),
+        "rejected"
+    );
+
+    // The error_message should fall back to the server-supplied default
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let review = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert_eq!(review.status, "failed");
+    assert!(
+        review.error_message.is_some(),
+        "error_message must be set even when no rejection_reason is provided"
+    );
+    assert!(
+        !review.error_message.as_deref().unwrap_or("").is_empty(),
+        "default rejection reason must be non-empty"
+    );
+
+    Ok(())
+}
+
+// ─── Test: approving a non-existent step returns 404 ─────────────────────────
+
+#[tokio::test]
+async fn test_approval_404_for_missing_step() -> Result<()> {
+    let (router, _pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    // Create job
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    // Attempt to approve a step that does not exist in this job
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/nonexistent/approve", job_id),
+            json!({"approved": true}),
+        ))
+        .await?;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "approving a non-existent step must return 404"
+    );
+
+    Ok(())
+}
+
+// ─── Test: approve with custom input stores it in step output ─────────────────
+
+#[tokio::test]
+async fn test_approval_approve_with_custom_input() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_root_approval()).await?;
+
+    // Create the gated-task job — gate is suspended immediately
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/gated-task/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    // Confirm gate is suspended
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps[0].status, "suspended");
+
+    // Approve with custom input carrying extra metadata
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/gate/approve", job_id),
+            json!({
+                "approved": true,
+                "input": {"environment": "staging", "version": "1.2.3"}
+            }),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await["status"].as_str().unwrap(),
+        "approved"
+    );
+
+    // The step output must contain the core approval fields and the custom input
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let gate = &steps[0];
+    assert_eq!(gate.status, "completed");
+    let output = gate.output.as_ref().unwrap();
+    assert_eq!(output["approved"], json!(true));
+    assert_eq!(output["input"]["environment"], json!("staging"));
+    assert_eq!(output["input"]["version"], json!("1.2.3"));
+
+    // Job must be completed (gate was the only step)
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "job with a single approval step must complete after approval"
     );
 
     Ok(())
