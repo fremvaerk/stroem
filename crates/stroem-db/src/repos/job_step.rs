@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -34,6 +34,7 @@ pub struct JobStepRow {
     pub loop_index: Option<i32>,
     pub loop_total: Option<i32>,
     pub loop_item: Option<JsonValue>,
+    pub agent_state: Option<JsonValue>,
 }
 
 /// New job step for creation
@@ -219,7 +220,7 @@ impl JobStepRepo {
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type != 'task'
+                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'agent')
                 ORDER BY random()
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -792,7 +793,7 @@ impl JobStepRepo {
             SELECT js.job_id, js.step_name, NULL::uuid AS worker_id
             FROM job_step js
             WHERE js.status = 'ready'
-              AND js.action_type != 'task'
+              AND js.action_type NOT IN ('task', 'agent')
               AND js.ready_at < NOW() - make_interval(secs => $1::double precision)
               AND NOT EXISTS (
                   SELECT 1 FROM worker w

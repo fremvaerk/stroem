@@ -398,6 +398,15 @@ mod tests {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         }
     }
 
@@ -424,6 +433,15 @@ mod tests {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         }
     }
 

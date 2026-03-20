@@ -183,6 +183,7 @@ mod tests {
             },
             acl: None,
             mcp: None,
+            agents: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
         let log_storage = LogStorage::new(log_dir);

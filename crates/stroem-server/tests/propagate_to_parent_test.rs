@@ -59,6 +59,7 @@ fn setup_state(
         },
         acl: None,
         mcp: None,
+        agents: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace_config);
     let log_storage = LogStorage::new(log_dir);
@@ -95,6 +96,15 @@ fn make_workspace_config() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
     actions.insert(
@@ -121,6 +131,15 @@ fn make_workspace_config() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -497,6 +516,15 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
     for (action_name, task_name) in &[
@@ -527,6 +555,15 @@ async fn deep_nesting_three_levels() -> Result<()> {
                 input: HashMap::new(),
                 output: None,
                 manifest: None,
+                provider: None,
+                model: None,
+                system_prompt: None,
+                prompt: None,
+                output_schema: None,
+                temperature: None,
+                max_tokens: None,
+                tools: vec![],
+                max_turns: None,
             },
         );
     }
@@ -814,6 +851,15 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
     actions.insert(
@@ -840,6 +886,15 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 

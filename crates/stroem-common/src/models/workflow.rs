@@ -82,11 +82,19 @@ pub struct ResourceDef {
     pub memory: Option<String>,
 }
 
+/// Tool reference for agent actions — can reference a Strom task or an MCP server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AgentToolRef {
+    Task { task: String },
+    Mcp { mcp: String },
+}
+
 /// Action definition - represents a reusable execution unit
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDef {
     #[serde(rename = "type")]
-    pub action_type: String, // "script", "docker", "pod", "task"
+    pub action_type: String, // "script", "docker", "pod", "task", "agent"
 
     /// Human-readable display name for this action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +167,42 @@ pub struct ActionDef {
     /// Only valid on `type: pod` and `type: script` + `runner: pod`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<serde_json::Value>,
+
+    /// Agent provider reference (for type: agent)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+
+    /// Model override (for type: agent, overrides provider default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// System prompt template (for type: agent). Tera-rendered with standard context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    /// User prompt template (for type: agent). Tera-rendered with standard context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+
+    /// Structured output JSON schema (for type: agent)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+
+    /// Temperature override (for type: agent, 0.0-2.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+
+    /// Max tokens override (for type: agent)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+
+    /// Tool definitions for multi-turn agent loops
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentToolRef>,
+
+    /// Maximum conversation turns (safety limit for multi-turn agents)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
 }
 
 /// Hook definition — an action to run when a job completes or fails

@@ -155,6 +155,7 @@ pub enum ActionType {
     Docker,
     Pod,
     Task,
+    Agent,
 }
 
 impl fmt::Display for ActionType {
@@ -170,6 +171,7 @@ impl AsRef<str> for ActionType {
             Self::Docker => "docker",
             Self::Pod => "pod",
             Self::Task => "task",
+            Self::Agent => "agent",
         }
     }
 }
@@ -182,6 +184,7 @@ impl std::str::FromStr for ActionType {
             "docker" => Ok(Self::Docker),
             "pod" => Ok(Self::Pod),
             "task" => Ok(Self::Task),
+            "agent" => Ok(Self::Agent),
             other => anyhow::bail!("Unknown action type: {}", other),
         }
     }
@@ -391,6 +394,7 @@ mod tests {
         assert_eq!(ActionType::Docker.to_string(), "docker");
         assert_eq!(ActionType::Pod.to_string(), "pod");
         assert_eq!(ActionType::Task.to_string(), "task");
+        assert_eq!(ActionType::Agent.to_string(), "agent");
     }
 
     #[test]
@@ -399,6 +403,7 @@ mod tests {
         assert_eq!("docker".parse::<ActionType>().unwrap(), ActionType::Docker);
         assert_eq!("pod".parse::<ActionType>().unwrap(), ActionType::Pod);
         assert_eq!("task".parse::<ActionType>().unwrap(), ActionType::Task);
+        assert_eq!("agent".parse::<ActionType>().unwrap(), ActionType::Agent);
         assert!("invalid".parse::<ActionType>().is_err());
     }
 
@@ -409,6 +414,12 @@ mod tests {
         assert_eq!(json, r#""script""#);
         let parsed: ActionType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, action_type);
+
+        let agent_type = ActionType::Agent;
+        let json = serde_json::to_string(&agent_type).unwrap();
+        assert_eq!(json, r#""agent""#);
+        let parsed: ActionType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, agent_type);
     }
 
     #[test]

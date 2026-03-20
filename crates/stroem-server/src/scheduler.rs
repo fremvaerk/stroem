@@ -376,6 +376,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         "trigger",
         Some(&source_id),
         revision.as_deref(),
+        app_state.config.agents.as_ref(),
     )
     .await
     {
@@ -468,6 +469,15 @@ mod tests {
                 input: HashMap::new(),
                 output: None,
                 manifest: None,
+                provider: None,
+                model: None,
+                system_prompt: None,
+                prompt: None,
+                output_schema: None,
+                temperature: None,
+                max_tokens: None,
+                tools: vec![],
+                max_turns: None,
             },
         );
 
@@ -809,6 +819,7 @@ mod tests {
             },
             acl: None,
             mcp: None,
+            agents: None,
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();

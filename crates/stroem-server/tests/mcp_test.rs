@@ -79,6 +79,15 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             input: greet_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -122,6 +131,15 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             input: notify_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -255,6 +273,7 @@ async fn setup_with_mcp() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
+        agents: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -303,6 +322,7 @@ async fn setup_mcp_disabled() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: None, // MCP disabled
+        agents: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -360,6 +380,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
+        agents: None,
     };
 
     // Seed initial user
@@ -935,6 +956,7 @@ async fn test_mcp_get_job_status_includes_revision() -> Result<()> {
         "api",
         None,
         Some(revision),
+        None,
     )
     .await?;
 
@@ -986,6 +1008,7 @@ async fn test_mcp_list_jobs_includes_revision() -> Result<()> {
         "api",
         None,
         Some(revision),
+        None,
     )
     .await?;
 
@@ -1050,6 +1073,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         "mcp",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -1107,6 +1131,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
+        agents: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);

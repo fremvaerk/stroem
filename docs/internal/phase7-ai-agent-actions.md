@@ -2,32 +2,53 @@
 
 ## Context
 
-Strøm orchestrates shell, Docker, Kubernetes, and sub-task actions. Phase 7 extends this to AI agents — letting workflows call LLMs as first-class steps, with full observability, tool access, and structured output. This makes Strøm a natural fit for agentic workflows where deterministic orchestration wraps non-deterministic AI reasoning.
+Strom orchestrates shell, Docker, Kubernetes, and sub-task actions. Phase 7 adds `type: agent` — letting workflows call LLMs as first-class steps with structured output, multi-turn tool loops, and MCP client integration. This makes Strom a natural fit for agentic workflows where deterministic orchestration wraps non-deterministic AI reasoning.
 
-## Phase 7 features (in implementation order)
+**Key design decisions:**
+- **Merged single/multi-turn**: One `type: agent` with optional `tools` field. No tools = single-turn.
+- **Dedicated `prompt` field**: Tera template on ActionDef, not via `input.prompt`.
+- **Per-action LLM params**: `temperature`, `max_tokens` overridable per action.
+- **Token tracking**: Output `_meta` with model, tokens, latency.
+- **Built-in retry**: Exponential backoff for transient LLM errors.
+- **rig-core framework**: Use rig-core (v0.33+) for provider abstraction, tool calling, and token tracking.
+- **MCP client tools**: Agent steps can call external MCP servers (configured in workspace YAML).
+- **Prompt-only context**: Agent sees only what's in the rendered prompt/system_prompt.
+- **Multi-turn via DB state**: Conversation persisted in `agent_state` JSONB.
+- **Server-side dispatch**: Like `type: task`, workers never claim agent steps.
+- **Built-in `ask_user` tool**: LLM can request human input, reuses Phase 5d approval gate infrastructure (`suspended` status, approve API, `on_suspended` hooks).
 
-### 7a. `type: agent` — Single-turn LLM calls (prompt → structured output)
-### 7b. Agent tool access — Multi-turn agent loops with Strøm tasks as tools
-### 7c. MCP server mode — Expose Strøm tasks as MCP tools for external agents
-
----
-
-## 7a. Single-Turn Agent Actions — Detailed Design
-
-The simplest useful integration: call an LLM with a rendered prompt, get structured output back. Follows the `type: task` server-side dispatch pattern exactly.
-
-### YAML syntax
+## YAML Syntax
 
 ```yaml
+# Provider config (server-config.yaml)
+agents:
+  providers:
+    anthropic:
+      provider_type: anthropic
+      api_key: "${ANTHROPIC_API_KEY}"
+      model: claude-sonnet-4-20250514
+      max_tokens: 4096
+      max_retries: 3
+    openai:
+      provider_type: openai
+      api_key: "${OPENAI_API_KEY}"
+      model: gpt-4o
+      api_endpoint: https://api.openai.com/v1  # also works for Ollama, vLLM, etc.
+
+# Workflow YAML
 actions:
+  # Single-turn (no tools)
   classify-ticket:
     type: agent
-    provider: anthropic          # references providers config
-    model: claude-sonnet-4-20250514       # override provider default
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    temperature: 0.1
+    max_tokens: 256
     system_prompt: |
-      You are a support ticket classifier. Categorize tickets into:
-      bug, feature_request, question, or other.
-    output_schema:               # enforced structured output
+      You are a support ticket classifier.
+    prompt: |
+      Classify this ticket: {{ input.ticket_text }}
+    output_schema:
       type: object
       properties:
         category:
@@ -35,15 +56,40 @@ actions:
           enum: [bug, feature_request, question, other]
         confidence:
           type: number
-        summary:
-          type: string
 
-  generate-response:
+  # Multi-turn with task tools
+  investigate-incident:
     type: agent
     provider: anthropic
-    input:
-      ticket: {}
-      category: {}
+    system_prompt: |
+      You are an SRE investigating a production incident.
+    prompt: |
+      Investigate alert: {{ input.alert_message }}
+    tools:
+      - task: query-metrics
+      - task: check-logs
+      - task: get-pod-status
+    max_turns: 20
+    output_schema:
+      type: object
+      properties:
+        root_cause: { type: string }
+        severity: { type: string, enum: [p1, p2, p3, p4] }
+
+  # Multi-turn with MCP client tools
+  research-topic:
+    type: agent
+    provider: anthropic
+    prompt: "Research: {{ input.topic }}"
+    tools:
+      - task: search-db
+      - mcp: brave-search
+
+# MCP servers (workspace YAML)
+mcp_servers:
+  brave-search:
+    transport: sse
+    url: http://localhost:3001/sse
 
 tasks:
   handle-ticket:
@@ -51,420 +97,396 @@ tasks:
       classify:
         action: classify-ticket
         input:
-          prompt: "Classify this ticket: {{ input.ticket_text }}"
-
+          ticket_text: "{{ input.text }}"
       route-bug:
         action: create-jira-issue
         depends_on: [classify]
         when: "{{ classify.output.category == 'bug' }}"
-        input:
-          summary: "{{ classify.output.summary }}"
-
-      respond:
-        action: generate-response
-        depends_on: [classify]
-        input:
-          ticket: "{{ input.ticket_text }}"
-          category: "{{ classify.output.category }}"
 ```
 
-### Provider configuration
+## Output Shape
 
-In `server-config.yaml`:
-
-```yaml
-agents:
-  providers:
-    anthropic:
-      provider_type: anthropic
-      api_key: "${ANTHROPIC_API_KEY}"    # or use STROEM__AGENTS__PROVIDERS__ANTHROPIC__API_KEY
-      model: claude-sonnet-4-20250514             # default model for this provider
-      max_tokens: 4096
-
-    openai:
-      provider_type: openai
-      api_key: "${OPENAI_API_KEY}"
-      model: gpt-4o
-      max_tokens: 4096
-      api_endpoint: https://api.openai.com/v1   # optional, for proxies/compatible APIs
-
-    local-llama:
-      provider_type: openai              # OpenAI-compatible API
-      api_endpoint: http://localhost:11434/v1
-      model: llama3.2
-```
-
-Provider types:
-- **`anthropic`** — Anthropic Messages API (native support)
-- **`openai`** — OpenAI Chat Completions API (also covers Azure OpenAI, Ollama, vLLM, any compatible endpoint)
-
-Two provider types cover ~95% of use cases since most local/alternative LLM servers expose an OpenAI-compatible API.
-
-### ActionDef changes
-
-```rust
-pub struct ActionDef {
-    // ... existing fields ...
-
-    /// Agent provider reference (for type: agent)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-
-    /// Model override (for type: agent, overrides provider default)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-
-    /// System prompt (for type: agent)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-
-    /// Structured output JSON schema (for type: agent)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<serde_json::Value>,
+```json
+{
+  "category": "bug",
+  "confidence": 0.95,
+  "_meta": {
+    "model": "claude-sonnet-4-20250514",
+    "provider": "anthropic",
+    "input_tokens": 342,
+    "output_tokens": 87,
+    "latency_ms": 1250,
+    "turns": 1
+  }
 }
 ```
 
-### ServerConfig changes
+Without `output_schema`: `{ "text": "...", "_meta": { ... } }`.
+Downstream: `{{ classify.output.category }}` works as usual.
 
+---
+
+## Implementation Phases
+
+### Phase A: Core Agent Infrastructure (single-turn)
+
+#### A1. ActionDef fields (`crates/stroem-common/src/models/workflow.rs:86-162`)
+
+Add to `ActionDef`:
+- `provider: Option<String>` — references provider in server config
+- `model: Option<String>` — overrides provider default
+- `system_prompt: Option<String>` — Tera template
+- `prompt: Option<String>` — Tera template (required for agent)
+- `output_schema: Option<serde_json::Value>` — JSON Schema for structured output
+- `temperature: Option<f32>` — 0.0-2.0
+- `max_tokens: Option<u32>` — overrides provider default
+- `tools: Vec<AgentToolRef>` — tool references (Phase B, add to model now)
+- `max_turns: Option<u32>` — safety limit (Phase B, add to model now)
+
+New enum (forward-compatible for Phase C):
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
-    // ... existing fields ...
-    #[serde(default)]
-    pub agents: Option<AgentsConfig>,
+#[serde(untagged)]
+pub enum AgentToolRef {
+    Task { task: String },
+    Mcp { mcp: String },
 }
+```
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#### A2. ActionType enum (`crates/stroem-common/src/models/job.rs:~152`)
+
+Add `Agent` variant with Display/FromStr/serde.
+
+#### A3. ServerConfig (`crates/stroem-server/src/config.rs:289-309`)
+
+Add `agents: Option<AgentsConfig>` to `ServerConfig`.
+
+```rust
 pub struct AgentsConfig {
-    #[serde(default)]
     pub providers: HashMap<String, AgentProviderConfig>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProviderConfig {
-    pub provider_type: String,              // "anthropic" or "openai"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_type: String,     // "anthropic" or "openai"
     pub api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_endpoint: Option<String>,
-    pub model: String,                      // default model
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: String,
+    pub max_tokens: u32,           // default 4096
     pub temperature: Option<f32>,
+    pub max_retries: u32,          // default 3
 }
 ```
 
 Env var overrides work automatically: `STROEM__AGENTS__PROVIDERS__ANTHROPIC__API_KEY`.
 
-### Server-side dispatch
+#### A4. DB migration (`crates/stroem-db/migrations/023_agent_type.sql`)
 
-Mirrors `handle_task_steps()`:
+- Update `action_type` CHECK constraint to include `'agent'`
+- Add `agent_state JSONB` column to `job_step` (nullable, for Phase B)
+- Update `JobStepRow`, `NewJobStep`, `STEP_COLUMNS`, INSERT SQL
 
+#### A5. Worker claim filter (`crates/stroem-db/src/repos/job_step.rs:222`)
+
+Change `action_type != 'task'` to `action_type NOT IN ('task', 'agent')`.
+Same in `get_unmatched_ready_steps` (recovery Phase 4 should skip agent steps).
+
+#### A6. Validation (`crates/stroem-common/src/validation.rs`)
+
+New `validate_agent_action()`:
+- Required: `provider`, `prompt`
+- Forbidden: `cmd`, `script`, `source`, `image`, `runner`, `manifest`, `task`, `language`, `entrypoint`, `dependencies`, `interpreter`
+- `output_schema` must be a JSON object
+- `temperature` must be 0.0-2.0
+- `prompt` and `system_prompt` must be valid Tera syntax
+
+Update `compute_required_tags("agent")` -> `[]`, `derive_runner("agent")` -> `"none"`.
+
+#### A7. LLM integration via rig-core (NEW: `crates/stroem-server/src/agent/`)
+
+Uses **rig-core** (v0.33+) — a Rust LLM framework with 20+ providers, built-in tool calling, and token tracking. This replaces hand-rolled reqwest HTTP calls.
+
+```
+agent/
+  mod.rs          -- module root, provider factory, re-exports
+  dispatch.rs     -- handle_agent_steps(), structured output helpers
+  tools.rs        -- Phase B: StromTaskTool impl of rig's Tool trait
+  mcp_client.rs   -- Phase C: MCP client tool integration
+```
+
+**Why rig-core over direct HTTP:**
+- Unified API across Anthropic, OpenAI, and 20+ other providers
+- Built-in tool calling (critical for Phase B multi-turn)
+- Token usage tracking on all responses
+- Custom endpoint support for OpenAI-compatible APIs (Ollama, vLLM)
+- Battle-tested, actively maintained (weekly releases)
+- Reduces ~500-800 lines of provider boilerplate
+
+**Provider creation from config:**
 ```rust
-pub async fn handle_agent_steps(
-    pool: &PgPool,
-    workspace_config: &WorkspaceConfig,
-    workspace_name: &str,
-    job_id: Uuid,
-    agents_config: &AgentsConfig,
-) -> Result<()> {
-    let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
-    let job = JobRepo::get(pool, job_id).await?;
-
-    for step in &steps {
-        if step.status != "ready" || step.action_type != "agent" {
-            continue;
+fn create_rig_client(config: &AgentProviderConfig) -> Result<Box<dyn CompletionModel>> {
+    match config.provider_type.as_str() {
+        "anthropic" => {
+            let client = rig::providers::anthropic::ClientBuilder::new(&api_key)
+                .base_url(config.api_endpoint.as_deref().unwrap_or("https://api.anthropic.com"))
+                .build();
+            Ok(Box::new(client.completion_model(&config.model)))
         }
-
-        let action_spec: ActionDef = serde_json::from_value(step.action_spec.clone()?)?;
-        let provider_name = action_spec.provider.as_ref().context("missing provider")?;
-        let provider = agents_config.providers.get(provider_name)
-            .context(format!("unknown agent provider: {}", provider_name))?;
-
-        // Build render context (same as task steps)
-        let ctx = build_step_render_context(&job, &steps, workspace_config);
-
-        // Render the user prompt from step input
-        let rendered_input = render_input_map(&flow_step.input, &ctx)?;
-        let user_prompt = rendered_input["prompt"].as_str()
-            .context("agent step requires 'prompt' in input")?;
-
-        // Mark running (server-side, no worker)
-        JobStepRepo::mark_running_server(pool, job_id, &step.step_name).await?;
-
-        // Call LLM provider
-        let model = action_spec.model.as_deref()
-            .unwrap_or(&provider.model);
-
-        let result = call_llm(
-            provider,
-            model,
-            action_spec.system_prompt.as_deref(),
-            user_prompt,
-            action_spec.output_schema.as_ref(),
-        ).await;
-
-        match result {
-            Ok(output) => {
-                // Store structured output (or raw text as { "text": "..." })
-                JobStepRepo::complete_step(pool, job_id, &step.step_name, output).await?;
+        "openai" => {
+            let mut builder = rig::providers::openai::Client::new(&api_key);
+            if let Some(ref endpoint) = config.api_endpoint {
+                builder = builder.base_url(endpoint);
             }
-            Err(e) => {
-                JobStepRepo::fail_step(pool, job_id, &step.step_name, &e.to_string()).await?;
-            }
+            Ok(Box::new(builder.completion_model(&config.model)))
         }
-    }
-
-    Ok(())
-}
-```
-
-### LLM provider abstraction
-
-```rust
-/// Minimal provider trait — just enough for single-turn calls
-#[async_trait]
-trait LlmProvider: Send + Sync {
-    async fn chat(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        user_message: &str,
-        output_schema: Option<&serde_json::Value>,
-    ) -> Result<serde_json::Value>;
-}
-```
-
-Two implementations:
-- `AnthropicProvider` — calls `POST https://api.anthropic.com/v1/messages`
-- `OpenAiProvider` — calls `POST {endpoint}/chat/completions`
-
-Both use `reqwest` (already a dependency). No SDK crates needed — the APIs are simple enough for direct HTTP calls, avoiding version churn.
-
-### Structured output
-
-When `output_schema` is set:
-- **Anthropic**: Use tool_use with a single tool matching the schema (the standard pattern for structured output)
-- **OpenAI**: Use `response_format: { type: "json_schema", json_schema: { ... } }`
-- Parse the response and validate against schema before storing as step output
-- If no schema: store `{ "text": "raw response" }` as output
-
-### Validation rules
-
-```rust
-"agent" => {
-    if action.provider.is_none() {
-        bail!("Action '{}' is type 'agent' but missing 'provider' field", name);
-    }
-    // Forbidden fields (same as task)
-    if action.cmd.is_some() { bail!("..."); }
-    if action.script.is_some() { bail!("..."); }
-    if action.image.is_some() { bail!("..."); }
-    if action.runner.is_some() { bail!("..."); }
-    if action.manifest.is_some() { bail!("..."); }
-    if action.task.is_some() { bail!("..."); }
-    // Validate output_schema is valid JSON Schema (basic check)
-    if let Some(ref schema) = action.output_schema {
-        if !schema.is_object() {
-            bail!("output_schema must be a JSON object");
-        }
+        other => bail!("Unknown provider type: {}", other),
     }
 }
 ```
 
-Worker claim filter: `action_type NOT IN ('task', 'agent')`.
+**Structured output via JSON Schema:**
+The YAML `output_schema` is already JSON Schema syntax (`type`, `properties`, `enum`, etc.). At dispatch time, normalize it into a full JSON Schema (add `title`, ensure `type: "object"` at root) and pass it to rig's extractor API. Rig handles the provider-specific mechanics:
+- Anthropic: tool_use pattern with forced tool choice
+- OpenAI: `response_format` with `json_schema`
 
-Tags/runner: `compute_required_tags("agent")` → empty vec. `derive_runner("agent")` → `"none"`.
+For unstructured output (no `output_schema`): use rig's standard `.prompt()` API directly.
 
-### DB changes
+**Retry logic**: Wrap rig calls with a shared retry helper. Retry on transient errors (429, 500, 502, 503, 529). Exponential backoff 1s/2s/4s with jitter. Up to `max_retries` per provider config.
 
-Minimal — `action_type` already supports arbitrary strings via the `action_spec` JSONB pattern. The claim query just needs the `!= 'agent'` filter. No migration needed beyond updating the claim SQL.
+#### A8. Dispatch (`crates/stroem-server/src/agent/dispatch.rs`)
 
-### Logging
+`handle_agent_steps()` mirrors `handle_task_steps()`:
+1. Find ready agent steps
+2. Deserialize `action_spec`, look up provider
+3. Build render context via `build_step_render_context()`
+4. Render `prompt` and `system_prompt` as Tera templates
+5. Mark step running (server-side, no worker)
+6. Call LLM via provider
+7. On success: store output + `_meta`, mark completed
+8. On failure: mark failed with error message
+9. Call `orchestrate_after_step()` to trigger downstream
 
-Each agent call logs to the job's log stream:
-- Request: model, token count, prompt (truncated)
-- Response: output, token usage, latency
-- Errors: provider errors, schema validation failures
+**Integration points** -- call `handle_agent_steps` alongside `handle_task_steps`:
+- `job_creator.rs:204` -- after job creation (for initially-ready agent steps)
+- `job_recovery.rs` `orchestrate_after_step()` -- after orchestration
+- `job_recovery.rs` `propagate_to_parent()` -- after child completion
 
-Uses `AppState::append_server_log()` (existing pattern from hooks/recovery).
+The `create_job_for_task_inner` needs `&AppState` (or at least `agents_config`) threaded through for initially-ready dispatch.
 
-### Tests
+#### A9. Logging
 
-- **Unit**: `AnthropicProvider` and `OpenAiProvider` with mocked HTTP (using `wiremock`)
-- **Unit**: Output schema validation, structured output parsing
-- **Unit**: Validation rules for `type: agent`
-- **Integration**: Agent step dispatch — mock provider, verify step output stored correctly
-- **Integration**: Agent step failure — provider error → step failed with message
-- **Integration**: Agent step in conditional branch — `when` + `type: agent` combo
+Use `AppState::append_server_log()`:
+```
+[agent] Step 'classify': calling anthropic/claude-sonnet-4-20250514 (342 input tokens)
+[agent] Step 'classify': completed in 1250ms (87 output tokens)
+[agent] Step 'classify': failed -- 429 Too Many Requests after 3 retries
+```
+
+#### A10. Tests
+
+**Unit** (stroem-common):
+- Validation: valid agent, missing provider, missing prompt, forbidden fields, bad temperature, bad Tera
+- `compute_required_tags("agent")` -> `[]`
+- `derive_runner("agent")` -> `"none"`
+- YAML parsing: agent action, inline agent step
+
+**Unit** (stroem-server, using `wiremock`):
+- rig-core Anthropic client: text response, structured output, retry on 429, error propagation
+- rig-core OpenAI client: text response, structured output, retry on 500, custom endpoint
+- Provider factory: create_rig_client with different provider_type values
+
+**Integration** (testcontainers Postgres + wiremock):
+- Agent step dispatch: mock LLM -> output stored correctly
+- Agent failure: provider error -> step fails
+- Agent with `when` condition: conditional + agent combo
+- Agent in DAG: agent output used by downstream step via templating
+
+**Dev dependency**: Add `wiremock = "0.6"` to stroem-server.
+
+#### A11. Documentation
+
+- Update `CLAUDE.md`: agent action type description
+- Create `docs/src/content/docs/guides/agent-actions.md`: user guide
+- Update `docs/internal/stroem-v2-plan.md`: Phase 7 status
+- Update `docs/internal/TODO.md`: Phase 7 items
+- Regenerate `docs/public/llms.txt`
 
 ---
 
-## 7b. Multi-Turn Agent Loops — Design Outline
+### Phase B: Multi-Turn Conversations, Task Tools & ask_user
 
-Extend `type: agent` to support multi-turn conversations where the agent can call tools.
+**Depends on Phase 5d (approval gates)** -- reuses `suspended` status, approve API, `on_suspended` hooks.
 
-### YAML syntax
+`max_turns` is independent of `tools` -- an agent can have multiple turns even without tools (e.g., self-refinement). Tools add Strom tasks as callable tools. A built-in `ask_user` tool lets the LLM request human input.
+
+#### B1. Built-in `ask_user` tool
+
+The LLM automatically gets an `ask_user` tool. When called:
+1. Agent step enters `suspended` status (Phase 5d infrastructure)
+2. The question is stored in step metadata, visible in UI approval card
+3. `on_suspended` hooks fire (Slack notification, etc.)
+4. User responds via `POST /api/jobs/{id}/steps/{step}/approve` (same as approval gates)
+5. Agent step resumes -- user's response fed back as tool result in conversation
+6. LLM continues with the new information
 
 ```yaml
-actions:
-  investigate-incident:
-    type: agent
-    provider: anthropic
-    model: claude-sonnet-4-20250514
-    system_prompt: |
-      You are an SRE investigating a production incident.
-      Use the available tools to diagnose the issue.
-    tools:
-      - task: query-metrics       # Strøm task as a tool
-      - task: check-logs
-      - task: get-pod-status
-    max_turns: 20                 # safety limit
-    output_schema:
-      type: object
-      properties:
-        root_cause: { type: string }
-        severity: { type: string, enum: [p1, p2, p3, p4] }
-        remediation: { type: string }
-
-tasks:
-  incident-response:
-    flow:
-      investigate:
-        action: investigate-incident
-        input:
-          prompt: "Investigate alert: {{ input.alert_message }}"
-
-      remediate:
-        action: auto-remediate
-        depends_on: [investigate]
-        when: "{{ investigate.output.severity == 'p1' }}"
-        input:
-          steps: "{{ investigate.output.remediation }}"
+# The LLM sees this tool automatically (no YAML config needed):
+# ask_user(question: str) -> str
+#
+# Example flow:
+# LLM: "I need to investigate. What severity is this incident?"
+#   -> ask_user("What severity is this incident?")
+#   -> step suspended, user notified
+#   -> user responds "P1"
+#   -> agent resumes, LLM gets "P1" as tool result
 ```
 
-### Architecture sketch
+#### B2. Agent dispatch loop algorithm
 
-- `tools: Vec<ToolRef>` on `ActionDef` — references to Strøm tasks the agent can call
-- Each tool maps to a task: the task's input schema becomes the tool's parameters, the task's output becomes the tool result
-- Server runs the agent loop:
-  1. Send prompt + tool definitions to LLM
-  2. If LLM returns tool_use → create child job for referenced task → wait for completion → feed result back
-  3. Repeat until LLM returns final response (no tool_use) or `max_turns` hit
-- Each turn logged as a server event (visible in log stream)
-- Uses Phase 5d's `suspended` status during tool execution (agent step suspends while child job runs)
+**Initial dispatch** (step becomes ready):
+1. Render prompt, generate tool definitions from referenced tasks' input schemas (if any) + built-in `ask_user` tool
+2. Call LLM with messages + tool definitions
+3. If final answer (no tool calls):
+   - If `max_turns > 1` and turn < max_turns: feed response back as conversation history, call LLM again
+   - Otherwise: mark step completed, done
+4. If tool calls:
+   - `ask_user` -> step enters `suspended`, saves conversation to `agent_state`
+   - Strom task tools -> create child jobs, save conversation to `agent_state`, step stays `running`
+   - Both can appear in same turn: execute task tools first, then suspend for user input
 
-### Key challenges
+**Resumption** (user responds or child job completes):
+1. **User response** (via approve API): load `agent_state`, append user's answer as tool result, call LLM again
+2. **Child job completion**: `propagate_to_parent()` detects agent step, records tool result in `agent_state`, checks if all pending tool calls resolved
+3. When all resolved: call LLM with updated conversation (next turn)
+4. Repeat until final answer or `max_turns` exceeded
 
-- **Async tool execution**: Child jobs may take minutes. Agent step must suspend and resume.
-- **Context accumulation**: Each turn adds to the conversation. Need to manage context window.
-- **Cost control**: Token limits, turn limits, cost tracking per step.
-- **Timeout**: Overall step timeout for the entire agent loop.
-- **Concurrent tool calls**: LLMs may request multiple tools at once — run child jobs in parallel.
-
-### Tool definition generation
-
-```rust
-fn task_to_tool_def(task: &TaskDef) -> ToolDef {
-    ToolDef {
-        name: task.name.clone(),
-        description: task.description.clone(),
-        input_schema: task.input_schema_to_json_schema(),
-    }
+**`agent_state` JSONB shape:**
+```json
+{
+  "messages": [...],
+  "turn": 3,
+  "pending_tool_calls": [
+    {"tool_call_id": "tc_1", "task": "query-metrics", "child_job_id": "uuid"},
+    {"tool_call_id": "tc_2", "type": "ask_user", "question": "What severity?"}
+  ]
 }
 ```
 
-### Conversation state
+#### B3. Key changes
 
-Store the full conversation (messages + tool results) in a new `agent_state` JSONB column on `job_step`, or in log storage. On resume after tool completion, reconstruct the conversation and continue.
+- **rig Tool trait**: `StromTaskTool` wraps Strom tasks as rig tools. `AskUserTool` is a built-in tool that triggers step suspension.
+- `propagate_to_parent()` in `job_recovery.rs`: agent-aware branch -- if parent is agent with `agent_state`, call `handle_agent_tool_result()`
+- Approve API handler: detect when approved step is an agent step -> resume agent loop instead of normal completion
+- `dispatch.rs`: use rig's agent builder with `.tool()` for each referenced task + `ask_user`
+- Concurrent tool calls: multiple child jobs in parallel, all tracked in `pending_tool_calls`
+- `update_agent_state()` repo method
+
+#### B4. Safety limits
+
+- `max_turns` default 10, max 100
+- Step timeout (`FlowStep.timeout`) applies to entire agent loop (including suspended time)
+- Token budget tracked in `_meta` (cumulative across turns)
 
 ---
 
-## 7c. MCP Server Mode — Design Outline
+### Phase C: MCP Client Tools
 
-Expose Strøm's tasks as MCP tools so external agent frameworks can orchestrate Strøm workflows.
-
-### Architecture
-
-Strøm runs an MCP server (stdio or SSE transport) that exposes:
-
-**Tools:**
-- `run_task(workspace, task, input)` — trigger a task, return job ID
-- `get_job_status(job_id)` — check job status
-- `get_job_output(job_id)` — get completed job output
-- `run_task_sync(workspace, task, input)` — trigger and wait for completion (polls internally)
-
-**Resources:**
-- `stroem://workspaces` — list workspaces
-- `stroem://workspaces/{ws}/tasks` — list tasks in workspace
-- `stroem://workspaces/{ws}/tasks/{name}` — task definition + input schema
-
-### YAML syntax (server config)
+#### C1. Workspace YAML
 
 ```yaml
-mcp:
-  enabled: true
-  transport: sse              # or stdio
-  listen: "0.0.0.0:8081"     # for SSE transport
-  auth_token: "${MCP_AUTH_TOKEN}"
+mcp_servers:
+  brave-search:
+    transport: sse
+    url: http://localhost:3001/sse
+  local-db:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-sqlite"]
 ```
 
-### Use cases
+New `McpServerDef` struct, `mcp_servers: HashMap` on `WorkflowConfig`/`WorkspaceConfig`.
 
-- **Claude Code / Cursor**: Developer runs Strøm tasks from their IDE agent
-- **LangChain / CrewAI**: External agent frameworks use Strøm for reliable, observable task execution
-- **Chained platforms**: Another orchestrator triggers Strøm workflows via MCP
+#### C2. MCP client integration (`crates/stroem-server/src/agent/mcp_client.rs`)
 
-### Implementation sketch
+- **rig has MCP tool support** -- rig-core includes examples of using MCP servers as tools
+- Connects to configured MCP servers (lazy, on first use)
+- Discovers tools via `tools/list`, wraps them as rig `Tool` impls
+- Calls tools via `tools/call`
+- Uses `rmcp` crate client features (already a dependency for MCP server) + rig's MCP integration
 
-- New crate: `stroem-mcp` (or module in `stroem-server`)
-- Uses the `rmcp` crate (Rust MCP SDK) or direct JSON-RPC implementation
-- Shares `AppState` with the HTTP server (same DB pool, workspace manager)
-- SSE transport runs as a separate Axum route (`/mcp/sse`)
-- Stdio transport for CLI integration (`stroem mcp serve`)
+#### C3. Mixed tool execution
 
-### Key challenges
-
-- **Long-running tasks**: `run_task_sync` needs server-sent progress updates
-- **Authentication**: Token-based, separate from user auth
-- **Rate limiting**: Prevent agent loops from overwhelming the system
-- **Schema translation**: Convert Strøm task input definitions to JSON Schema for MCP tool parameters
+In the agent loop, when LLM returns tool calls:
+- **MCP tools**: called synchronously (inline), result fed back immediately
+- **Task tools**: create child jobs (async), wait for completion via propagation
+- **Mixed**: execute MCP tools first, create task child jobs, wait for tasks, combine all results
 
 ---
 
-## Dependency on other phases
+## Implementation order
 
-| Phase 7 feature | Depends on |
-|---|---|
-| 7a. Single-turn agent | None (can implement now) |
-| 7b. Multi-turn with tools | Phase 5d (suspend/resume for tool calls) |
-| 7c. MCP server mode | None (can implement independently) |
+**5d -> 7A -> 7B -> 7C**
 
-## Implementation order recommendation
+| Phase | Depends on | Key deliverable |
+|-------|-----------|-----------------|
+| 5d. Approval gates | None | `suspended` status, approve API, `on_suspended` hooks, UI card |
+| 7A. Single-turn agent | None (parallel with 5d) | `type: agent`, rig-core providers, structured output |
+| 7B. Multi-turn + tools + ask_user | 5d + 7A | Tool calling loop, `ask_user` via suspended, `agent_state` |
+| 7C. MCP client tools | 7B | Workspace MCP servers, mixed sync/async tools |
 
-1. **7a** first — small surface area, high value, proves the pattern
-2. **7c** in parallel — independent, enables external agent use immediately
-3. **7b** after Phase 5d — requires suspend/resume infrastructure
+## Files Summary
 
-## Crate dependencies (7a only)
+### Phase A -- Create
+| File | Purpose |
+|------|---------|
+| `crates/stroem-server/src/agent/mod.rs` | Module root, provider factory |
+| `crates/stroem-server/src/agent/dispatch.rs` | handle_agent_steps, structured output |
+| `crates/stroem-db/migrations/023_agent_type.sql` | Migration |
+| `docs/src/content/docs/guides/agent-actions.md` | User guide |
 
-- `reqwest` — already in workspace (HTTP calls to LLM APIs)
-- `wiremock` — dev dependency for testing (mock LLM responses)
-- No LLM SDK crates — direct HTTP keeps dependencies minimal and avoids version churn
+### Phase A -- Modify
+| File | Change |
+|------|--------|
+| `crates/stroem-common/src/models/workflow.rs` | ActionDef + AgentToolRef |
+| `crates/stroem-common/src/models/job.rs` | ActionType::Agent |
+| `crates/stroem-common/src/validation.rs` | validate_agent_action + tag/runner |
+| `crates/stroem-server/src/config.rs` | AgentsConfig + AgentProviderConfig |
+| `crates/stroem-server/src/lib.rs` | `pub mod agent;` |
+| `crates/stroem-server/src/job_creator.rs` | Call handle_agent_steps |
+| `crates/stroem-server/src/job_recovery.rs` | Call handle_agent_steps |
+| `crates/stroem-db/src/repos/job_step.rs` | agent_state, claim filter |
+| `crates/stroem-server/Cargo.toml` | rig-core + wiremock dev-dep |
+| `Cargo.toml` | rig-core workspace dep |
+| `CLAUDE.md` | Agent action docs |
+
+### Phase B -- Create
+| File | Purpose |
+|------|---------|
+| `crates/stroem-server/src/agent/tools.rs` | StromTaskTool + AskUserTool (rig Tool trait impls) |
+
+### Phase C -- Create
+| File | Purpose |
+|------|---------|
+| `crates/stroem-server/src/agent/mcp_client.rs` | MCP client manager |
+
+## Crate dependencies
+
+- `rig-core` -- LLM framework (Anthropic, OpenAI, 20+ providers, tool calling, token tracking)
+- `wiremock` -- dev dependency for testing (mock LLM responses)
+- `rmcp` client features -- Phase C only (already a dep for MCP server)
+- `reqwest` -- already in workspace (used by rig internally)
+- `schemars` -- may be needed for rig integration (evaluate during Phase A)
 
 ## Verification
 
 ```bash
-cargo test --workspace
 cargo fmt --check --all
 cargo clippy --workspace -- -D warnings
+cargo test --workspace
 cd ui && bun run lint && bunx tsc --noEmit
 ```
 
-## Documentation
-
-- Update `CLAUDE.md` with agent action type patterns
-- Add `docs/src/content/docs/guides/agent-actions.md` user guide
-- Update `docs/internal/stroem-v2-plan.md` with Phase 7 status
-- Add provider configuration reference to docs
+Manual verification:
+1. Add agents config to server-config.yaml with Anthropic provider
+2. Create a workflow with type: agent action
+3. Trigger the task, verify step runs and output is stored
+4. Check _server logs for agent call details
+5. Verify downstream steps can access `{{ step.output.field }}`

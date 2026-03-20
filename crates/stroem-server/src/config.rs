@@ -306,6 +306,63 @@ pub struct ServerConfig {
     pub acl: Option<AclConfig>,
     /// MCP server endpoint configuration (optional)
     pub mcp: Option<McpConfig>,
+    /// Agent provider configuration (optional)
+    pub agents: Option<AgentsConfig>,
+}
+
+/// Agent (LLM) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub providers: HashMap<String, AgentProviderConfig>,
+}
+
+/// Configuration for a single LLM provider
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentProviderConfig {
+    /// Provider type: "anthropic" or "openai"
+    pub provider_type: String,
+    /// API key (can use ${ENV_VAR} syntax)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Custom API endpoint (for OpenAI-compatible servers like Ollama, vLLM)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_endpoint: Option<String>,
+    /// Default model name
+    pub model: String,
+    /// Default max tokens
+    #[serde(default = "default_agent_max_tokens")]
+    pub max_tokens: u32,
+    /// Default temperature
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Max retries for transient errors
+    #[serde(default = "default_agent_max_retries")]
+    pub max_retries: u32,
+}
+
+impl std::fmt::Debug for AgentProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentProviderConfig")
+            .field("provider_type", &self.provider_type)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("api_endpoint", &self.api_endpoint)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
+}
+
+fn default_agent_max_tokens() -> u32 {
+    4096
+}
+
+fn default_agent_max_retries() -> u32 {
+    3
 }
 
 impl ServerConfig {
@@ -338,6 +395,25 @@ impl ServerConfig {
         if let Some(days) = self.recovery.log_retention_days {
             if days < 1 {
                 anyhow::bail!("log_retention_days must be at least 1");
+            }
+        }
+        if let Some(ref agents) = self.agents {
+            for (name, provider) in &agents.providers {
+                match provider.provider_type.as_str() {
+                    "anthropic" | "openai" => {}
+                    other => anyhow::bail!(
+                        "Agent provider '{}' has unknown provider_type: '{}' (expected: anthropic, openai)",
+                        name,
+                        other
+                    ),
+                }
+                if provider.max_retries > 10 {
+                    anyhow::bail!(
+                        "Agent provider '{}' max_retries must be at most 10, got {}",
+                        name,
+                        provider.max_retries
+                    );
+                }
             }
         }
         Ok(())

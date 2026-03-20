@@ -225,6 +225,7 @@ impl TestEnv {
             },
             acl: None,
             mcp: None,
+            agents: None,
         };
 
         // 4. Load workspaces using real FolderSource

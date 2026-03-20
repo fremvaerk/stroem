@@ -119,6 +119,20 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             .await;
     }
 
+    // Handle any newly-promoted type: agent steps
+    #[cfg(feature = "agent")]
+    if let Err(e) =
+        crate::agent::dispatch::handle_agent_steps(state, &workspace, &job.workspace, job_id).await
+    {
+        tracing::error!("Failed to handle agent steps for job {}: {:#}", job_id, e);
+        state
+            .append_server_log(
+                job_id,
+                &format!("[orchestration] Failed to handle agent steps: {:#}", e),
+            )
+            .await;
+    }
+
     // Check if job reached terminal state
     if let Ok(Some(job_after)) = JobRepo::get(&state.pool, job_id).await {
         if matches!(
@@ -259,6 +273,23 @@ async fn propagate_to_parent(
                 parent_job_id,
             )
             .await?;
+
+            // Handle any newly-promoted agent steps in the parent
+            #[cfg(feature = "agent")]
+            if let Err(e) = crate::agent::dispatch::handle_agent_steps(
+                state,
+                &parent_ws,
+                &parent_job.workspace,
+                parent_job_id,
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to handle agent steps for parent job {}: {:#}",
+                    parent_job_id,
+                    e
+                );
+            }
 
             // Check if parent job is now terminal — propagate recursively
             if let Ok(Some(parent_after)) = JobRepo::get(&state.pool, parent_job_id).await {
@@ -509,6 +540,7 @@ mod tests {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            agent_state: None,
         }
     }
 

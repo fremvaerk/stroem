@@ -270,6 +270,7 @@ async fn fire_single_hook(
             "hook",
             Some(source_id),
             revision,
+            None, // agents_config not available in hook context; orchestrator dispatches agents
         )
         .await
         .context("Failed to create hook task job")?;

@@ -1076,6 +1076,15 @@ mod tests {
             input: Default::default(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         };
         let action_spec = serde_json::to_value(&action).unwrap();
 
@@ -1115,6 +1124,15 @@ mod tests {
             input: Default::default(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         };
         let action_spec = serde_json::to_value(&action).unwrap();
 

@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["s3", "mcp"]
+default = ["s3", "mcp", "agent"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 mcp = ["dep:rmcp", "dep:schemars", "dep:http"]
+agent = ["dep:rig-core"]
 
 [dependencies]
 anyhow.workspace = true
@@ -53,6 +54,7 @@ aws-config = { version = "1", optional = true }
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
+rig-core = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

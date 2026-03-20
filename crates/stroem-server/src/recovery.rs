@@ -346,6 +346,7 @@ mod tests {
             },
             acl: None,
             mcp: None,
+            agents: None,
         };
 
         let ws_config = WorkspaceConfig::new();

@@ -10,14 +10,18 @@ use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
+use crate::config::AgentsConfig;
+
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
 const MAX_TASK_DEPTH: u32 = 10;
 
 /// Create a job and its steps for a task in a workspace.
 ///
 /// Shared by the API handler (`execute_task`) and the scheduler.
+/// Pass `agents_config` to enable initial dispatch of ready `type: agent` steps
+/// without waiting for the orchestrator to trigger them.
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip(pool, workspace_config, input))]
+#[tracing::instrument(skip(pool, workspace_config, agents_config, input))]
 pub async fn create_job_for_task(
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
@@ -27,6 +31,7 @@ pub async fn create_job_for_task(
     source_type: &str,
     source_id: Option<&str>,
     revision: Option<&str>,
+    agents_config: Option<&AgentsConfig>,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
         pool,
@@ -39,6 +44,7 @@ pub async fn create_job_for_task(
         None,
         None,
         revision,
+        agents_config,
     )
     .await
 }
@@ -56,6 +62,7 @@ fn create_job_for_task_inner<'a>(
     parent_job_id: Option<Uuid>,
     parent_step_name: Option<&'a str>,
     revision: Option<&'a str>,
+    agents_config: Option<&'a AgentsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
     Box::pin(async move {
         // Look up task
@@ -208,6 +215,25 @@ fn create_job_for_task_inner<'a>(
         // Handle any initially-ready type: task steps
         handle_task_steps(pool, workspace_config, workspace_name, job_id).await?;
 
+        // Handle any initially-ready type: agent steps (server-side LLM dispatch)
+        if let Some(cfg) = agents_config {
+            if let Err(e) = crate::agent::dispatch::dispatch_initial_agent_steps(
+                pool,
+                cfg,
+                workspace_config,
+                workspace_name,
+                job_id,
+            )
+            .await
+            {
+                tracing::error!(
+                    job_id = %job_id,
+                    "Failed to dispatch initial agent steps: {:#}",
+                    e
+                );
+            }
+        }
+
         // If all steps ended up terminal (e.g. all skipped by when conditions),
         // mark the job as completed now rather than waiting for the recovery sweep.
         if needs_post_creation_loop {
@@ -325,7 +351,10 @@ pub async fn handle_task_steps(
 
         let source_id = format!("{}/{}", job_id, step.step_name);
 
-        // Create child job with parent tracking (inherits parent revision)
+        // Create child job with parent tracking (inherits parent revision).
+        // agents_config is not available here (handle_task_steps only has pool),
+        // so agent steps in child jobs will be dispatched by the orchestrator
+        // when it processes the child job's ready steps.
         match create_job_for_task_inner(
             pool,
             workspace_config,
@@ -337,6 +366,7 @@ pub async fn handle_task_steps(
             Some(job_id),
             Some(&step.step_name),
             job.revision.as_deref(),
+            None, // agents_config not available; orchestrator will dispatch
         )
         .await
         {
@@ -869,6 +899,7 @@ mod tests {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            agent_state: None,
         }
     }
 

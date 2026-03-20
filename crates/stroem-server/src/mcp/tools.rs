@@ -404,6 +404,7 @@ impl StromMcpHandler {
             "mcp",
             source_id.as_deref(),
             revision.as_deref(),
+            self.state.config.agents.as_ref(),
         )
         .await
         .map_err(|e| internal_err(format!("Failed to create job: {e}")))?;

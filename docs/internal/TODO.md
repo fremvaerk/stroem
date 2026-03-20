@@ -49,6 +49,7 @@ Last updated: 2026-03-13.
 - [ ] No heartbeat failure → worker re-registration logic
 - [x] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
 - [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
+- [ ] Folder workspace revision pinning — currently the tarball endpoint builds from live folder contents at request time, so mid-job file changes cause later steps to run against a different revision than the job was planned with. Fix: cache tarballs keyed by revision hash on the server side, keep cached tarballs alive until all jobs referencing that revision reach a terminal state, then clean up. Git workspaces are less affected (atomic commit checkout) but folders can even serve inconsistent intermediate states.
 
 ## Simplification (from codex review 2026-03-17)
 
@@ -241,6 +242,88 @@ Last updated: 2026-03-13.
 - [x] `getUserGroups` in `api.ts` is dead code (never called) — removed
 - [x] Missing `#[tracing::instrument]` on `load_user_acl_context` — `acl.rs`
 - [x] Silent error swallowing in `get_user` groups fetch — `users.rs`
+
+## Phase 7: AI Agent Actions
+
+### 7A: Single-turn agent (in progress)
+- [x] ActionDef fields (provider, model, system_prompt, prompt, output_schema, temperature, max_tokens, tools, max_turns)
+- [x] AgentToolRef enum (Task + Mcp variants)
+- [x] ActionType::Agent variant
+- [x] validate_agent_action() with 14 unit tests
+- [x] compute_required_tags / derive_runner for agent type
+- [x] DB migration 023: action_type CHECK + agent_state column
+- [x] Worker claim filter excludes agent steps
+- [x] ServerConfig: AgentsConfig + AgentProviderConfig
+- [x] Agent dispatch module (handle_agent_steps) with rig-core integration
+- [x] Integration into orchestrate_after_step / propagate_to_parent
+- [x] Structured output via output_schema (prompt engineering + JSON parsing)
+- [ ] Token usage tracking (rig's Prompt trait doesn't expose it — investigate lower-level completion API)
+- [x] Retry logic for transient LLM errors (429, 500, 502, 503, 529 + connection/timeout)
+- [x] Temperature / max_tokens passthrough to rig agent builder
+- [x] Initial agent step dispatch at job creation time (via agents_config parameter)
+- [ ] Integration tests with wiremock (mock LLM server)
+- [x] Documentation: CLAUDE.md agent section, agent-actions.md user guide
+
+### 7A Review Fixes (2026-03-20)
+
+#### Critical
+- [x] `truncate_for_error` panics on multi-byte UTF-8 — fixed: uses `is_char_boundary()` loop — `dispatch.rs`
+- [x] Partial GIN index `idx_job_step_ready_claim` predicate mismatch — fixed: rebuilt in migration 023 with `NOT IN ('task', 'agent')` — `023_agent_type.sql`
+
+#### Important
+- [x] No cancellation check in dispatch loop — fixed: checks job status != "cancelled" on each iteration — `dispatch.rs`
+- [x] No timeout on LLM calls — fixed: 120s `tokio::time::timeout` wrapper — `dispatch.rs`
+- [x] `is_transient_error` false positives — fixed: uses specific prefixes (`status: 500`, `http 500`) instead of bare `"500"` — `dispatch.rs`
+- [ ] ~200 lines duplicated between `handle_agent_steps` and `dispatch_initial_agent_steps` — extract shared dispatch logic — `dispatch.rs`
+- [x] Secrets in prompts sent to external LLM APIs — documented in agent-actions.md Security Considerations section
+- [ ] No SSRF validation on `api_endpoint` — could point to internal services. Validate against private IP ranges in config — `config.rs`
+- [x] Missing `#[serde(deny_unknown_fields)]` on `AgentsConfig` and `AgentProviderConfig` — fixed — `config.rs`
+- [x] Unbounded `max_retries` — fixed: validated <= 10 in `ServerConfig::validate()` — `config.rs`
+- [x] `for_each` + agent step: `each` variable not injected — fixed: injects `each.item`/`each.index`/`each.total` for loop instances — `dispatch.rs`
+
+#### Minor
+- [x] `_meta` field collision — documented as reserved key in agent-actions.md + code comment — `dispatch.rs`
+- [x] Empty rendered prompt not caught — fixed: checks `trim().is_empty()` and fails step — `dispatch.rs`
+- [x] Token counts logged as if real — fixed: log message no longer mentions token counts — `dispatch.rs`
+- [x] API key in `Debug` derive — fixed: manual `Debug` impl redacts `api_key` — `config.rs`
+- [x] Misleading retry state machine — fixed: simplified to single `Result` variable — `dispatch.rs`
+
+### 7A Missing Tests
+
+#### Integration tests (need wiremock + testcontainers)
+- [ ] Agent-only job: creation → step running → LLM call → step completed → job completed
+- [ ] Agent step failure: LLM error → step failed → job failed
+- [ ] Chained agent steps: step A output available in step B prompt via `{{ step_a.output.field }}`
+- [ ] Mixed workflow: script step → agent step (handoff from worker to server dispatch)
+- [ ] Worker cannot claim agent steps (SQL filter correctness)
+- [ ] Recovery sweeper ignores agent steps (unmatched step timeout)
+- [ ] `when: false` skips agent step without LLM call
+- [ ] `continue_on_failure: true` + failed predecessor → agent step still dispatched
+- [ ] `for_each` + agent step expansion and dispatch
+
+#### Unit tests
+- [x] `truncate_for_error` with multi-byte UTF-8 input (emoji, CJK, exact boundary)
+- [x] Unstructured response wraps to `{"text": "..."}` shape
+- [x] `_meta` fields present in structured output
+- [ ] Retry exhaustion: correct attempt count with transient errors
+- [ ] Non-transient error: exactly one attempt, no retry
+- [x] `strip_code_fences` with no closing fence (malformed input)
+- [ ] Empty prompt after template rendering → step fails
+- [ ] `dispatch_initial_agent_steps` unknown provider → step marked failed
+
+### 7B: Multi-turn + tools + ask_user (depends on 5d + 7A)
+- [ ] Strom task tools via rig Tool trait (StromTaskTool)
+- [ ] Built-in ask_user tool (reuses Phase 5d suspended status)
+- [ ] agent_state conversation persistence in DB
+- [ ] Multi-turn dispatch loop with max_turns
+- [ ] Concurrent tool calls (parallel child jobs)
+- [ ] Tool definition generation from task input schemas
+
+### 7C: MCP client tools (depends on 7B)
+- [ ] McpServerDef in workspace YAML (mcp_servers section)
+- [ ] MCP client manager via rmcp
+- [ ] MCP tool discovery + execution
+- [ ] Mixed sync (MCP) / async (task) tool calls
 
 ## Phase 5: Advanced Flow Control
 

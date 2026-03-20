@@ -685,8 +685,9 @@ fn validate_action(action_name: &str, action: &ActionDef) -> Result<Vec<String>>
         "docker" => validate_docker_action(action, action_name),
         "pod" => validate_pod_action(action, action_name),
         "task" => validate_task_action(action, action_name),
+        "agent" => validate_agent_action(action, action_name),
         other => bail!(
-            "Action '{}' has invalid type '{}' (expected: script, docker, pod, task)",
+            "Action '{}' has invalid type '{}' (expected: script, docker, pod, task, agent)",
             action_name,
             other
         ),
@@ -1058,6 +1059,143 @@ fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<Str
     Ok(vec![])
 }
 
+fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
+    let warnings = Vec::new();
+
+    // Required fields
+    if action.provider.is_none() {
+        bail!(
+            "Action '{}' is type 'agent' but missing 'provider' field",
+            action_name
+        );
+    }
+    if action.prompt.is_none() {
+        bail!(
+            "Action '{}' is type 'agent' but missing 'prompt' field",
+            action_name
+        );
+    }
+
+    // Forbidden fields (incompatible with agent type)
+    if action.cmd.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'cmd' field",
+            action_name
+        );
+    }
+    if action.script.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'script' field",
+            action_name
+        );
+    }
+    if action.source.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'source' field",
+            action_name
+        );
+    }
+    if action.image.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'image' field",
+            action_name
+        );
+    }
+    if action.runner.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'runner' field",
+            action_name
+        );
+    }
+    if action.manifest.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'manifest' field",
+            action_name
+        );
+    }
+    if action.task.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'task' field",
+            action_name
+        );
+    }
+    if action.language.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'language' field",
+            action_name
+        );
+    }
+    if action.entrypoint.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'entrypoint' field",
+            action_name
+        );
+    }
+    if !action.dependencies.is_empty() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'dependencies' field",
+            action_name
+        );
+    }
+    if action.interpreter.is_some() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'interpreter' field",
+            action_name
+        );
+    }
+
+    // Validate output_schema is a JSON object if present
+    if let Some(ref schema) = action.output_schema {
+        if !schema.is_object() {
+            bail!(
+                "Action '{}' output_schema must be a JSON object",
+                action_name
+            );
+        }
+    }
+
+    // Validate temperature range
+    if let Some(temp) = action.temperature {
+        if !(0.0..=2.0).contains(&temp) {
+            bail!(
+                "Action '{}' temperature must be between 0.0 and 2.0, got {}",
+                action_name,
+                temp
+            );
+        }
+    }
+
+    // Validate prompt is valid Tera template syntax (same two-pass strategy as `when`)
+    if let Some(ref prompt) = action.prompt {
+        if tera::Tera::one_off(prompt, &tera::Context::new(), false).is_err() {
+            let mut test_tera = tera::Tera::default();
+            if let Err(e) = test_tera.add_raw_template("__prompt__", prompt) {
+                bail!(
+                    "Action '{}' has invalid prompt template: {}",
+                    action_name,
+                    e
+                );
+            }
+        }
+    }
+
+    // Same for system_prompt
+    if let Some(ref sp) = action.system_prompt {
+        if tera::Tera::one_off(sp, &tera::Context::new(), false).is_err() {
+            let mut test_tera = tera::Tera::default();
+            if let Err(e) = test_tera.add_raw_template("__system_prompt__", sp) {
+                bail!(
+                    "Action '{}' has invalid system_prompt template: {}",
+                    action_name,
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
 /// Validates that a hook references an existing action (or a library action).
 fn validate_hook_action_exists(
     label: &str,
@@ -1077,8 +1215,8 @@ fn validate_hook_action_exists(
 /// Compute the required worker tags for an action.
 /// These tags must all be present on a worker for it to claim a step using this action.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
-    // Task actions are handled server-side, not by workers
-    if action.action_type == "task" {
+    // Task and agent actions are handled server-side, not by workers
+    if action.action_type == "task" || action.action_type == "agent" {
         return vec![];
     }
 
@@ -1108,7 +1246,7 @@ pub fn derive_runner(action: &ActionDef) -> String {
     match action.action_type.as_str() {
         "script" => action.runner.as_deref().unwrap_or("local").to_string(),
         "docker" | "pod" => "none".to_string(),
-        "task" => "none".to_string(),
+        "task" | "agent" => "none".to_string(),
         _ => "local".to_string(),
     }
 }
@@ -4715,5 +4853,300 @@ tasks:
             result
         );
         assert!(result.unwrap().is_empty(), "Expected no warnings");
+    }
+
+    // --- agent action validation tests ---
+
+    #[test]
+    fn test_validate_agent_action_valid() {
+        let yaml = r#"
+actions:
+  summarise:
+    type: agent
+    provider: openai
+    prompt: "Summarise {{ input.text }}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Valid agent action should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_with_all_optional_fields() {
+        let yaml = r#"
+actions:
+  analyse:
+    type: agent
+    provider: anthropic
+    model: claude-opus-4-5
+    system_prompt: "You are a helpful assistant."
+    prompt: "Analyse {{ input.data }}"
+    temperature: 0.7
+    max_tokens: 2048
+    max_turns: 5
+    output_schema:
+      type: object
+      properties:
+        result:
+          type: string
+    tools:
+      - task: run-tool
+      - mcp: my-mcp-server
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Agent action with all optional fields should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_missing_provider() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    prompt: "Do something"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Missing provider should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing 'provider'"),
+            "Error should mention missing 'provider'"
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_missing_prompt() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Missing prompt should fail");
+        assert!(
+            result.unwrap_err().to_string().contains("missing 'prompt'"),
+            "Error should mention missing 'prompt'"
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_rejects_script_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "Do something"
+    script: "echo hi"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Agent with 'script' should fail");
+        assert!(result.unwrap_err().to_string().contains("'script' field"));
+    }
+
+    #[test]
+    fn test_validate_agent_action_rejects_image_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "Do something"
+    image: "my-image:latest"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Agent with 'image' should fail");
+        assert!(result.unwrap_err().to_string().contains("'image' field"));
+    }
+
+    #[test]
+    fn test_validate_agent_action_rejects_task_field() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "Do something"
+    task: some-task
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Agent with 'task' field should fail");
+        assert!(result.unwrap_err().to_string().contains("'task' field"));
+    }
+
+    #[test]
+    fn test_validate_agent_action_temperature_out_of_range() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "Do something"
+    temperature: 2.5
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Temperature > 2.0 should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("temperature must be between"),
+            "Error should mention temperature range"
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_temperature_zero_valid() {
+        let yaml = r#"
+actions:
+  deterministic:
+    type: agent
+    provider: openai
+    prompt: "Classify {{ input.text }}"
+    temperature: 0.0
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Temperature 0.0 should be valid: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_temperature_max_valid() {
+        let yaml = r#"
+actions:
+  creative:
+    type: agent
+    provider: openai
+    prompt: "Write a poem about {{ input.topic }}"
+    temperature: 2.0
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_ok(),
+            "Temperature 2.0 should be valid: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_output_schema_not_object() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "Do something"
+    output_schema: "not an object"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err(), "Non-object output_schema should fail");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("output_schema must be a JSON object"),
+            "Error should mention output_schema"
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_invalid_prompt_template() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    prompt: "{% if %}"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "Invalid prompt template syntax should fail"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid prompt template"),
+            "Error should mention invalid prompt template"
+        );
+    }
+
+    #[test]
+    fn test_validate_agent_action_invalid_system_prompt_template() {
+        let yaml = r#"
+actions:
+  bad:
+    type: agent
+    provider: openai
+    system_prompt: "{% if %}"
+    prompt: "Do something"
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "Invalid system_prompt template syntax should fail"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid system_prompt template"),
+            "Error should mention invalid system_prompt template"
+        );
+    }
+
+    #[test]
+    fn test_compute_required_tags_agent() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yaml::from_str(
+            r#"
+type: agent
+provider: openai
+prompt: "Do something"
+"#,
+        )
+        .unwrap();
+        assert_eq!(compute_required_tags(&action), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_derive_runner_agent() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yaml::from_str(
+            r#"
+type: agent
+provider: openai
+prompt: "Do something"
+"#,
+        )
+        .unwrap();
+        assert_eq!(derive_runner(&action), "none");
     }
 }

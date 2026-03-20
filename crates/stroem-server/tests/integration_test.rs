@@ -76,6 +76,15 @@ fn test_workspace() -> WorkspaceConfig {
             input: greet_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -104,6 +113,15 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -136,6 +154,15 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -650,6 +677,15 @@ fn test_workspace() -> WorkspaceConfig {
             input: db_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -759,6 +795,15 @@ fn test_workspace() -> WorkspaceConfig {
             input: transform_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -805,6 +850,15 @@ fn test_workspace() -> WorkspaceConfig {
             input: summarize_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -1019,6 +1073,7 @@ async fn setup() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = test_workspace();
@@ -2091,6 +2146,7 @@ async fn test_task_detail_connections() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     // Build a workspace with connections
@@ -2158,6 +2214,15 @@ async fn test_task_detail_connections() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -4092,6 +4157,15 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -4120,6 +4194,15 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -4184,6 +4267,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -4294,6 +4378,15 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -4356,6 +4449,15 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -4414,6 +4516,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -4646,6 +4749,7 @@ async fn setup_with_auth() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     // Seed initial user
@@ -6561,6 +6665,15 @@ fn test_workspace_ops() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -6646,6 +6759,7 @@ async fn setup_multi_workspace() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let ws_default = test_workspace();
@@ -7035,6 +7149,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7201,6 +7316,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7285,6 +7401,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7385,6 +7502,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7520,6 +7638,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7955,6 +8074,7 @@ async fn test_create_job_for_task_trigger_source() -> Result<()> {
         "trigger",
         Some("default/every-minute"),
         None,
+        None,
     )
     .await?;
 
@@ -7995,6 +8115,7 @@ async fn test_create_job_for_task_multi_step() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -8027,6 +8148,7 @@ async fn test_create_job_for_task_missing_task() -> Result<()> {
         "nonexistent-task",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -8091,6 +8213,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
         "broken-task",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -8316,6 +8439,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = test_workspace();
@@ -8399,6 +8523,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = test_workspace();
@@ -8466,6 +8591,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = test_workspace();
@@ -8516,6 +8642,15 @@ fn hook_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -8544,6 +8679,15 @@ fn hook_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -8587,6 +8731,15 @@ fn hook_test_workspace() -> WorkspaceConfig {
             input: notify_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -8618,6 +8771,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         },
         acl: None,
         mcp: None,
+        agents: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -8684,6 +8838,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         "deploy-task",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -8797,6 +8952,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
         "crash-task",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -8974,6 +9130,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -9079,6 +9236,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
         "multi-fail",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -9218,6 +9376,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -9330,6 +9489,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
         "py-crash",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -9447,6 +9607,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         "with-hook",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -9605,6 +9766,15 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -9633,6 +9803,15 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -9778,6 +9957,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -9828,6 +10008,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
         "deploy",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -10022,6 +10203,15 @@ async fn test_task_action_input_rendered() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -10083,6 +10273,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
         "deploy-with-input",
         json!({"environment": "production"}),
         "api",
+        None,
         None,
         None,
     )
@@ -10157,6 +10348,7 @@ async fn test_task_action_in_hook() -> Result<()> {
         "deploy-with-hook",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -10301,6 +10493,15 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -10345,6 +10546,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         "parent-of-fail",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -10441,6 +10643,7 @@ async fn setup_recovery() -> Result<(
         },
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = test_workspace();
@@ -10542,6 +10745,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -10594,6 +10798,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
         "linear-3",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -10686,6 +10891,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         },
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = task_action_test_workspace();
@@ -10701,6 +10907,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         "deploy",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -12398,6 +12605,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -12469,6 +12677,15 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             input: action_input,
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -12643,6 +12860,15 @@ async fn setup_sync_webhook() -> Result<(
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -12714,6 +12940,7 @@ async fn setup_sync_webhook() -> Result<(
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -13164,6 +13391,15 @@ async fn setup_scheduler_workspace(
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -13250,6 +13486,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -13332,6 +13569,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -13396,6 +13634,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -13466,6 +13705,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(pool, mgr, sched_config, sched_log_storage, HashMap::new());
@@ -13838,6 +14078,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let mgr =
@@ -14080,6 +14321,7 @@ async fn setup_recovery_with_unmatched_timeout(
         },
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let workspace = test_workspace();
@@ -14128,6 +14370,7 @@ async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
         "hello-world",
         json!({"name": "test"}),
         "api",
+        None,
         None,
         None,
     )
@@ -14181,6 +14424,7 @@ async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -14220,6 +14464,7 @@ async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -14252,6 +14497,7 @@ async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
         "hello-world",
         json!({"name": "test"}),
         "api",
+        None,
         None,
         None,
     )
@@ -14295,6 +14541,7 @@ async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()>
         "hello-world",
         json!({"name": "test"}),
         "api",
+        None,
         None,
         None,
     )
@@ -14368,6 +14615,7 @@ async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -14419,6 +14667,15 @@ fn when_test_workspace_with_flow(
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
     workspace.tasks.insert(
@@ -14490,6 +14747,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -14549,6 +14807,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
         "api",
         None,
         None,
+        None,
     )
     .await?;
 
@@ -14595,6 +14854,15 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -14622,6 +14890,15 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             input: HashMap::new(),
             output: None,
             manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            output_schema: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
         },
     );
 
@@ -14696,6 +14973,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
         "parent-task",
         json!({}),
         "api",
+        None,
         None,
         None,
     )
@@ -14779,6 +15057,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
         "build-and-deploy",
         json!({"should_deploy": true}),
         "api",
+        None,
         None,
         None,
     )
@@ -15326,6 +15605,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         recovery: Default::default(),
         acl: None,
         mcp: None,
+        agents: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -15510,6 +15790,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         },
         acl: None,
         mcp: None,
+        agents: None,
     };
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
@@ -15598,6 +15879,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
         "api",
         None,
         Some("test-rev"),
+        None,
     )
     .await?;
 
@@ -15704,6 +15986,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
         "api",
         None,
         Some("test-rev"),
+        None,
     )
     .await?;
 

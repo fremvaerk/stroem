@@ -332,6 +332,7 @@ pub async fn execute_task(
         source_type,
         source_id.as_deref(),
         revision.as_deref(),
+        state.config.agents.as_ref(),
     )
     .await
     .map_err(|e| {

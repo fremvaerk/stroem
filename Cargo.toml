@@ -80,6 +80,9 @@ rmcp = { version = "1.2", default-features = false, features = ["server", "macro
 schemars = "1"
 http = "1"
 
+# LLM agent framework
+rig-core = "0.33"
+
 # Workspace sources
 async-trait = "0.1"
 git2 = "0.20"
