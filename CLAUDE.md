@@ -330,6 +330,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Runtime sqlx queries, NOT compile-time checked
 - Migrations in `crates/stroem-db/migrations/`
 - Job claiming uses `SELECT ... FOR UPDATE SKIP LOCKED`
+- **Job revision tracking**: `job.revision` stores the workspace revision (git SHA or folder content hash) at job creation time. Sub-jobs inherit their parent's revision. Hook jobs inherit the originating job's revision. Looked up via `WorkspaceManager::get_revision()`.
 
 ### Health Check
 - `GET /healthz` — unauthenticated endpoint, not under `/api/`

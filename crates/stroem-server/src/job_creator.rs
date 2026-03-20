@@ -16,6 +16,7 @@ const MAX_TASK_DEPTH: u32 = 10;
 /// Create a job and its steps for a task in a workspace.
 ///
 /// Shared by the API handler (`execute_task`) and the scheduler.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(pool, workspace_config, input))]
 pub async fn create_job_for_task(
     pool: &PgPool,
@@ -25,6 +26,7 @@ pub async fn create_job_for_task(
     input: serde_json::Value,
     source_type: &str,
     source_id: Option<&str>,
+    revision: Option<&str>,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
         pool,
@@ -36,6 +38,7 @@ pub async fn create_job_for_task(
         source_id,
         None,
         None,
+        revision,
     )
     .await
 }
@@ -52,6 +55,7 @@ fn create_job_for_task_inner<'a>(
     source_id: Option<&'a str>,
     parent_job_id: Option<Uuid>,
     parent_step_name: Option<&'a str>,
+    revision: Option<&'a str>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
     Box::pin(async move {
         // Look up task
@@ -149,6 +153,7 @@ fn create_job_for_task_inner<'a>(
             parent_step_name,
             task.timeout
                 .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
+            revision,
         )
         .await
         .context("Failed to create job")?;
@@ -320,7 +325,7 @@ pub async fn handle_task_steps(
 
         let source_id = format!("{}/{}", job_id, step.step_name);
 
-        // Create child job with parent tracking
+        // Create child job with parent tracking (inherits parent revision)
         match create_job_for_task_inner(
             pool,
             workspace_config,
@@ -331,6 +336,7 @@ pub async fn handle_task_steps(
             Some(&source_id),
             Some(job_id),
             Some(&step.step_name),
+            job.revision.as_deref(),
         )
         .await
         {

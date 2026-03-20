@@ -264,6 +264,7 @@ fn compute_next_run(
 async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstate: &TriggerState) {
     let source_id = format!("{}/{}", tstate.workspace, tstate.trigger_name);
     let input = serde_json::to_value(&tstate.input).unwrap_or_default();
+    let revision = app_state.workspaces.get_revision(&tstate.workspace);
 
     // Apply concurrency policy
     match tstate.concurrency {
@@ -283,6 +284,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                         Some(input.clone()),
                         "trigger",
                         Some(&source_id),
+                        revision.as_deref(),
                     )
                     .await
                     {
@@ -373,6 +375,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         input,
         "trigger",
         Some(&source_id),
+        revision.as_deref(),
     )
     .await
     {

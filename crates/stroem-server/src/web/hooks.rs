@@ -79,6 +79,7 @@ async fn webhook_handler(
 
     let is_sync = wh.mode.as_deref() == Some("sync");
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
+    let revision = state.workspaces.get_revision(&wh.ws_name);
 
     let job_id = match create_job_for_task(
         &state.pool,
@@ -88,6 +89,7 @@ async fn webhook_handler(
         input_value,
         "webhook",
         Some(&source_id),
+        revision.as_deref(),
     )
     .await
     .context("create webhook job")

@@ -1174,6 +1174,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         Some(json!({"name": "Bob"})),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -1606,6 +1607,7 @@ async fn test_log_append_and_retrieve() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -1804,6 +1806,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -1913,6 +1916,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -2616,8 +2620,17 @@ async fn test_worker_complete_job() -> Result<()> {
     let (router, pool, _tmp, _container) = setup().await?;
 
     // Create job directly
-    let job_id =
-        JobRepo::create(&pool, "default", "hello-world", "local", None, "api", None).await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "local",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     // Complete job via worker API
     let response = router
@@ -3542,6 +3555,7 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
         Some(json!({})),
         "api",
         Some("test/script-render-fail"),
+        None,
     )
     .await?;
     JobStepRepo::create_steps(
@@ -3632,6 +3646,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         Some(json!({})),
         "api",
         Some("test/env-render-fail"),
+        None,
     )
     .await?;
     JobStepRepo::create_steps(
@@ -3713,6 +3728,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         Some(json!({})),
         "api",
         Some("test/script-render-fail"),
+        None,
     )
     .await?;
     JobStepRepo::create_steps(
@@ -3794,6 +3810,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         Some(json!({})),
         "api",
         Some("test/manifest-render-fail"),
+        None,
     )
     .await?;
     // A pod-type step with a manifest containing a template referencing a missing key
@@ -3882,6 +3899,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         Some(json!({})),
         "api",
         Some("test/image-render-fail"),
+        None,
     )
     .await?;
     // A docker-type step whose image tag is a template referencing a missing key
@@ -4912,6 +4930,7 @@ async fn test_ws_backfill_existing_logs() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -4978,6 +4997,7 @@ async fn test_ws_live_log_streaming() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -5035,6 +5055,7 @@ async fn test_ws_backfill_plus_live() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -5161,6 +5182,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -5283,6 +5305,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -5424,6 +5447,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -5524,6 +5548,7 @@ async fn test_jsonl_logs_contain_stderr_stream() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -5597,6 +5622,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -5740,6 +5766,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -5887,6 +5914,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -6011,6 +6039,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -6144,6 +6173,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -6274,6 +6304,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -6415,6 +6446,7 @@ async fn test_cascading_skip() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -6853,6 +6885,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         "distributed",
         Some(json!({})),
         "api",
+        None,
         None,
     )
     .await?;
@@ -7674,6 +7707,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         Some(json!({"name": "Test"})),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -7709,6 +7743,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         "distributed",
         Some(json!({})),
         "api",
+        None,
         None,
     )
     .await?;
@@ -7919,6 +7954,7 @@ async fn test_create_job_for_task_trigger_source() -> Result<()> {
         input.clone(),
         "trigger",
         Some("default/every-minute"),
+        None,
     )
     .await?;
 
@@ -7958,6 +7994,7 @@ async fn test_create_job_for_task_multi_step() -> Result<()> {
         input,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -7990,6 +8027,7 @@ async fn test_create_job_for_task_missing_task() -> Result<()> {
         "nonexistent-task",
         json!({}),
         "api",
+        None,
         None,
     )
     .await;
@@ -8053,6 +8091,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
         "broken-task",
         json!({}),
         "api",
+        None,
         None,
     )
     .await;
@@ -8646,6 +8685,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         json!({}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -8758,6 +8798,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
         json!({}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -8852,6 +8893,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
         Some(json!({})),
         "hook",
         Some("default/deploy-task/abc/on_success[0]"),
+        None,
     )
     .await?;
 
@@ -8930,6 +8972,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
         "deploy-task",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -9036,6 +9079,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
         "multi-fail",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -9173,6 +9217,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         json!({}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -9285,6 +9330,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
         "py-crash",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -9401,6 +9447,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         "with-hook",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -9730,6 +9777,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
         json!({}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -9780,6 +9828,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
         "deploy",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -9895,8 +9944,17 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
     let _workspace = task_action_test_workspace();
 
     // Insert a step that is "ready" with action_type "task" directly
-    let job_id =
-        JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "deploy",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     let step = NewJobStep {
         job_id,
@@ -10026,6 +10084,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
         json!({"environment": "production"}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -10098,6 +10157,7 @@ async fn test_task_action_in_hook() -> Result<()> {
         "deploy-with-hook",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -10285,6 +10345,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         "parent-of-fail",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -10480,6 +10541,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
         json!({"name": "test"}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -10532,6 +10594,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
         "linear-3",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -10638,6 +10701,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         "deploy",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -11058,6 +11122,7 @@ async fn test_get_worker_with_jobs() -> Result<()> {
         "distributed",
         Some(json!({"name": "Test"})),
         "api",
+        None,
         None,
     )
     .await?;
@@ -11955,6 +12020,7 @@ async fn test_ws_auth_rejects_without_token() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -11993,6 +12059,7 @@ async fn test_ws_auth_accepts_jwt_via_query_param() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -12033,6 +12100,7 @@ async fn test_ws_auth_accepts_api_key_via_query_param() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -12087,6 +12155,7 @@ async fn test_ws_auth_rejects_invalid_token() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -12125,6 +12194,7 @@ async fn test_ws_no_auth_allows_without_token() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -12161,6 +12231,7 @@ async fn test_ws_skip_backfill_suppresses_existing_logs() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -12240,6 +12311,7 @@ async fn test_ws_without_skip_backfill_sends_existing_logs() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -13492,6 +13564,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         Some(json!({"name": "Test"})),
         "api",
         None,
+        None,
     )
     .await?;
     JobStepRepo::create_steps(
@@ -13526,6 +13599,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         "distributed",
         Some(json!({})),
         "api",
+        None,
         None,
     )
     .await?;
@@ -14055,6 +14129,7 @@ async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
         json!({"name": "test"}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -14105,6 +14180,7 @@ async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
         json!({"name": "test"}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -14143,6 +14219,7 @@ async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
         json!({"name": "test"}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -14175,6 +14252,7 @@ async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
         "hello-world",
         json!({"name": "test"}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -14217,6 +14295,7 @@ async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()>
         "hello-world",
         json!({"name": "test"}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -14287,6 +14366,7 @@ async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
         "hello-world",
         json!({"name": "test"}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -14409,6 +14489,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
         json!({}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -14466,6 +14547,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
         "truthy-root",
         json!({}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -14615,6 +14697,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
         json!({}),
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -14696,6 +14779,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
         "build-and-deploy",
         json!({"should_deploy": true}),
         "api",
+        None,
         None,
     )
     .await?;
@@ -15164,6 +15248,168 @@ async fn test_webhook_job_status_cancelled_treated_as_terminal() -> Result<()> {
     Ok(())
 }
 
+// ─── Scheduler: revision is stored on trigger-created jobs ──────────────────
+
+/// Verify that jobs created by the scheduler record the workspace revision on the
+/// `job.revision` column.  We use an in-memory `InMemSource` that returns a fixed
+/// revision string so the assertion is stable regardless of file-system state.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    // Build a scheduler workspace with a trigger that fires every second.
+    let workspace = setup_scheduler_workspace(
+        "rev-trigger",
+        "* * * * * *",
+        "rev-task",
+        HashMap::new(),
+        true,
+    )
+    .await;
+
+    // Use an InMemSource that reports a known revision so the scheduler can pick it up.
+    const EXPECTED_REVISION: &str = "sched-rev-deadbeef";
+
+    struct InMemSourceWithRev(WorkspaceConfig);
+    #[async_trait::async_trait]
+    impl stroem_server::workspace::WorkspaceSource for InMemSourceWithRev {
+        async fn load(&self) -> Result<WorkspaceConfig> {
+            Ok(self.0.clone())
+        }
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("/dev/null")
+        }
+        fn revision(&self) -> Option<String> {
+            Some(EXPECTED_REVISION.to_string())
+        }
+    }
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use stroem_server::workspace::WorkspaceEntry;
+    use tokio::sync::RwLock;
+
+    let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
+        Arc::new(InMemSourceWithRev(workspace.clone()));
+
+    let mut entries = HashMap::new();
+    entries.insert(
+        "default".to_string(),
+        WorkspaceEntry {
+            config: Arc::new(RwLock::new(Arc::new(workspace))),
+            source: src,
+            name: "default".to_string(),
+            source_path: PathBuf::from("/dev/null"),
+            load_error: Arc::new(std::sync::RwLock::new(None)),
+        },
+    );
+    let mgr = WorkspaceManager::from_entries(entries);
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let sched_config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url: url.clone() },
+        log_storage: LogStorageConfig {
+            local_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        acl: None,
+        mcp: None,
+    };
+    let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
+    let sched_state = AppState::new(
+        pool.clone(),
+        mgr,
+        sched_config,
+        sched_log_storage,
+        HashMap::new(),
+    );
+    let handle = stroem_server::scheduler::start(sched_state, cancel.clone());
+
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    cancel.cancel();
+    handle.await?;
+
+    let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
+        "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
+         source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
+         parent_job_id, parent_step_name, timeout_secs FROM job WHERE source_type = $1",
+    )
+    .bind("trigger")
+    .fetch_all(&pool)
+    .await?;
+
+    assert!(
+        !jobs.is_empty(),
+        "scheduler must have created at least one trigger job"
+    );
+
+    let job = &jobs[0];
+    assert_eq!(
+        job.revision.as_deref(),
+        Some(EXPECTED_REVISION),
+        "scheduler-created job must record the workspace revision"
+    );
+
+    Ok(())
+}
+
+// ─── Webhook: revision is stored on webhook-triggered jobs ──────────────────
+
+/// Verify that jobs created by webhook triggers record the workspace revision.
+/// `setup_multi_workspace()` uses `InMemSource` which reports `"test-rev"`, so
+/// any job created by a webhook in that setup should carry that revision.
+#[tokio::test]
+async fn test_webhook_triggered_job_stores_revision() -> Result<()> {
+    // setup_multi_workspace uses InMemSource whose revision() returns "test-rev"
+    let (router, pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Fire the "public-hook" webhook (no secret, targets hello-world in "default")
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/public-hook")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "webhook fire must return 200"
+    );
+
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"]
+        .as_str()
+        .expect("response must include job_id")
+        .parse()?;
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("created job must exist in DB");
+
+    assert_eq!(job.source_type, "webhook");
+    assert_eq!(
+        job.revision.as_deref(),
+        Some("test-rev"),
+        "webhook-triggered job must record the workspace revision from InMemSource"
+    );
+
+    Ok(())
+}
+
 // ─── Health check endpoint ─────────────────────────────────────────────
 //
 // NOTE: The /healthz route must be registered in build_router before this
@@ -15208,6 +15454,389 @@ async fn test_healthz_returns_structured_json() -> Result<()> {
 
     // With db ok but tasks stopped, overall status is "degraded".
     assert_eq!(body["status"], "degraded");
+
+    Ok(())
+}
+
+// ─── Revision inheritance: hook jobs and sub-jobs ──────────────────────
+
+/// In-memory workspace source that always returns a fixed revision.
+/// Used by revision-inheritance tests to provide a known revision without
+/// touching the filesystem.
+struct FixedRevisionSource(WorkspaceConfig);
+
+#[async_trait::async_trait]
+impl stroem_server::workspace::WorkspaceSource for FixedRevisionSource {
+    async fn load(&self) -> Result<WorkspaceConfig> {
+        Ok(self.0.clone())
+    }
+    fn path(&self) -> &std::path::Path {
+        std::path::Path::new("/dev/null")
+    }
+    fn revision(&self) -> Option<String> {
+        Some("test-rev".to_string())
+    }
+}
+
+/// Build an [`AppState`] backed by a single workspace whose source always
+/// reports `"test-rev"` as the revision.  The workspace name is `"default"`.
+fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use stroem_server::workspace::WorkspaceEntry;
+    use tokio::sync::RwLock;
+
+    let temp_dir = std::env::temp_dir().join(format!("stroem-rev-test-{}", Uuid::new_v4()));
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://test".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: temp_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test".to_string(),
+        auth: None,
+        recovery: stroem_server::config::RecoveryConfig {
+            heartbeat_timeout_secs: 120,
+            sweep_interval_secs: 60,
+            unmatched_step_timeout_secs: 30,
+            ..Default::default()
+        },
+        acl: None,
+        mcp: None,
+    };
+
+    let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
+        Arc::new(FixedRevisionSource(workspace.clone()));
+
+    let mut entries = HashMap::new();
+    entries.insert(
+        "default".to_string(),
+        WorkspaceEntry {
+            config: Arc::new(RwLock::new(Arc::new(workspace))),
+            source: src,
+            name: "default".to_string(),
+            source_path: PathBuf::from("/dev/null"),
+            load_error: Arc::new(std::sync::RwLock::new(None)),
+        },
+    );
+
+    let mgr = WorkspaceManager::from_entries(entries);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    AppState::new(pool, mgr, config, log_storage, HashMap::new())
+}
+
+/// Hook jobs must inherit the originating job's `revision` field.
+///
+/// Strategy:
+/// 1. Create a workspace with `on_success` hook using `FixedRevisionSource`
+///    so that the workspace manager reports `"test-rev"`.
+/// 2. Create a job via `create_job_for_task` passing `Some("test-rev")` as
+///    revision (mirrors what the API handler does by reading it from the
+///    workspace manager).
+/// 3. Drive the step to completion and call `fire_hooks`.
+/// 4. Assert the hook job carries the same revision.
+#[tokio::test]
+async fn test_hook_job_inherits_revision() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+
+    // Build a task with a single step and an on_success hook.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "rev-deploy".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            on_success: vec![HookDef {
+                action: "notify".to_string(),
+                input: HashMap::new(),
+            }],
+            on_error: vec![],
+        },
+    );
+
+    // Create the parent job with the known revision.
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "rev-deploy",
+        json!({}),
+        "api",
+        None,
+        Some("test-rev"),
+    )
+    .await?;
+
+    // Verify the parent job carries the revision.
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.revision.as_deref(), Some("test-rev"));
+
+    let task = workspace.tasks.get("rev-deploy").unwrap();
+
+    // Drive the step to terminal state so hooks will fire.
+    let worker_id = register_test_worker(&pool).await;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
+    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+
+    // Fire hooks using the revision-aware state.
+    let state = revision_test_state(pool.clone(), workspace.clone());
+    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+
+    // There must now be exactly two jobs: the original and the hook job.
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    assert_eq!(all_jobs.len(), 2, "expected original job + hook job");
+
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("hook job not found");
+
+    // The hook job must inherit the parent's revision.
+    assert_eq!(
+        hook_job.revision.as_deref(),
+        Some("test-rev"),
+        "hook job must inherit parent revision"
+    );
+
+    Ok(())
+}
+
+/// Sub-jobs created by `type: task` steps must inherit the parent job's
+/// `revision` field.
+///
+/// Strategy:
+/// 1. Use `task_action_test_workspace` which already contains a `run-cleanup`
+///    action (`type: task`) that triggers the `cleanup` task.
+/// 2. Create a thin wrapper task with a single `type: task` step referencing
+///    `run-cleanup`.
+/// 3. Call `create_job_for_task` with `Some("test-rev")` as revision.
+/// 4. Verify both the parent job and the immediately-created child job
+///    carry `"test-rev"` as their revision.
+#[tokio::test]
+async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = task_action_test_workspace();
+
+    // Add a top-level task whose only step is a `type: task` action.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "rev-task-parent".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+        },
+    );
+
+    // Create the parent job with the known revision.
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "rev-task-parent",
+        json!({}),
+        "api",
+        None,
+        Some("test-rev"),
+    )
+    .await?;
+
+    // Verify the parent job carries the revision.
+    let parent_job = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(parent_job.revision.as_deref(), Some("test-rev"));
+
+    // `create_job_for_task` handles task-type steps synchronously: by the
+    // time it returns the child job already exists.
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    assert_eq!(all_jobs.len(), 2, "expected parent job + child job");
+
+    let child_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "task")
+        .expect("child job not found");
+
+    assert_eq!(child_job.parent_job_id, Some(parent_job_id));
+
+    // The child job must inherit the parent's revision.
+    assert_eq!(
+        child_job.revision.as_deref(),
+        Some("test-rev"),
+        "child job must inherit parent revision"
+    );
+
+    Ok(())
+}
+
+// ─── Job revision in API responses ────────────────────────────────────────
+
+/// Verify that the job detail endpoint returns `"revision": "test-rev"` when
+/// the workspace source reports a revision string.
+#[tokio::test]
+async fn test_job_revision_in_api_detail_response() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create a job via the "default" workspace (InMemSource returns "test-rev")
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "RevTest"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let job_id = body["job_id"].as_str().unwrap();
+
+    // Fetch the job detail and assert revision is propagated
+    let resp = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    assert_eq!(
+        body["revision"].as_str(),
+        Some("test-rev"),
+        "job detail must expose the workspace revision captured at creation time"
+    );
+
+    Ok(())
+}
+
+/// Verify that the job list endpoint includes `"revision": "test-rev"` on each
+/// item when the workspace source reports a revision string.
+#[tokio::test]
+async fn test_job_revision_in_api_list_response() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // Create a job
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "RevList"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // List jobs and check revision on the first item
+    let resp = router.oneshot(api_get("/api/jobs")).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    let items = body["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "expected at least one job in the list");
+
+    assert_eq!(
+        items[0]["revision"].as_str(),
+        Some("test-rev"),
+        "job list items must expose the workspace revision captured at creation time"
+    );
+
+    Ok(())
+}
+
+/// Verify that the job detail endpoint returns `"revision": null` when the
+/// workspace has no revision information (uses the regular `setup()` helper
+/// which builds the workspace manager with `WorkspaceManager::from_config`,
+/// backed by `InMemorySource` that always returns `None`).
+#[tokio::test]
+async fn test_job_revision_null_when_no_workspace_revision() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup().await?;
+
+    // Create a job — the workspace has no revision
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "NoRev"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let job_id = body["job_id"].as_str().unwrap();
+
+    // Fetch the job detail and assert revision is null
+    let resp = router
+        .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    assert!(
+        body["revision"].is_null(),
+        "job detail revision must be null when the workspace source reports no revision, got: {:?}",
+        body["revision"]
+    );
 
     Ok(())
 }

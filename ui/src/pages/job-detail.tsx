@@ -158,6 +158,18 @@ export function JobDetailPage() {
               ? `${job.source_type} (${job.source_id})`
               : job.source_type,
           },
+          {
+            label: "Revision",
+            value: job.revision ? (
+              <span title={job.revision}>
+                {job.revision.length > 12
+                  ? job.revision.substring(0, 8)
+                  : job.revision}
+              </span>
+            ) : (
+              "\u2014"
+            ),
+          },
           { label: "Created", value: formatTime(job.created_at) },
           { label: "Started", value: formatTime(job.started_at) },
           {

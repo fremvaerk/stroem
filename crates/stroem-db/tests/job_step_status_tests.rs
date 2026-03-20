@@ -20,7 +20,17 @@ async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)
 
 /// Create a minimal job and return its ID.
 async fn make_job(pool: &PgPool, task_name: &str) -> Result<Uuid> {
-    JobRepo::create(pool, "default", task_name, "distributed", None, "api", None).await
+    JobRepo::create(
+        pool,
+        "default",
+        task_name,
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await
 }
 
 /// Build a `NewJobStep` with sensible defaults.  Only `step_name` and `status`
@@ -276,6 +286,7 @@ async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -290,6 +301,7 @@ async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
         Some(&format!("{}/{}", parent_id, "dispatch-step")),
         Some(parent_id),
         Some("dispatch-step"),
+        None,
         None,
     )
     .await?;
@@ -326,6 +338,7 @@ async fn test_job_without_parent_has_null_parent_columns() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -349,8 +362,17 @@ async fn test_job_without_parent_has_null_parent_columns() -> Result<()> {
 async fn test_job_grandchild_parent_chain() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
-    let root_id =
-        JobRepo::create(&pool, "default", "root", "distributed", None, "api", None).await?;
+    let root_id = JobRepo::create(
+        &pool,
+        "default",
+        "root",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     let child_id = JobRepo::create_with_parent(
         &pool,
@@ -362,6 +384,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         Some(root_id),
         Some("step-a"),
+        None,
         None,
     )
     .await?;
@@ -376,6 +399,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         Some(child_id),
         Some("step-b"),
+        None,
         None,
     )
     .await?;
@@ -623,6 +647,7 @@ async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
         Some(parent_id),
         Some("spawn-step"),
         None,
+        None,
     )
     .await?;
 
@@ -669,6 +694,7 @@ async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> 
         None,
         Some(parent_id),
         Some("spawn-step"),
+        None,
         None,
     )
     .await?;

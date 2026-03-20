@@ -129,6 +129,7 @@ pub async fn fire_hooks(
             hook,
             &ctx_value,
             &source_id,
+            job.revision.as_deref(),
         )
         .await
         {
@@ -223,6 +224,7 @@ async fn fire_single_hook(
     hook: &HookDef,
     ctx_value: &serde_json::Value,
     source_id: &str,
+    revision: Option<&str>,
 ) -> anyhow::Result<()> {
     // Resolve action
     let action = workspace_config
@@ -267,6 +269,7 @@ async fn fire_single_hook(
             rendered_input,
             "hook",
             Some(source_id),
+            revision,
         )
         .await
         .context("Failed to create hook task job")?;
@@ -292,6 +295,7 @@ async fn fire_single_hook(
         Some(rendered_input.clone()),
         "hook",
         Some(source_id),
+        revision,
     )
     .await
     .context("Failed to create hook job")?;

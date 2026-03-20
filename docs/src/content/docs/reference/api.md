@@ -177,6 +177,7 @@ GET /api/jobs
       "status": "completed",
       "source_type": "api",
       "source_id": null,
+      "revision": "abc123def456",
       "created_at": "2025-02-10T12:00:00Z",
       "started_at": "2025-02-10T12:00:01Z",
       "completed_at": "2025-02-10T12:00:03Z"
@@ -210,6 +211,7 @@ Returns job metadata and all steps with statuses.
   "workspace": "default",
   "task_name": "hello-world",
   "status": "completed",
+  "revision": "abc123def456",
   "input": { "name": "World" },
   "steps": [
     {

@@ -917,7 +917,119 @@ async fn test_mcp_auth_with_valid_token() -> Result<()> {
     Ok(())
 }
 
-/// Test 8: jobs created via MCP have source_type "mcp"; on_success hooks fire correctly.
+/// Test 8: get_job_status includes the revision field when the job was created with one.
+#[tokio::test]
+async fn test_mcp_get_job_status_includes_revision() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_mcp().await?;
+
+    // Create a job directly with a known revision via JobRepo so we can control the
+    // exact value without depending on WorkspaceManager::get_revision().
+    let workspace = mcp_test_workspace();
+    let revision = "mcp-test-rev-abc123";
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "revision-test"}),
+        "api",
+        None,
+        Some(revision),
+    )
+    .await?;
+
+    let (router, session_id) = mcp_initialize(router).await;
+
+    let status_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "get_job_status",
+            "arguments": {"job_id": job_id.to_string()}
+        }
+    });
+    let response = router
+        .oneshot(mcp_request(session_id.as_deref(), status_body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp = body_json(response).await;
+
+    let content_text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text should be a string");
+    let job_status: Value = serde_json::from_str(content_text)?;
+
+    assert_eq!(job_status["job_id"].as_str().unwrap(), job_id.to_string());
+    assert_eq!(
+        job_status["revision"].as_str(),
+        Some(revision),
+        "get_job_status must include the revision stored on the job"
+    );
+
+    Ok(())
+}
+
+/// Test 9: list_jobs includes the revision field for each job.
+#[tokio::test]
+async fn test_mcp_list_jobs_includes_revision() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_mcp().await?;
+
+    let workspace = mcp_test_workspace();
+    let revision = "list-jobs-rev-xyz789";
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "list-rev-test"}),
+        "api",
+        None,
+        Some(revision),
+    )
+    .await?;
+
+    let (router, session_id) = mcp_initialize(router).await;
+
+    let list_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "list_jobs",
+            "arguments": {"workspace": "default"}
+        }
+    });
+    let response = router
+        .oneshot(mcp_request(session_id.as_deref(), list_body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp = body_json(response).await;
+
+    let content_text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text should be a string");
+    let list_result: Value = serde_json::from_str(content_text)?;
+
+    let jobs = list_result["jobs"]
+        .as_array()
+        .expect("list_jobs should return a 'jobs' array");
+
+    let matching = jobs
+        .iter()
+        .find(|j| j["job_id"].as_str() == Some(&job_id.to_string()))
+        .expect("created job must appear in list_jobs response");
+
+    assert_eq!(
+        matching["revision"].as_str(),
+        Some(revision),
+        "list_jobs must include the revision stored on the job"
+    );
+
+    Ok(())
+}
+
+/// Test 10: jobs created via MCP have source_type "mcp"; on_success hooks fire correctly.
 #[tokio::test]
 async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
     let container = Postgres::default().start().await?;
@@ -936,6 +1048,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         "with-hook",
         json!({}),
         "mcp",
+        None,
         None,
     )
     .await?;

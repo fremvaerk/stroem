@@ -40,6 +40,7 @@ async fn test_create_and_get_job() -> Result<()> {
         Some(serde_json::json!({"name": "test"})),
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -73,6 +74,7 @@ async fn test_list_jobs() -> Result<()> {
             None,
             "api",
             None,
+            None,
         )
         .await?;
     }
@@ -104,7 +106,17 @@ async fn test_list_jobs() -> Result<()> {
 
     // List by task name — multiple jobs for same task, newest first
     for _ in 0..3 {
-        JobRepo::create(&pool, "default", "task-0", "distributed", None, "api", None).await?;
+        JobRepo::create(
+            &pool,
+            "default",
+            "task-0",
+            "distributed",
+            None,
+            "api",
+            None,
+            None,
+        )
+        .await?;
     }
     let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, 10, 0).await?;
     assert_eq!(jobs.len(), 4); // 1 original + 3 new
@@ -147,6 +159,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
         "distributed",
         None,
         "user",
+        None,
         None,
     )
     .await?;
@@ -250,6 +263,7 @@ async fn test_claim_concurrency() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -334,6 +348,7 @@ async fn test_step_lifecycle() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -414,6 +429,7 @@ async fn test_update_input() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -464,6 +480,7 @@ async fn test_promote_ready_steps() -> Result<()> {
         "distributed",
         None,
         "user",
+        None,
         None,
     )
     .await?;
@@ -698,6 +715,7 @@ async fn test_all_steps_terminal() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -771,6 +789,7 @@ async fn test_any_step_failed() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -843,6 +862,7 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -896,6 +916,7 @@ async fn test_job_status_transitions() -> Result<()> {
         Some(serde_json::json!({"key": "value"})),
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -938,6 +959,7 @@ async fn test_job_status_transitions() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -961,6 +983,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         "distributed",
         None,
         "user",
+        None,
         None,
     )
     .await?;
@@ -1079,6 +1102,7 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -1143,6 +1167,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -1204,6 +1229,7 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -1252,6 +1278,7 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -1331,6 +1358,7 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -1414,6 +1442,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -1887,12 +1916,39 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     // Create 3 jobs, transition them to different statuses
-    let job1 =
-        JobRepo::create(&pool, "default", "task-a", "distributed", None, "api", None).await?;
-    let job2 =
-        JobRepo::create(&pool, "default", "task-b", "distributed", None, "api", None).await?;
-    let _job3 =
-        JobRepo::create(&pool, "default", "task-c", "distributed", None, "api", None).await?;
+    let job1 = JobRepo::create(
+        &pool,
+        "default",
+        "task-a",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    let job2 = JobRepo::create(
+        &pool,
+        "default",
+        "task-b",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    let _job3 = JobRepo::create(
+        &pool,
+        "default",
+        "task-c",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     // job1 → completed, job2 → failed, job3 stays pending
     JobRepo::mark_completed(&pool, job1, None).await?;
@@ -1931,9 +1987,39 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     // Create jobs in two workspaces
-    let j1 = JobRepo::create(&pool, "ws-a", "task", "distributed", None, "api", None).await?;
-    let _j2 = JobRepo::create(&pool, "ws-a", "task", "distributed", None, "api", None).await?;
-    let j3 = JobRepo::create(&pool, "ws-b", "task", "distributed", None, "api", None).await?;
+    let j1 = JobRepo::create(
+        &pool,
+        "ws-a",
+        "task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    let _j2 = JobRepo::create(
+        &pool,
+        "ws-a",
+        "task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    let j3 = JobRepo::create(
+        &pool,
+        "ws-b",
+        "task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     // j1 → completed, j2 stays pending, j3 → completed
     JobRepo::mark_completed(&pool, j1, None).await?;
@@ -1967,9 +2053,39 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
 async fn test_list_by_task_with_status_filter() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
-    let j1 = JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
-    let _j2 = JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
-    let _j3 = JobRepo::create(&pool, "default", "deploy", "distributed", None, "api", None).await?;
+    let j1 = JobRepo::create(
+        &pool,
+        "default",
+        "deploy",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    let _j2 = JobRepo::create(
+        &pool,
+        "default",
+        "deploy",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    let _j3 = JobRepo::create(
+        &pool,
+        "default",
+        "deploy",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     // j1 → completed, j2/j3 stay pending
     JobRepo::mark_completed(&pool, j1, None).await?;
@@ -2005,7 +2121,17 @@ async fn test_list_by_task_with_status_filter() -> Result<()> {
 async fn test_status_filter_returns_empty_for_nonexistent_status() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
-    JobRepo::create(&pool, "default", "task", "distributed", None, "api", None).await?;
+    JobRepo::create(
+        &pool,
+        "default",
+        "task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
 
     // No jobs with "running" status
     let jobs = JobRepo::list(&pool, None, Some("running"), 10, 0).await?;
@@ -2034,6 +2160,7 @@ async fn test_transaction_rollback_on_step_failure() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
         None,
         None,
@@ -2077,6 +2204,7 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
         None,
         None,
@@ -2136,6 +2264,7 @@ async fn test_cancel_job() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -2193,6 +2322,7 @@ async fn test_cancel_job_running() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -2228,6 +2358,7 @@ async fn test_cancel_job_already_completed() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -2269,6 +2400,7 @@ async fn test_get_child_jobs() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -2284,6 +2416,7 @@ async fn test_get_child_jobs() -> Result<()> {
         Some(parent_id),
         Some("step-a"),
         None,
+        None,
     )
     .await?;
 
@@ -2297,6 +2430,7 @@ async fn test_get_child_jobs() -> Result<()> {
         Some(&parent_id.to_string()),
         Some(parent_id),
         Some("step-b"),
+        None,
         None,
     )
     .await?;
@@ -2351,6 +2485,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -2462,6 +2597,7 @@ async fn test_get_running_steps() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
     )
     .await?;
@@ -2614,6 +2750,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -2724,6 +2861,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
         None,
         "api",
         None,
+        None,
     )
     .await?;
 
@@ -2817,6 +2955,7 @@ async fn test_get_status_counts() -> Result<()> {
             "distributed",
             None,
             "api",
+            None,
             None,
         )
         .await?;
@@ -2928,6 +3067,7 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
         None,
         "user",
         None,
+        None,
     )
     .await?;
 
@@ -3002,6 +3142,7 @@ async fn test_create_skipped_job() -> Result<()> {
         Some(input.clone()),
         "trigger",
         Some("default/nightly"),
+        None,
     )
     .await?;
 
@@ -3039,6 +3180,120 @@ async fn test_create_skipped_job() -> Result<()> {
     // Status counts should include skipped
     let counts = JobRepo::get_status_counts(&pool).await?;
     assert_eq!(*counts.get("skipped").unwrap_or(&0), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_job_stores_revision() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create a job with a revision
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "rev-test",
+        "distributed",
+        None,
+        "api",
+        None,
+        Some("abc123def456"),
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("job should exist");
+    assert_eq!(job.revision.as_deref(), Some("abc123def456"));
+
+    // Create a job without a revision
+    let job_id_none = JobRepo::create(
+        &pool,
+        "default",
+        "rev-test-none",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+
+    let job_none = JobRepo::get(&pool, job_id_none)
+        .await?
+        .expect("job should exist");
+    assert!(job_none.revision.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_skipped_job_stores_revision() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create_skipped(
+        &pool,
+        "default",
+        "skip-rev-test",
+        None,
+        "trigger",
+        Some("default/nightly"),
+        Some("deadbeef"),
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("job should exist");
+    assert_eq!(job.status, "skipped");
+    assert_eq!(job.revision.as_deref(), Some("deadbeef"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sub_job_inherits_revision() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create parent with revision
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        Some("parent-rev-abc"),
+    )
+    .await?;
+
+    // Create child with same revision (simulating inheritance)
+    let child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&format!("{}/step-a", parent_id)),
+        Some(parent_id),
+        Some("step-a"),
+        None,
+        Some("parent-rev-abc"),
+    )
+    .await?;
+
+    let parent = JobRepo::get(&pool, parent_id)
+        .await?
+        .expect("parent should exist");
+    let child = JobRepo::get(&pool, child_id)
+        .await?
+        .expect("child should exist");
+
+    assert_eq!(parent.revision.as_deref(), Some("parent-rev-abc"));
+    assert_eq!(child.revision.as_deref(), Some("parent-rev-abc"));
+    assert_eq!(parent.revision, child.revision);
 
     Ok(())
 }

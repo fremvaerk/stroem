@@ -47,6 +47,7 @@ pub struct JobRepo;
 
 impl JobRepo {
     /// Create a new job
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         pool: &PgPool,
         workspace: &str,
@@ -55,6 +56,7 @@ impl JobRepo {
         input: Option<JsonValue>,
         source_type: &str,
         source_id: Option<&str>,
+        revision: Option<&str>,
     ) -> Result<Uuid> {
         Self::create_with_parent(
             pool,
@@ -67,6 +69,7 @@ impl JobRepo {
             None,
             None,
             None,
+            revision,
         )
         .await
     }
@@ -84,6 +87,7 @@ impl JobRepo {
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
         timeout_secs: Option<i32>,
+        revision: Option<&str>,
     ) -> Result<Uuid> {
         Self::create_with_parent_tx(
             pool,
@@ -96,6 +100,7 @@ impl JobRepo {
             parent_job_id,
             parent_step_name,
             timeout_secs,
+            revision,
         )
         .await
     }
@@ -117,6 +122,7 @@ impl JobRepo {
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
         timeout_secs: Option<i32>,
+        revision: Option<&str>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -133,6 +139,7 @@ impl JobRepo {
             parent_job_id,
             parent_step_name,
             timeout_secs,
+            revision,
         )
         .await
     }
@@ -151,14 +158,15 @@ impl JobRepo {
         parent_job_id: Option<Uuid>,
         parent_step_name: Option<&str>,
         timeout_secs: Option<i32>,
+        revision: Option<&str>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(job_id)
@@ -171,6 +179,7 @@ impl JobRepo {
         .bind(parent_job_id)
         .bind(parent_step_name)
         .bind(timeout_secs)
+        .bind(revision)
         .execute(executor)
         .await
         .context("Failed to create job")?;
@@ -182,6 +191,7 @@ impl JobRepo {
     ///
     /// Used when a `concurrency: skip` trigger fires but an active job already
     /// exists — the job is recorded for visibility but never executed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_skipped(
         pool: &PgPool,
         workspace: &str,
@@ -189,12 +199,13 @@ impl JobRepo {
         input: Option<JsonValue>,
         source_type: &str,
         source_id: Option<&str>,
+        revision: Option<&str>,
     ) -> Result<Uuid> {
         let job_id = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, status, source_type, source_id, completed_at)
-            VALUES ($1, $2, $3, 'distributed', $4, 'skipped', $5, $6, NOW())
+            INSERT INTO job (job_id, workspace, task_name, mode, input, status, source_type, source_id, completed_at, revision)
+            VALUES ($1, $2, $3, 'distributed', $4, 'skipped', $5, $6, NOW(), $7)
             "#,
         )
         .bind(job_id)
@@ -203,6 +214,7 @@ impl JobRepo {
         .bind(input)
         .bind(source_type)
         .bind(source_id)
+        .bind(revision)
         .execute(pool)
         .await
         .context("Failed to create skipped job")?;

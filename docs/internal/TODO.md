@@ -47,7 +47,7 @@ Last updated: 2026-03-13.
 - [x] Workspace retry: `get_revision()` gated by `load_error` — returns None for errored workspaces
 - [x] Workspace retry: documented `names()` excludes `GitSource::new()` failures, `list_workspace_info()` includes both
 - [ ] No heartbeat failure → worker re-registration logic
-- [ ] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
+- [x] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
 - [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
 
 ## Simplification (from codex review 2026-03-17)
@@ -182,6 +182,16 @@ Last updated: 2026-03-13.
 - [x] Workspace retry: watcher sets error on continued failure test
 - [x] Workspace retry: `get_revision()` returns None for errored-after-healthy workspace test
 - [ ] Git workspace source auth failure test
+
+### Job Revision Tracking Test Gaps (2026-03-20)
+- [x] API detail response (`GET /api/jobs/{id}`) asserts `revision` field in JSON
+- [x] API list response (`GET /api/jobs`) asserts `revision` field in JSON
+- [x] Hook job inherits `revision` from originating job (end-to-end)
+- [x] Sub-job inherits `revision` via `handle_task_steps` (full orchestration path)
+- [x] Scheduler-triggered job stores workspace `revision`
+- [x] Webhook-triggered job stores workspace `revision`
+- [x] MCP `get_job_status` response includes `revision` field
+- [x] MCP `list_jobs` response includes `revision` field
 
 ## ACL / Authorization
 

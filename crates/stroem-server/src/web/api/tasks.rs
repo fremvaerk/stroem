@@ -322,6 +322,7 @@ pub async fn execute_task(
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
 
     // 4. Create job + steps via shared function
+    let revision = state.workspaces.get_revision(&ws);
     let job_id = create_job_for_task(
         &state.pool,
         &workspace,
@@ -330,6 +331,7 @@ pub async fn execute_task(
         input_value,
         source_type,
         source_id.as_deref(),
+        revision.as_deref(),
     )
     .await
     .map_err(|e| {

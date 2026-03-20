@@ -394,6 +394,7 @@ impl StromMcpHandler {
             .unwrap_or(serde_json::Value::Object(Default::default()));
 
         let source_id = source_id_for_audit(&self.auth);
+        let revision = self.state.workspaces.get_revision(&params.workspace);
         let job_id = crate::job_creator::create_job_for_task(
             &self.state.pool,
             &ws_config,
@@ -402,6 +403,7 @@ impl StromMcpHandler {
             input,
             "mcp",
             source_id.as_deref(),
+            revision.as_deref(),
         )
         .await
         .map_err(|e| internal_err(format!("Failed to create job: {e}")))?;
@@ -457,6 +459,7 @@ impl StromMcpHandler {
             "task_name": job.task_name,
             "status": job.status,
             "source_type": job.source_type,
+            "revision": job.revision,
             "created_at": job.created_at.to_rfc3339(),
             "started_at": job.started_at.map(|dt| dt.to_rfc3339()),
             "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
@@ -586,6 +589,7 @@ impl StromMcpHandler {
                     "task_name": job.task_name,
                     "status": job.status,
                     "source_type": job.source_type,
+                    "revision": job.revision,
                     "created_at": job.created_at.to_rfc3339(),
                     "completed_at": job.completed_at.map(|dt| dt.to_rfc3339()),
                 })
