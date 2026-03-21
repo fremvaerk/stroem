@@ -5,6 +5,7 @@ export interface WorkspaceInfo {
   triggers_count: number;
   revision?: string;
   error?: string;
+  warnings?: string[];
 }
 
 export interface TaskListItem {

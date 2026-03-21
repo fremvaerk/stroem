@@ -82,24 +82,30 @@ impl LibraryResolver {
     }
 
     fn resolve_one(&self, lib_name: &str, lib_def: &LibraryDef) -> Result<ResolvedLibrary> {
-        let (raw_config, lib_path) = match lib_def {
+        let (raw_config, warnings, lib_path) = match lib_def {
             LibraryDef::Folder { path } => {
                 let p = PathBuf::from(path);
                 if !p.exists() {
                     bail!("Library folder does not exist: {}", path);
                 }
-                let config = load_library_workspace(&p)
+                let (config, warnings) = load_library_workspace(&p)
                     .with_context(|| format!("Failed to load folder library '{}'", lib_name))?;
-                (config, p)
+                (config, warnings, p)
             }
             LibraryDef::Git { url, git_ref, auth } => {
                 let auth_config = self.resolve_auth(auth.as_deref())?;
                 let clone_dir = self.cache_dir.join(lib_name);
-                let config = clone_and_load(url, git_ref, auth_config.as_ref(), &clone_dir)
-                    .with_context(|| format!("Failed to load git library '{}'", lib_name))?;
-                (config, clone_dir)
+                let (config, warnings) =
+                    clone_and_load(url, git_ref, auth_config.as_ref(), &clone_dir)
+                        .with_context(|| format!("Failed to load git library '{}'", lib_name))?;
+                (config, warnings, clone_dir)
             }
         };
+
+        // Log any per-file warnings from the library load
+        for w in &warnings {
+            tracing::warn!("Library '{}': {}", lib_name, w);
+        }
 
         // Prefix and rewrite references
         let config = prefix_library(lib_name, raw_config);
@@ -125,7 +131,8 @@ impl LibraryResolver {
 }
 
 /// Load workspace config from a library path (same as folder source but without secrets/connections rendering).
-fn load_library_workspace(path: &Path) -> Result<WorkspaceConfig> {
+/// Per-file warnings (files skipped due to parse errors) are prefixed with `"library:"` and returned.
+fn load_library_workspace(path: &Path) -> Result<(WorkspaceConfig, Vec<String>)> {
     let workflows_dir = path.join(".workflows");
     let scan_dir = if workflows_dir.exists() && workflows_dir.is_dir() {
         workflows_dir
@@ -134,15 +141,21 @@ fn load_library_workspace(path: &Path) -> Result<WorkspaceConfig> {
     };
 
     if !scan_dir.exists() {
-        return Ok(WorkspaceConfig::new());
+        return Ok((WorkspaceConfig::new(), Vec::new()));
     }
 
     // Scan YAML files, skipping SOPS-encrypted files (libraries don't decrypt secrets)
-    let workspace = scan_and_merge_yaml_files(&scan_dir, true, false)
+    let (workspace, raw_warnings) = scan_and_merge_yaml_files(&scan_dir, true, false)
         .with_context(|| format!("Failed to scan library directory: {}", scan_dir.display()))?;
 
+    // Prefix warnings so callers can distinguish library warnings from workspace warnings
+    let warnings = raw_warnings
+        .into_iter()
+        .map(|w| format!("library: {}", w))
+        .collect();
+
     // Don't render secrets or connections for libraries — those are workspace-local
-    Ok(workspace)
+    Ok((workspace, warnings))
 }
 
 /// Clone (or fetch) a git library and load its workspace config.
@@ -151,7 +164,7 @@ fn clone_and_load(
     git_ref: &str,
     auth: Option<&GitAuthConfig>,
     clone_dir: &Path,
-) -> Result<WorkspaceConfig> {
+) -> Result<(WorkspaceConfig, Vec<String>)> {
     clone_or_fetch(url, git_ref, auth, clone_dir)?;
     load_library_workspace(clone_dir)
 }
@@ -808,7 +821,7 @@ connections:
         )
         .unwrap();
 
-        let config = load_library_workspace(temp.path()).unwrap();
+        let (config, _) = load_library_workspace(temp.path()).unwrap();
 
         // Actions, tasks, and connection_types loaded
         assert_eq!(config.actions.len(), 2);
@@ -826,7 +839,7 @@ connections:
     #[test]
     fn test_load_library_workspace_empty_dir() {
         let temp = TempDir::new().unwrap();
-        let config = load_library_workspace(temp.path()).unwrap();
+        let (config, _) = load_library_workspace(temp.path()).unwrap();
         assert!(config.actions.is_empty());
         assert!(config.tasks.is_empty());
     }

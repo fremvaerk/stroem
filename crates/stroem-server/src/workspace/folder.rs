@@ -64,14 +64,14 @@ impl FolderSource {
 
 #[async_trait]
 impl WorkspaceSource for FolderSource {
-    async fn load(&self) -> Result<WorkspaceConfig> {
-        let config = load_folder_workspace(self.path.to_str().unwrap_or("")).await?;
+    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
+        let (config, warnings) = load_folder_workspace(self.path.to_str().unwrap_or("")).await?;
         if let Some(rev) = Self::compute_revision(&self.path) {
             if let Ok(mut lock) = self.revision.write() {
                 *lock = Some(rev);
             }
         }
-        Ok(config)
+        Ok((config, warnings))
     }
 
     fn path(&self) -> &Path {
@@ -88,8 +88,9 @@ impl WorkspaceSource for FolderSource {
 }
 
 /// Load workspace from a folder containing workflow YAML files
-/// Looks for .workflows/ subdirectory, or scans the folder itself if it contains YAML files
-pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
+/// Looks for .workflows/ subdirectory, or scans the folder itself if it contains YAML files.
+/// Returns the config paired with per-file warnings for files that were skipped.
+pub async fn load_folder_workspace(path: &str) -> Result<(WorkspaceConfig, Vec<String>)> {
     let base_path = Path::new(path);
 
     if !base_path.exists() {
@@ -104,8 +105,9 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         base_path.to_path_buf()
     };
 
-    // Scan YAML files, decrypting SOPS-encrypted files where present
-    let mut workspace = scan_and_merge_yaml_files(&scan_dir, false, true)
+    // Scan YAML files, decrypting SOPS-encrypted files where present.
+    // Bad individual files are skipped and returned as warnings.
+    let (mut workspace, warnings) = scan_and_merge_yaml_files(&scan_dir, false, true)
         .with_context(|| format!("Failed to scan workspace directory: {:?}", scan_dir))?;
 
     // Render secret values through Tera (resolves {{ 'ref+...' | vals }} at load time)
@@ -128,7 +130,7 @@ pub async fn load_folder_workspace(path: &str) -> Result<WorkspaceConfig> {
         workspace.connections.len()
     );
 
-    Ok(workspace)
+    Ok((workspace, warnings))
 }
 
 /// Hex-encode helper (avoids adding another dep)
@@ -151,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_empty_folder() {
         let temp_dir = TempDir::new().unwrap();
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -179,7 +181,7 @@ tasks:
 "#;
         fs::write(&workflow_path, yaml).unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -227,7 +229,7 @@ tasks:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -255,7 +257,7 @@ actions:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -279,7 +281,7 @@ actions:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -485,7 +487,7 @@ actions:
         .unwrap();
 
         let source = FolderSource::new(temp_dir.path().to_str().unwrap());
-        let config1 = source.load().await.unwrap();
+        let (config1, _) = source.load().await.unwrap();
         let rev1 = source.revision().unwrap();
 
         assert_eq!(config1.actions.len(), 1);
@@ -498,7 +500,7 @@ actions:
         )
         .unwrap();
 
-        let config2 = source.load().await.unwrap();
+        let (config2, _) = source.load().await.unwrap();
         let rev2 = source.revision().unwrap();
 
         // Config should reflect the new file
@@ -534,6 +536,7 @@ actions:
     async fn test_sops_file_triggers_decryption() {
         // A *.sops.yaml file should trigger SOPS decryption, which fails
         // when sops is not installed or the file isn't actually encrypted.
+        // The file is skipped with a warning rather than failing the whole workspace.
         let temp_dir = TempDir::new().unwrap();
 
         // Add a regular file so the workspace isn't empty
@@ -551,10 +554,28 @@ actions:
         .unwrap();
 
         let result = load_folder_workspace(temp_dir.path().to_str().unwrap()).await;
-        // Should fail because sops decryption fails (not installed or file not encrypted)
-        assert!(result.is_err());
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(err.contains("sops"), "Error should mention sops: {}", err);
+        // Should succeed — the SOPS file is skipped with a warning
+        assert!(
+            result.is_ok(),
+            "Workspace should load despite SOPS failure: {:?}",
+            result.err()
+        );
+        let (workspace, warnings) = result.unwrap();
+        // The regular file is loaded; the SOPS file is skipped
+        assert_eq!(
+            workspace.actions.len(),
+            1,
+            "Only the regular file's action should be loaded"
+        );
+        assert!(workspace.actions.contains_key("test"));
+        // One warning for the SOPS file that couldn't be decrypted
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert!(
+            warning.contains("sops"),
+            "Warning should mention sops: {}",
+            warning
+        );
     }
 
     #[tokio::test]
@@ -578,7 +599,7 @@ actions:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -608,7 +629,7 @@ tasks:
 "#;
         fs::write(&workflow_path, yaml).unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -660,7 +681,7 @@ tasks:
 "#;
         fs::write(&workflow_path, yaml).unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -714,7 +735,7 @@ tasks:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -759,7 +780,7 @@ tasks:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
@@ -796,7 +817,7 @@ tasks:
         )
         .unwrap();
 
-        let workspace = load_folder_workspace(temp_dir.path().to_str().unwrap())
+        let (workspace, _) = load_folder_workspace(temp_dir.path().to_str().unwrap())
             .await
             .unwrap();
 
