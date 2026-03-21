@@ -6802,8 +6802,8 @@ async fn setup_multi_workspace() -> Result<(
     struct InMemSource(WorkspaceConfig);
     #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSource {
-        async fn load(&self) -> Result<WorkspaceConfig> {
-            Ok(self.0.clone())
+        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
+            Ok((self.0.clone(), Vec::new()))
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
@@ -6827,6 +6827,7 @@ async fn setup_multi_workspace() -> Result<(
             name: "default".to_string(),
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
+            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
         },
     );
     entries.insert(
@@ -6837,6 +6838,7 @@ async fn setup_multi_workspace() -> Result<(
             name: "ops".to_string(),
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
+            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
         },
     );
 
@@ -15643,8 +15645,8 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     struct InMemSourceWithRev(WorkspaceConfig);
     #[async_trait::async_trait]
     impl stroem_server::workspace::WorkspaceSource for InMemSourceWithRev {
-        async fn load(&self) -> Result<WorkspaceConfig> {
-            Ok(self.0.clone())
+        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
+            Ok((self.0.clone(), Vec::new()))
         }
         fn path(&self) -> &std::path::Path {
             std::path::Path::new("/dev/null")
@@ -15671,6 +15673,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
             name: "default".to_string(),
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
+            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
         },
     );
     let mgr = WorkspaceManager::from_entries(entries);
@@ -15834,8 +15837,8 @@ struct FixedRevisionSource(WorkspaceConfig);
 
 #[async_trait::async_trait]
 impl stroem_server::workspace::WorkspaceSource for FixedRevisionSource {
-    async fn load(&self) -> Result<WorkspaceConfig> {
-        Ok(self.0.clone())
+    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
+        Ok((self.0.clone(), Vec::new()))
     }
     fn path(&self) -> &std::path::Path {
         std::path::Path::new("/dev/null")
@@ -15892,6 +15895,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
             name: "default".to_string(),
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
+            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
         },
     );
 
