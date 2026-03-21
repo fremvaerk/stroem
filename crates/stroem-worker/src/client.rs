@@ -27,6 +27,7 @@ pub struct ClaimedStep {
     pub input: Option<serde_json::Value>,
     pub runner: Option<String>,
     pub timeout_secs: Option<i32>,
+    pub revision: Option<String>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -43,6 +44,7 @@ struct ClaimResponse {
     pub input: Option<serde_json::Value>,
     pub runner: Option<String>,
     pub timeout_secs: Option<i32>,
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -218,6 +220,7 @@ impl ServerClient {
             input: resp.input,
             runner: resp.runner,
             timeout_secs: resp.timeout_secs,
+            revision: resp.revision,
         };
 
         Ok(Some(step))
@@ -285,13 +288,20 @@ impl ServerClient {
     }
 
     /// Download workspace tarball from the server, returns (bytes, revision)
-    /// Sends If-None-Match header if a cached revision is provided.
-    /// Returns Ok(None) if the server returns 304 Not Modified.
+    ///
+    /// Sends `If-None-Match` header if a cached revision is provided.
+    /// Returns `Ok(None)` if the server returns 304 Not Modified.
+    ///
+    /// When `pin_revision` is `Some`, appends `?revision={rev}` to request a
+    /// specific historical revision rather than the latest. In this mode the
+    /// caller should pass `cached_revision: None` (the server never returns 304
+    /// for pinned requests).
     #[tracing::instrument(skip(self))]
     pub async fn download_workspace_tarball(
         &self,
         workspace: &str,
         cached_revision: Option<&str>,
+        pin_revision: Option<&str>,
     ) -> Result<Option<(Vec<u8>, String)>> {
         let url = format!("{}/worker/workspace/{}.tar.gz", self.base_url, workspace);
 
@@ -301,6 +311,10 @@ impl ServerClient {
             .header("Authorization", format!("Bearer {}", self.token))
             // Override the default request timeout — tarball downloads can be large
             .timeout(self.download_timeout);
+
+        if let Some(rev) = pin_revision {
+            req = req.query(&[("revision", rev)]);
+        }
 
         if let Some(rev) = cached_revision {
             req = req.header("If-None-Match", format!("\"{}\"", rev));
@@ -429,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_claim_response_missing_task_name_defaults_to_none() {
-        // Simulates an older server that does not emit task_name
+        // Simulates an older server that does not emit task_name or revision
         let json = serde_json::json!({
             "job_id": "abc-123",
             "workspace": "default",
@@ -440,6 +454,7 @@ mod tests {
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();
         assert!(resp.task_name.is_none());
+        assert!(resp.revision.is_none());
     }
 
     #[test]
@@ -455,6 +470,7 @@ mod tests {
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.task_name, Some("deploy-api".to_string()));
+        assert!(resp.revision.is_none());
     }
 
     #[test]
@@ -470,5 +486,73 @@ mod tests {
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();
         assert!(resp.task_name.is_none());
+        assert!(resp.revision.is_none());
+    }
+
+    #[test]
+    fn test_claim_response_with_revision() {
+        let json = serde_json::json!({
+            "job_id": "abc-123",
+            "workspace": "default",
+            "task_name": "deploy-api",
+            "step_name": "build",
+            "action_name": "run",
+            "action_type": "script",
+            "runner": "local",
+            "revision": "abc123"
+        });
+        let resp: ClaimResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.revision, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_claimed_step_revision_field() {
+        let step_with_revision = ClaimedStep {
+            job_id: uuid::Uuid::nil(),
+            workspace: "default".to_string(),
+            task_name: "task".to_string(),
+            step_name: "step".to_string(),
+            action_name: "action".to_string(),
+            action_type: "script".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: None,
+            timeout_secs: None,
+            revision: Some("deadbeef".to_string()),
+        };
+        let json = serde_json::to_value(&step_with_revision).unwrap();
+        assert_eq!(json["revision"], "deadbeef");
+
+        let roundtripped: ClaimedStep = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtripped.revision, Some("deadbeef".to_string()));
+
+        // Without revision field
+        let step_without_revision = ClaimedStep {
+            revision: None,
+            ..step_with_revision
+        };
+        let json2 = serde_json::to_value(&step_without_revision).unwrap();
+        let roundtripped2: ClaimedStep = serde_json::from_value(json2).unwrap();
+        assert!(roundtripped2.revision.is_none());
+    }
+
+    #[test]
+    fn test_claim_response_backward_compat_no_revision() {
+        // Simulates a server version that predates revision pinning
+        let json = serde_json::json!({
+            "job_id": "abc-123",
+            "workspace": "default",
+            "task_name": "deploy",
+            "step_name": "build",
+            "action_name": "run",
+            "action_type": "script",
+            "runner": "local"
+        });
+        let resp: ClaimResponse = serde_json::from_value(json).unwrap();
+        assert!(
+            resp.revision.is_none(),
+            "missing revision field must default to None for backward compat"
+        );
     }
 }

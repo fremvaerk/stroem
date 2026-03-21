@@ -17,5 +17,6 @@ pub mod orchestrator;
 pub mod recovery;
 pub mod scheduler;
 pub mod state;
+pub mod tarball_cache;
 pub mod web;
 pub mod workspace;

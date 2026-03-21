@@ -313,6 +313,7 @@ mod tests {
             input: None,
             runner: None,
             timeout_secs: None,
+            revision: None,
         }
     }
 

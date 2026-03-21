@@ -2,50 +2,161 @@ use crate::state::AppState;
 use crate::web::error::AppError;
 use anyhow::Context;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use serde::Deserialize;
 use std::sync::Arc;
 
+/// Optional query parameters for the workspace tarball download endpoint.
+///
+/// Workers that received a `revision` in the claim response should pass it
+/// back here so the server can serve the exact pinned tarball, even if the
+/// workspace has since been updated.
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceQuery {
+    /// Specific workspace revision the worker wants. When absent, the current
+    /// live revision is served (backward-compatible behaviour).
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
 /// GET /worker/workspace/:ws.tar.gz - Download workspace as tarball
-#[tracing::instrument(skip(state))]
+///
+/// Accepts an optional `?revision=<rev>` query parameter. When present, the
+/// server attempts to serve the exact revision requested:
+///
+/// - If the revision is cached on disk, the cached bytes are returned immediately
+///   (subject to the normal `If-None-Match` 304 short-circuit).
+/// - If the revision matches the workspace's current live revision, the tarball
+///   is built from the filesystem, cached, and returned.
+/// - If the revision is neither cached nor the current revision (i.e. it has
+///   been superseded), a 404 is returned so the worker knows it cannot obtain
+///   that revision and should abandon the step.
+///
+/// When `?revision` is absent the existing behaviour is preserved: the live
+/// tarball is built and returned, and the result is also stored in the cache
+/// under the current revision for future pinned requests.
+#[tracing::instrument(skip(state, headers))]
 pub async fn download_workspace(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(ws_filename): Path<String>,
+    Query(query): Query<WorkspaceQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     // Strip .tar.gz suffix to get workspace name
     let ws_name = ws_filename.strip_suffix(".tar.gz").unwrap_or(&ws_filename);
 
+    // Ensure the workspace exists and is loadable before we do anything else.
     let workspace_path = state
         .workspaces
         .get_path(ws_name)
         .map(|p| p.to_path_buf())
         .ok_or_else(|| AppError::NotFound(format!("Workspace '{}' not found", ws_name)))?;
 
-    let revision = state.workspaces.get_revision(ws_name);
+    let current_revision = state.workspaces.get_revision(ws_name);
 
-    // Check If-None-Match for caching
-    if let Some(etag) = headers.get(header::IF_NONE_MATCH) {
-        if let Ok(etag_str) = etag.to_str() {
-            if let Some(ref rev) = revision {
-                if etag_str.trim_matches('"') == rev.as_str() {
-                    return Ok(StatusCode::NOT_MODIFIED.into_response());
+    if let Some(requested_rev) = query.revision {
+        // ── Revision-pinned path ──────────────────────────────────────────────
+        //
+        // Step 1: Check If-None-Match against the requested revision.
+        if let Some(etag) = headers.get(header::IF_NONE_MATCH) {
+            if etag
+                .to_str()
+                .map(|s| s.trim_matches('"') == requested_rev.as_str())
+                .unwrap_or(false)
+            {
+                return Ok(StatusCode::NOT_MODIFIED.into_response());
+            }
+        }
+
+        // Step 2: Try the on-disk cache.
+        let cache = Arc::clone(&state.tarball_cache);
+        let ws_name_owned = ws_name.to_owned();
+        let requested_rev_clone = requested_rev.clone();
+
+        let cached =
+            tokio::task::spawn_blocking(move || cache.get(&ws_name_owned, &requested_rev_clone))
+                .await
+                .map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!(e).context("tarball cache get panicked"))
+                })?;
+
+        if let Some(tarball) = cached {
+            tracing::debug!(
+                workspace = %ws_name,
+                revision = %requested_rev,
+                "Serving revision-pinned tarball from cache"
+            );
+            return Ok(build_tarball_response(tarball, &requested_rev).into_response());
+        }
+
+        // Step 3: Cache miss — only build if the requested revision is still current.
+        match &current_revision {
+            Some(current_rev) if current_rev == &requested_rev => {
+                // Requested revision is current — build, cache, and serve.
+                let library_paths = state.workspaces.get_library_paths();
+                let tarball = tokio::task::spawn_blocking(move || {
+                    build_tarball(&workspace_path, &library_paths)
+                })
+                .await
+                .map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!(e).context("tarball task panicked"))
+                })?
+                .context("build workspace tarball")?;
+
+                // Store in cache (best-effort, fire-and-forget — a write failure does not abort the response).
+                let cache = Arc::clone(&state.tarball_cache);
+                let ws_name_owned = ws_name.to_owned();
+                let rev_clone = requested_rev.clone();
+                let tarball_clone = tarball.clone();
+                std::mem::drop(tokio::task::spawn_blocking(move || {
+                    if let Err(e) = cache.put(&ws_name_owned, &rev_clone, &tarball_clone) {
+                        tracing::warn!(
+                            workspace = %ws_name_owned,
+                            revision = %rev_clone,
+                            "Failed to cache tarball: {:#}",
+                            e
+                        );
+                    }
+                }));
+
+                Ok(build_tarball_response(tarball, &requested_rev).into_response())
+            }
+            _ => {
+                // Revision is neither cached nor current — it has been superseded.
+                Err(AppError::NotFound(format!(
+                    "Revision '{}' no longer available for workspace '{}'",
+                    requested_rev, ws_name
+                )))
+            }
+        }
+    } else {
+        // ── Backward-compatible live path ─────────────────────────────────────
+        //
+        // No revision pinning requested. Build the tarball from the live
+        // filesystem, then opportunistically store it in the cache under the
+        // current revision so that future pinned requests can be served cheaply.
+
+        // Check If-None-Match against the current revision.
+        if let Some(etag) = headers.get(header::IF_NONE_MATCH) {
+            if let Ok(etag_str) = etag.to_str() {
+                if let Some(ref rev) = current_revision {
+                    if etag_str.trim_matches('"') == rev.as_str() {
+                        return Ok(StatusCode::NOT_MODIFIED.into_response());
+                    }
                 }
             }
         }
-    }
 
-    // Collect library source paths for tarball overlay
-    let library_paths = state.workspaces.get_library_paths();
-
-    // Build tarball in a blocking task
-    let tarball =
-        match tokio::task::spawn_blocking(move || build_tarball(&workspace_path, &library_paths))
-            .await
+        let library_paths = state.workspaces.get_library_paths();
+        let tarball = match tokio::task::spawn_blocking(move || {
+            build_tarball(&workspace_path, &library_paths)
+        })
+        .await
         {
             Ok(result) => result.context("build workspace tarball")?,
             Err(e) => {
@@ -55,14 +166,55 @@ pub async fn download_workspace(
             }
         };
 
+        // Opportunistically cache under the current revision (fire-and-forget).
+        if let Some(ref rev) = current_revision {
+            let cache = Arc::clone(&state.tarball_cache);
+            let ws_name_owned = ws_name.to_owned();
+            let rev_clone = rev.clone();
+            let tarball_clone = tarball.clone();
+            std::mem::drop(tokio::task::spawn_blocking(move || {
+                if let Err(e) = cache.put(&ws_name_owned, &rev_clone, &tarball_clone) {
+                    tracing::warn!(
+                        workspace = %ws_name_owned,
+                        revision = %rev_clone,
+                        "Failed to cache tarball: {:#}",
+                        e
+                    );
+                }
+            }));
+        }
+
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(header::CONTENT_TYPE, "application/gzip".parse().unwrap());
+        if let Some(ref rev) = current_revision {
+            if let Ok(val) = rev.parse() {
+                response_headers.insert("X-Revision", val);
+            }
+            if let Ok(val) = format!("\"{}\"", rev).parse() {
+                response_headers.insert(header::ETAG, val);
+            }
+        }
+
+        Ok((StatusCode::OK, response_headers, tarball).into_response())
+    }
+}
+
+/// Build the HTTP response for a revision-pinned tarball.
+///
+/// Sets `Content-Type: application/gzip`, `X-Revision`, and `ETag` headers.
+/// Header values that cannot be represented as valid HTTP header values
+/// (e.g. non-visible-ASCII characters) are silently omitted rather than
+/// causing a panic.
+fn build_tarball_response(tarball: Vec<u8>, revision: &str) -> impl IntoResponse {
     let mut response_headers = HeaderMap::new();
     response_headers.insert(header::CONTENT_TYPE, "application/gzip".parse().unwrap());
-    if let Some(ref rev) = revision {
-        response_headers.insert("X-Revision", rev.parse().unwrap());
-        response_headers.insert(header::ETAG, format!("\"{}\"", rev).parse().unwrap());
+    if let Ok(val) = revision.parse() {
+        response_headers.insert("X-Revision", val);
     }
-
-    Ok((StatusCode::OK, response_headers, tarball).into_response())
+    if let Ok(val) = format!("\"{}\"", revision).parse() {
+        response_headers.insert(header::ETAG, val);
+    }
+    (StatusCode::OK, response_headers, tarball)
 }
 
 /// Build a gzipped tar archive of a workspace directory with library overlays
@@ -103,6 +255,42 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use walkdir::WalkDir;
+
+    // ── WorkspaceQuery deserialization ───────────────────────────────────────
+    //
+    // axum's Query extractor uses serde's Deserialize impl. We test the struct
+    // directly via serde_json (same trait, no extra crate dependency needed).
+
+    #[test]
+    fn test_workspace_query_revision_present() {
+        let q: WorkspaceQuery = serde_json::from_value(serde_json::json!({"revision": "abc123"}))
+            .expect("should deserialize");
+        assert_eq!(q.revision.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_workspace_query_revision_absent_is_none() {
+        // serde(default) must yield None when the field is missing.
+        let q: WorkspaceQuery =
+            serde_json::from_value(serde_json::json!({})).expect("should deserialize empty object");
+        assert!(q.revision.is_none());
+    }
+
+    #[test]
+    fn test_workspace_query_revision_null_is_none() {
+        // Explicit null also yields None.
+        let q: WorkspaceQuery = serde_json::from_value(serde_json::json!({"revision": null}))
+            .expect("should deserialize null revision");
+        assert!(q.revision.is_none());
+    }
+
+    #[test]
+    fn test_workspace_query_revision_sha_roundtrips() {
+        let sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        let q: WorkspaceQuery = serde_json::from_value(serde_json::json!({"revision": sha}))
+            .expect("should deserialize sha1");
+        assert_eq!(q.revision.as_deref(), Some(sha));
+    }
 
     /// Extract tarball bytes into a temporary directory and return file map
     fn extract_tarball(

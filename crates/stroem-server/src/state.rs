@@ -4,9 +4,11 @@ use crate::job_completion::JobCompletionNotifier;
 use crate::log_broadcast::LogBroadcast;
 use crate::log_storage::LogStorage;
 use crate::oidc::OidcProvider;
+use crate::tarball_cache::TarballCache;
 use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
@@ -61,6 +63,7 @@ pub struct AppState {
     pub acl: Arc<AclEvaluator>,
     pub log_broadcast: Arc<LogBroadcast>,
     pub log_storage: Arc<LogStorage>,
+    pub tarball_cache: Arc<TarballCache>,
     pub oidc_providers: Arc<HashMap<String, OidcProvider>>,
     pub job_completion: Arc<JobCompletionNotifier>,
     /// Set of job IDs that have been cancelled. Workers poll this to detect
@@ -83,6 +86,12 @@ impl AppState {
         oidc_providers: HashMap<String, OidcProvider>,
     ) -> Self {
         let acl = AclEvaluator::new(config.acl.clone());
+        // Place tarball cache alongside log storage directory
+        let tarball_cache_dir = PathBuf::from(&config.log_storage.local_dir)
+            .parent()
+            .map(|p| p.join("tarball_cache"))
+            .unwrap_or_else(|| PathBuf::from("tarball_cache"));
+        let tarball_cache = TarballCache::new(tarball_cache_dir);
         Self {
             pool,
             workspaces: Arc::new(workspaces),
@@ -90,6 +99,7 @@ impl AppState {
             acl: Arc::new(acl),
             log_broadcast: Arc::new(LogBroadcast::new()),
             log_storage: Arc::new(log_storage),
+            tarball_cache: Arc::new(tarball_cache),
             oidc_providers: Arc::new(oidc_providers),
             job_completion: Arc::new(JobCompletionNotifier::new()),
             cancelled_jobs: Arc::new(std::sync::RwLock::new(HashSet::new())),

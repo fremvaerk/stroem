@@ -49,7 +49,7 @@ Last updated: 2026-03-13.
 - [ ] No heartbeat failure → worker re-registration logic
 - [x] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
 - [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
-- [ ] Folder workspace revision pinning — currently the tarball endpoint builds from live folder contents at request time, so mid-job file changes cause later steps to run against a different revision than the job was planned with. Fix: cache tarballs keyed by revision hash on the server side, keep cached tarballs alive until all jobs referencing that revision reach a terminal state, then clean up. Git workspaces are less affected (atomic commit checkout) but folders can even serve inconsistent intermediate states.
+- [x] Folder workspace revision pinning — server-side TarballCache keyed by (workspace, revision), workers download pinned revision via `?revision=` query param, ClaimResponse includes job revision, stale cache entries cleaned up during retention sweep
 
 ## Simplification (from codex review 2026-03-17)
 

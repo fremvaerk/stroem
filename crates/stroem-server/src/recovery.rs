@@ -306,6 +306,9 @@ async fn retention_cleanup(state: &AppState) {
         }
     }
 
+    // Tarball cache cleanup — remove cached tarballs for revisions with no active jobs
+    tarball_cache_cleanup(state).await;
+
     // Log retention — delete old terminal jobs, their local logs, and S3 logs
     if let Some(days) = state.config.recovery.log_retention_days {
         const BATCH_SIZE: i64 = 1000;
@@ -358,6 +361,58 @@ async fn retention_cleanup(state: &AppState) {
             _ => {}
         }
     }
+}
+
+/// Clean up stale tarball cache entries.
+///
+/// Keeps cached tarballs for revisions that have active (non-terminal) jobs,
+/// plus the current revision for each workspace. Everything else is evicted.
+async fn tarball_cache_cleanup(state: &AppState) {
+    // Query all revisions with active jobs
+    let active_revisions: Vec<(String, String)> = match sqlx::query_as::<_, (String, String)>(
+        "SELECT DISTINCT workspace, revision FROM job \
+         WHERE status IN ('pending', 'running') \
+         AND revision IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                "Tarball cache cleanup: failed to query active revisions: {:#}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Build workspace → active revisions map
+    let mut keep_map: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for (workspace, revision) in active_revisions {
+        keep_map.entry(workspace).or_default().insert(revision);
+    }
+
+    // Add current workspace revisions to the keep set
+    for name in state.workspaces.names() {
+        if let Some(rev) = state.workspaces.get_revision(name) {
+            keep_map.entry(name.to_string()).or_default().insert(rev);
+        }
+    }
+
+    // Clean up each workspace in the cache (removes stale workspaces entirely,
+    // prunes stale revisions within known workspaces)
+    let tarball_cache = state.tarball_cache.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = tarball_cache.cleanup_all(&keep_map) {
+            tracing::warn!("Tarball cache cleanup failed: {:#}", e);
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("Tarball cache cleanup task panicked: {:#}", e);
+    });
 }
 
 #[cfg(test)]

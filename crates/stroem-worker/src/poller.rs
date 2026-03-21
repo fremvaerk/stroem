@@ -62,10 +62,17 @@ pub(crate) async fn execute_claimed_step(
     step: crate::client::ClaimedStep,
     worker_id: Uuid,
 ) {
-    // Ensure workspace is downloaded and up-to-date.
-    // The guard keeps the revision directory alive (ref-counted) for the
-    // duration of step execution, preventing cleanup from deleting it.
-    let ws_guard = match ws_cache.ensure_up_to_date(&client, &step.workspace).await {
+    // Ensure workspace is downloaded and up-to-date (or pinned to a specific
+    // revision). The guard keeps the revision directory alive (ref-counted) for
+    // the duration of step execution, preventing cleanup from deleting it.
+    let ws_result = if let Some(ref rev) = step.revision {
+        ws_cache
+            .ensure_revision(&client, &step.workspace, rev)
+            .await
+    } else {
+        ws_cache.ensure_up_to_date(&client, &step.workspace).await
+    };
+    let ws_guard = match ws_result {
         Ok(guard) => guard,
         Err(e) => {
             let err_msg = format!("Failed to download workspace: {:#}", e);
@@ -769,7 +776,7 @@ mod tests {
         use flate2::write::GzEncoder;
         use flate2::Compression;
         use uuid::Uuid;
-        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::matchers::{method, path, path_regex, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         /// Build a minimal valid gzipped tarball containing a single shell script.
@@ -841,6 +848,7 @@ mod tests {
                 input: None,
                 runner: Some("local".to_string()),
                 timeout_secs: None,
+                revision: None,
             }
         }
 
@@ -963,6 +971,47 @@ mod tests {
 
             // Should complete without panicking even on command failure
             execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+        }
+
+        #[tokio::test]
+        async fn test_execute_claimed_step_with_pinned_revision() {
+            let mock_server = MockServer::start().await;
+
+            // Workspace tarball endpoint — must accept ?revision= query param
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .and(query_param("revision", "pinned-rev-123"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "pinned-rev-123"),
+                )
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+
+            mount_common_mocks(&mock_server).await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp_dir.path()).unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
+
+            let job_id = Uuid::new_v4();
+            let mut step = make_step(job_id, "echo hello");
+            step.revision = Some("pinned-rev-123".to_string());
+
+            // Should complete successfully, using the pinned revision endpoint
+            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+
+            // wiremock verifies the ?revision= query param was sent (via expect(1))
         }
     }
 }

@@ -52,6 +52,11 @@ pub struct ClaimResponse {
     pub runner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<i32>,
+    /// Workspace revision (git SHA or folder hash) at the time this step was
+    /// created. Workers use this to request the exact tarball that matches the
+    /// job, avoiding workspace-update races. Absent when there is no work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +203,7 @@ pub async fn claim_job(
                 input: None,
                 runner: None,
                 timeout_secs: None,
+                revision: None,
             })
             .into_response());
         }
@@ -331,6 +337,7 @@ pub async fn claim_job(
         input: rendered_input,
         runner: Some(step.runner),
         timeout_secs: step.timeout_secs,
+        revision: job.revision.clone(),
     })
     .into_response())
 }
@@ -481,6 +488,7 @@ mod tests {
             input: None,
             runner: Some("local".to_string()),
             timeout_secs: None,
+            revision: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -556,8 +564,55 @@ mod tests {
             input: None,
             runner: None,
             timeout_secs: None,
+            revision: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
+    }
+
+    #[test]
+    fn test_claim_response_serializes_revision() {
+        // When revision is Some it appears in the JSON output.
+        let resp = ClaimResponse {
+            workspace: Some("default".to_string()),
+            job_id: Some("abc-123".to_string()),
+            task_name: Some("deploy".to_string()),
+            step_name: Some("build".to_string()),
+            action_name: Some("build".to_string()),
+            action_type: Some("script".to_string()),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: Some("local".to_string()),
+            timeout_secs: None,
+            revision: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["revision"], "abc123");
+    }
+
+    #[test]
+    fn test_claim_response_revision_none_is_omitted() {
+        // When revision is None, skip_serializing_if must suppress the key entirely.
+        let resp = ClaimResponse {
+            workspace: None,
+            job_id: None,
+            task_name: None,
+            step_name: None,
+            action_name: None,
+            action_type: None,
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: None,
+            timeout_secs: None,
+            revision: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(
+            json.get("revision").is_none(),
+            "revision: None must not appear in serialized JSON, got: {}",
+            json
+        );
     }
 }

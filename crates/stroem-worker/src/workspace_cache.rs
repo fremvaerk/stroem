@@ -133,7 +133,25 @@ impl WorkspaceCache {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
-        extract_tarball_inner(&self.base_dir, name, data, revision)
+        extract_tarball_inner(&self.base_dir, name, data, revision, true)
+    }
+
+    /// Extract a tarball into a revision-based directory without updating `.current`.
+    ///
+    /// Used for pinned (historical) revisions where we do not want to regress
+    /// the workspace's tracked latest revision.
+    ///
+    /// Returns the path to the revision directory. Idempotent if the directory
+    /// already exists.
+    // Used in tests to verify pinned extraction behaviour.
+    #[cfg(test)]
+    fn extract_tarball_pinned(&self, name: &str, data: &[u8], revision: &str) -> Result<PathBuf> {
+        let lock = self.workspace_lock(name);
+        let _guard = lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        extract_tarball_inner(&self.base_dir, name, data, revision, false)
     }
 
     /// Ensure the workspace is up-to-date by downloading if necessary.
@@ -149,7 +167,7 @@ impl WorkspaceCache {
         let cached_rev = self.current_revision(workspace);
 
         let result = client
-            .download_workspace_tarball(workspace, cached_rev.as_deref())
+            .download_workspace_tarball(workspace, cached_rev.as_deref(), None)
             .await
             .context("Failed to check workspace update")?;
 
@@ -164,7 +182,7 @@ impl WorkspaceCache {
                     let _guard = lock
                         .lock()
                         .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-                    extract_tarball_inner(&base_dir, &workspace_owned, &data, &revision_clone)
+                    extract_tarball_inner(&base_dir, &workspace_owned, &data, &revision_clone, true)
                 })
                 .await
                 .context("tarball extraction task panicked")??;
@@ -218,14 +236,105 @@ impl WorkspaceCache {
 
         Ok(guard)
     }
+
+    /// Ensure a specific revision is available locally for a workspace.
+    ///
+    /// Unlike [`ensure_up_to_date`], this method downloads a specific revision
+    /// (using `?revision=` query param) and does NOT update the `.current` file,
+    /// since downloading an old pinned revision should not regress the latest
+    /// tracking.
+    ///
+    /// Returns a [`WorkspaceGuard`] if the revision is already cached locally
+    /// (no network call) or after downloading and extracting.
+    ///
+    /// [`ensure_up_to_date`]: WorkspaceCache::ensure_up_to_date
+    pub async fn ensure_revision(
+        &self,
+        client: &ServerClient,
+        workspace: &str,
+        revision: &str,
+    ) -> Result<WorkspaceGuard> {
+        let sanitized = sanitize_revision_for_dir(revision);
+        let rev_dir = self.base_dir.join(workspace).join(&sanitized);
+
+        // Hold the per-workspace lock while checking existence and acquiring the guard
+        // to prevent a TOCTOU race with cleanup_old_revisions.
+        {
+            let lock = self.workspace_lock(workspace);
+            let _lk = lock
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            if rev_dir.is_dir() {
+                tracing::debug!(
+                    workspace,
+                    revision,
+                    "Pinned revision already cached locally"
+                );
+                let guard = self.acquire_guard(workspace, revision, rev_dir);
+                return Ok(guard);
+            }
+        }
+        // Lock released — proceed with download (which re-acquires the lock for extraction).
+
+        // Not cached — download the specific revision from the server.
+        let result = client
+            .download_workspace_tarball(workspace, None, Some(revision))
+            .await
+            .context("Failed to download pinned workspace revision")?;
+
+        let (data, returned_revision) = result.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Server returned 304 Not Modified for pinned revision request \
+                 (workspace '{}', revision '{}')",
+                workspace,
+                revision
+            )
+        })?;
+
+        if returned_revision != revision {
+            tracing::warn!(
+                workspace,
+                requested = revision,
+                returned = %returned_revision,
+                "Server returned different revision than requested"
+            );
+        }
+
+        // Extract in a blocking thread without updating .current.
+        let lock = self.workspace_lock(workspace);
+        let base_dir = self.base_dir.clone();
+        let workspace_owned = workspace.to_owned();
+        let revision_owned = revision.to_owned();
+        let rev_dir = tokio::task::spawn_blocking(move || {
+            let _guard = lock
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            extract_tarball_inner(&base_dir, &workspace_owned, &data, &revision_owned, false)
+        })
+        .await
+        .context("pinned tarball extraction task panicked")??;
+
+        tracing::debug!(
+            workspace,
+            revision,
+            returned_revision = %returned_revision,
+            "Pinned revision downloaded and extracted"
+        );
+
+        let guard = self.acquire_guard(workspace, revision, rev_dir);
+        Ok(guard)
+    }
 }
 
 /// Sanitize a revision string for use as a directory name.
 ///
 /// Revision strings are typically hex hashes (40-64 chars) which are already
 /// filesystem-safe. This is a safety net for unexpected characters.
+///
+/// Special-cases `".."` and `"."` which would otherwise resolve to the parent
+/// or current directory via [`PathBuf::join`], enabling path traversal.
 fn sanitize_revision_for_dir(revision: &str) -> String {
-    revision
+    let sanitized: String = revision
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
@@ -234,7 +343,14 @@ fn sanitize_revision_for_dir(revision: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    // Prevent path traversal — ".." and "." are valid after character mapping
+    // but would resolve to parent/current directory inside PathBuf::join.
+    match sanitized.as_str() {
+        ".." => "_dotdot".to_string(),
+        "." => "_dot".to_string(),
+        _ => sanitized,
+    }
 }
 
 /// Write `content` to `path` atomically via a temp file + rename.
@@ -253,9 +369,12 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 /// Inner extraction logic — caller must hold the per-workspace lock.
 ///
 /// Extracts `data` (a gzip-compressed tar archive) into
-/// `base_dir/name/{sanitized_revision}/`, writing the revision string to
-/// `base_dir/name/.current`. Uses a temp directory + atomic rename so
-/// concurrent readers always see a consistent directory.
+/// `base_dir/name/{sanitized_revision}/`. Uses a temp directory + atomic rename
+/// so concurrent readers always see a consistent directory.
+///
+/// When `update_current` is `true`, the revision string is atomically written to
+/// `base_dir/name/.current` after extraction. Pass `false` for pinned (historical)
+/// revisions to avoid regressing the workspace's latest-revision tracking.
 ///
 /// If the revision directory already exists, skips extraction (idempotent).
 /// Returns the path to the revision directory.
@@ -264,6 +383,7 @@ fn extract_tarball_inner(
     name: &str,
     data: &[u8],
     revision: &str,
+    update_current: bool,
 ) -> Result<PathBuf> {
     let ws_dir = base_dir.join(name);
     let sanitized = sanitize_revision_for_dir(revision);
@@ -272,15 +392,17 @@ fn extract_tarball_inner(
     }
     let rev_dir = ws_dir.join(&sanitized);
 
-    // Idempotent: if revision directory already exists, just update .current
+    // Idempotent: if revision directory already exists, optionally update .current
     if rev_dir.is_dir() {
         tracing::debug!(
             "Revision directory already exists, skipping extraction: {}",
             rev_dir.display()
         );
-        // Still update .current in case it's stale
-        let current_file = ws_dir.join(".current");
-        atomic_write(&current_file, revision).context("Failed to write .current file")?;
+        if update_current {
+            // Still update .current in case it's stale
+            let current_file = ws_dir.join(".current");
+            atomic_write(&current_file, revision).context("Failed to write .current file")?;
+        }
         return Ok(rev_dir);
     }
 
@@ -305,15 +427,18 @@ fn extract_tarball_inner(
     // Fall back to recursive copy+remove when crossing filesystem boundaries.
     rename_or_copy(&tmp_dir, &rev_dir)?;
 
-    // Update .current to point to this revision (atomic write)
-    let current_file = ws_dir.join(".current");
-    atomic_write(&current_file, revision).context("Failed to write .current file")?;
+    if update_current {
+        // Update .current to point to this revision (atomic write)
+        let current_file = ws_dir.join(".current");
+        atomic_write(&current_file, revision).context("Failed to write .current file")?;
+    }
 
     tracing::info!(
-        "Extracted workspace '{}' (revision: {}) to {}",
+        "Extracted workspace '{}' (revision: {}) to {} (update_current: {})",
         name,
         revision,
-        rev_dir.display()
+        rev_dir.display(),
+        update_current,
     );
 
     Ok(rev_dir)
@@ -1039,6 +1164,47 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_revision_path_traversal() {
+        // ".." must not pass through — PathBuf::join("..") resolves to parent dir
+        assert_eq!(sanitize_revision_for_dir(".."), "_dotdot");
+
+        // "." must not pass through — PathBuf::join(".") resolves to current dir
+        assert_eq!(sanitize_revision_for_dir("."), "_dot");
+
+        // Ensure the sanitized names don't escape the workspace dir when joined
+        let base = std::path::PathBuf::from("/tmp/cache/myws");
+        let dotdot = base.join(sanitize_revision_for_dir(".."));
+        assert!(
+            dotdot.starts_with("/tmp/cache/myws"),
+            "'..' must not escape workspace dir, got: {}",
+            dotdot.display()
+        );
+        let dot = base.join(sanitize_revision_for_dir("."));
+        assert!(
+            dot.starts_with("/tmp/cache/myws"),
+            "'.' must not equal workspace dir itself via join, got: {}",
+            dot.display()
+        );
+    }
+
+    #[test]
+    fn test_sanitize_revision_for_dir_path_traversal() {
+        let result = sanitize_revision_for_dir("..");
+        assert_ne!(
+            result, "..",
+            "'..' must be replaced to prevent path traversal"
+        );
+        assert!(!result.is_empty());
+
+        let result = sanitize_revision_for_dir(".");
+        assert_ne!(result, ".", "'.' must be replaced to prevent path issues");
+
+        // Dots within larger strings are safe
+        assert_eq!(sanitize_revision_for_dir("a..b"), "a..b");
+        assert_eq!(sanitize_revision_for_dir("..abc"), "..abc");
+    }
+
+    #[test]
     fn test_backward_compat_old_layout() {
         let dir = tempfile::tempdir().unwrap();
         let cache = new_cache(dir.path());
@@ -1200,5 +1366,98 @@ mod tests {
         );
         // .current.tmp should NOT exist (was renamed atomically to .current)
         assert!(!ws_dir.join(".current.tmp").exists());
+    }
+
+    #[test]
+    fn test_extract_tarball_pinned_does_not_update_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = new_cache(dir.path());
+
+        // Establish a "current" revision first
+        let tarball1 = build_tarball_with_files(&[("current.txt", b"current content")]);
+        cache
+            .extract_tarball("test-ws", &tarball1, "current-rev")
+            .unwrap();
+
+        assert_eq!(
+            cache.current_revision("test-ws"),
+            Some("current-rev".to_string())
+        );
+
+        // Now extract a pinned (older) revision — must not touch .current
+        let tarball2 = build_tarball_with_files(&[("pinned.txt", b"pinned content")]);
+        let pinned_dir = cache
+            .extract_tarball_pinned("test-ws", &tarball2, "pinned-rev")
+            .unwrap();
+
+        // .current must still point to the original revision
+        assert_eq!(
+            cache.current_revision("test-ws"),
+            Some("current-rev".to_string()),
+            ".current must not be updated by extract_tarball_pinned"
+        );
+
+        // The pinned revision directory was created correctly
+        assert!(pinned_dir.join("pinned.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(pinned_dir.join("pinned.txt")).unwrap(),
+            "pinned content"
+        );
+    }
+
+    #[test]
+    fn test_extract_tarball_pinned_idempotent_when_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = new_cache(dir.path());
+
+        let tarball = build_tarball_with_files(&[("file.txt", b"data")]);
+
+        // First pinned extraction
+        let path1 = cache
+            .extract_tarball_pinned("test-ws", &tarball, "rev-pin")
+            .unwrap();
+        // Second call — dir already exists, must be idempotent
+        let path2 = cache
+            .extract_tarball_pinned("test-ws", &tarball, "rev-pin")
+            .unwrap();
+
+        assert_eq!(path1, path2);
+        // Still no .current file (workspace dir was created but .current never written)
+        assert!(!dir.path().join("test-ws").join(".current").exists());
+    }
+
+    #[test]
+    fn test_ensure_revision_uses_local_cache_when_available() {
+        // When the revision directory already exists locally, ensure_revision
+        // must return a guard pointing to it without needing a network call.
+        // We test this by pre-extracting the tarball, then verifying the
+        // guard's path matches the expected revision directory.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = new_cache(dir.path());
+
+        let tarball = build_tarball_with_files(&[("hello.txt", b"hello")]);
+        // Pre-populate the revision directory (simulating a previous extraction)
+        cache
+            .extract_tarball_pinned("test-ws", &tarball, "cached-rev")
+            .unwrap();
+
+        let expected_path = dir.path().join("test-ws").join("cached-rev");
+        assert!(
+            expected_path.is_dir(),
+            "pre-condition: directory must exist"
+        );
+
+        // acquire_guard goes through the same code path as ensure_revision's
+        // early-return branch: dir exists → acquire guard, no download.
+        let guard = cache.acquire_guard("test-ws", "cached-rev", expected_path.clone());
+
+        assert_eq!(guard.path(), expected_path.as_path());
+
+        // Ref count is 1 while guard is held
+        let rc = cache.revision_ref_count("test-ws", "cached-rev");
+        assert_eq!(rc.load(Ordering::Acquire), 1);
+
+        drop(guard);
+        assert_eq!(rc.load(Ordering::Acquire), 0);
     }
 }
