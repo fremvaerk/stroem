@@ -855,6 +855,14 @@ pub async fn handle_approval_steps(
                             );
                             tracing::error!("{}", err);
                             JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                            orchestrate_after_approval_failure(
+                                pool,
+                                job_id,
+                                &step.step_name,
+                                task,
+                                workspace_config,
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -885,6 +893,14 @@ pub async fn handle_approval_steps(
                     );
                     tracing::error!("{}", err);
                     JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                    orchestrate_after_approval_failure(
+                        pool,
+                        job_id,
+                        &step.step_name,
+                        task,
+                        workspace_config,
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -1063,6 +1079,33 @@ pub fn build_step_render_context(
         }
     }
     serde_json::Value::Object(ctx)
+}
+
+/// Run orchestrator after an approval step fails (e.g. message render error).
+/// Cascade-skips downstream steps and marks the job as failed if needed.
+async fn orchestrate_after_approval_failure(
+    pool: &PgPool,
+    job_id: Uuid,
+    step_name: &str,
+    task: &stroem_common::models::workflow::TaskDef,
+    workspace_config: &WorkspaceConfig,
+) {
+    if let Err(e) = crate::orchestrator::on_step_completed(
+        pool,
+        job_id,
+        step_name,
+        task,
+        Some(workspace_config),
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to orchestrate after approval step '{}' failure in job {}: {:#}",
+            step_name,
+            job_id,
+            e
+        );
+    }
 }
 
 /// Compute the nesting depth of a job by walking the parent chain.
