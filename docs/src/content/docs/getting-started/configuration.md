@@ -69,6 +69,21 @@ worker_token: "change-in-production"
 #       action: view
 #       groups: [engineering]
 #       users: [contractor@ext.com]
+# Optional: agent/LLM configuration
+# agents:
+#   providers:
+#     - id: anthropic-main
+#       type: anthropic
+#       api_key: "${ANTHROPIC_API_KEY}"
+#       model: claude-opus-4-1-20250805
+#       max_tokens: 2048
+#     - id: openai-gpt4
+#       type: openai
+#       api_key: "${OPENAI_API_KEY}"
+#       model: gpt-4o
+# Optional: MCP server configuration
+# mcp:
+#   enabled: true
 ```
 
 ### Server fields
@@ -84,6 +99,8 @@ worker_token: "change-in-production"
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
 | `auth` | No | Authentication config (see [Authentication](/operations/authentication/)) |
 | `acl` | No | Access control list configuration (see [Authorization](/operations/authorization/)) |
+| `agents` | No | Agent/LLM provider configuration (see [Agent Actions](/guides/agent-actions/)) |
+| `mcp` | No | MCP server configuration (see [MCP Integration](/guides/mcp/)) |
 
 ### ACL configuration
 
@@ -114,6 +131,48 @@ acl:
 | `rules[].users` | User email addresses to match (OR'd with `groups`). |
 
 See [Authorization](/operations/authorization/) for detailed behavior, admin role, and rule evaluation order.
+
+## Agent providers
+
+Agent actions enable LLM integration directly in workflows. Configure provider credentials here:
+
+```yaml
+agents:
+  providers:
+    - id: anthropic-main
+      type: anthropic
+      api_key: "${ANTHROPIC_API_KEY}"
+      model: claude-opus-4-1-20250805
+      max_tokens: 2048
+      temperature: 0.7
+      max_retries: 2
+
+    - id: openai-gpt4
+      type: openai
+      api_key: "${OPENAI_API_KEY}"
+      model: gpt-4o
+      max_tokens: 1024
+
+    - id: ollama-local
+      type: ollama
+      api_endpoint: "http://localhost:11434"
+      model: llama2
+```
+
+### Agent provider fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Unique provider identifier used in workflow actions |
+| `type` | Yes | Provider type: `anthropic`, `azure`, `cohere`, `deepseek`, `galadriel`, `gemini`, `groq`, `huggingface`, `hyperbolic`, `llamafile`, `mira`, `mistral`, `moonshot`, `ollama`, `openai`, `openrouter`, `perplexity`, `together`, or `xai` |
+| `api_key` | Conditional | API key (not required for `ollama` and `llamafile`). Supports env var templating with `${VAR_NAME}` |
+| `api_endpoint` | Conditional | Custom endpoint URL. Required for `azure`, optional for OpenAI-compatible servers |
+| `model` | Yes | Model identifier (e.g., `claude-opus-4-1-20250805`, `gpt-4o`, `gemini-2.0-flash`) |
+| `max_tokens` | No | Default max completion tokens (can be overridden per action) |
+| `temperature` | No | Default sampling temperature (0–2) |
+| `max_retries` | No | Number of retries on transient errors (default 2) |
+
+See [Agent Actions](/guides/agent-actions/) for complete examples and provider-specific documentation.
 
 ## Worker configuration
 

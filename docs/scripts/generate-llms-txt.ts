@@ -35,6 +35,8 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`type: script\` + \`runner: docker\` — scripts inside a Docker container with workspace at \`/workspace\`.
 - \`type: script\` + \`runner: pod\` — scripts inside a Kubernetes pod with workspace.
 - \`type: task\` — requires \`task\` field. Cannot have \`cmd\`, \`script\`, \`image\`, \`runner\`, or \`language\`.
+- \`type: agent\` — requires \`provider\` and \`prompt\`. Calls an LLM (19 providers: anthropic, azure, cohere, deepseek, galadriel, gemini, groq, huggingface, hyperbolic, llamafile, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together, xai). Optional \`system_prompt\`, \`output\` (structured JSON schema), \`model\`, \`temperature\`, \`max_tokens\`.
+- \`type: approval\` — optional \`message\` (Tera template). Pauses job for human approval, reuses Phase 5d infrastructure.
 - \`type: script\` + \`image\` is **rejected** — use \`type: docker\` or \`runner: docker\` instead.
 
 **Task actions:**
@@ -89,6 +91,7 @@ const sections: { file: string; title: string }[] = [
   { file: "guides/hooks.md", title: "Hooks" },
   { file: "guides/connections.md", title: "Connections" },
   { file: "guides/secrets.md", title: "Secrets & Encryption" },
+  { file: "guides/agent-actions.md", title: "Agent Actions" },
   { file: "reference/workflow-yaml.md", title: "Workflow YAML Reference" },
   { file: "examples/hello-world.md", title: "Example: Hello World" },
   { file: "examples/deploy-pipeline.md", title: "Example: Deploy Pipeline" },
