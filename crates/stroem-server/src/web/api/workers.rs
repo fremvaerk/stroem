@@ -70,9 +70,6 @@ pub async fn get_worker(
     let steps = JobStepRepo::list_by_worker(&state.pool, worker_id, 50, 0)
         .await
         .context("list steps for worker")?;
-    let total = JobStepRepo::count_by_worker(&state.pool, worker_id)
-        .await
-        .context("count steps for worker")?;
 
     // ACL filter: remove steps for tasks the user can't see
     let steps: Vec<_> = if let Some(ref auth) = auth_user {
@@ -118,7 +115,10 @@ pub async fn get_worker(
                         })
                         .collect()
                 }
-                Err(_) => vec![], // error loading ACL context, show no steps for safety
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load ACL context for worker detail");
+                    vec![]
+                }
             }
         } else {
             steps
@@ -126,6 +126,8 @@ pub async fn get_worker(
     } else {
         steps
     };
+
+    let total = steps.len() as i64;
 
     let steps_json: Vec<serde_json::Value> = steps
         .iter()

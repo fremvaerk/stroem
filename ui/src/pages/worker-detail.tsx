@@ -141,52 +141,59 @@ export function WorkerDetailPage() {
               No steps executed by this worker.
             </p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Step</TableHead>
-                  <TableHead>Task</TableHead>
-                  <TableHead>Workspace</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Started</TableHead>
-                  <TableHead className="text-right">Duration</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {worker.steps.items.map((step: WorkerStepItem) => (
-                  <TableRow key={`${step.job_id}/${step.step_name}`}>
-                    <TableCell className="font-medium">
-                      {step.step_name}
-                    </TableCell>
-                    <TableCell>
-                      <Link
-                        to={`/jobs/${step.job_id}`}
-                        className="hover:underline"
-                      >
-                        {step.task_name}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant="secondary"
-                        className="font-mono text-xs"
-                      >
-                        {step.workspace}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={step.status} />
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {formatTime(step.started_at)}
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                      {formatDuration(step.started_at, step.completed_at)}
-                    </TableCell>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Step</TableHead>
+                    <TableHead>Task</TableHead>
+                    <TableHead>Workspace</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Started</TableHead>
+                    <TableHead className="text-right">Duration</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {worker.steps.items.map((step: WorkerStepItem) => (
+                    <TableRow key={`${step.job_id}/${step.step_name}`}>
+                      <TableCell className="font-medium">
+                        {step.step_name}
+                      </TableCell>
+                      <TableCell>
+                        <Link
+                          to={`/jobs/${step.job_id}`}
+                          className="hover:underline"
+                        >
+                          {step.task_name}
+                        </Link>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant="secondary"
+                          className="font-mono text-xs"
+                        >
+                          {step.workspace}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={step.status} />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {formatTime(step.started_at)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                        {formatDuration(step.started_at, step.completed_at)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {worker.steps.total > worker.steps.items.length && (
+                <p className="mt-4 text-center text-xs text-muted-foreground">
+                  Showing {worker.steps.items.length} of {worker.steps.total} steps
+                </p>
+              )}
+            </>
           )}
         </CardContent>
       </Card>

@@ -11415,6 +11415,20 @@ async fn test_get_worker_with_steps() -> Result<()> {
     assert_eq!(items[0]["step_name"].as_str().unwrap(), "say-hello");
     assert_eq!(items[0]["workspace"].as_str().unwrap(), "default");
     assert_eq!(items[0]["action_type"].as_str().unwrap(), "script");
+    assert_eq!(items[0]["status"].as_str().unwrap(), "running");
+    assert_eq!(items[0]["job_status"].as_str().unwrap(), "running");
+    assert!(
+        items[0]["started_at"].is_string(),
+        "started_at should be a non-null string"
+    );
+    assert!(
+        items[0]["error_message"].is_null(),
+        "error_message should be null"
+    );
+    assert!(
+        items[0]["completed_at"].is_null(),
+        "completed_at should be null"
+    );
     assert_eq!(steps_resp["total"], 1);
 
     Ok(())

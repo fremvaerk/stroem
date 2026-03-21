@@ -446,7 +446,31 @@ Returns registered workers with status and tags. Supports `limit` and `offset` q
 GET /api/workers/{id}
 ```
 
-Returns a single worker's info along with its recent jobs (up to 50).
+Returns a single worker's info along with its recent steps (up to 50).
+
+**Response:**
+
+```json
+{
+  "steps": {
+    "items": [
+      {
+        "job_id": "...",
+        "workspace": "...",
+        "task_name": "...",
+        "job_status": "...",
+        "step_name": "...",
+        "action_type": "...",
+        "status": "...",
+        "started_at": "...",
+        "completed_at": "...",
+        "error_message": null
+      }
+    ],
+    "total": 42
+  }
+}
+```
 
 ## Error responses
 

@@ -5,6 +5,7 @@ import type {
   TriggerInfo,
   JobListItem,
   JobDetail,
+  PaginatedResponse,
   WorkerListItem,
   WorkerDetail,
   UserListItem,
@@ -125,10 +126,7 @@ async function apiFetch<T>(
   return res.json();
 }
 
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
-}
+export type { PaginatedResponse } from "./types";
 
 export class ApiError extends Error {
   status: number;
