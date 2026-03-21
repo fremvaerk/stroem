@@ -46,16 +46,15 @@ actions:
       Subject: {{ input.subject }}
       Body: {{ input.body }}
     output:
-      properties:
-        category:
-          type: string
-          required: true
-          options: [bug, feature_request, question]
-        confidence:
-          type: number
-          required: true
-        summary:
-          type: string
+      category:
+        type: string
+        required: true
+        options: [bug, feature_request, question]
+      confidence:
+        type: number
+        required: true
+      summary:
+        type: string
     input:
       subject: { type: string, required: true }
       body: { type: string, required: true }
@@ -251,15 +250,14 @@ actions:
     provider: anthropic-main
     prompt: "Analyze this data: {{ input.data }}"
     output:
-      properties:
-        sentiment:
-          type: string
-          required: true
-          options: [positive, negative, neutral]
-        keywords:
-          type: array
-        score:
-          type: number
+      sentiment:
+        type: string
+        required: true
+        options: [positive, negative, neutral]
+      keywords:
+        type: array
+      score:
+        type: number
 ```
 
 **Output:**
@@ -413,11 +411,10 @@ actions:
     provider: anthropic-main
     prompt: "Classify this GitHub issue: {{ input.issue_body }}"
     output:
-      properties:
-        category:
-          type: string
-          required: true
-          options: [bug, feature, documentation, wontfix]
+      category:
+        type: string
+        required: true
+        options: [bug, feature, documentation, wontfix]
 
 tasks:
   issue-workflow:
@@ -455,10 +452,9 @@ actions:
 
       Return as JSON with name, email, phone.
     output:
-      properties:
-        name: { type: string }
-        email: { type: string }
-        phone: { type: string }
+      name: { type: string }
+      email: { type: string }
+      phone: { type: string }
 
 tasks:
   contact-extraction:
@@ -487,12 +483,11 @@ actions:
     provider: anthropic-main
     prompt: "Analyze sentiment of: {{ input.text }}"
     output:
-      properties:
-        sentiment:
-          type: string
-          required: true
-          options: [positive, negative, neutral]
-        score: { type: number }
+      sentiment:
+        type: string
+        required: true
+        options: [positive, negative, neutral]
+      score: { type: number }
 
 tasks:
   feedback-workflow:

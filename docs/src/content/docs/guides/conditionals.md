@@ -78,8 +78,7 @@ actions:
       status=$(curl -s https://api.example.com/status)
       echo "OUTPUT: {\"ok\": $(echo $status | jq '.healthy')}"
     output:
-      properties:
-        ok: { type: boolean }
+      ok: { type: boolean }
 
   do-something:
     type: script
@@ -280,8 +279,7 @@ actions:
       count=$(curl -s https://api.example.com/count)
       echo "OUTPUT: {\"count\": $count}"
     output:
-      properties:
-        count: { type: integer }
+      count: { type: integer }
 
   process-large-dataset:
     type: script
@@ -310,8 +308,7 @@ actions:
     type: script
     script: "echo 'Checking...' && echo 'OUTPUT: {\"ready\": true}'"
     output:
-      properties:
-        ready: { type: boolean }
+      ready: { type: boolean }
 
   fast-process:
     type: script

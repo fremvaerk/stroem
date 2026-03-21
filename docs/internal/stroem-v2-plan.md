@@ -985,8 +985,7 @@ actions:
     input:
       name: { type: string, required: true }
     output:
-      properties:
-        greeting: { type: string }
+      greeting: { type: string }
 
   shout:
     type: shell

@@ -49,13 +49,11 @@ actions:
     prompt: |
       Classify this ticket: {{ input.ticket_text }}
     output:
-      type: object
-      properties:
-        category:
-          type: string
-          enum: [bug, feature_request, question, other]
-        confidence:
-          type: number
+      category:
+        type: string
+        enum: [bug, feature_request, question, other]
+      confidence:
+        type: number
 
   # Multi-turn with task tools
   investigate-incident:
@@ -71,10 +69,8 @@ actions:
       - task: get-pod-status
     max_turns: 20
     output:
-      type: object
-      properties:
-        root_cause: { type: string }
-        severity: { type: string, enum: [p1, p2, p3, p4] }
+      root_cause: { type: string }
+      severity: { type: string, enum: [p1, p2, p3, p4] }
 
   # Multi-turn with MCP client tools
   research-topic:

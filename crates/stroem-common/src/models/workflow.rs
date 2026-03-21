@@ -76,10 +76,11 @@ pub struct OutputFieldDef {
     pub options: Option<Vec<serde_json::Value>>,
 }
 
-/// Output schema for actions
+/// Output schema for actions — fields defined directly under `output:` in YAML,
+/// matching the same flat style as `input:` on actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct OutputDef {
-    #[serde(default)]
     pub properties: BTreeMap<String, OutputFieldDef>,
 }
 
@@ -917,15 +918,14 @@ mod tests {
     #[test]
     fn test_output_def_yaml_round_trip() {
         let yaml = r#"
-properties:
-  category:
-    type: string
-    required: true
-    description: "The ticket category"
-    options: [bug, feature, question]
-  score:
-    type: number
-    default: 0.5
+category:
+  type: string
+  required: true
+  description: "The ticket category"
+  options: [bug, feature, question]
+score:
+  type: number
+  default: 0.5
 "#;
         let output: OutputDef = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(output.properties.len(), 2);
@@ -1041,8 +1041,8 @@ actions:
     }
 
     #[test]
-    fn test_output_def_parses_without_properties_key() {
-        // output: {} should work thanks to #[serde(default)] on properties
+    fn test_output_def_parses_empty_map() {
+        // output: {} should parse as empty output definition
         let yaml = "{}";
         let output: OutputDef = serde_yaml::from_str(yaml).unwrap();
         assert!(output.properties.is_empty());

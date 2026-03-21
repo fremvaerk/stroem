@@ -195,13 +195,12 @@ actions:
     system_prompt: "You are a support ticket classifier."
     prompt: "Classify this ticket: {{ input.ticket_body }}"
     output:
-      properties:
-        category:
-          type: string
-          required: true
-          options: [bug, feature_request, question]
-        confidence:
-          type: number
+      category:
+        type: string
+        required: true
+        options: [bug, feature_request, question]
+      confidence:
+        type: number
 
 tasks:
   handle-support:
@@ -307,14 +306,11 @@ actions:
       echo "Building..."
       echo 'OUTPUT: {"artifact": "dist/app.tar.gz", "size": 1024}'
     output:
-      properties:
-        artifact: { type: string }
-        size: { type: integer }
+      artifact: { type: string }
+      size: { type: integer }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `output.properties` | map | Map of field names to output field definitions |
+Output fields are defined directly under the `output:` key as a flat map of field names to field definitions.
 
 **Output field properties:**
 

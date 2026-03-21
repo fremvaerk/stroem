@@ -5058,9 +5058,8 @@ actions:
     max_tokens: 2048
     max_turns: 5
     output:
-      properties:
-        result:
-          type: string
+      result:
+        type: string
     tools:
       - task: run-tool
       - mcp: my-mcp-server
@@ -5228,9 +5227,8 @@ actions:
     provider: openai
     prompt: "Do something"
     output:
-      properties:
-        result:
-          type: invalid_type
+      result:
+        type: invalid_type
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -5253,9 +5251,8 @@ actions:
     provider: openai
     prompt: "Do something"
     output:
-      properties:
-        result:
-          type: text
+      result:
+        type: text
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -5275,9 +5272,8 @@ actions:
     type: script
     script: "echo done"
     output:
-      properties:
-        result:
-          type: invalid_type
+      result:
+        type: invalid_type
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
