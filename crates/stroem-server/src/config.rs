@@ -318,6 +318,29 @@ pub struct AgentsConfig {
     pub providers: HashMap<String, AgentProviderConfig>,
 }
 
+/// All supported agent provider types (must match dispatch match in agent/dispatch.rs).
+pub const SUPPORTED_AGENT_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "azure",
+    "cohere",
+    "deepseek",
+    "galadriel",
+    "gemini",
+    "groq",
+    "huggingface",
+    "hyperbolic",
+    "llamafile",
+    "mira",
+    "mistral",
+    "moonshot",
+    "ollama",
+    "openai",
+    "openrouter",
+    "perplexity",
+    "together",
+    "xai",
+];
+
 /// Configuration for a single LLM provider
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -400,19 +423,13 @@ impl ServerConfig {
         }
         if let Some(ref agents) = self.agents {
             for (name, provider) in &agents.providers {
-                match provider.provider_type.as_str() {
-                    "anthropic" | "azure" | "cohere" | "deepseek" | "galadriel" | "gemini"
-                    | "groq" | "huggingface" | "hyperbolic" | "llamafile" | "mira" | "mistral"
-                    | "moonshot" | "ollama" | "openai" | "openrouter" | "perplexity"
-                    | "together" | "xai" => {}
-                    other => anyhow::bail!(
-                        "Agent provider '{}' has unknown type: '{}' (supported: anthropic, \
-                         azure, cohere, deepseek, galadriel, gemini, groq, huggingface, \
-                         hyperbolic, llamafile, mira, mistral, moonshot, ollama, openai, \
-                         openrouter, perplexity, together, xai)",
+                if !SUPPORTED_AGENT_PROVIDERS.contains(&provider.provider_type.as_str()) {
+                    anyhow::bail!(
+                        "Agent provider '{}' has unknown type: '{}' (supported: {})",
                         name,
-                        other
-                    ),
+                        provider.provider_type,
+                        SUPPORTED_AGENT_PROVIDERS.join(", ")
+                    );
                 }
                 if provider.max_retries > 10 {
                     anyhow::bail!(
@@ -1865,6 +1882,105 @@ mcp:
         assert!(
             result.is_err(),
             "Unknown fields in mcp section should be rejected"
+        );
+    }
+
+    // ─── Agent provider config tests ────────────────────────────────────────
+
+    #[test]
+    fn test_agent_provider_config_type_field() {
+        let yaml = r#"
+type: anthropic
+model: claude-sonnet-4-20250514
+api_key: "sk-test"
+"#;
+        let config: AgentProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.provider_type, "anthropic");
+        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.max_tokens, 4096); // default
+        assert_eq!(config.max_retries, 3); // default
+    }
+
+    #[test]
+    fn test_agent_provider_config_backward_compat_provider_type() {
+        let yaml = r#"
+provider_type: openai
+model: gpt-4o
+api_key: "sk-test"
+"#;
+        let config: AgentProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.provider_type, "openai");
+    }
+
+    #[test]
+    fn test_agent_provider_config_optional_fields() {
+        let yaml = r#"
+type: ollama
+model: llama3
+api_endpoint: "http://localhost:11434"
+"#;
+        let config: AgentProviderConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.provider_type, "ollama");
+        assert!(config.api_key.is_none());
+        assert_eq!(
+            config.api_endpoint.as_deref(),
+            Some("http://localhost:11434")
+        );
+    }
+
+    fn make_minimal_config_with_agents(agents_yaml: &str) -> String {
+        format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+agents:
+{agents_yaml}
+"#
+        )
+    }
+
+    #[test]
+    fn test_validate_accepts_all_supported_providers() {
+        for &provider in SUPPORTED_AGENT_PROVIDERS {
+            let agents_yaml = format!(
+                "  providers:\n    test-provider:\n      type: {}\n      model: test\n      api_key: \"key\"",
+                provider
+            );
+            let yaml = make_minimal_config_with_agents(&agents_yaml);
+            let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert!(
+                config.validate().is_ok(),
+                "validate() should accept provider type '{}'",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_unknown_provider_type() {
+        let agents_yaml =
+            "  providers:\n    bad:\n      type: bedrock\n      model: test\n      api_key: \"key\"";
+        let yaml = make_minimal_config_with_agents(agents_yaml);
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unknown type"),
+            "Expected 'unknown type' error, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("bedrock"),
+            "Error should mention the bad type, got: {}",
+            msg
         );
     }
 }

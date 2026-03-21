@@ -950,6 +950,7 @@ fn truncate_for_error(s: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SUPPORTED_AGENT_PROVIDERS;
     use stroem_common::models::workflow::ActionDef;
 
     fn make_action(output: Option<serde_json::Value>) -> ActionDef {
@@ -1047,9 +1048,15 @@ mod tests {
         let result = call_llm(&provider_config, "llama3", "hello", None, &action).await;
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
+        // Must fail with connection error, NOT with "requires api_key"
         assert!(
             !msg.contains("requires api_key"),
             "ollama should not require api_key, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("Ollama API call failed"),
+            "Expected Ollama API call error (connection), got: {}",
             msg
         );
     }
@@ -1075,6 +1082,34 @@ mod tests {
             "Expected 'requires api_endpoint', got: {}",
             msg
         );
+    }
+
+    /// Every provider in SUPPORTED_AGENT_PROVIDERS must be handled in call_llm
+    /// (not hit the catch-all "Unknown agent provider type" arm).
+    #[tokio::test]
+    async fn test_dispatch_covers_all_supported_providers() {
+        let action = make_action(None);
+        for &provider_type in SUPPORTED_AGENT_PROVIDERS {
+            let provider_config = AgentProviderConfig {
+                provider_type: provider_type.to_string(),
+                api_key: Some("test-key".to_string()),
+                api_endpoint: Some("http://127.0.0.1:1".to_string()),
+                model: "test-model".to_string(),
+                max_tokens: 4096,
+                temperature: None,
+                max_retries: 3,
+            };
+            let result = call_llm(&provider_config, "test-model", "hello", None, &action).await;
+            // All should fail (unreachable endpoint) but NOT with "Unknown agent provider type"
+            assert!(result.is_err());
+            let msg = format!("{:#}", result.unwrap_err());
+            assert!(
+                !msg.contains("Unknown agent provider type"),
+                "Provider '{}' is not handled in call_llm dispatch: {}",
+                provider_type,
+                msg
+            );
+        }
     }
 
     // ─── Unit tests for pure helper functions ─────────────────────────────────
