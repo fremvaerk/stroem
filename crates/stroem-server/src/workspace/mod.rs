@@ -468,29 +468,14 @@ impl WorkspaceManager {
             } else {
                 Vec::new()
             };
+            // Errored workspaces have an empty placeholder config, so .len() is 0.
             let config = entry.config.read().await;
             infos.push(WorkspaceInfo {
                 name: name.clone(),
-                tasks_count: if error.is_some() {
-                    0
-                } else {
-                    config.tasks.len()
-                },
-                actions_count: if error.is_some() {
-                    0
-                } else {
-                    config.actions.len()
-                },
-                triggers_count: if error.is_some() {
-                    0
-                } else {
-                    config.triggers.len()
-                },
-                connections_count: if error.is_some() {
-                    0
-                } else {
-                    config.connections.len()
-                },
+                tasks_count: config.tasks.len(),
+                actions_count: config.actions.len(),
+                triggers_count: config.triggers.len(),
+                connections_count: config.connections.len(),
                 revision: entry.source.revision(),
                 error,
                 warnings,
@@ -1475,6 +1460,123 @@ tasks:
         let info = &infos[0];
         assert!(info.error.is_none());
         assert_eq!(info.warnings.len(), 2);
+    }
+
+    /// Warnings should be cleared when a previously-bad file is fixed on reload.
+    #[tokio::test]
+    async fn test_warnings_cleared_when_file_fixed_on_reload() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+
+        // Start with one valid and one invalid file
+        fs::write(
+            workflows_dir.join("good.yaml"),
+            r#"
+actions:
+  greet:
+    type: script
+    script: "echo hello"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workflows_dir.join("bad.yaml"),
+            "actions:\n  a:\n    script: \"unterminated\n",
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ws".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+
+        // Initial: 1 valid action, 1 warning
+        let config = mgr.get_config("ws").await.unwrap();
+        assert_eq!(config.actions.len(), 1);
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos[0].warnings.len(), 1);
+
+        // Fix the bad file
+        fs::write(
+            workflows_dir.join("bad.yaml"),
+            r#"
+actions:
+  farewell:
+    type: script
+    script: "echo bye"
+"#,
+        )
+        .unwrap();
+
+        // Reload
+        mgr.reload("ws").await.unwrap();
+
+        // Now: 2 valid actions, 0 warnings
+        let config = mgr.get_config("ws").await.unwrap();
+        assert_eq!(config.actions.len(), 2);
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos[0].warnings.len(), 0);
+        assert!(infos[0].error.is_none());
+    }
+
+    /// Warnings should be cleared when workspace transitions to a hard error state.
+    #[tokio::test]
+    async fn test_warnings_cleared_on_hard_error() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+
+        // Start with one valid and one invalid file
+        fs::write(
+            workflows_dir.join("good.yaml"),
+            r#"
+actions:
+  greet:
+    type: script
+    script: "echo hello"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            workflows_dir.join("bad.yaml"),
+            "actions:\n  a:\n    script: \"unterminated\n",
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "ws".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+
+        // Initial: loaded with 1 warning
+        let infos = mgr.list_workspace_info().await;
+        assert!(infos[0].error.is_none());
+        assert_eq!(infos[0].warnings.len(), 1);
+
+        // Remove all contents to cause a hard error on reload.
+        // We can't remove temp.path() itself (TempDir owns it), so replace the
+        // workspace path with a non-existent directory.
+        fs::remove_dir_all(temp.path()).unwrap();
+        // Recreate temp path as empty — FolderSource will fail because path doesn't
+        // exist (TempDir keeps track of it for cleanup, but the dir is gone).
+
+        let _ = mgr.reload("ws").await;
+
+        // Now: hard error, warnings cleared
+        let infos = mgr.list_workspace_info().await;
+        assert!(infos[0].error.is_some());
+        assert!(infos[0].warnings.is_empty());
     }
 
     #[tokio::test]

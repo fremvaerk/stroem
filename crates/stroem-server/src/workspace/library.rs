@@ -102,7 +102,10 @@ impl LibraryResolver {
             }
         };
 
-        // Log any per-file warnings from the library load
+        // Log any per-file warnings from the library load.
+        // Library warnings are intentionally not surfaced in the WorkspaceInfo API response
+        // because libraries are shared across workspaces — attaching them to one workspace
+        // would be misleading. Operators should check server logs for library issues.
         for w in &warnings {
             tracing::warn!("Library '{}': {}", lib_name, w);
         }
