@@ -46,7 +46,7 @@ Actions are the smallest execution unit. Each action defines what runs on a work
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | **required** | Action type: `script`, `docker`, `pod`, or `task` |
+| `type` | string | **required** | Action type: `script`, `docker`, `pod`, `task`, `agent`, or `approval` |
 | `name` | string | — | Human-readable display name |
 | `description` | string | — | What this action does |
 | `input` | map | `{}` | Input parameter schema (see [Input fields](#input-fields)) |
@@ -170,6 +170,92 @@ tasks:
 ```
 
 Child jobs have a max nesting depth of 10 levels.
+
+### `type: agent`
+
+Calls an LLM as a workflow step. The step is dispatched server-side (workers never claim it).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | **required** | Provider ID from server config |
+| `prompt` | string | **required** | Tera template for the user message |
+| `system_prompt` | string | — | Tera template for system/instruction message |
+| `model` | string | — | Override provider's default model |
+| `max_tokens` | integer | — | Override provider's max tokens |
+| `temperature` | number | — | Override provider's temperature (0–2) |
+| `output` | object | — | Output schema (converted to JSON Schema at dispatch) |
+
+Cannot use any other execution fields (`cmd`, `script`, `source`, `image`, `runner`, `language`, `manifest`, `task`, etc.).
+
+```yaml
+actions:
+  classify-ticket:
+    type: agent
+    provider: anthropic-main
+    system_prompt: "You are a support ticket classifier."
+    prompt: "Classify this ticket: {{ input.ticket_body }}"
+    output:
+      properties:
+        category:
+          type: string
+          required: true
+          options: [bug, feature_request, question]
+        confidence:
+          type: number
+
+tasks:
+  handle-support:
+    input:
+      ticket_body: { type: string }
+    flow:
+      classify:
+        action: classify-ticket
+        input:
+          ticket_body: "{{ input.ticket_body }}"
+      route-bug:
+        action: escalate
+        depends_on: [classify]
+        when: "{{ classify.output.category == 'bug' }}"
+```
+
+### `type: approval`
+
+Pauses execution for human approval/rejection. The step is dispatched server-side (workers never claim it).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `message` | string | — | Tera template for the approval message shown to approver |
+
+Cannot use any other execution fields (`cmd`, `script`, `source`, `image`, `runner`, `language`, `manifest`, `task`, `provider`, `prompt`, etc.).
+
+```yaml
+actions:
+  approve-deployment:
+    type: approval
+    message: |
+      Deploy to production?
+      Version: {{ input.version }}
+      Environment: {{ input.env }}
+
+tasks:
+  deploy-workflow:
+    input:
+      version: { type: string }
+      env: { type: string }
+    flow:
+      manual-approval:
+        action: approve-deployment
+        input:
+          version: "{{ input.version }}"
+          env: "{{ input.env }}"
+      deploy:
+        action: run-deployment
+        depends_on: [manual-approval]
+        input:
+          version: "{{ input.version }}"
+```
+
+When approved, the step's output is `{ "approved": true, "approved_by": "user@example.com", "approved_at": "2025-03-21T10:30:00Z", "input": {...} }`. When rejected, the step fails and downstream steps are skipped.
 
 ---
 

@@ -311,13 +311,14 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Agent Actions (type: agent — LLM Calls)
 - `type: agent` — LLM call as a workflow step, server-side dispatch (like `type: task`)
-- Config: `agents.providers` in `server-config.yaml` with `provider_type` (anthropic/openai), `api_key`, `model`, `max_tokens`, `temperature`, `max_retries`
+- Config: `agents.providers` in `server-config.yaml` with `type` (provider type), `api_key`, `model`, `max_tokens`, `temperature`, `max_retries`
+- Supports 19 providers: anthropic, azure, cohere, deepseek, galadriel, gemini, groq, huggingface, hyperbolic, llamafile, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together, xai
 - `ActionDef` fields: `provider`, `model`, `system_prompt`, `prompt` (Tera templates), `output` (OutputDef, converted to JSON Schema at dispatch), `temperature`, `max_tokens`
 - `prompt` and `system_prompt` are Tera templates rendered at dispatch time with standard context (input, step outputs, secrets)
 - **Structured output**: when `output` is set, `OutputDef::to_json_schema()` produces a JSON Schema injected into the system prompt; response is parsed as JSON; output includes `_meta` with model, provider, tokens, latency
 - Server-side dispatch: `handle_agent_steps()` in `agent/dispatch.rs`, called from `orchestrate_after_step` and at job creation
 - Workers never claim agent steps (filtered in claim SQL alongside `type: task`)
-- Uses `rig-core` (v0.33) for LLM provider abstraction (Anthropic, OpenAI, custom endpoints)
+- Uses `rig-core` (v0.33) for LLM provider abstraction (19 providers, custom endpoints)
 - Feature-gated: `agent` cargo feature on stroem-server (enabled by default)
 - DB: migration `023_agent_type.sql` adds `'agent'` to action_type CHECK + `agent_state` JSONB column
 - Future: Phase 7B adds multi-turn with tools + ask_user (depends on Phase 5d approval gates)

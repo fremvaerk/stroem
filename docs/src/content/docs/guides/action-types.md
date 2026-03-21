@@ -1,6 +1,6 @@
 ---
 title: Action Types
-description: Script, Docker, Kubernetes, and task action types
+description: Script, Docker, Kubernetes, task, agent, and approval action types
 ---
 
 Actions are the smallest execution unit in Strøm. Each action defines what runs and how.
@@ -13,6 +13,8 @@ Actions are the smallest execution unit in Strøm. Each action defines what runs
 | `docker` | Runs a Docker image as-is — no workspace mount. |
 | `pod` | Runs an image as a Kubernetes pod — no workspace mount. |
 | `task` | References another task, creating a child job. Dispatched server-side — workers never see them. |
+| `agent` | Calls an LLM as a workflow step. Dispatched server-side — workers never see them. |
+| `approval` | Pauses execution for human approval. Dispatched server-side — workers never see them. |
 
 **`docker` / `pod`** actions require `image`. The image's default entrypoint/cmd runs unless overridden. Use this when you have a self-contained image (e.g., DB migrations, deploy tools).
 
@@ -26,24 +28,31 @@ Actions are the smallest execution unit in Strøm. Each action defines what runs
 
 Quick reference showing which fields are valid for each action type:
 
-| Field | `type: script` | `type: docker` | `type: pod` | `type: task` |
-|-------|----------------|----------------|-------------|--------------|
-| `script` | ✓ (inline) | - | - | - |
-| `source` | ✓ (file path) | - | - | - |
-| `cmd` | - | ✓ | ✓ | - |
-| `entrypoint` | - | ✓ | ✓ | - |
-| `command` | - | ✓ | ✓ | - |
-| `image` | - | ✓ | ✓ | - |
-| `runner` | ✓ (`local`/`docker`/`pod`) | - | - | - |
-| `language` | ✓ (`shell`/`python`/`js`/`ts`/`go`) | - | - | - |
-| `dependencies` | ✓ | - | - | - |
-| `interpreter` | ✓ | - | - | - |
-| `manifest` | ✓ (pod runner only) | - | ✓ | - |
-| `task` | - | - | - | ✓ |
-| `tags` | ✓ | ✓ | ✓ | - |
-| `env` | ✓ | ✓ | ✓ | - |
-| `timeout` | ✓ | ✓ | ✓ | - |
-| `input` | ✓ | ✓ | ✓ | ✓ |
+| Field | `type: script` | `type: docker` | `type: pod` | `type: task` | `type: agent` | `type: approval` |
+|-------|----------------|----------------|-------------|--------------|---------------|------------------|
+| `script` | ✓ (inline) | - | - | - | - | - |
+| `source` | ✓ (file path) | - | - | - | - | - |
+| `cmd` | - | ✓ | ✓ | - | - | - |
+| `entrypoint` | - | ✓ | ✓ | - | - | - |
+| `command` | - | ✓ | ✓ | - | - | - |
+| `image` | - | ✓ | ✓ | - | - | - |
+| `runner` | ✓ (`local`/`docker`/`pod`) | - | - | - | - | - |
+| `language` | ✓ (`shell`/`python`/`js`/`ts`/`go`) | - | - | - | - | - |
+| `dependencies` | ✓ | - | - | - | - | - |
+| `interpreter` | ✓ | - | - | - | - | - |
+| `manifest` | ✓ (pod runner only) | - | ✓ | - | - | - |
+| `task` | - | - | - | ✓ | - | - |
+| `provider` | - | - | - | - | ✓ | - |
+| `prompt` | - | - | - | - | ✓ | - |
+| `system_prompt` | - | - | - | - | ✓ | - |
+| `message` | - | - | - | - | - | ✓ |
+| `model` | - | - | - | - | ✓ | - |
+| `output` | - | - | - | - | ✓ | - |
+| `temperature` | - | - | - | - | ✓ | - |
+| `tags` | ✓ | ✓ | ✓ | - | - | - |
+| `env` | ✓ | ✓ | ✓ | - | - | - |
+| `timeout` | ✓ | ✓ | ✓ | - | ✓ | ✓ |
+| `input` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## Script actions
 

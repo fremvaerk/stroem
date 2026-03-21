@@ -684,11 +684,6 @@ async fn call_llm(
     use rig::completion::Prompt as _;
     use rig::prelude::CompletionClient as _;
 
-    let api_key = provider_config
-        .api_key
-        .as_deref()
-        .context("Agent provider requires api_key")?;
-
     // Resolve temperature: action override takes precedence over provider default.
     let temperature = action.temperature.or(provider_config.temperature);
 
@@ -713,52 +708,158 @@ async fn call_llm(
         (None, None) => None,
     };
 
-    let response_text = match provider_config.provider_type.as_str() {
-        "anthropic" => {
-            let mut builder =
-                rig::providers::anthropic::Client::builder().api_key(api_key.to_string());
+    /// Build a rig provider client, configure an agent, and prompt it.
+    macro_rules! call_provider {
+        ($client_type:ty, $label:expr, $api_key:expr) => {{
+            let mut builder = <$client_type>::builder().api_key($api_key);
             if let Some(ref endpoint) = provider_config.api_endpoint {
                 builder = builder.base_url(endpoint);
             }
             let client = builder
                 .build()
-                .context("Failed to build Anthropic client")?;
-            let mut agent_builder = client.agent(model_name);
+                .context(concat!("Failed to build ", $label, " client"))?;
+            let mut ab = client.agent(model_name);
             if let Some(ref sys) = effective_system {
-                agent_builder = agent_builder.preamble(sys);
+                ab = ab.preamble(sys);
             }
-            agent_builder = agent_builder.max_tokens(u64::from(max_tokens));
+            ab = ab.max_tokens(u64::from(max_tokens));
             if let Some(temp) = temperature {
-                agent_builder = agent_builder.temperature(f64::from(temp));
+                ab = ab.temperature(f64::from(temp));
             }
-            let agent = agent_builder.build();
-            agent
+            ab.build()
                 .prompt(prompt)
                 .await
-                .context("Anthropic API call failed")?
-        }
-        "openai" => {
-            // Use CompletionsClient for custom endpoint compatibility (Ollama, vLLM, etc.)
-            let mut builder =
-                rig::providers::openai::CompletionsClient::builder().api_key(api_key.to_string());
-            if let Some(ref endpoint) = provider_config.api_endpoint {
-                builder = builder.base_url(endpoint);
-            }
-            let client = builder.build().context("Failed to build OpenAI client")?;
-            let mut agent_builder = client.agent(model_name);
+                .context(concat!($label, " API call failed"))?
+        }};
+    }
+
+    let require_api_key = || -> Result<&str> {
+        provider_config
+            .api_key
+            .as_deref()
+            .context("Agent provider requires api_key")
+    };
+
+    let response_text = match provider_config.provider_type.as_str() {
+        // Standard providers (api_key required)
+        "anthropic" => call_provider!(
+            rig::providers::anthropic::Client,
+            "Anthropic",
+            require_api_key()?.to_string()
+        ),
+        "cohere" => call_provider!(
+            rig::providers::cohere::Client,
+            "Cohere",
+            require_api_key()?.to_string()
+        ),
+        "deepseek" => call_provider!(
+            rig::providers::deepseek::Client,
+            "DeepSeek",
+            require_api_key()?.to_string()
+        ),
+        "galadriel" => call_provider!(
+            rig::providers::galadriel::Client,
+            "Galadriel",
+            require_api_key()?.to_string()
+        ),
+        "gemini" => call_provider!(
+            rig::providers::gemini::Client,
+            "Gemini",
+            require_api_key()?.to_string()
+        ),
+        "groq" => call_provider!(
+            rig::providers::groq::Client,
+            "Groq",
+            require_api_key()?.to_string()
+        ),
+        "huggingface" => call_provider!(
+            rig::providers::huggingface::Client,
+            "HuggingFace",
+            require_api_key()?.to_string()
+        ),
+        "hyperbolic" => call_provider!(
+            rig::providers::hyperbolic::Client,
+            "Hyperbolic",
+            require_api_key()?.to_string()
+        ),
+        "mira" => call_provider!(
+            rig::providers::mira::Client,
+            "Mira",
+            require_api_key()?.to_string()
+        ),
+        "mistral" => call_provider!(
+            rig::providers::mistral::Client,
+            "Mistral",
+            require_api_key()?.to_string()
+        ),
+        "moonshot" => call_provider!(
+            rig::providers::moonshot::Client,
+            "Moonshot",
+            require_api_key()?.to_string()
+        ),
+        "openrouter" => call_provider!(
+            rig::providers::openrouter::Client,
+            "OpenRouter",
+            require_api_key()?.to_string()
+        ),
+        "perplexity" => call_provider!(
+            rig::providers::perplexity::Client,
+            "Perplexity",
+            require_api_key()?.to_string()
+        ),
+        "together" => call_provider!(
+            rig::providers::together::Client,
+            "Together",
+            require_api_key()?.to_string()
+        ),
+        "xai" => call_provider!(
+            rig::providers::xai::Client,
+            "xAI",
+            require_api_key()?.to_string()
+        ),
+        // OpenAI: uses CompletionsClient for chat completions endpoint
+        "openai" => call_provider!(
+            rig::providers::openai::CompletionsClient,
+            "OpenAI",
+            require_api_key()?.to_string()
+        ),
+        // Azure: typed auth + required api_endpoint
+        "azure" => {
+            let api_key = require_api_key()?;
+            let endpoint = provider_config
+                .api_endpoint
+                .as_deref()
+                .context("Azure provider requires api_endpoint")?;
+            let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(api_key.to_string());
+            let client = rig::providers::azure::Client::builder()
+                .api_key(auth)
+                .azure_endpoint(endpoint.to_string())
+                .build()
+                .context("Failed to build Azure client")?;
+            let mut ab = client.agent(model_name);
             if let Some(ref sys) = effective_system {
-                agent_builder = agent_builder.preamble(sys);
+                ab = ab.preamble(sys);
             }
-            agent_builder = agent_builder.max_tokens(u64::from(max_tokens));
+            ab = ab.max_tokens(u64::from(max_tokens));
             if let Some(temp) = temperature {
-                agent_builder = agent_builder.temperature(f64::from(temp));
+                ab = ab.temperature(f64::from(temp));
             }
-            let agent = agent_builder.build();
-            agent
+            ab.build()
                 .prompt(prompt)
                 .await
-                .context("OpenAI API call failed")?
+                .context("Azure API call failed")?
         }
+        // Local providers: no API key needed
+        "ollama" => call_provider!(
+            rig::providers::ollama::Client,
+            "Ollama",
+            rig::client::Nothing
+        ),
+        "llamafile" => call_provider!(
+            rig::providers::llamafile::Client,
+            "Llamafile",
+            rig::client::Nothing
+        ),
         other => bail!("Unknown agent provider type: {}", other),
     };
 
@@ -926,6 +1027,52 @@ mod tests {
         assert!(
             msg.contains("api_key"),
             "Expected error about api_key, got: {}",
+            msg
+        );
+    }
+
+    /// Verify ollama does NOT require an api_key.
+    #[tokio::test]
+    async fn test_call_llm_ollama_no_api_key_required() {
+        let provider_config = AgentProviderConfig {
+            provider_type: "ollama".to_string(),
+            api_key: None,
+            api_endpoint: Some("http://127.0.0.1:1".to_string()),
+            model: "llama3".to_string(),
+            max_tokens: 4096,
+            temperature: None,
+            max_retries: 3,
+        };
+        let action = make_action(None);
+        let result = call_llm(&provider_config, "llama3", "hello", None, &action).await;
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            !msg.contains("requires api_key"),
+            "ollama should not require api_key, got: {}",
+            msg
+        );
+    }
+
+    /// Verify azure requires api_endpoint.
+    #[tokio::test]
+    async fn test_call_llm_azure_requires_endpoint() {
+        let provider_config = AgentProviderConfig {
+            provider_type: "azure".to_string(),
+            api_key: Some("test-key".to_string()),
+            api_endpoint: None,
+            model: "gpt-4o".to_string(),
+            max_tokens: 4096,
+            temperature: None,
+            max_retries: 3,
+        };
+        let action = make_action(None);
+        let result = call_llm(&provider_config, "gpt-4o", "hello", None, &action).await;
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("requires api_endpoint"),
+            "Expected 'requires api_endpoint', got: {}",
             msg
         );
     }

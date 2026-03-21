@@ -3,7 +3,7 @@ title: Agent Actions
 description: Call LLMs as workflow steps with structured output
 ---
 
-Agent actions let you call LLMs (Anthropic, OpenAI) as first-class workflow steps. Generate text, classify content, extract data, or feed LLM responses directly into downstream steps.
+Agent actions let you call LLMs as first-class workflow steps. Supports 19 LLM providers including Anthropic, OpenAI, Gemini, Groq, and more. Generate text, classify content, extract data, or feed LLM responses directly into downstream steps.
 
 ## Quick Start
 
@@ -15,16 +15,16 @@ In your `server-config.yaml`:
 agents:
   providers:
     - id: anthropic-main
-      provider_type: anthropic
-      api_key: "{{ env.ANTHROPIC_API_KEY }}"
+      type: anthropic
+      api_key: "${ANTHROPIC_API_KEY}"
       model: claude-opus-4-1-20250805
       max_tokens: 2048
       temperature: 0.7
       max_retries: 2
 
     - id: openai-gpt4
-      provider_type: openai
-      api_key: "{{ env.OPENAI_API_KEY }}"
+      type: openai
+      api_key: "${OPENAI_API_KEY}"
       model: gpt-4o
       max_tokens: 1024
 ```
@@ -98,7 +98,33 @@ tasks:
 
 Agent actions dispatch to a configured provider. The server loads providers from `server-config.yaml`.
 
-### Provider Types
+### Supported Providers
+
+The following 19 providers are supported:
+
+| Provider | Type | Description | Requires API Key |
+|----------|------|-------------|------------------|
+| Anthropic | `anthropic` | Claude models | Yes |
+| Azure | `azure` | Azure OpenAI Service | Yes (requires `api_endpoint`) |
+| Cohere | `cohere` | Cohere models | Yes |
+| DeepSeek | `deepseek` | DeepSeek models | Yes |
+| Galadriel | `galadriel` | Galadriel models | Yes |
+| Gemini | `gemini` | Google Gemini | Yes |
+| Groq | `groq` | Groq models | Yes |
+| Hugging Face | `huggingface` | Hugging Face models | Yes |
+| Hyperbolic | `hyperbolic` | Hyperbolic AI | Yes |
+| Llamafile | `llamafile` | Local Llamafile server | No |
+| Mira | `mira` | Mira AI | Yes |
+| Mistral | `mistral` | Mistral models | Yes |
+| Moonshot | `moonshot` | Moonshot AI | Yes |
+| Ollama | `ollama` | Local Ollama server | No |
+| OpenAI | `openai` | GPT models | Yes |
+| OpenRouter | `openrouter` | OpenRouter API | Yes |
+| Perplexity | `perplexity` | Perplexity AI | Yes |
+| Together | `together` | Together AI | Yes |
+| xAI | `xai` | xAI Grok | Yes |
+
+### Provider Examples
 
 **Anthropic:**
 
@@ -106,35 +132,70 @@ Agent actions dispatch to a configured provider. The server loads providers from
 agents:
   providers:
     - id: anthropic-main
-      provider_type: anthropic
-      api_key: "{{ env.ANTHROPIC_API_KEY }}"
+      type: anthropic
+      api_key: "${ANTHROPIC_API_KEY}"
       model: claude-opus-4-1-20250805
       max_tokens: 2048
       temperature: 0.7
       max_retries: 2
 ```
 
-**OpenAI:**
+**Gemini:**
 
 ```yaml
 agents:
   providers:
-    - id: openai-gpt4
-      provider_type: openai
-      api_key: "{{ env.OPENAI_API_KEY }}"
-      model: gpt-4o
+    - id: gemini-pro
+      type: gemini
+      api_key: "${GEMINI_API_KEY}"
+      model: gemini-2.0-flash
       max_tokens: 1024
-      temperature: 0.5
 ```
 
-**Custom Endpoint (OpenAI-compatible):**
+**Groq:**
 
 ```yaml
 agents:
   providers:
-    - id: local-llm
-      provider_type: openai
-      api_key: "{{ env.CUSTOM_API_KEY }}"
+    - id: groq-fast
+      type: groq
+      api_key: "${GROQ_API_KEY}"
+      model: llama-3.3-70b-versatile
+      max_tokens: 2048
+```
+
+**Ollama (local, no API key required):**
+
+```yaml
+agents:
+  providers:
+    - id: ollama-local
+      type: ollama
+      api_endpoint: "http://localhost:11434"
+      model: llama2
+```
+
+**Azure OpenAI:**
+
+```yaml
+agents:
+  providers:
+    - id: azure-gpt4
+      type: azure
+      api_key: "${AZURE_API_KEY}"
+      api_endpoint: "https://myresource.openai.azure.com"
+      model: gpt-4-deployment-name
+      max_tokens: 2048
+```
+
+**OpenAI-compatible endpoint:**
+
+```yaml
+agents:
+  providers:
+    - id: vllm-local
+      type: openai
+      api_key: "${CUSTOM_API_KEY}"
       api_endpoint: "http://localhost:8000/v1"
       model: local-model
 ```
@@ -144,10 +205,10 @@ agents:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `id` | Yes | Unique provider identifier used in actions |
-| `provider_type` | Yes | `anthropic` or `openai` |
-| `api_key` | Yes | API key (supports env var templating with `{{ env.VAR_NAME }}`) |
-| `model` | Yes | Model identifier (e.g., `claude-opus-4-1-20250805`, `gpt-4o`) |
-| `api_endpoint` | No | Custom endpoint URL (OpenAI-compatible only) |
+| `type` | Yes | Provider type (see table above) |
+| `api_key` | Conditional | API key for the provider. Not required for `ollama` and `llamafile`. Supports env var templating with `${VAR_NAME}` |
+| `api_endpoint` | Conditional | Custom endpoint URL. Required for `azure`; optional for OpenAI-compatible servers |
+| `model` | Yes | Model identifier (e.g., `claude-opus-4-1-20250805`, `gpt-4o`, `gemini-2.0-flash`) |
 | `max_tokens` | No | Default max completion tokens (can be overridden per action) |
 | `temperature` | No | Default sampling temperature (0–2) |
 | `max_retries` | No | Number of retries on transient errors (default 2) |

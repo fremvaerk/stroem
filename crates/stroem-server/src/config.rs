@@ -322,7 +322,8 @@ pub struct AgentsConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProviderConfig {
-    /// Provider type: "anthropic" or "openai"
+    /// Provider type (e.g. "anthropic", "openai", "gemini", "ollama")
+    #[serde(rename = "type", alias = "provider_type")]
     pub provider_type: String,
     /// API key (can use ${ENV_VAR} syntax)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,7 +347,7 @@ pub struct AgentProviderConfig {
 impl std::fmt::Debug for AgentProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentProviderConfig")
-            .field("provider_type", &self.provider_type)
+            .field("type", &self.provider_type)
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .field("api_endpoint", &self.api_endpoint)
             .field("model", &self.model)
@@ -400,9 +401,15 @@ impl ServerConfig {
         if let Some(ref agents) = self.agents {
             for (name, provider) in &agents.providers {
                 match provider.provider_type.as_str() {
-                    "anthropic" | "openai" => {}
+                    "anthropic" | "azure" | "cohere" | "deepseek" | "galadriel" | "gemini"
+                    | "groq" | "huggingface" | "hyperbolic" | "llamafile" | "mira" | "mistral"
+                    | "moonshot" | "ollama" | "openai" | "openrouter" | "perplexity"
+                    | "together" | "xai" => {}
                     other => anyhow::bail!(
-                        "Agent provider '{}' has unknown provider_type: '{}' (expected: anthropic, openai)",
+                        "Agent provider '{}' has unknown type: '{}' (supported: anthropic, \
+                         azure, cohere, deepseek, galadriel, gemini, groq, huggingface, \
+                         hyperbolic, llamafile, mira, mistral, moonshot, ollama, openai, \
+                         openrouter, perplexity, together, xai)",
                         name,
                         other
                     ),

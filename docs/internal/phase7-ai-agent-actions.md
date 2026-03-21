@@ -24,13 +24,13 @@ Strom orchestrates shell, Docker, Kubernetes, and sub-task actions. Phase 7 adds
 agents:
   providers:
     anthropic:
-      provider_type: anthropic
+      type: anthropic
       api_key: "${ANTHROPIC_API_KEY}"
       model: claude-sonnet-4-20250514
       max_tokens: 4096
       max_retries: 3
     openai:
-      provider_type: openai
+      type: openai
       api_key: "${OPENAI_API_KEY}"
       model: gpt-4o
       api_endpoint: https://api.openai.com/v1  # also works for Ollama, vLLM, etc.
@@ -166,7 +166,7 @@ pub struct AgentsConfig {
     pub providers: HashMap<String, AgentProviderConfig>,
 }
 pub struct AgentProviderConfig {
-    pub provider_type: String,     // "anthropic" or "openai"
+    pub type: String,     // "anthropic", "openai", "gemini", "groq", etc. (19 total)
     pub api_key: Option<String>,
     pub api_endpoint: Option<String>,
     pub model: String,
@@ -223,7 +223,7 @@ agent/
 **Provider creation from config:**
 ```rust
 fn create_rig_client(config: &AgentProviderConfig) -> Result<Box<dyn CompletionModel>> {
-    match config.provider_type.as_str() {
+    match config.type.as_str() {
         "anthropic" => {
             let client = rig::providers::anthropic::ClientBuilder::new(&api_key)
                 .base_url(config.api_endpoint.as_deref().unwrap_or("https://api.anthropic.com"))
@@ -237,6 +237,15 @@ fn create_rig_client(config: &AgentProviderConfig) -> Result<Box<dyn CompletionM
             }
             Ok(Box::new(builder.completion_model(&config.model)))
         }
+        "gemini" => {
+            let client = rig::providers::gemini::ClientBuilder::new(&api_key).build();
+            Ok(Box::new(client.completion_model(&config.model)))
+        }
+        "groq" => {
+            let client = rig::providers::groq::ClientBuilder::new(&api_key).build();
+            Ok(Box::new(client.completion_model(&config.model)))
+        }
+        // ... support all 19 providers via rig-core
         other => bail!("Unknown provider type: {}", other),
     }
 }
