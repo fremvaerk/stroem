@@ -36,7 +36,7 @@ Last updated: 2026-03-13.
 - [ ] Single-server bottleneck: scheduler, recovery, log broadcast in-process — no leader election
 - [ ] No metrics/Prometheus endpoint — capacity planning blind
 - [x] No proper health check — `GET /healthz` with DB ping + scheduler/recovery liveness via `BackgroundTasks` atomic flags
-- [ ] Log retention: local JSONL grows unbounded; no cleanup after S3 upload
+- [x] Log retention: local JSONL grows unbounded; no cleanup after S3 upload — `retention_cleanup` in `recovery.rs` deletes local logs and S3 archives for terminal jobs older than `log_retention_days`
 - [ ] No API versioning (`/api/` with no version prefix)
 - [ ] DB transactions only for job+steps creation; other paths still have TOCTOU races
 - [ ] `AppState` is a God Object — no compile-time capability enforcement
@@ -55,7 +55,7 @@ Last updated: 2026-03-13.
 
 - [x] Workspace load state: add `is_healthy()` helper on `WorkspaceEntry` to eliminate repeated 6-line guard pattern in 5 accessors
 - [x] Extract shared `scan_and_merge_yaml_files()` from `folder.rs` and `library.rs` — deterministic sorted merge order
-- [ ] `useAsyncData`: keep as-is — 3 call sites, acceptable abstraction tax, stale-response guard is non-trivial
+- [x] `useAsyncData`: keep as-is — 3 call sites, acceptable abstraction tax, stale-response guard is non-trivial
 - [x] Merge duplicate API tests: consolidated into `ui/src/lib/__tests__/api.test.ts`, deleted duplicate
 - [x] Delete unused UI components: removed `dropdown-menu`, `select`, `collapsible` (367 lines); kept `sheet` (used by sidebar) and `command` (used by combobox-field)
 - [ ] Trim sidebar.tsx: 772 lines, 24 exports, only 13 used (46% unused) — low priority
@@ -371,7 +371,7 @@ Last updated: 2026-03-13.
 - [x] Frontend: static indicator on suspended badge (no pulse) — `status-badge.tsx`
 - [x] Frontend: "Waiting since" shown on suspended steps — `approval-card.tsx`
 - [x] Warning log when approval message template is missing — `job_creator.rs`
-- [ ] Design doc migration number stale (says 023, actual is 024)
+- [x] Design doc migration number stale (says 023, actual is 024) — fixed in phase5d-approval-gates.md
 
 #### Tests
 - [x] Integration: approval happy path (suspend → approve → downstream runs)
