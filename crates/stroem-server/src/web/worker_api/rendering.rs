@@ -145,6 +145,7 @@ pub fn render_action_spec(
     action_spec: Option<&serde_json::Value>,
     rendered_input: Option<&serde_json::Value>,
     secrets: &serde_json::Value,
+    completed_steps: &[(String, Option<serde_json::Value>)],
 ) -> Result<Option<serde_json::Value>> {
     let original_spec = match action_spec {
         Some(s) => s,
@@ -156,12 +157,20 @@ pub fn render_action_spec(
         None => return Ok(Some(original_spec.clone())),
     };
 
-    // Build context with rendered input + secrets
+    // Build context with rendered input + secrets + completed step outputs
     let mut spec_ctx = serde_json::Map::new();
     if let Some(input_val) = rendered_input {
         spec_ctx.insert("input".to_string(), input_val.clone());
     }
     spec_ctx.insert("secret".to_string(), secrets.clone());
+    for (step_name, output) in completed_steps {
+        let mut step_ctx = serde_json::Map::new();
+        if let Some(output) = output {
+            step_ctx.insert("output".to_string(), output.clone());
+        }
+        let safe_name = step_name.replace('-', "_");
+        spec_ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
+    }
     let spec_context = serde_json::Value::Object(spec_ctx);
 
     // Render env values if present
@@ -243,6 +252,7 @@ pub fn render_image(
     image: Option<&str>,
     rendered_input: Option<&serde_json::Value>,
     secrets: &serde_json::Value,
+    completed_steps: &[(String, Option<serde_json::Value>)],
 ) -> Result<Option<String>> {
     let image_str = match image {
         Some(s) => s,
@@ -257,6 +267,14 @@ pub fn render_image(
         spec_ctx.insert("input".to_string(), input_val.clone());
     }
     spec_ctx.insert("secret".to_string(), secrets.clone());
+    for (step_name, output) in completed_steps {
+        let mut step_ctx = serde_json::Map::new();
+        if let Some(output) = output {
+            step_ctx.insert("output".to_string(), output.clone());
+        }
+        let safe_name = step_name.replace('-', "_");
+        spec_ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
+    }
     let spec_context = serde_json::Value::Object(spec_ctx);
 
     let img_opt = Some(image_str.to_string());
@@ -642,7 +660,7 @@ mod tests {
     #[test]
     fn test_render_action_spec_none_returns_none() {
         let secrets = json!({});
-        let result = render_action_spec(None, None, &secrets).unwrap();
+        let result = render_action_spec(None, None, &secrets, &[]).unwrap();
         assert!(result.is_none());
     }
 
@@ -650,7 +668,7 @@ mod tests {
     fn test_render_action_spec_non_object_returns_unchanged() {
         let spec = json!("just a string");
         let secrets = json!({});
-        let result = render_action_spec(Some(&spec), None, &secrets).unwrap();
+        let result = render_action_spec(Some(&spec), None, &secrets, &[]).unwrap();
         assert_eq!(result, Some(json!("just a string")));
     }
 
@@ -660,7 +678,7 @@ mod tests {
         let rendered_input = json!({"key": "world"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
             .unwrap()
             .unwrap();
 
@@ -673,7 +691,7 @@ mod tests {
         let rendered_input = json!({"message": "hello"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
             .unwrap()
             .unwrap();
 
@@ -686,7 +704,7 @@ mod tests {
         let rendered_input = json!({"greeting": "hi"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
             .unwrap()
             .unwrap();
 
@@ -705,7 +723,7 @@ mod tests {
         let rendered_input = json!({"sa_name": "my-service-account"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets)
+        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
             .unwrap()
             .unwrap();
 
@@ -722,14 +740,15 @@ mod tests {
     #[test]
     fn test_render_image_none_returns_none() {
         let secrets = json!({});
-        let result = render_image(None, None, &secrets).unwrap();
+        let result = render_image(None, None, &secrets, &[]).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_render_image_no_template_syntax_returns_unchanged() {
         let secrets = json!({});
-        let result = render_image(Some("my-registry/my-image:latest"), None, &secrets).unwrap();
+        let result =
+            render_image(Some("my-registry/my-image:latest"), None, &secrets, &[]).unwrap();
         assert_eq!(result, Some("my-registry/my-image:latest".to_string()));
     }
 
@@ -741,6 +760,7 @@ mod tests {
             Some("my-registry/app:{{ input.tag }}"),
             Some(&rendered_input),
             &secrets,
+            &[],
         )
         .unwrap();
         assert_eq!(result, Some("my-registry/app:v1.2.3".to_string()));
@@ -754,9 +774,63 @@ mod tests {
             Some("{{ secret.registry }}/app:latest"),
             Some(&rendered_input),
             &secrets,
+            &[],
         )
         .unwrap();
         assert_eq!(result, Some("private.registry.io/app:latest".to_string()));
+    }
+
+    #[test]
+    fn test_render_action_spec_script_references_upstream_step_output() {
+        let spec = json!({
+            "script": "echo \"Category: {{ classify.output.category }}\"\necho \"Confidence: {{ classify.output.confidence }}\""
+        });
+        let rendered_input = json!({});
+        let secrets = json!({});
+        let completed_steps = vec![(
+            "classify".to_string(),
+            Some(json!({"category": "bug", "confidence": 0.95})),
+        )];
+
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&rendered_input),
+            &secrets,
+            &completed_steps,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            result["script"],
+            "echo \"Category: bug\"\necho \"Confidence: 0.95\""
+        );
+    }
+
+    #[test]
+    fn test_render_action_spec_env_references_upstream_step_output() {
+        let spec = json!({"env": {"CATEGORY": "{{ classify.output.category }}"}});
+        let secrets = json!({});
+        let completed_steps = vec![("classify".to_string(), Some(json!({"category": "feature"})))];
+
+        let result = render_action_spec(Some(&spec), None, &secrets, &completed_steps)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result["env"]["CATEGORY"], "feature");
+    }
+
+    #[test]
+    fn test_render_action_spec_sanitizes_step_name_hyphens() {
+        let spec = json!({"script": "echo {{ my_step.output.value }}"});
+        let secrets = json!({});
+        let completed_steps = vec![("my-step".to_string(), Some(json!({"value": "hello"})))];
+
+        let result = render_action_spec(Some(&spec), None, &secrets, &completed_steps)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result["script"], "echo hello");
     }
 
     // -------------------------------------------------------------------------

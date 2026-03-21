@@ -291,6 +291,7 @@ pub async fn claim_job(
         step.action_spec.as_ref(),
         rendered_input.as_ref(),
         &secrets_value,
+        &completed_steps,
     ) {
         Ok(spec) => spec,
         Err(e) => {
@@ -304,6 +305,7 @@ pub async fn claim_job(
         step.action_image.as_deref(),
         rendered_input.as_ref(),
         &secrets_value,
+        &completed_steps,
     ) {
         Ok(img) => img,
         Err(e) => {
