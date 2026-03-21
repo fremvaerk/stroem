@@ -5,7 +5,7 @@ pub mod repos;
 pub use pool::{create_pool, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
 pub use repos::job::{JobRepo, JobRow, RetentionJobInfo};
-pub use repos::job_step::{JobStepRepo, JobStepRow, NewJobStep, StaleStepInfo};
+pub use repos::job_step::{JobStepRepo, JobStepRow, NewJobStep, StaleStepInfo, WorkerStepRow};
 pub use repos::refresh_token::{RefreshTokenRepo, RefreshTokenRow};
 pub use repos::user::{UserRepo, UserRow};
 pub use repos::user_auth_link::{UserAuthLinkRepo, UserAuthLinkRow};

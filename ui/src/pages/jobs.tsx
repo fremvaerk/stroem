@@ -15,7 +15,6 @@ import { StatusBadge } from "@/components/status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
-import { useWorkerNames } from "@/hooks/use-worker-names";
 import { useAsyncData } from "@/hooks/use-async-data";
 import { listJobs } from "@/lib/api";
 import { formatDuration, formatTime } from "@/lib/formatting";
@@ -26,7 +25,6 @@ const STATUSES = ["all", "pending", "running", "completed", "failed", "cancelled
 
 export function JobsPage() {
   useTitle("Jobs");
-  const workerNames = useWorkerNames();
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
@@ -85,7 +83,6 @@ export function JobsPage() {
                   <TableHead>Task</TableHead>
                   <TableHead>Workspace</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Worker</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>Created</TableHead>
                   <TableHead className="text-right">Duration</TableHead>
@@ -109,16 +106,6 @@ export function JobsPage() {
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={job.status} />
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {job.worker_id ? (
-                        <Link
-                          to={`/workers/${job.worker_id}`}
-                          className="hover:underline"
-                        >
-                          {workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)}
-                        </Link>
-                      ) : "-"}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {job.source_id ? `${job.source_type} (${job.source_id})` : job.source_type}

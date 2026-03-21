@@ -11236,10 +11236,10 @@ async fn test_no_auth_configured_all_routes_open() -> Result<()> {
     Ok(())
 }
 
-// ─── Test: worker_id exposed in job list and detail API ─────────────
+// ─── Test: worker_id in job detail API (removed from list) ──────────
 
 #[tokio::test]
-async fn test_worker_id_in_job_list_and_detail() -> Result<()> {
+async fn test_worker_id_in_job_detail() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup().await?;
 
     // Create a job
@@ -11255,7 +11255,7 @@ async fn test_worker_id_in_job_list_and_detail() -> Result<()> {
     let body = body_json(response).await;
     let job_id = body["job_id"].as_str().unwrap().to_string();
 
-    // Job list should include worker_id field (null before any worker claims)
+    // Job list should NOT include worker_id field
     let response = router.clone().oneshot(api_get("/api/jobs")).await?;
     assert_eq!(response.status(), 200);
     let body = body_json(response).await;
@@ -11263,15 +11263,11 @@ async fn test_worker_id_in_job_list_and_detail() -> Result<()> {
     assert!(!jobs.is_empty());
     let job = &jobs[0];
     assert!(
-        job.get("worker_id").is_some(),
-        "worker_id field must be present in job list"
-    );
-    assert!(
-        job["worker_id"].is_null(),
-        "worker_id should be null before worker claims"
+        job.get("worker_id").is_none(),
+        "worker_id field must not be present in job list"
     );
 
-    // Job detail should include worker_id field
+    // Job detail should still include worker_id field
     let response = router
         .oneshot(api_get(&format!("/api/jobs/{}", job_id)))
         .await?;
@@ -11353,19 +11349,21 @@ async fn test_get_worker_success() -> Result<()> {
         body.get("last_heartbeat").is_some(),
         "last_heartbeat field must be present"
     );
-    assert!(body["jobs"].is_array());
-    assert_eq!(body["jobs"].as_array().unwrap().len(), 0);
+    assert!(body["steps"].is_object());
+    assert!(body["steps"]["items"].is_array());
+    assert_eq!(body["steps"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(body["steps"]["total"], 0);
 
     Ok(())
 }
 
 #[tokio::test]
-async fn test_get_worker_with_jobs() -> Result<()> {
+async fn test_get_worker_with_steps() -> Result<()> {
     let (router, pool, _tmp, _container) = setup().await?;
 
     let worker_id = register_test_worker(&pool).await;
 
-    // Create a job and assign the worker to it
+    // Create a job and a step claimed by the worker
     let job_id = JobRepo::create(
         &pool,
         "default",
@@ -11379,20 +11377,45 @@ async fn test_get_worker_with_jobs() -> Result<()> {
     .await?;
     JobRepo::mark_running(&pool, job_id, worker_id).await?;
 
+    // Create a step and assign it to the worker
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "say-hello".to_string(),
+        action_name: "say-hello".to_string(),
+        action_type: "script".to_string(),
+        action_image: None,
+        action_spec: None,
+        input: Some(json!({"name": "Test"})),
+        status: "ready".to_string(),
+        required_tags: vec!["script".to_string()],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+    JobStepRepo::mark_running(&pool, job_id, "say-hello", worker_id).await?;
+
     let response = router
         .oneshot(api_get(&format!("/api/workers/{}", worker_id)))
         .await?;
     assert_eq!(response.status(), 200);
 
     let body = body_json(response).await;
-    let jobs = body["jobs"].as_array().unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0]["job_id"].as_str().unwrap(), job_id.to_string());
-    assert_eq!(jobs[0]["task_name"].as_str().unwrap(), "hello-world");
-    assert_eq!(
-        jobs[0]["worker_id"].as_str().unwrap(),
-        worker_id.to_string()
-    );
+    let steps_resp = &body["steps"];
+    assert!(steps_resp["items"].is_array());
+    let items = steps_resp["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["job_id"].as_str().unwrap(), job_id.to_string());
+    assert_eq!(items[0]["task_name"].as_str().unwrap(), "hello-world");
+    assert_eq!(items[0]["step_name"].as_str().unwrap(), "say-hello");
+    assert_eq!(items[0]["workspace"].as_str().unwrap(), "default");
+    assert_eq!(items[0]["action_type"].as_str().unwrap(), "script");
+    assert_eq!(steps_resp["total"], 1);
 
     Ok(())
 }

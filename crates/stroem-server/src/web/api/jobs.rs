@@ -169,7 +169,6 @@ pub async fn list_jobs(
                 "source_type": job.source_type,
                 "source_id": job.source_id,
                 "revision": job.revision,
-                "worker_id": job.worker_id,
                 "created_at": job.created_at,
                 "started_at": job.started_at,
                 "completed_at": job.completed_at,

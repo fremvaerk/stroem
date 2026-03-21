@@ -12,7 +12,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use stroem_db::{JobRepo, WorkerRepo};
+use stroem_db::{JobStepRepo, WorkerRepo};
 
 #[derive(Debug, Deserialize)]
 pub struct ListWorkersQuery {
@@ -53,7 +53,7 @@ pub async fn list_workers(
     Ok(Json(json!({ "items": workers_json, "total": total })))
 }
 
-/// GET /api/workers/:id - Get worker detail with recent jobs
+/// GET /api/workers/:id - Get worker detail with recent steps
 #[tracing::instrument(skip(state))]
 pub async fn get_worker(
     State(state): State<Arc<AppState>>,
@@ -67,17 +67,20 @@ pub async fn get_worker(
         .context("get worker")?
         .ok_or_else(|| AppError::not_found("Worker"))?;
 
-    let jobs = JobRepo::list_by_worker(&state.pool, worker_id, 50, 0)
+    let steps = JobStepRepo::list_by_worker(&state.pool, worker_id, 50, 0)
         .await
-        .context("list jobs for worker")?;
+        .context("list steps for worker")?;
+    let total = JobStepRepo::count_by_worker(&state.pool, worker_id)
+        .await
+        .context("count steps for worker")?;
 
-    // ACL filter: remove jobs for tasks the user can't see
-    let jobs: Vec<_> = if let Some(ref auth) = auth_user {
+    // ACL filter: remove steps for tasks the user can't see
+    let steps: Vec<_> = if let Some(ref auth) = auth_user {
         if state.acl.is_configured() {
             let user_id = match auth.user_id() {
                 Ok(id) => id,
                 Err(_) => {
-                    // Couldn't parse user_id — return worker info with no jobs for safety
+                    // Couldn't parse user_id — return worker info with no steps for safety
                     return Ok(Json(json!({
                         "worker_id": worker.worker_id,
                         "name": worker.name,
@@ -86,25 +89,26 @@ pub async fn get_worker(
                         "version": worker.version,
                         "last_heartbeat": worker.last_heartbeat,
                         "registered_at": worker.registered_at,
-                        "jobs": [],
+                        "steps": { "items": [], "total": 0i64 },
                     })));
                 }
             };
             match load_user_acl_context(&state.pool, user_id, auth.is_admin()).await {
-                Ok((true, _)) => jobs, // admin sees all
+                Ok((true, _)) => steps, // admin sees all
                 Ok((false, groups)) => {
                     let all_configs = state.workspaces.get_all_configs().await;
-                    jobs.into_iter()
-                        .filter(|j| {
+                    steps
+                        .into_iter()
+                        .filter(|s| {
                             let folder = all_configs
                                 .iter()
-                                .find(|(ws_name, _)| ws_name == &j.workspace)
+                                .find(|(ws_name, _)| ws_name == &s.workspace)
                                 .and_then(|(_, ws)| {
-                                    ws.tasks.get(&j.task_name).and_then(|t| t.folder.clone())
+                                    ws.tasks.get(&s.task_name).and_then(|t| t.folder.clone())
                                 });
-                            let task_path = make_task_path(folder.as_deref(), &j.task_name);
+                            let task_path = make_task_path(folder.as_deref(), &s.task_name);
                             let perm = state.acl.evaluate(
-                                &j.workspace,
+                                &s.workspace,
                                 &task_path,
                                 &auth.claims.email,
                                 &groups,
@@ -114,30 +118,29 @@ pub async fn get_worker(
                         })
                         .collect()
                 }
-                Err(_) => vec![], // error loading ACL context, show no jobs for safety
+                Err(_) => vec![], // error loading ACL context, show no steps for safety
             }
         } else {
-            jobs
+            steps
         }
     } else {
-        jobs
+        steps
     };
 
-    let jobs_json: Vec<serde_json::Value> = jobs
+    let steps_json: Vec<serde_json::Value> = steps
         .iter()
-        .map(|j| {
+        .map(|s| {
             json!({
-                "job_id": j.job_id,
-                "workspace": j.workspace,
-                "task_name": j.task_name,
-                "mode": j.mode,
-                "status": j.status,
-                "source_type": j.source_type,
-                "source_id": j.source_id,
-                "worker_id": j.worker_id,
-                "created_at": j.created_at,
-                "started_at": j.started_at,
-                "completed_at": j.completed_at,
+                "job_id": s.job_id,
+                "workspace": s.workspace,
+                "task_name": s.task_name,
+                "job_status": s.job_status,
+                "step_name": s.step_name,
+                "action_type": s.action_type,
+                "status": s.status,
+                "started_at": s.started_at,
+                "completed_at": s.completed_at,
+                "error_message": s.error_message,
             })
         })
         .collect();
@@ -150,6 +153,6 @@ pub async fn get_worker(
         "version": worker.version,
         "last_heartbeat": worker.last_heartbeat,
         "registered_at": worker.registered_at,
-        "jobs": jobs_json,
+        "steps": { "items": steps_json, "total": total },
     })))
 }

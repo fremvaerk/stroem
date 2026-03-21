@@ -146,16 +146,6 @@ export function JobDetailPage() {
         items={[
           { label: "Workspace", value: job.workspace },
           {
-            label: "Worker",
-            value: job.worker_id ? (
-              <Link to={`/workers/${job.worker_id}`} className="hover:underline">
-                {workerNames.get(job.worker_id) ?? job.worker_id.substring(0, 8)}
-              </Link>
-            ) : (
-              "-"
-            ),
-          },
-          {
             label: "Source",
             value: job.source_id
               ? `${job.source_type} (${job.source_id})`

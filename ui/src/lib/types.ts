@@ -74,7 +74,6 @@ export interface JobListItem {
   source_type: string;
   source_id: string | null;
   revision: string | null;
-  worker_id: string | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -122,6 +121,11 @@ export interface JobDetail {
   steps: JobStep[];
 }
 
+export interface PaginatedResponse<T> {
+  items: T[];
+  total: number;
+}
+
 export interface WorkerListItem {
   worker_id: string;
   name: string;
@@ -132,8 +136,21 @@ export interface WorkerListItem {
   registered_at: string;
 }
 
+export interface WorkerStepItem {
+  job_id: string;
+  workspace: string;
+  task_name: string;
+  job_status: string;
+  step_name: string;
+  action_type: string;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_message: string | null;
+}
+
 export interface WorkerDetail extends WorkerListItem {
-  jobs: JobListItem[];
+  steps: PaginatedResponse<WorkerStepItem>;
 }
 
 export interface UserListItem {

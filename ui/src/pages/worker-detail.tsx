@@ -19,7 +19,7 @@ import { LoadingSpinner } from "@/components/loading-spinner";
 import { useTitle } from "@/hooks/use-title";
 import { getWorker } from "@/lib/api";
 import { formatRelativeTime, formatTime, formatDuration } from "@/lib/formatting";
-import type { WorkerDetail } from "@/lib/types";
+import type { WorkerDetail, WorkerStepItem } from "@/lib/types";
 
 export function WorkerDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -133,33 +133,37 @@ export function WorkerDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Recent Jobs</CardTitle>
+          <CardTitle className="text-base">Recent Steps</CardTitle>
         </CardHeader>
         <CardContent>
-          {worker.jobs.length === 0 ? (
+          {worker.steps.items.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No jobs executed by this worker.
+              No steps executed by this worker.
             </p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>Step</TableHead>
                   <TableHead>Task</TableHead>
                   <TableHead>Workspace</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>Started</TableHead>
                   <TableHead className="text-right">Duration</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {worker.jobs.map((job) => (
-                  <TableRow key={job.job_id}>
+                {worker.steps.items.map((step: WorkerStepItem) => (
+                  <TableRow key={`${step.job_id}/${step.step_name}`}>
+                    <TableCell className="font-medium">
+                      {step.step_name}
+                    </TableCell>
                     <TableCell>
                       <Link
-                        to={`/jobs/${job.job_id}`}
-                        className="font-medium hover:underline"
+                        to={`/jobs/${step.job_id}`}
+                        className="hover:underline"
                       >
-                        {job.task_name}
+                        {step.task_name}
                       </Link>
                     </TableCell>
                     <TableCell>
@@ -167,17 +171,17 @@ export function WorkerDetailPage() {
                         variant="secondary"
                         className="font-mono text-xs"
                       >
-                        {job.workspace}
+                        {step.workspace}
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <StatusBadge status={job.status} />
+                      <StatusBadge status={step.status} />
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
-                      {formatTime(job.created_at)}
+                      {formatTime(step.started_at)}
                     </TableCell>
                     <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                      {formatDuration(job.started_at, job.completed_at)}
+                      {formatDuration(step.started_at, step.completed_at)}
                     </TableCell>
                   </TableRow>
                 ))}

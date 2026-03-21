@@ -93,6 +93,21 @@ pub struct StaleStepInfo {
     pub worker_id: Option<Uuid>,
 }
 
+/// Step with joined job metadata, for worker detail views.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WorkerStepRow {
+    pub job_id: Uuid,
+    pub step_name: String,
+    pub action_type: String,
+    pub status: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+    pub workspace: String,
+    pub task_name: String,
+    pub job_status: String,
+}
+
 /// Repository for job step operations
 pub struct JobStepRepo;
 
@@ -900,6 +915,45 @@ impl JobStepRepo {
         .await
         .context("get_timed_out_suspended_steps")?;
         Ok(rows)
+    }
+
+    /// List steps executed by a specific worker, with joined job metadata.
+    pub async fn list_by_worker(
+        pool: &PgPool,
+        worker_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<WorkerStepRow>> {
+        let rows = sqlx::query_as::<_, WorkerStepRow>(
+            r#"
+            SELECT js.job_id, js.step_name, js.action_type, js.status,
+                   js.started_at, js.completed_at, js.error_message,
+                   j.workspace, j.task_name, j.status AS job_status
+            FROM job_step js
+            JOIN job j ON j.job_id = js.job_id
+            WHERE js.worker_id = $1
+            ORDER BY js.started_at DESC NULLS LAST
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(worker_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list steps by worker")?;
+        Ok(rows)
+    }
+
+    /// Count steps executed by a specific worker.
+    pub async fn count_by_worker(pool: &PgPool, worker_id: Uuid) -> Result<i64> {
+        let count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM job_step WHERE worker_id = $1")
+                .bind(worker_id)
+                .fetch_one(pool)
+                .await
+                .context("Failed to count steps by worker")?;
+        Ok(count)
     }
 }
 

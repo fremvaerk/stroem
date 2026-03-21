@@ -499,27 +499,6 @@ impl JobRepo {
         Ok(jobs)
     }
 
-    /// List jobs by worker ID with pagination
-    pub async fn list_by_worker(
-        pool: &PgPool,
-        worker_id: Uuid,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Vec<JobRow>> {
-        let jobs = sqlx::query_as::<_, JobRow>(&format!(
-            "SELECT {} FROM job WHERE worker_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            JOB_COLUMNS
-        ))
-        .bind(worker_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
-        .context("Failed to list jobs by worker")?;
-
-        Ok(jobs)
-    }
-
     /// Cancel a job (set status to cancelled, completed_at to NOW).
     /// Only cancels jobs that are pending or running. Returns true if the job was updated.
     pub async fn cancel(pool: &PgPool, job_id: Uuid) -> Result<bool> {
