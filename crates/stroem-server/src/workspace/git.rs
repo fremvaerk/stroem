@@ -153,7 +153,7 @@ impl GitSource {
 
 #[async_trait]
 impl WorkspaceSource for GitSource {
-    async fn load(&self) -> Result<WorkspaceConfig> {
+    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
         let oid = tokio::task::block_in_place(|| self.clone_or_fetch())
             .context("Git clone/fetch failed")?;
 
@@ -276,7 +276,7 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        let config = source.load().await.unwrap();
+        let (config, _) = source.load().await.unwrap();
         assert_eq!(config.actions.len(), 1);
         assert!(config.actions.contains_key("greet"));
         assert_eq!(config.tasks.len(), 1);
@@ -364,7 +364,7 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        let config1 = source.load().await.unwrap();
+        let (config1, _) = source.load().await.unwrap();
         assert_eq!(config1.actions.len(), 1);
 
         // Add a second action
@@ -378,7 +378,7 @@ mod tests {
             "add build action",
         );
 
-        let config2 = source.load().await.unwrap();
+        let (config2, _) = source.load().await.unwrap();
         assert_eq!(config2.actions.len(), 2);
         assert!(config2.actions.contains_key("greet"));
         assert!(config2.actions.contains_key("build"));
@@ -421,7 +421,7 @@ mod tests {
         let source =
             GitSource::with_clone_dir(&url, "develop", None, clone_dir.path().join("repo"));
 
-        let config = source.load().await.unwrap();
+        let (config, _) = source.load().await.unwrap();
         assert!(
             config.actions.contains_key("dev_action"),
             "Should have develop branch action"
@@ -469,7 +469,7 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
 
-        let config = source.load().await.unwrap();
+        let (config, _) = source.load().await.unwrap();
         assert_eq!(config.actions.len(), 2, "Both actions should be merged");
         assert!(config.actions.contains_key("greet"));
         assert!(config.actions.contains_key("build"));

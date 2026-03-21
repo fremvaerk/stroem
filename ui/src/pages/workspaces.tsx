@@ -70,6 +70,15 @@ export function WorkspacesPage() {
                             <span className="text-xs">{ws.error}</span>
                           </div>
                         )}
+                        {ws.warnings?.map((w, i) => (
+                          <div
+                            key={i}
+                            className="flex items-start gap-1.5 text-amber-600 dark:text-amber-500"
+                          >
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span className="text-xs">{w}</span>
+                          </div>
+                        ))}
                       </div>
                     </TableCell>
                     <TableCell>

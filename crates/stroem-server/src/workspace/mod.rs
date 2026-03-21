@@ -22,6 +22,10 @@ use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 /// Recursively scans subdirectories. Files are processed in **sorted path order**
 /// for deterministic merges. Non-YAML files are silently skipped.
 ///
+/// Files that fail to read or parse are skipped with a warning rather than
+/// aborting the entire workspace load. The returned `Vec<String>` contains one
+/// human-readable warning message per skipped file.
+///
 /// # Parameters
 ///
 /// - `scan_dir` — The directory to scan. Must exist; returns an error otherwise.
@@ -34,14 +38,13 @@ use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 ///
 /// # Errors
 ///
-/// Returns an error if the directory cannot be read, a YAML file cannot be read
-/// (including failed SOPS decryption when `skip_sops` is `false`), or a file
-/// fails YAML parsing.
+/// Returns an error only if the directory cannot be read (`collect_yaml_files`
+/// fails). Individual file read/parse errors are captured as warnings.
 pub(crate) fn scan_and_merge_yaml_files(
     scan_dir: &Path,
     skip_sops: bool,
     infer_folders: bool,
-) -> Result<WorkspaceConfig> {
+) -> Result<(WorkspaceConfig, Vec<String>)> {
     use stroem_common::models::workflow::WorkflowConfig;
 
     // Collect YAML files recursively from scan_dir and all subdirectories.
@@ -52,6 +55,7 @@ pub(crate) fn scan_and_merge_yaml_files(
     entries.sort();
 
     let mut workspace = WorkspaceConfig::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for file_path in entries {
         let is_sops = stroem_common::sops::is_sops_file(&file_path);
@@ -70,11 +74,32 @@ pub(crate) fn scan_and_merge_yaml_files(
             tracing::debug!("Loading workflow file: {}", file_path.display());
         }
 
-        let content = stroem_common::sops::read_yaml_file(&file_path)
-            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+        // Compute a display path relative to scan_dir for human-readable warnings.
+        let display_path = file_path
+            .strip_prefix(scan_dir)
+            .unwrap_or(&file_path)
+            .display()
+            .to_string();
 
-        let mut config: WorkflowConfig = serde_yaml::from_str(&content)
-            .with_context(|| format!("Failed to parse YAML: {}", file_path.display()))?;
+        let content = match stroem_common::sops::read_yaml_file(&file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("Skipping '{}': failed to read file: {:#}", display_path, e);
+                tracing::warn!("{}", msg);
+                warnings.push(msg);
+                continue;
+            }
+        };
+
+        let mut config: WorkflowConfig = match serde_yaml::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("Skipping '{}': failed to parse YAML: {}", display_path, e);
+                tracing::warn!("{}", msg);
+                warnings.push(msg);
+                continue;
+            }
+        };
 
         // For files in subdirectories, infer task folder from the relative path
         // (e.g., .workflows/data/etl.yaml → folder "data").
@@ -97,7 +122,7 @@ pub(crate) fn scan_and_merge_yaml_files(
         workspace.merge(config);
     }
 
-    Ok(workspace)
+    Ok((workspace, warnings))
 }
 
 /// Maximum recursion depth for subdirectory scanning (matches `compute_revision`).
@@ -137,8 +162,10 @@ fn collect_yaml_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) -> Resul
 /// Trait for workspace sources (folder, git, etc.)
 #[async_trait]
 pub trait WorkspaceSource: Send + Sync {
-    /// Load/reload workspace configuration from this source
-    async fn load(&self) -> Result<WorkspaceConfig>;
+    /// Load/reload workspace configuration from this source.
+    /// Returns the config paired with per-file warnings for files that were
+    /// skipped due to read or parse errors.
+    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)>;
     /// Filesystem path where the workspace files reside
     fn path(&self) -> &Path;
     /// Current revision identifier (content hash for folder, git OID for git)
@@ -165,6 +192,9 @@ pub struct WorkspaceEntry {
     /// None when healthy, Some(message) when last load failed.
     /// Uses std::sync::RwLock since it's read from both sync and async contexts.
     pub load_error: Arc<std::sync::RwLock<Option<String>>>,
+    /// Per-file warnings from the last successful load (files that were skipped
+    /// due to read or parse errors). Empty when the workspace has a load_error.
+    pub load_warnings: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 impl WorkspaceEntry {
@@ -198,8 +228,8 @@ struct InMemorySource {
 
 #[async_trait]
 impl WorkspaceSource for InMemorySource {
-    async fn load(&self) -> Result<WorkspaceConfig> {
-        Ok(self.config.read().await.clone())
+    async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
+        Ok((self.config.read().await.clone(), Vec::new()))
     }
 
     fn path(&self) -> &Path {
@@ -279,10 +309,18 @@ impl WorkspaceManager {
             };
 
             match source.load().await {
-                Ok(mut config) => {
+                Ok((mut config, warnings)) => {
                     // Merge library items into workspace config
                     for lib in resolved_libraries.values() {
                         merge_library_into_workspace(&mut config, lib);
+                    }
+
+                    if !warnings.is_empty() {
+                        tracing::warn!(
+                            "Workspace '{}': {} file(s) skipped due to errors",
+                            name,
+                            warnings.len()
+                        );
                     }
 
                     let source_path = source.path().to_path_buf();
@@ -294,6 +332,7 @@ impl WorkspaceManager {
                             name: name.clone(),
                             source_path,
                             load_error: Arc::new(std::sync::RwLock::new(None)),
+                            load_warnings: Arc::new(std::sync::RwLock::new(warnings)),
                         },
                     );
                 }
@@ -309,6 +348,7 @@ impl WorkspaceManager {
                             name: name.clone(),
                             source_path,
                             load_error: Arc::new(std::sync::RwLock::new(Some(err_msg))),
+                            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
                         },
                     );
                 }
@@ -346,6 +386,7 @@ impl WorkspaceManager {
                 name: name.to_string(),
                 source_path: PathBuf::from("/dev/null"),
                 load_error: Arc::new(std::sync::RwLock::new(None)),
+                load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
             },
         );
         Self {
@@ -418,6 +459,15 @@ impl WorkspaceManager {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let warnings = if error.is_none() {
+                entry
+                    .load_warnings
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            } else {
+                Vec::new()
+            };
             let config = entry.config.read().await;
             infos.push(WorkspaceInfo {
                 name: name.clone(),
@@ -443,6 +493,7 @@ impl WorkspaceManager {
                 },
                 revision: entry.source.revision(),
                 error,
+                warnings,
             });
         }
         // Source construction failures (e.g. GitSource::new() failed — no source object)
@@ -455,6 +506,7 @@ impl WorkspaceManager {
                 connections_count: 0,
                 revision: None,
                 error: Some(error.clone()),
+                warnings: Vec::new(),
             });
         }
         infos
@@ -470,18 +522,33 @@ impl WorkspaceManager {
             .with_context(|| format!("Workspace '{}' not found", name))?;
 
         match entry.source.load().await {
-            Ok(mut new_config) => {
+            Ok((mut new_config, new_warnings)) => {
                 // Re-merge library items
                 for lib in self.resolved_libraries.values() {
                     merge_library_into_workspace(&mut new_config, lib);
                 }
 
+                if !new_warnings.is_empty() {
+                    tracing::warn!(
+                        "Workspace '{}': {} file(s) skipped due to errors",
+                        name,
+                        new_warnings.len()
+                    );
+                }
+
                 let mut config = entry.config.write().await;
                 *config = Arc::new(new_config);
 
-                // Clear any previous error
+                // Clear any previous error and store new warnings
                 let mut err = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
                 *err = None;
+                drop(err);
+
+                let mut warnings = entry
+                    .load_warnings
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                *warnings = new_warnings;
 
                 Ok(())
             }
@@ -489,6 +556,13 @@ impl WorkspaceManager {
                 let err_msg = format!("{:#}", e);
                 let mut err = entry.load_error.write().unwrap_or_else(|e| e.into_inner());
                 *err = Some(err_msg);
+                // Clear warnings when workspace is fully errored
+                drop(err);
+                let mut warnings = entry
+                    .load_warnings
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                *warnings = Vec::new();
                 Err(e).with_context(|| format!("Failed to reload workspace '{}'", name))
             }
         }
@@ -517,6 +591,7 @@ impl WorkspaceManager {
             let libs = self.resolved_libraries.clone();
             let cancel = cancel_token.clone();
             let load_error = entry.load_error.clone();
+            let load_warnings = entry.load_warnings.clone();
             let needs_initial_load = !entry.is_healthy();
 
             tokio::spawn(async move {
@@ -579,10 +654,18 @@ impl WorkspaceManager {
 
                     // Revision changed (or source doesn't support peek, or errored) — do full reload
                     match source.load().await {
-                        Ok(mut new_config) => {
+                        Ok((mut new_config, new_warnings)) => {
                             // Re-merge library items
                             for lib in libs.values() {
                                 merge_library_into_workspace(&mut new_config, lib);
+                            }
+
+                            if !new_warnings.is_empty() {
+                                tracing::warn!(
+                                    "Workspace '{}': {} file(s) skipped due to errors",
+                                    ws_name,
+                                    new_warnings.len()
+                                );
                             }
 
                             let new_revision = source.revision();
@@ -601,12 +684,22 @@ impl WorkspaceManager {
                                 );
                             }
                             *err = None;
+                            drop(err);
+
+                            let mut warnings =
+                                load_warnings.write().unwrap_or_else(|e| e.into_inner());
+                            *warnings = new_warnings;
                             last_revision = new_revision;
                         }
                         Err(e) => {
                             let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
                             *err = Some(format!("{:#}", e));
                             tracing::warn!("Failed to reload workspace '{}': {:#}", ws_name, e);
+                            drop(err);
+                            // Clear warnings when workspace is in full error state
+                            let mut warnings =
+                                load_warnings.write().unwrap_or_else(|e| e.into_inner());
+                            *warnings = Vec::new();
                         }
                     }
                 }
@@ -626,6 +719,8 @@ pub struct WorkspaceInfo {
     pub revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1245,13 +1340,141 @@ actions:
         );
 
         let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
-        // Should not crash — entry exists but get_config returns None
+        // Workspace loads successfully — the bad file is skipped with a warning
         assert_eq!(mgr.names().len(), 1);
-        assert!(mgr.get_config("bad").await.is_none());
+        assert!(mgr.get_config("bad").await.is_some());
         let infos = mgr.list_workspace_info().await;
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "bad");
-        assert!(infos[0].error.is_some());
+        // No hard error — workspace is healthy
+        assert!(infos[0].error.is_none());
+        // One warning for the skipped bad file
+        assert_eq!(infos[0].warnings.len(), 1);
+        let warning = &infos[0].warnings[0];
+        assert!(
+            warning.contains("bad.yaml"),
+            "Warning should mention the file: {}",
+            warning
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mixed_valid_invalid_yaml_files() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+
+        // Valid file 1
+        fs::write(
+            workflows_dir.join("valid1.yaml"),
+            r#"
+actions:
+  action1:
+    type: script
+    script: "echo 1"
+tasks:
+  task1:
+    flow:
+      step1:
+        action: action1
+"#,
+        )
+        .unwrap();
+
+        // Valid file 2
+        fs::write(
+            workflows_dir.join("valid2.yaml"),
+            r#"
+actions:
+  action2:
+    type: script
+    script: "echo 2"
+tasks:
+  task2:
+    flow:
+      step1:
+        action: action2
+"#,
+        )
+        .unwrap();
+
+        // Invalid YAML (broken string literal)
+        fs::write(
+            workflows_dir.join("invalid.yaml"),
+            "actions:\n  bad:\n    type: script\n    script: \"unterminated\n",
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "mixed".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+
+        // Workspace should load successfully with both valid files merged
+        let config = mgr.get_config("mixed").await.unwrap();
+        assert_eq!(config.actions.len(), 2);
+        assert!(config.actions.contains_key("action1"));
+        assert!(config.actions.contains_key("action2"));
+        assert_eq!(config.tasks.len(), 2);
+
+        // One warning for the invalid file
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        let info = &infos[0];
+        assert!(info.error.is_none());
+        assert_eq!(info.warnings.len(), 1);
+        let warning = &info.warnings[0];
+        assert!(
+            warning.contains("invalid.yaml"),
+            "Warning should mention the file: {}",
+            warning
+        );
+    }
+
+    #[tokio::test]
+    async fn test_all_invalid_yaml_files() {
+        let temp = TempDir::new().unwrap();
+        let workflows_dir = temp.path().join(".workflows");
+        fs::create_dir(&workflows_dir).unwrap();
+
+        // Two invalid YAML files
+        fs::write(
+            workflows_dir.join("bad1.yaml"),
+            "actions:\n  a:\n    script: \"unterminated\n",
+        )
+        .unwrap();
+        fs::write(
+            workflows_dir.join("bad2.yaml"),
+            "actions:\n  b:\n    script: \"unterminated\n",
+        )
+        .unwrap();
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            "all-bad".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp.path().to_str().unwrap().to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+
+        // Workspace loads with empty config — no hard error
+        let config = mgr.get_config("all-bad").await.unwrap();
+        assert_eq!(config.actions.len(), 0);
+        assert_eq!(config.tasks.len(), 0);
+
+        // Two warnings, one per file
+        let infos = mgr.list_workspace_info().await;
+        assert_eq!(infos.len(), 1);
+        let info = &infos[0];
+        assert!(info.error.is_none());
+        assert_eq!(info.warnings.len(), 2);
     }
 
     #[tokio::test]
@@ -1409,7 +1632,7 @@ tasks:
         .unwrap();
 
         let source = folder::FolderSource::new(temp.path().to_str().unwrap());
-        let config = source.load().await.unwrap();
+        let (config, _) = source.load().await.unwrap();
 
         // Verify both files were merged
         assert_eq!(config.actions.len(), 2);
