@@ -141,6 +141,43 @@ pub async fn handle_agent_steps(
             }
         }
 
+        // Resolve flow-step input templates and replace `input` in the context
+        // so prompt/system_prompt can use {{ input.X }} for resolved step input.
+        if let Some(ref input) = step.input {
+            if let Some(input_map) = input.as_object() {
+                if !input_map.is_empty() {
+                    let map: std::collections::HashMap<String, serde_json::Value> = input_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    match stroem_common::template::render_input_map(&map, &render_ctx) {
+                        Ok(resolved) => {
+                            if let Some(ctx_obj) = render_ctx.as_object_mut() {
+                                ctx_obj.insert("input".to_string(), resolved);
+                            }
+                        }
+                        Err(e) => {
+                            let err = format!(
+                                "Failed to render input for agent step '{}': {:#}",
+                                step.step_name, e
+                            );
+                            JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err)
+                                .await?;
+                            orchestrate_step(
+                                &state.pool,
+                                job_id,
+                                &step.step_name,
+                                &task,
+                                workspace_config,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         // Render prompt template
         let rendered_prompt = match action_spec.prompt.as_deref() {
             Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
@@ -432,6 +469,41 @@ pub async fn dispatch_initial_agent_steps(
                 });
                 if let Some(obj) = render_ctx.as_object_mut() {
                     obj.insert("each".to_string(), each_val);
+                }
+            }
+        }
+
+        // Resolve flow-step input templates and replace `input` in the context
+        if let Some(ref input) = step.input {
+            if let Some(input_map) = input.as_object() {
+                if !input_map.is_empty() {
+                    let map: std::collections::HashMap<String, serde_json::Value> = input_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    match stroem_common::template::render_input_map(&map, &render_ctx) {
+                        Ok(resolved) => {
+                            if let Some(ctx_obj) = render_ctx.as_object_mut() {
+                                ctx_obj.insert("input".to_string(), resolved);
+                            }
+                        }
+                        Err(e) => {
+                            let err = format!(
+                                "Failed to render input for agent step '{}': {:#}",
+                                step.step_name, e
+                            );
+                            JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                            orchestrate_step(
+                                pool,
+                                job_id,
+                                &step.step_name,
+                                &task,
+                                workspace_config,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                 }
             }
         }

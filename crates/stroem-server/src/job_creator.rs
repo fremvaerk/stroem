@@ -831,6 +831,37 @@ pub async fn handle_approval_steps(
             }
         }
 
+        // Render the step's flow-level input (resolves templates like
+        // {{ prepare.output.changelog }}) and replace `input` in the context
+        // so the message template can use {{ input.changelog }} to reference
+        // resolved step input, not just job-level input.
+        if let Some(ref input) = step.input {
+            if let Some(input_map) = input.as_object() {
+                if !input_map.is_empty() {
+                    let map: HashMap<String, serde_json::Value> = input_map
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    match render_input_map(&map, &context_value) {
+                        Ok(resolved) => {
+                            if let Some(ctx_obj) = context_value.as_object_mut() {
+                                ctx_obj.insert("input".to_string(), resolved);
+                            }
+                        }
+                        Err(e) => {
+                            let err = format!(
+                                "Failed to render input for approval step '{}': {:#}",
+                                step.step_name, e
+                            );
+                            tracing::error!("{}", err);
+                            JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         // Warn when no message template is configured — action_spec may be missing
         // or the action was defined without a `message` field. (FIX 8)
         if raw_message.is_empty() {
