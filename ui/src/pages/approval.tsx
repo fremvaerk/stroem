@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useParams, Link } from "react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
@@ -12,10 +13,11 @@ export function ApprovalPage() {
   const { jobId, stepName } = useParams<{ jobId: string; stepName: string }>();
   useTitle("Approval");
 
-  const { data: job, loading, refresh } = useAsyncData(
+  const fetcher = useCallback(
     () => (jobId ? getJob(jobId) : Promise.reject("Missing job ID")),
     [jobId],
   );
+  const { data: job, loading, refresh } = useAsyncData(fetcher);
 
   if (loading && !job) {
     return <LoadingSpinner />;
