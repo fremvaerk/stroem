@@ -17,6 +17,7 @@ import { UsersPage } from "@/pages/users";
 import { UserDetailPage } from "@/pages/user-detail";
 import { LoginCallbackPage } from "@/pages/login-callback";
 import { SettingsPage } from "@/pages/settings";
+import { ApprovalPage } from "@/pages/approval";
 
 export default function App() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
                 />
                 <Route path="jobs" element={<ErrorBoundary><JobsPage /></ErrorBoundary>} />
                 <Route path="jobs/:id" element={<ErrorBoundary><JobDetailPage /></ErrorBoundary>} />
+                <Route path="approve/:jobId/:stepName" element={<ErrorBoundary><ApprovalPage /></ErrorBoundary>} />
                 <Route path="workers" element={<ErrorBoundary><WorkersPage /></ErrorBoundary>} />
                 <Route path="workers/:id" element={<ErrorBoundary><WorkerDetailPage /></ErrorBoundary>} />
                 <Route path="users" element={<ErrorBoundary><UsersPage /></ErrorBoundary>} />
