@@ -142,6 +142,31 @@ pub enum AgentToolRef {
     Mcp { mcp: String },
 }
 
+/// MCP (Model Context Protocol) server definition.
+///
+/// Configured under `mcp_servers:` in workflow YAML.
+/// Agents reference servers by name via `tools: [{ mcp: <name> }]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpServerDef {
+    /// Transport type: `"stdio"` or `"sse"`.
+    pub transport: String,
+    /// Command to run for stdio transport (e.g. `"npx"`, `"uvx"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Arguments to pass to the command (stdio only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    /// Server URL for SSE transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Environment variables to inject into the server process (stdio only).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    /// Connection/call timeout in seconds (default: 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+}
+
 /// Action definition - represents a reusable execution unit
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionDef {
@@ -251,6 +276,11 @@ pub struct ActionDef {
     /// Maximum conversation turns (safety limit for multi-turn agents)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+
+    /// When true, enables interactive ask_user suspensions without requiring explicit tools.
+    /// Useful for agents that may ask the user for clarification at any point.
+    #[serde(default)]
+    pub interactive: bool,
 
     /// Approval prompt message (for type: approval). Tera template rendered at suspension time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -635,6 +665,9 @@ pub struct WorkflowConfig {
     pub on_error: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_suspended: Vec<HookDef>,
+    /// MCP server definitions available to agent actions in this workspace.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub mcp_servers: HashMap<String, McpServerDef>,
 }
 
 /// Raw deserialization target for WorkflowConfig — converted via `From` to auto-hoist
@@ -659,6 +692,8 @@ struct WorkflowConfigRaw {
     on_error: Vec<HookDef>,
     #[serde(default)]
     on_suspended: Vec<HookDef>,
+    #[serde(default)]
+    mcp_servers: HashMap<String, McpServerDef>,
 }
 
 impl From<WorkflowConfigRaw> for WorkflowConfig {
@@ -673,6 +708,7 @@ impl From<WorkflowConfigRaw> for WorkflowConfig {
             on_success: raw.on_success,
             on_error: raw.on_error,
             on_suspended: raw.on_suspended,
+            mcp_servers: raw.mcp_servers,
         };
         config.hoist_inline_actions();
         config
@@ -722,6 +758,8 @@ pub struct WorkspaceConfig {
     pub on_success: Vec<HookDef>,
     pub on_error: Vec<HookDef>,
     pub on_suspended: Vec<HookDef>,
+    /// MCP server definitions merged from all workspace YAML files.
+    pub mcp_servers: HashMap<String, McpServerDef>,
 }
 
 impl WorkspaceConfig {
@@ -741,6 +779,7 @@ impl WorkspaceConfig {
         self.on_success.extend(config.on_success);
         self.on_error.extend(config.on_error);
         self.on_suspended.extend(config.on_suspended);
+        self.mcp_servers.extend(config.mcp_servers);
     }
 
     /// Render secret values through Tera templates.

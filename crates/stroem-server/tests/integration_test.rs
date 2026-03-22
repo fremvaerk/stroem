@@ -84,6 +84,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -121,6 +122,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -162,6 +164,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -692,6 +695,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -811,6 +815,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -866,6 +871,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -2234,6 +2240,7 @@ async fn test_task_detail_connections() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -4179,6 +4186,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -4216,6 +4224,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -4401,6 +4410,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -4473,6 +4483,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -6699,6 +6710,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -8680,6 +8692,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -8717,6 +8730,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -8769,6 +8783,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -9813,6 +9828,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -9850,6 +9866,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -10253,6 +10270,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -10546,6 +10564,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -12768,6 +12787,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -12952,6 +12972,7 @@ async fn setup_sync_webhook() -> Result<(
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -13484,6 +13505,7 @@ async fn setup_scheduler_workspace(
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -14761,6 +14783,7 @@ fn when_test_workspace_with_flow(
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -14949,6 +14972,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -14985,6 +15009,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -16268,6 +16293,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -16305,6 +16331,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: Some(
                 "Please approve the deployment. Greet output: {{ greet.output }}".to_string(),
             ),
@@ -16419,6 +16446,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: Some("Gate approval required before continuing.".to_string()),
         },
     );

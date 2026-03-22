@@ -104,6 +104,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -139,6 +140,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -220,6 +222,7 @@ fn make_workspace_config() -> WorkspaceConfig {
         secrets: HashMap::new(),
         connections: HashMap::new(),
         connection_types: HashMap::new(),
+        mcp_servers: HashMap::new(),
 
         on_success: vec![],
         on_error: vec![],
@@ -527,6 +530,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -566,6 +570,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                interactive: false,
                 message: None,
             },
         );
@@ -682,6 +687,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         secrets: HashMap::new(),
         connections: HashMap::new(),
         connection_types: HashMap::new(),
+        mcp_servers: HashMap::new(),
 
         on_success: vec![],
         on_error: vec![],
@@ -866,6 +872,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -901,6 +908,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -998,6 +1006,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
         secrets: HashMap::new(),
         connections: HashMap::new(),
         connection_types: HashMap::new(),
+        mcp_servers: HashMap::new(),
 
         on_success: vec![],
         on_error: vec![],

@@ -262,6 +262,214 @@ pub async fn handle_agent_steps(
             )
             .await;
 
+        // ── Multi-turn dispatch branch ──────────────────────────────────
+        // If the action has tools defined, use the multi-turn dispatch loop
+        // which handles tool calling, task tools, MCP, and ask_user.
+        if !action_spec.tools.is_empty() || action_spec.interactive {
+            let start = std::time::Instant::now();
+
+            // Check if resuming from a previous state (e.g. after child job completed)
+            let resume_state = step
+                .agent_state
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+            // Connect MCP clients if any MCP tool refs exist
+            let mcp_server_names: Vec<&str> = action_spec
+                .tools
+                .iter()
+                .filter_map(|t| match t {
+                    stroem_common::models::workflow::AgentToolRef::Mcp { mcp } => {
+                        Some(mcp.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            let mcp_client = if !mcp_server_names.is_empty() {
+                match super::mcp_client::McpClientManager::connect(
+                    &workspace_config.mcp_servers,
+                    &mcp_server_names,
+                )
+                .await
+                {
+                    Ok(client) => Some(client),
+                    Err(e) => {
+                        let err = format!("Failed to connect MCP servers: {:#}", e);
+                        JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err)
+                            .await?;
+                        orchestrate_step(
+                            &state.pool,
+                            job_id,
+                            &step.step_name,
+                            &task,
+                            workspace_config,
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            let outcome = super::loop_dispatch::dispatch_agent_loop(
+                &state.pool,
+                workspace_config,
+                workspace_name,
+                job_id,
+                &step.step_name,
+                &action_spec,
+                provider_config,
+                model_name,
+                &rendered_prompt,
+                rendered_system.as_deref(),
+                resume_state,
+                mcp_client.as_ref(),
+                vec![], // No tool results on initial dispatch
+                state.config.agents.as_ref(),
+                state.workspaces.get_revision(workspace_name).as_deref(),
+            )
+            .await;
+
+            // Shut down MCP clients
+            if let Some(client) = mcp_client {
+                client.shutdown().await;
+            }
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let completed_step_name = step.step_name.clone();
+
+            match outcome {
+                Ok(super::loop_dispatch::DispatchOutcome::Completed {
+                    mut output,
+                    usage,
+                    turns,
+                }) => {
+                    if let Some(obj) = output.as_object_mut() {
+                        obj.insert(
+                            "_meta".to_string(),
+                            serde_json::json!({
+                                "model": model_name,
+                                "provider": provider_name,
+                                "input_tokens": usage.input_tokens,
+                                "output_tokens": usage.output_tokens,
+                                "latency_ms": elapsed_ms,
+                                "turns": turns,
+                            }),
+                        );
+                    }
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!(
+                                "[agent] Step '{}': completed in {}ms (multi-turn)",
+                                step.step_name, elapsed_ms
+                            ),
+                        )
+                        .await;
+                    JobStepRepo::mark_completed(&state.pool, job_id, &step.step_name, Some(output))
+                        .await?;
+                }
+                Ok(super::loop_dispatch::DispatchOutcome::WaitingForTools {
+                    state: conv_state,
+                }) => {
+                    // Save conversation state and wait for child jobs to complete
+                    let agent_state = serde_json::to_value(&conv_state)?;
+                    stroem_db::JobStepRepo::update_agent_state(
+                        &state.pool,
+                        job_id,
+                        &step.step_name,
+                        agent_state,
+                    )
+                    .await?;
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!(
+                                "[agent] Step '{}': waiting for {} task tool(s)",
+                                step.step_name,
+                                conv_state.pending_tool_calls.len()
+                            ),
+                        )
+                        .await;
+                    // Don't orchestrate — step stays running, child jobs will trigger resume
+                    continue;
+                }
+                Ok(super::loop_dispatch::DispatchOutcome::WaitingForUser {
+                    state: conv_state,
+                    message,
+                }) => {
+                    // Save state and suspend step for ask_user
+                    let agent_state = serde_json::to_value(&conv_state)?;
+                    stroem_db::JobStepRepo::update_agent_state(
+                        &state.pool,
+                        job_id,
+                        &step.step_name,
+                        agent_state,
+                    )
+                    .await?;
+                    // Store the message in output (same pattern as approval gates)
+                    let output = serde_json::json!({ "approval_message": message });
+                    JobStepRepo::mark_completed(&state.pool, job_id, &step.step_name, Some(output))
+                        .await?;
+                    // Re-mark as suspended (mark_completed was to set output)
+                    JobStepRepo::mark_suspended(&state.pool, job_id, &step.step_name).await?;
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!(
+                                "[agent] Step '{}': waiting for user input (ask_user)",
+                                step.step_name
+                            ),
+                        )
+                        .await;
+                    // Fire on_suspended hooks
+                    crate::hooks::fire_suspended_hooks(
+                        state,
+                        workspace_config,
+                        &job_row,
+                        &task,
+                        &step.step_name,
+                        &message,
+                    )
+                    .await;
+                    continue;
+                }
+                Ok(super::loop_dispatch::DispatchOutcome::Failed { error }) => {
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!("[agent] Step '{}': failed — {}", step.step_name, error),
+                        )
+                        .await;
+                    JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &error).await?;
+                }
+                Err(e) => {
+                    let err_msg = format!("{:#}", e);
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!("[agent] Step '{}': failed — {}", step.step_name, err_msg),
+                        )
+                        .await;
+                    JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err_msg)
+                        .await?;
+                }
+            }
+
+            orchestrate_step(
+                &state.pool,
+                job_id,
+                &completed_step_name,
+                &task,
+                workspace_config,
+            )
+            .await;
+            continue;
+        }
+
+        // ── Single-turn dispatch (no tools) ─────────────────────────────
         let start = std::time::Instant::now();
 
         // Retry loop with exponential backoff for transient errors.
@@ -975,7 +1183,7 @@ async fn call_llm(
 }
 
 /// Strip a single layer of markdown code fences (```json ... ``` or ``` ... ```).
-fn strip_code_fences(s: &str) -> &str {
+pub(super) fn strip_code_fences(s: &str) -> &str {
     let s = s.trim();
     if let Some(rest) = s.strip_prefix("```") {
         // Skip optional language tag on the first line
@@ -992,7 +1200,7 @@ fn strip_code_fences(s: &str) -> &str {
 }
 
 /// Human-readable JSON value type name for error messages.
-fn json_type_name(v: &serde_json::Value) -> &'static str {
+pub(super) fn json_type_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "boolean",
@@ -1007,7 +1215,7 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 /// boundaries.  When `max_bytes` falls in the middle of a multi-byte character
 /// the function snaps down to the nearest complete character boundary so the
 /// returned slice is always valid UTF-8.
-fn truncate_for_error(s: &str, max_bytes: usize) -> &str {
+pub(super) fn truncate_for_error(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }

@@ -903,6 +903,33 @@ impl JobStepRepo {
         Ok(())
     }
 
+    /// Persist the agent conversation state for a running multi-turn agent step.
+    ///
+    /// Called after each turn of the agent dispatch loop to save progress so
+    /// the loop can be resumed after async tool calls complete.
+    pub async fn update_agent_state(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        agent_state: JsonValue,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job_step
+            SET agent_state = $3
+            WHERE job_id = $1 AND step_name = $2
+            "#,
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(agent_state)
+        .execute(pool)
+        .await
+        .context("Failed to update agent_state")?;
+
+        Ok(())
+    }
+
     /// Return suspended approval steps whose `timeout_secs` deadline has elapsed
     /// since `suspended_at`.
     pub async fn get_timed_out_suspended_steps(pool: &PgPool) -> Result<Vec<StaleStepInfo>> {

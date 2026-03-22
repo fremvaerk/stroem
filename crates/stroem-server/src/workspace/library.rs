@@ -422,6 +422,7 @@ mod tests {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         }
     }
@@ -457,6 +458,7 @@ mod tests {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         }
     }
@@ -1129,6 +1131,7 @@ tasks:
             on_success: ws.on_success,
             on_error: ws.on_error,
             on_suspended: ws.on_suspended,
+            mcp_servers: ws.mcp_servers,
         }
     }
 

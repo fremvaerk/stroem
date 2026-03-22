@@ -487,6 +487,7 @@ mod tests {
                 max_tokens: None,
                 tools: vec![],
                 max_turns: None,
+                interactive: false,
                 message: None,
             },
         );

@@ -311,6 +311,65 @@ Last updated: 2026-03-13.
 - [ ] Empty prompt after template rendering → step fails
 - [ ] `dispatch_initial_agent_steps` unknown provider → step marked failed
 
+### 7B+C: Multi-turn Agent Tools & MCP Client (2026-03-22)
+
+- [x] AgentConversationState types (state.rs)
+- [x] `interactive` flag on ActionDef
+- [x] McpServerDef struct + mcp_servers on WorkflowConfig/WorkspaceConfig
+- [x] Tool definition generation (tools.rs)
+- [x] Custom multi-turn dispatch loop (loop_dispatch.rs)
+- [x] MCP client manager (mcp_client.rs)
+- [x] Dispatch integration — handle_agent_steps branches to loop_dispatch when tools present
+- [x] approve_step handler dual-purpose — supports both approval gates and agent ask_user
+- [x] propagate_to_parent agent detection — resumes dispatch loop when child jobs complete
+- [x] Validation: tools, max_turns, interactive, MCP server defs, workspace-level tool refs
+- [x] DB migration 025: agent_tool source_type
+- [x] update_agent_state repo helper
+- [ ] SSE transport for MCP servers (currently only stdio)
+- [ ] Token usage tracking via CompletionModel (partially implemented)
+
+### 7B+C Review Fixes (2026-03-22)
+
+#### Critical (fixed)
+- [x] User response injected into conversation state on ask_user resume — `jobs.rs`
+- [x] Actual workspace config resolved on ask_user resume (was `WorkspaceConfig::default()`) — `jobs.rs`
+- [x] Tool result injected on task-tool child completion — `job_recovery.rs`
+- [x] `env_clear()` on MCP server process + warning log — `mcp_client.rs`
+
+#### Important (fixed)
+- [x] `_meta.turns` now uses actual turn count via `DispatchOutcome::Completed.turns` — `dispatch.rs`, `loop_dispatch.rs`
+- [x] System prompt uses `preamble` instead of `Message::System` in chat_history — `loop_dispatch.rs`
+- [x] 120s timeout on multi-turn LLM calls — `loop_dispatch.rs`
+- [x] Cancellation check on each loop iteration — `loop_dispatch.rs`
+- [x] `revision` and `agents_config` passed through to child job creation — `loop_dispatch.rs`
+- [x] Task tool calls validated against `action_spec.tools` allowed set — `loop_dispatch.rs`
+- [x] `is_mcp_tool` validates against actual connection prefixes — `mcp_client.rs`
+- [x] `timeout_secs` applied to MCP server init and tool discovery — `mcp_client.rs`
+- [x] Redundant dead branch removed — `loop_dispatch.rs`
+
+#### Remaining (not yet fixed)
+- [ ] Underscore/hyphen normalization enables task name collisions — `tools.rs`, `loop_dispatch.rs`
+- [ ] No rate limit on tool calls per turn / unbounded JSONB state growth — `loop_dispatch.rs`, `state.rs`
+- [ ] TOCTOU race in concurrent tool call resolution — `job_recovery.rs`
+- [ ] MCP client shutdown on WaitingForTools — stateful MCP servers lose state — `dispatch.rs`
+- [ ] WaitingForTools step stays running forever if child job propagation silently fails — `dispatch.rs`
+- [ ] No audit trail for agent-created child jobs — `loop_dispatch.rs`
+- [ ] No SSRF validation on MCP server URLs — `mcp_client.rs`
+
+### 7B: Multi-turn + tools + ask_user (depends on 5d + 7A)
+- [x] Strom task tools via rig Tool trait (StromTaskTool)
+- [x] Built-in ask_user tool (reuses Phase 5d suspended status)
+- [x] agent_state conversation persistence in DB
+- [x] Multi-turn dispatch loop with max_turns
+- [x] Concurrent tool calls (parallel child jobs)
+- [x] Tool definition generation from task input schemas
+
+### 7C: MCP client tools (depends on 7B)
+- [x] McpServerDef in workspace YAML (mcp_servers section)
+- [x] MCP client manager via rmcp
+- [x] MCP tool discovery + execution
+- [x] Mixed sync (MCP) / async (task) tool calls
+
 ### OutputDef Unification Review Fixes (2026-03-20)
 
 #### Critical
@@ -330,18 +389,18 @@ Last updated: 2026-03-13.
 - [x] `OutputDef` parses from YAML without `properties` key (serde default) — `workflow.rs`
 
 ### 7B: Multi-turn + tools + ask_user (depends on 5d + 7A)
-- [ ] Strom task tools via rig Tool trait (StromTaskTool)
-- [ ] Built-in ask_user tool (reuses Phase 5d suspended status)
-- [ ] agent_state conversation persistence in DB
-- [ ] Multi-turn dispatch loop with max_turns
-- [ ] Concurrent tool calls (parallel child jobs)
-- [ ] Tool definition generation from task input schemas
+- [x] Strom task tools via rig Tool trait (StromTaskTool)
+- [x] Built-in ask_user tool (reuses Phase 5d suspended status)
+- [x] agent_state conversation persistence in DB
+- [x] Multi-turn dispatch loop with max_turns
+- [x] Concurrent tool calls (parallel child jobs)
+- [x] Tool definition generation from task input schemas
 
 ### 7C: MCP client tools (depends on 7B)
-- [ ] McpServerDef in workspace YAML (mcp_servers section)
-- [ ] MCP client manager via rmcp
-- [ ] MCP tool discovery + execution
-- [ ] Mixed sync (MCP) / async (task) tool calls
+- [x] McpServerDef in workspace YAML (mcp_servers section)
+- [x] MCP client manager via rmcp
+- [x] MCP tool discovery + execution
+- [x] Mixed sync (MCP) / async (task) tool calls
 
 ## Phase 5: Advanced Flow Control
 

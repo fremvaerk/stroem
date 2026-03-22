@@ -87,6 +87,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );
@@ -139,6 +140,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             max_tokens: None,
             tools: vec![],
             max_turns: None,
+            interactive: false,
             message: None,
         },
     );

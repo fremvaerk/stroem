@@ -1101,7 +1101,7 @@ fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<Str
 }
 
 fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<String>> {
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
 
     // Required fields
     if action.provider.is_none() {
@@ -1220,6 +1220,63 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
                     action_name,
                     e
                 );
+            }
+        }
+    }
+
+    // Validate max_turns range (1..=100)
+    if let Some(turns) = action.max_turns {
+        if turns == 0 || turns > 100 {
+            bail!(
+                "Action '{}' max_turns must be between 1 and 100, got {}",
+                action_name,
+                turns
+            );
+        }
+    }
+
+    // Warn: max_turns without tools has no effect
+    if action.max_turns.is_some() && action.tools.is_empty() && !action.interactive {
+        warnings.push(format!(
+            "Action '{}': max_turns is set but the action has no tools defined — max_turns has no effect on single-turn agents",
+            action_name
+        ));
+    }
+
+    // Warn: interactive without tools
+    if action.interactive && action.tools.is_empty() {
+        warnings.push(format!(
+            "Action '{}': interactive=true but the action has no tools defined — interactive mode enables ask_user suspensions but task tools and MCP tools are unavailable",
+            action_name
+        ));
+    }
+
+    // Warn: interactive without max_turns (infinite loop risk)
+    if action.interactive && !action.tools.is_empty() && action.max_turns.is_none() {
+        warnings.push(format!(
+            "Action '{}': interactive=true with no max_turns set — consider setting max_turns to prevent unbounded conversation loops",
+            action_name
+        ));
+    }
+
+    // Validate tool references: empty strings are not allowed
+    for tool_ref in &action.tools {
+        match tool_ref {
+            crate::models::workflow::AgentToolRef::Task { task } => {
+                if task.is_empty() {
+                    bail!(
+                        "Action '{}' has a tool with empty task reference",
+                        action_name
+                    );
+                }
+            }
+            crate::models::workflow::AgentToolRef::Mcp { mcp } => {
+                if mcp.is_empty() {
+                    bail!(
+                        "Action '{}' has a tool with empty MCP server reference",
+                        action_name
+                    );
+                }
             }
         }
     }
@@ -1372,6 +1429,65 @@ fn validate_hook_action_exists(
     Ok(())
 }
 
+/// Validates a map of MCP server definitions. Returns `Ok(Vec<String>)` with warnings on success.
+///
+/// Validates each server has the correct fields for its transport type:
+/// - `stdio`: requires `command`, rejects `url`
+/// - `sse`: requires `url`, rejects `command`/`args`
+pub fn validate_mcp_servers(
+    servers: &std::collections::HashMap<String, crate::models::workflow::McpServerDef>,
+) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+
+    for (name, def) in servers {
+        match def.transport.as_str() {
+            "stdio" => {
+                if def.command.is_none() {
+                    bail!(
+                        "MCP server '{}' uses stdio transport but is missing 'command' field",
+                        name
+                    );
+                }
+                if def.url.is_some() {
+                    bail!(
+                        "MCP server '{}' uses stdio transport but has 'url' field (only valid for sse transport)",
+                        name
+                    );
+                }
+            }
+            "sse" => {
+                if def.url.is_none() {
+                    bail!(
+                        "MCP server '{}' uses sse transport but is missing 'url' field",
+                        name
+                    );
+                }
+                if def.command.is_some() {
+                    warnings.push(format!(
+                        "MCP server '{}': 'command' field is ignored for sse transport",
+                        name
+                    ));
+                }
+                if def.args.is_some() {
+                    warnings.push(format!(
+                        "MCP server '{}': 'args' field is ignored for sse transport",
+                        name
+                    ));
+                }
+            }
+            other => {
+                bail!(
+                    "MCP server '{}' has unknown transport type '{}' (expected: stdio, sse)",
+                    name,
+                    other
+                );
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
 /// Compute the required worker tags for an action.
 /// These tags must all be present on a worker for it to claim a step using this action.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
@@ -1417,7 +1533,7 @@ pub fn derive_runner(action: &ActionDef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::workflow::{TaskDef, TriggerDef};
+    use crate::models::workflow::{AgentToolRef, McpServerDef, TaskDef, TriggerDef};
     use std::collections::HashMap;
 
     #[test]
@@ -5630,5 +5746,219 @@ on_suspended:
             result.unwrap_err().to_string().contains("does_not_exist"),
             "expected missing action error"
         );
+    }
+
+    // ─── Helpers for multi-turn agent and MCP validation tests ───────────────
+
+    /// Create a minimal valid agent ActionDef and apply a mutation closure.
+    fn make_agent_action_with(
+        f: impl FnOnce(&mut crate::models::workflow::ActionDef),
+    ) -> crate::models::workflow::ActionDef {
+        let mut action: crate::models::workflow::ActionDef = serde_yaml::from_str(
+            r#"
+type: agent
+provider: anthropic
+prompt: "Do something useful"
+"#,
+        )
+        .unwrap();
+        f(&mut action);
+        action
+    }
+
+    /// Wrap a single action into a minimal WorkflowConfig.
+    fn make_config_with_action(
+        name: &str,
+        action: crate::models::workflow::ActionDef,
+    ) -> WorkflowConfig {
+        let mut config = WorkflowConfig::default();
+        config.actions.insert(name.to_string(), action);
+        config
+    }
+
+    // ─── Multi-turn agent tool validation ────────────────────────────────
+
+    #[test]
+    fn test_validate_agent_action_max_turns_zero() {
+        let action = make_agent_action_with(|a| {
+            a.max_turns = Some(0);
+            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("max_turns must be between 1 and 100"));
+    }
+
+    #[test]
+    fn test_validate_agent_action_max_turns_101() {
+        let action = make_agent_action_with(|a| {
+            a.max_turns = Some(101);
+            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("max_turns must be between 1 and 100"));
+    }
+
+    #[test]
+    fn test_validate_agent_action_max_turns_valid_boundaries() {
+        // max_turns=1 with tools should be valid
+        let action = make_agent_action_with(|a| {
+            a.max_turns = Some(1);
+            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_ok());
+
+        // max_turns=100 with tools should be valid
+        let action = make_agent_action_with(|a| {
+            a.max_turns = Some(100);
+            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_agent_action_max_turns_no_tools_warns() {
+        let action = make_agent_action_with(|a| {
+            a.max_turns = Some(5);
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("max_turns") && w.contains("no tools")));
+    }
+
+    #[test]
+    fn test_validate_agent_action_interactive_no_tools_warns() {
+        let action = make_agent_action_with(|a| {
+            a.interactive = true;
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("interactive=true") && w.contains("no tools")));
+    }
+
+    #[test]
+    fn test_validate_agent_action_interactive_no_max_turns_warns() {
+        let action = make_agent_action_with(|a| {
+            a.interactive = true;
+            a.tools = vec![AgentToolRef::Task { task: "t".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_ok());
+        let warnings = result.unwrap();
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("interactive=true") && w.contains("no max_turns")));
+    }
+
+    #[test]
+    fn test_validate_agent_action_empty_task_ref() {
+        let action = make_agent_action_with(|a| {
+            a.tools = vec![AgentToolRef::Task { task: "".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("empty task reference"));
+    }
+
+    #[test]
+    fn test_validate_agent_action_empty_mcp_ref() {
+        let action = make_agent_action_with(|a| {
+            a.tools = vec![AgentToolRef::Mcp { mcp: "".into() }];
+        });
+        let result = validate_workflow_config(&make_config_with_action("a", action));
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("empty MCP server reference"));
+    }
+
+    #[test]
+    fn test_validate_mcp_servers_empty() {
+        let result = validate_mcp_servers(&std::collections::HashMap::new());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_mcp_servers_stdio_missing_command() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "test".to_string(),
+            McpServerDef {
+                transport: "stdio".to_string(),
+                command: None,
+                args: None,
+                url: None,
+                env: Default::default(),
+                timeout_secs: None,
+            },
+        );
+        let result = validate_mcp_servers(&servers);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("missing 'command'"));
+    }
+
+    #[test]
+    fn test_validate_mcp_servers_stdio_has_url() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "test".to_string(),
+            McpServerDef {
+                transport: "stdio".to_string(),
+                command: Some("npx".to_string()),
+                args: None,
+                url: Some("http://localhost".to_string()),
+                env: Default::default(),
+                timeout_secs: None,
+            },
+        );
+        let result = validate_mcp_servers(&servers);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("has 'url' field"));
+    }
+
+    #[test]
+    fn test_validate_mcp_servers_sse_missing_url() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "test".to_string(),
+            McpServerDef {
+                transport: "sse".to_string(),
+                command: None,
+                args: None,
+                url: None,
+                env: Default::default(),
+                timeout_secs: None,
+            },
+        );
+        let result = validate_mcp_servers(&servers);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("missing 'url'"));
+    }
+
+    #[test]
+    fn test_validate_mcp_servers_unknown_transport() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "test".to_string(),
+            McpServerDef {
+                transport: "grpc".to_string(),
+                command: None,
+                args: None,
+                url: None,
+                env: Default::default(),
+                timeout_secs: None,
+            },
+        );
+        let result = validate_mcp_servers(&servers);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("unknown transport type"));
     }
 }
