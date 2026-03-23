@@ -1462,6 +1462,18 @@ pub fn validate_mcp_servers(
                         name
                     );
                 }
+                if let Some(ref url) = def.url {
+                    if url
+                        .parse::<url::Url>()
+                        .map_or(true, |u| u.scheme() != "http" && u.scheme() != "https")
+                    {
+                        bail!(
+                            "MCP server '{}' url must be a valid http or https URL, got '{}'",
+                            name,
+                            url
+                        );
+                    }
+                }
                 if def.command.is_some() {
                     warnings.push(format!(
                         "MCP server '{}': 'command' field is ignored for sse transport",
@@ -5896,6 +5908,7 @@ prompt: "Do something useful"
                 command: None,
                 args: None,
                 url: None,
+                auth_token: None,
                 env: Default::default(),
                 timeout_secs: None,
             },
@@ -5915,6 +5928,7 @@ prompt: "Do something useful"
                 command: Some("npx".to_string()),
                 args: None,
                 url: Some("http://localhost".to_string()),
+                auth_token: None,
                 env: Default::default(),
                 timeout_secs: None,
             },
@@ -5934,6 +5948,7 @@ prompt: "Do something useful"
                 command: None,
                 args: None,
                 url: None,
+                auth_token: None,
                 env: Default::default(),
                 timeout_secs: None,
             },
@@ -5953,6 +5968,7 @@ prompt: "Do something useful"
                 command: None,
                 args: None,
                 url: None,
+                auth_token: None,
                 env: Default::default(),
                 timeout_secs: None,
             },

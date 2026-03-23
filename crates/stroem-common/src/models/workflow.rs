@@ -159,10 +159,15 @@ pub struct McpServerDef {
     /// Server URL for SSE transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Environment variables to inject into the server process (stdio only).
+    /// Authentication token for SSE transport. Sent as Bearer token in the Authorization header.
+    /// Value is a Tera template rendered with the standard context (e.g., `{{ secret.MCP_TOKEN }}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+    /// Environment variables for the server process (stdio transport).
+    /// Values are Tera templates rendered with the standard context (secrets, etc.).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
-    /// Connection/call timeout in seconds (default: 30).
+    /// Timeout in seconds for initialization, tool discovery, and each tool call (default: 30).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u32>,
 }

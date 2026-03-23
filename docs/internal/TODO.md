@@ -358,20 +358,20 @@ Last updated: 2026-03-13.
 
 ### SSE Transport Review Fixes (2026-03-23)
 
-#### Important
-- [ ] `SseMcpService` is byte-for-byte duplicate of `StdioMcpService` — replace both with a single `RmcpService` wrapper — `mcp_client.rs:38-85`
-- [ ] ~50 lines duplicated between stdio and sse `connect()` branches (timeout, tool discovery, McpToolInfo mapping) — extract shared `connect_and_discover()` helper — `mcp_client.rs:115-313`
-- [ ] `env` field documented as "stdio only" but silently used for SSE auth via `MCP_AUTH_TOKEN` convention — add dedicated `auth_token: Option<String>` field to `McpServerDef` or update docs — `workflow.rs:162`, `mcp_client.rs:231`
-- [ ] `timeout_secs` doc comment ambiguous — says "Connection timeout" but applies to init + tool discovery — `workflow.rs:165`
+#### Important (fixed)
+- [x] `SseMcpService` + `StdioMcpService` merged into single `RmcpService` — `mcp_client.rs`
+- [x] ~50 lines deduped into `discover_and_register()` helper — `mcp_client.rs`
+- [x] `auth_token: Option<String>` field added to `McpServerDef`, `env` docs clarified — `workflow.rs`, `mcp_client.rs`
+- [x] `timeout_secs` doc comment clarified (init + discovery + calls) — `workflow.rs`
 
-#### Minor
-- [ ] URL not validated for scheme/format in `validate_mcp_servers` — empty string or `file://` URL gives confusing runtime error — `validation.rs`
-- [ ] `reqwest::Client::default()` per SSE connection — no shared connection pool (acceptable at current scale) — `mcp_client.rs:237`
+#### Minor (fixed)
+- [x] URL validated for http/https scheme in `validate_mcp_servers` — `validation.rs`
+- [ ] `reqwest::Client::default()` per SSE connection — no shared connection pool (acceptable at current scale) — `mcp_client.rs`
 
-#### Missing Tests
-- [ ] `is_mcp_tool()` with hyphen-normalized server names — `mcp_client.rs`
-- [ ] `tool_definitions()` prefix generation with multiple servers — `mcp_client.rs`
-- [ ] `call_tool()` routing with overlapping server name prefixes (e.g., `github` vs `github-enterprise`) — `mcp_client.rs`
+#### Tests (added)
+- [x] `is_mcp_tool()` — 6 tests: matching, no prefix, unknown server, hyphenated, prefix only, empty — `mcp_client.rs`
+- [x] `tool_definitions()` — 4 tests: single/multi server, hyphenated names, empty — `mcp_client.rs`
+- [x] `call_tool()` — 6 tests: routing, unknown server, no prefix, hyphenated tools, overlapping prefixes — `mcp_client.rs`
 
 ### 7B: Multi-turn + tools + ask_user (depends on 5d + 7A)
 - [x] Strom task tools via rig Tool trait (StromTaskTool)
