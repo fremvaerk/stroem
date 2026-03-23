@@ -277,14 +277,53 @@ pub async fn dispatch_agent_loop(
             .messages
             .push(serde_json::to_value(&assistant_msg)?);
 
+        ctx.log(
+            job_id,
+            &format!(
+                "[agent] Turn {}: LLM responded (in={}, out={} tokens)",
+                conv_state.turn, response.usage.input_tokens, response.usage.output_tokens
+            ),
+        )
+        .await;
+
         // Classify the response content
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         for content in response.choice.iter() {
             match content {
-                AssistantContent::Text(t) => text_parts.push(t.text.clone()),
-                AssistantContent::ToolCall(tc) => tool_calls.push(tc.clone()),
+                AssistantContent::Text(t) => {
+                    text_parts.push(t.text.clone());
+                    ctx.log(job_id, &format!("[agent] {}", t.text)).await;
+                }
+                AssistantContent::ToolCall(tc) => {
+                    let args_str = tc.function.arguments.to_string();
+                    let args_preview = crate::dispatch::truncate_for_error(&args_str, 200);
+                    ctx.log(
+                        job_id,
+                        &format!("[agent] Tool call: {}({})", tc.function.name, args_preview),
+                    )
+                    .await;
+                    tool_calls.push(tc.clone());
+                }
+                AssistantContent::Reasoning(r) => {
+                    // Surface thinking/reasoning blocks in the log stream
+                    let thinking_text: String = r
+                        .content
+                        .iter()
+                        .filter_map(|c| match c {
+                            rig::message::ReasoningContent::Text { text, .. } => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !thinking_text.is_empty() {
+                        ctx.log(job_id, &format!("[agent] Thinking: {}", thinking_text))
+                            .await;
+                    }
+                }
                 _ => {}
             }
         }
@@ -354,6 +393,16 @@ pub async fn dispatch_agent_loop(
                     tc.function.name
                 )
             };
+
+            let result_preview = crate::dispatch::truncate_for_error(&result, 500);
+            ctx.log(
+                job_id,
+                &format!(
+                    "[agent] MCP result {}: {}",
+                    tc.function.name, result_preview
+                ),
+            )
+            .await;
 
             let tool_result = UserContent::ToolResult(ToolResult {
                 id: tc.id.clone(),

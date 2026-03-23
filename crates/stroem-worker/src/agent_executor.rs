@@ -282,6 +282,14 @@ pub async fn execute_agent_step(
         .await
         {
             Ok(resp) => {
+                ctx.log(
+                    job_id,
+                    &format!(
+                        "[agent] Single-turn completed (in={}, out={} tokens)",
+                        resp.input_tokens, resp.output_tokens
+                    ),
+                )
+                .await;
                 let mut output = resp.content;
                 if let Some(obj) = output.as_object_mut() {
                     obj.insert(
