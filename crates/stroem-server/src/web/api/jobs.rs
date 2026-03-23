@@ -577,6 +577,32 @@ pub struct ApproveStepRequest {
     pub rejection_reason: Option<String>,
 }
 
+/// Extract the user response text from an agent ask_user approval input.
+/// If input has a single "response" key with a non-empty string, use it directly
+/// so the LLM sees plain text instead of JSON. Otherwise falls back to JSON serialization.
+fn extract_agent_response(input: Option<&serde_json::Value>) -> String {
+    match input {
+        Some(v) => {
+            // Try single "response" key with a non-empty string value
+            if let Some(obj) = v.as_object() {
+                if obj.len() == 1 {
+                    if let Some(s) = obj.get("response").and_then(|r| r.as_str()) {
+                        if !s.is_empty() {
+                            return s.to_string();
+                        }
+                    }
+                }
+            }
+            // Fallback: JSON-serialize the whole input
+            serde_json::to_string(v).unwrap_or_else(|e| {
+                tracing::warn!("failed to serialize agent approval input: {e}");
+                "Approved".to_string()
+            })
+        }
+        None => "Approved".to_string(),
+    }
+}
+
 /// POST /api/jobs/:id/steps/:step/approve — Approve or reject a suspended approval step.
 #[tracing::instrument(skip(state))]
 pub async fn approve_step(
@@ -664,12 +690,7 @@ pub async fn approve_step(
     if req.approved {
         // ── Agent ask_user approval: inject response into agent_state, mark ready ──
         if step.action_type == "agent" {
-            // Build the user response text from the approval input
-            let user_response = req
-                .input
-                .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
-                .unwrap_or_else(|| "Approved".to_string());
+            let user_response = extract_agent_response(req.input.as_ref());
 
             // Get the agent conversation state
             if let Some(ref state_val) = step.agent_state {
@@ -1349,5 +1370,64 @@ mod tests {
 
         assert_eq!(step_json["approval_message"], "Please review");
         assert!(step_json["approval_fields"].get("ticket").is_some());
+    }
+
+    #[test]
+    fn test_extract_agent_response_none() {
+        assert_eq!(extract_agent_response(None), "Approved");
+    }
+
+    #[test]
+    fn test_extract_agent_response_single_response_key() {
+        let input = json!({"response": "hello world"});
+        assert_eq!(extract_agent_response(Some(&input)), "hello world");
+    }
+
+    #[test]
+    fn test_extract_agent_response_empty_string_falls_through() {
+        let input = json!({"response": ""});
+        // Empty response should fall through to JSON serialization, not send empty string to LLM
+        assert_eq!(
+            extract_agent_response(Some(&input)),
+            r#"{"response":""}"#
+        );
+    }
+
+    #[test]
+    fn test_extract_agent_response_non_string_value() {
+        let input = json!({"response": 42});
+        assert_eq!(extract_agent_response(Some(&input)), r#"{"response":42}"#);
+    }
+
+    #[test]
+    fn test_extract_agent_response_multiple_keys() {
+        let input = json!({"response": "hi", "extra": "data"});
+        let result = extract_agent_response(Some(&input));
+        assert!(result.contains("response"));
+        assert!(result.contains("extra"));
+    }
+
+    #[test]
+    fn test_extract_agent_response_bare_string() {
+        let input = json!("just a string");
+        assert_eq!(
+            extract_agent_response(Some(&input)),
+            r#""just a string""#
+        );
+    }
+
+    #[test]
+    fn test_extract_agent_response_empty_object() {
+        let input = json!({});
+        assert_eq!(extract_agent_response(Some(&input)), "{}");
+    }
+
+    #[test]
+    fn test_extract_agent_response_null_value() {
+        let input = json!({"response": null});
+        assert_eq!(
+            extract_agent_response(Some(&input)),
+            r#"{"response":null}"#
+        );
     }
 }

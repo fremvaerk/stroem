@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2, XCircle, Send, Bot } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +18,123 @@ interface ApprovalCardProps {
 }
 
 export function ApprovalCard({ jobId, step, onAction }: ApprovalCardProps) {
+  const isAgentAskUser = step.action_type === "agent";
+
+  if (isAgentAskUser) {
+    return <AgentAskUserCard jobId={jobId} step={step} onAction={onAction} />;
+  }
+
+  return <ApprovalGateCard jobId={jobId} step={step} onAction={onAction} />;
+}
+
+function AgentAskUserCard({ jobId, step, onAction }: ApprovalCardProps) {
+  const [response, setResponse] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const textareaId = `agent-response-${step.step_name}`;
+
+  async function handleSend() {
+    if (!response.trim()) {
+      setError("Please enter a response");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      await approveStep(jobId, step.step_name, true, { response: response.trim() });
+      onAction();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send response");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCancel() {
+    setLoading(true);
+    setError(null);
+    try {
+      await approveStep(jobId, step.step_name, false);
+      onAction();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel step");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base text-blue-900 dark:text-blue-200">
+          <Bot className="h-4 w-4" aria-hidden="true" />
+          Agent Waiting for Input
+        </CardTitle>
+        {step.suspended_at && (
+          <p className="text-xs text-muted-foreground">
+            Asked at {formatTime(step.suspended_at)}
+          </p>
+        )}
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {step.approval_message && (
+          <pre className="whitespace-pre-wrap break-words rounded-md border border-blue-200 bg-white p-3 font-mono text-sm text-foreground dark:border-blue-800 dark:bg-background">
+            {step.approval_message}
+          </pre>
+        )}
+
+        <div className="space-y-1.5">
+          <Label htmlFor={textareaId}>Your response</Label>
+          <Textarea
+            id={textareaId}
+            rows={4}
+            value={response}
+            onChange={(e) => setResponse(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !loading && response.trim()) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder="Type your response to the agent..."
+            autoFocus
+          />
+        </div>
+
+        {error && (
+          <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400">
+            {error}
+          </p>
+        )}
+
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            className="bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-600"
+            disabled={loading || !response.trim()}
+            onClick={handleSend}
+          >
+            <Send className="mr-1.5 h-3.5 w-3.5" />
+            {loading ? "Sending..." : "Send Response"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-muted-foreground"
+            disabled={loading}
+            onClick={handleCancel}
+          >
+            <XCircle className="mr-1.5 h-3.5 w-3.5" />
+            {loading ? "Cancelling..." : "Cancel"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ApprovalGateCard({ jobId, step, onAction }: ApprovalCardProps) {
   const [approvalInput, setApprovalInput] = useState<Record<string, unknown>>({});
   const [rejecting, setRejecting] = useState(false);
   const [rejectionReason, setRejectionReason] = useState("");
