@@ -373,6 +373,52 @@ fn validate_workflow_config_inner(
         )?;
     }
 
+    // Check for task name collisions after hyphen→underscore normalization.
+    // Two tasks whose names differ only by hyphens vs underscores would map
+    // to the same agent tool name, causing ambiguous tool routing.
+    {
+        let mut normalized_names: std::collections::HashMap<String, Vec<&str>> =
+            std::collections::HashMap::new();
+        for task_name in config.tasks.keys() {
+            let normalized = task_name.replace('-', "_");
+            normalized_names
+                .entry(normalized)
+                .or_default()
+                .push(task_name);
+        }
+        for (normalized, names) in &normalized_names {
+            if names.len() > 1 {
+                bail!(
+                    "Tasks {} have the same normalized name '{}' — agent tool names would collide. Rename one to avoid ambiguity.",
+                    names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(" and "),
+                    normalized
+                );
+            }
+        }
+    }
+
+    // Same collision check for MCP server names.
+    {
+        let mut normalized_names: std::collections::HashMap<String, Vec<&str>> =
+            std::collections::HashMap::new();
+        for server_name in config.mcp_servers.keys() {
+            let normalized = server_name.replace('-', "_");
+            normalized_names
+                .entry(normalized)
+                .or_default()
+                .push(server_name);
+        }
+        for (normalized, names) in &normalized_names {
+            if names.len() > 1 {
+                bail!(
+                    "MCP servers {} have the same normalized name '{}' — tool name prefixes would collide. Rename one to avoid ambiguity.",
+                    names.iter().map(|n| format!("'{}'", n)).collect::<Vec<_>>().join(" and "),
+                    normalized
+                );
+            }
+        }
+    }
+
     // Validate connections
     warnings.extend(validate_connections(config)?);
 
@@ -5976,5 +6022,79 @@ prompt: "Do something useful"
         let result = validate_mcp_servers(&servers);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("unknown transport type"));
+    }
+
+    #[test]
+    fn test_task_name_collision_hyphen_underscore() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: echo deploy
+tasks:
+  deploy-app:
+    flow:
+      s1:
+        action: deploy
+  deploy_app:
+    flow:
+      s1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("normalized name") && err.contains("deploy_app"),
+            "Error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_task_name_no_collision_when_different() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: echo deploy
+tasks:
+  deploy-app:
+    flow:
+      s1:
+        action: deploy
+  deploy-service:
+    flow:
+      s1:
+        action: deploy
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "Expected ok, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_mcp_server_name_collision_hyphen_underscore() {
+        let yaml = r#"
+actions: {}
+tasks: {}
+mcp_servers:
+  my-server:
+    transport: stdio
+    command: echo
+  my_server:
+    transport: stdio
+    command: echo
+"#;
+        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("normalized name") && err.contains("my_server"),
+            "Error: {}",
+            err
+        );
     }
 }

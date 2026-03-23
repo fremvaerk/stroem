@@ -65,199 +65,34 @@ pub async fn handle_agent_steps(
             None => break, // No more ready agent steps — done
         };
 
-        // Deserialize the action spec
-        let action_spec: ActionDef = match step.action_spec.as_ref() {
-            Some(spec) => serde_json::from_value(spec.clone())
-                .context("Failed to deserialize agent action_spec")?,
-            None => {
-                let err = "Missing action_spec for agent step";
-                JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, err).await?;
-                // Orchestrate after failure so downstream steps are unblocked
-                orchestrate_step(
-                    &state.pool,
-                    job_id,
-                    &step.step_name,
-                    &task,
-                    workspace_config,
-                )
-                .await;
-                continue;
-            }
-        };
-
-        let provider_name = match action_spec.provider.as_deref() {
-            Some(p) => p,
-            None => {
-                let err = "Agent step missing provider";
-                JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, err).await?;
-                orchestrate_step(
-                    &state.pool,
-                    job_id,
-                    &step.step_name,
-                    &task,
-                    workspace_config,
-                )
-                .await;
-                continue;
-            }
-        };
-
-        let provider_config = match agents_config.providers.get(provider_name) {
-            Some(p) => p,
-            None => {
-                let err = format!("Unknown agent provider: {}", provider_name);
-                JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err).await?;
-                orchestrate_step(
-                    &state.pool,
-                    job_id,
-                    &step.step_name,
-                    &task,
-                    workspace_config,
-                )
-                .await;
-                continue;
-            }
+        // Resolve and render all templates; on any validation error the step is
+        // marked failed internally and Ok(None) is returned — just continue.
+        let resolved = match resolve_and_render_step(
+            &state.pool,
+            agents_config,
+            workspace_config,
+            job_id,
+            &job_row,
+            &steps,
+            &step,
+            &task,
+        )
+        .await?
+        {
+            Some(r) => r,
+            None => continue,
         };
 
         // Mark step running (server-side, no worker)
-        JobStepRepo::mark_running_server(&state.pool, job_id, &step.step_name).await?;
+        JobStepRepo::mark_running_server(&state.pool, job_id, &resolved.step_name).await?;
         JobRepo::mark_running_if_pending_server(&state.pool, job_id).await?;
-
-        // Build render context from completed steps
-        let mut render_ctx =
-            crate::job_creator::build_step_render_context(&job_row, &steps, workspace_config);
-
-        // Inject `each` variable for for_each loop instances (mirrors rendering.rs)
-        if step.loop_source.is_some() {
-            if let Some(ref item) = step.loop_item {
-                let each_val = serde_json::json!({
-                    "item": item,
-                    "index": step.loop_index,
-                    "total": step.loop_total,
-                });
-                if let Some(obj) = render_ctx.as_object_mut() {
-                    obj.insert("each".to_string(), each_val);
-                }
-            }
-        }
-
-        // Resolve flow-step input templates and replace `input` in the context
-        // so prompt/system_prompt can use {{ input.X }} for resolved step input.
-        if let Some(ref input) = step.input {
-            if let Some(input_map) = input.as_object() {
-                if !input_map.is_empty() {
-                    let map: std::collections::HashMap<String, serde_json::Value> = input_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    match stroem_common::template::render_input_map(&map, &render_ctx) {
-                        Ok(resolved) => {
-                            if let Some(ctx_obj) = render_ctx.as_object_mut() {
-                                ctx_obj.insert("input".to_string(), resolved);
-                            }
-                        }
-                        Err(e) => {
-                            let err = format!(
-                                "Failed to render input for agent step '{}': {:#}",
-                                step.step_name, e
-                            );
-                            JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err)
-                                .await?;
-                            orchestrate_step(
-                                &state.pool,
-                                job_id,
-                                &step.step_name,
-                                &task,
-                                workspace_config,
-                            )
-                            .await;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Render prompt template
-        let rendered_prompt = match action_spec.prompt.as_deref() {
-            Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
-                Ok(p) => p,
-                Err(e) => {
-                    let err = format!("Failed to render prompt template: {:#}", e);
-                    JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err).await?;
-                    orchestrate_step(
-                        &state.pool,
-                        job_id,
-                        &step.step_name,
-                        &task,
-                        workspace_config,
-                    )
-                    .await;
-                    continue;
-                }
-            },
-            None => {
-                let err = "Agent step missing prompt";
-                JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, err).await?;
-                orchestrate_step(
-                    &state.pool,
-                    job_id,
-                    &step.step_name,
-                    &task,
-                    workspace_config,
-                )
-                .await;
-                continue;
-            }
-        };
-
-        // Reject empty prompts — an empty string would waste an LLM API call
-        if rendered_prompt.trim().is_empty() {
-            let err = "Agent step prompt rendered to empty string";
-            JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, err).await?;
-            orchestrate_step(
-                &state.pool,
-                job_id,
-                &step.step_name,
-                &task,
-                workspace_config,
-            )
-            .await;
-            continue;
-        }
-
-        // Render system_prompt template (optional)
-        let rendered_system = match action_spec.system_prompt.as_deref() {
-            Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    let err = format!("Failed to render system_prompt template: {:#}", e);
-                    JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err).await?;
-                    orchestrate_step(
-                        &state.pool,
-                        job_id,
-                        &step.step_name,
-                        &task,
-                        workspace_config,
-                    )
-                    .await;
-                    continue;
-                }
-            },
-            None => None,
-        };
-
-        let model_name = action_spec
-            .model
-            .as_deref()
-            .unwrap_or(&provider_config.model);
 
         state
             .append_server_log(
                 job_id,
                 &format!(
                     "[agent] Step '{}': calling {}/{}",
-                    step.step_name, provider_name, model_name
+                    resolved.step_name, resolved.provider_name, resolved.model_name
                 ),
             )
             .await;
@@ -265,7 +100,7 @@ pub async fn handle_agent_steps(
         // ── Multi-turn dispatch branch ──────────────────────────────────
         // If the action has tools defined, use the multi-turn dispatch loop
         // which handles tool calling, task tools, MCP, and ask_user.
-        if !action_spec.tools.is_empty() || action_spec.interactive {
+        if !resolved.action_spec.tools.is_empty() || resolved.action_spec.interactive {
             let start = std::time::Instant::now();
 
             // Check if resuming from a previous state (e.g. after child job completed)
@@ -275,7 +110,8 @@ pub async fn handle_agent_steps(
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
 
             // Connect MCP clients if any MCP tool refs exist
-            let mcp_server_names: Vec<&str> = action_spec
+            let mcp_server_names: Vec<&str> = resolved
+                .action_spec
                 .tools
                 .iter()
                 .filter_map(|t| match t {
@@ -296,12 +132,12 @@ pub async fn handle_agent_steps(
                     Ok(client) => Some(client),
                     Err(e) => {
                         let err = format!("Failed to connect MCP servers: {:#}", e);
-                        JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err)
+                        JobStepRepo::mark_failed(&state.pool, job_id, &resolved.step_name, &err)
                             .await?;
                         orchestrate_step(
                             &state.pool,
                             job_id,
-                            &step.step_name,
+                            &resolved.step_name,
                             &task,
                             workspace_config,
                         )
@@ -318,12 +154,12 @@ pub async fn handle_agent_steps(
                 workspace_config,
                 workspace_name,
                 job_id,
-                &step.step_name,
-                &action_spec,
-                provider_config,
-                model_name,
-                &rendered_prompt,
-                rendered_system.as_deref(),
+                &resolved.step_name,
+                &resolved.action_spec,
+                &resolved.provider_config,
+                &resolved.model_name,
+                &resolved.rendered_prompt,
+                resolved.rendered_system.as_deref(),
                 resume_state,
                 mcp_client.as_ref(),
                 vec![], // No tool results on initial dispatch
@@ -338,7 +174,7 @@ pub async fn handle_agent_steps(
             }
 
             let elapsed_ms = start.elapsed().as_millis() as u64;
-            let completed_step_name = step.step_name.clone();
+            let completed_step_name = resolved.step_name.clone();
 
             match outcome {
                 Ok(super::loop_dispatch::DispatchOutcome::Completed {
@@ -350,8 +186,8 @@ pub async fn handle_agent_steps(
                         obj.insert(
                             "_meta".to_string(),
                             serde_json::json!({
-                                "model": model_name,
-                                "provider": provider_name,
+                                "model": resolved.model_name,
+                                "provider": resolved.provider_name,
                                 "input_tokens": usage.input_tokens,
                                 "output_tokens": usage.output_tokens,
                                 "latency_ms": elapsed_ms,
@@ -364,12 +200,17 @@ pub async fn handle_agent_steps(
                             job_id,
                             &format!(
                                 "[agent] Step '{}': completed in {}ms (multi-turn)",
-                                step.step_name, elapsed_ms
+                                resolved.step_name, elapsed_ms
                             ),
                         )
                         .await;
-                    JobStepRepo::mark_completed(&state.pool, job_id, &step.step_name, Some(output))
-                        .await?;
+                    JobStepRepo::mark_completed(
+                        &state.pool,
+                        job_id,
+                        &resolved.step_name,
+                        Some(output),
+                    )
+                    .await?;
                 }
                 Ok(super::loop_dispatch::DispatchOutcome::WaitingForTools {
                     state: conv_state,
@@ -379,7 +220,7 @@ pub async fn handle_agent_steps(
                     stroem_db::JobStepRepo::update_agent_state(
                         &state.pool,
                         job_id,
-                        &step.step_name,
+                        &resolved.step_name,
                         agent_state,
                     )
                     .await?;
@@ -388,7 +229,7 @@ pub async fn handle_agent_steps(
                             job_id,
                             &format!(
                                 "[agent] Step '{}': waiting for {} task tool(s)",
-                                step.step_name,
+                                resolved.step_name,
                                 conv_state.pending_tool_calls.len()
                             ),
                         )
@@ -405,22 +246,27 @@ pub async fn handle_agent_steps(
                     stroem_db::JobStepRepo::update_agent_state(
                         &state.pool,
                         job_id,
-                        &step.step_name,
+                        &resolved.step_name,
                         agent_state,
                     )
                     .await?;
                     // Store the message in output (same pattern as approval gates)
                     let output = serde_json::json!({ "approval_message": message });
-                    JobStepRepo::mark_completed(&state.pool, job_id, &step.step_name, Some(output))
-                        .await?;
+                    JobStepRepo::mark_completed(
+                        &state.pool,
+                        job_id,
+                        &resolved.step_name,
+                        Some(output),
+                    )
+                    .await?;
                     // Re-mark as suspended (mark_completed was to set output)
-                    JobStepRepo::mark_suspended(&state.pool, job_id, &step.step_name).await?;
+                    JobStepRepo::mark_suspended(&state.pool, job_id, &resolved.step_name).await?;
                     state
                         .append_server_log(
                             job_id,
                             &format!(
                                 "[agent] Step '{}': waiting for user input (ask_user)",
-                                step.step_name
+                                resolved.step_name
                             ),
                         )
                         .await;
@@ -430,7 +276,7 @@ pub async fn handle_agent_steps(
                         workspace_config,
                         &job_row,
                         &task,
-                        &step.step_name,
+                        &resolved.step_name,
                         &message,
                     )
                     .await;
@@ -440,20 +286,24 @@ pub async fn handle_agent_steps(
                     state
                         .append_server_log(
                             job_id,
-                            &format!("[agent] Step '{}': failed — {}", step.step_name, error),
+                            &format!("[agent] Step '{}': failed — {}", resolved.step_name, error),
                         )
                         .await;
-                    JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &error).await?;
+                    JobStepRepo::mark_failed(&state.pool, job_id, &resolved.step_name, &error)
+                        .await?;
                 }
                 Err(e) => {
                     let err_msg = format!("{:#}", e);
                     state
                         .append_server_log(
                             job_id,
-                            &format!("[agent] Step '{}': failed — {}", step.step_name, err_msg),
+                            &format!(
+                                "[agent] Step '{}': failed — {}",
+                                resolved.step_name, err_msg
+                            ),
                         )
                         .await;
-                    JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err_msg)
+                    JobStepRepo::mark_failed(&state.pool, job_id, &resolved.step_name, &err_msg)
                         .await?;
                 }
             }
@@ -472,74 +322,30 @@ pub async fn handle_agent_steps(
         // ── Single-turn dispatch (no tools) ─────────────────────────────
         let start = std::time::Instant::now();
 
-        // Retry loop with exponential backoff for transient errors.
-        // Max retries comes from provider_config; base delay is 1s with jitter.
-        let max_retries = provider_config.max_retries;
-        let mut call_result: Result<LlmResponse> = Err(anyhow::anyhow!("LLM call not attempted"));
-
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
-                // Exponential backoff: 1s, 2s, 4s, 8s, ... with ±25% jitter
-                let base_ms = 1000u64 * (1u64 << (attempt - 1).min(6));
-                // Simple deterministic jitter based on attempt number — avoids
-                // pulling in the `rand` crate just for this purpose.
-                let jitter = (attempt as u64 * 7919) % (base_ms / 4 + 1);
-                let delay_ms = base_ms + jitter;
-                state
-                    .append_server_log(
-                        job_id,
-                        &format!(
-                            "[agent] Step '{}': retrying (attempt {}/{}) after {}ms",
-                            step.step_name, attempt, max_retries, delay_ms
-                        ),
-                    )
-                    .await;
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-            }
-
-            call_result = match tokio::time::timeout(
-                LLM_CALL_TIMEOUT,
-                call_llm(
-                    provider_config,
-                    model_name,
-                    &rendered_prompt,
-                    rendered_system.as_deref(),
-                    &action_spec,
-                ),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => Err(anyhow::anyhow!(
-                    "LLM API call timed out after {}s",
-                    LLM_CALL_TIMEOUT.as_secs()
-                )),
-            };
-
-            match &call_result {
-                Ok(_) => break,
-                Err(e) if is_transient_error(e) && attempt < max_retries => continue,
-                Err(_) => break,
-            }
-        }
+        let call_result = execute_single_turn_with_retry(
+            &resolved.provider_config,
+            &resolved.model_name,
+            &resolved.rendered_prompt,
+            resolved.rendered_system.as_deref(),
+            &resolved.action_spec,
+        )
+        .await;
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
-
-        let completed_step_name = step.step_name.clone();
+        let completed_step_name = resolved.step_name.clone();
 
         match call_result {
             Ok(response) => {
-                // Build output with _meta
+                // Build output with _meta.
+                // Note: `_meta` is a reserved key — any `_meta` field in the LLM
+                // response will be overwritten. This is documented behavior (agent-actions.md).
                 let mut output = response.content;
                 if let Some(obj) = output.as_object_mut() {
-                    // Note: `_meta` is a reserved key. If the LLM response or output
-                    // defines a `_meta` field, it will be overwritten. This is documented
-                    // behavior — see agent-actions.md.
                     obj.insert(
                         "_meta".to_string(),
                         serde_json::json!({
-                            "model": model_name,
-                            "provider": provider_name,
+                            "model": resolved.model_name,
+                            "provider": resolved.provider_name,
                             "input_tokens": response.input_tokens,
                             "output_tokens": response.output_tokens,
                             "latency_ms": elapsed_ms,
@@ -553,12 +359,12 @@ pub async fn handle_agent_steps(
                         job_id,
                         &format!(
                             "[agent] Step '{}': completed in {}ms",
-                            step.step_name, elapsed_ms
+                            resolved.step_name, elapsed_ms
                         ),
                     )
                     .await;
 
-                JobStepRepo::mark_completed(&state.pool, job_id, &step.step_name, Some(output))
+                JobStepRepo::mark_completed(&state.pool, job_id, &resolved.step_name, Some(output))
                     .await?;
             }
             Err(e) => {
@@ -566,10 +372,14 @@ pub async fn handle_agent_steps(
                 state
                     .append_server_log(
                         job_id,
-                        &format!("[agent] Step '{}': failed — {}", step.step_name, err_msg),
+                        &format!(
+                            "[agent] Step '{}': failed — {}",
+                            resolved.step_name, err_msg
+                        ),
                     )
                     .await;
-                JobStepRepo::mark_failed(&state.pool, job_id, &step.step_name, &err_msg).await?;
+                JobStepRepo::mark_failed(&state.pool, job_id, &resolved.step_name, &err_msg)
+                    .await?;
             }
         }
 
@@ -595,6 +405,10 @@ pub async fn handle_agent_steps(
 ///
 /// This handles the case where an agent step is the first (or only) step in a
 /// job and nothing else triggers `handle_agent_steps` via the orchestrator.
+///
+/// Only handles the single-turn path (no tools). Steps that need tools
+/// (`action_spec.tools` non-empty) are deferred to `handle_agent_steps` once
+/// the orchestrator picks them up.
 #[tracing::instrument(skip(pool, agents_config, workspace_config))]
 pub async fn dispatch_initial_agent_steps(
     pool: &sqlx::PgPool,
@@ -621,203 +435,54 @@ pub async fn dispatch_initial_agent_steps(
             _ => break, // Job gone or cancelled
         };
 
-        let ready_agent_step = steps
+        let step = match steps
             .iter()
-            .find(|s| s.status == StepStatus::Ready.as_ref() && s.action_type == "agent");
-
-        let step = match ready_agent_step {
+            .find(|s| s.status == StepStatus::Ready.as_ref() && s.action_type == "agent")
+        {
             Some(s) => s.clone(),
             None => break,
         };
 
-        let action_spec: ActionDef = match step.action_spec.as_ref() {
-            Some(spec) => serde_json::from_value(spec.clone())
-                .context("Failed to deserialize agent action_spec")?,
-            None => {
-                let err = "Missing action_spec for agent step";
-                JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
-                orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-                continue;
-            }
+        let resolved = match resolve_and_render_step(
+            pool,
+            agents_config,
+            workspace_config,
+            job_id,
+            &job_row,
+            &steps,
+            &step,
+            &task,
+        )
+        .await?
+        {
+            Some(r) => r,
+            None => continue,
         };
 
-        let provider_name = match action_spec.provider.as_deref() {
-            Some(p) => p,
-            None => {
-                let err = "Agent step missing provider";
-                JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
-                orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-                continue;
-            }
-        };
-
-        let provider_config = match agents_config.providers.get(provider_name) {
-            Some(p) => p,
-            None => {
-                let err = format!("Unknown agent provider: {}", provider_name);
-                JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-                continue;
-            }
-        };
-
-        JobStepRepo::mark_running_server(pool, job_id, &step.step_name).await?;
+        JobStepRepo::mark_running_server(pool, job_id, &resolved.step_name).await?;
         JobRepo::mark_running_if_pending_server(pool, job_id).await?;
-
-        let mut render_ctx =
-            crate::job_creator::build_step_render_context(&job_row, &steps, workspace_config);
-
-        // Inject `each` variable for for_each loop instances (mirrors rendering.rs)
-        if step.loop_source.is_some() {
-            if let Some(ref item) = step.loop_item {
-                let each_val = serde_json::json!({
-                    "item": item,
-                    "index": step.loop_index,
-                    "total": step.loop_total,
-                });
-                if let Some(obj) = render_ctx.as_object_mut() {
-                    obj.insert("each".to_string(), each_val);
-                }
-            }
-        }
-
-        // Resolve flow-step input templates and replace `input` in the context
-        if let Some(ref input) = step.input {
-            if let Some(input_map) = input.as_object() {
-                if !input_map.is_empty() {
-                    let map: std::collections::HashMap<String, serde_json::Value> = input_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    match stroem_common::template::render_input_map(&map, &render_ctx) {
-                        Ok(resolved) => {
-                            if let Some(ctx_obj) = render_ctx.as_object_mut() {
-                                ctx_obj.insert("input".to_string(), resolved);
-                            }
-                        }
-                        Err(e) => {
-                            let err = format!(
-                                "Failed to render input for agent step '{}': {:#}",
-                                step.step_name, e
-                            );
-                            JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                            orchestrate_step(
-                                pool,
-                                job_id,
-                                &step.step_name,
-                                &task,
-                                workspace_config,
-                            )
-                            .await;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-
-        let rendered_prompt = match action_spec.prompt.as_deref() {
-            Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
-                Ok(p) => p,
-                Err(e) => {
-                    let err = format!("Failed to render prompt template: {:#}", e);
-                    JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                    orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-                    continue;
-                }
-            },
-            None => {
-                let err = "Agent step missing prompt";
-                JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
-                orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-                continue;
-            }
-        };
-
-        // Reject empty prompts — an empty string would waste an LLM API call
-        if rendered_prompt.trim().is_empty() {
-            let err = "Agent step prompt rendered to empty string";
-            JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
-            orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-            continue;
-        }
-
-        let rendered_system = match action_spec.system_prompt.as_deref() {
-            Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    let err = format!("Failed to render system_prompt template: {:#}", e);
-                    JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                    orchestrate_step(pool, job_id, &step.step_name, &task, workspace_config).await;
-                    continue;
-                }
-            },
-            None => None,
-        };
-
-        let model_name = action_spec
-            .model
-            .as_deref()
-            .unwrap_or(&provider_config.model);
 
         tracing::info!(
             job_id = %job_id,
-            step = %step.step_name,
-            provider = %provider_name,
-            model = %model_name,
+            step = %resolved.step_name,
+            provider = %resolved.provider_name,
+            model = %resolved.model_name,
             "[agent] initial dispatch: calling LLM"
         );
 
         let start = std::time::Instant::now();
 
-        // Retry loop (same logic as handle_agent_steps, but uses tracing instead of server log)
-        let max_retries = provider_config.max_retries;
-        let mut call_result: Result<LlmResponse> = Err(anyhow::anyhow!("LLM call not attempted"));
-
-        for attempt in 0..=max_retries {
-            if attempt > 0 {
-                let base_ms = 1000u64 * (1u64 << (attempt - 1).min(6));
-                let jitter = (attempt as u64 * 7919) % (base_ms / 4 + 1);
-                let delay_ms = base_ms + jitter;
-                tracing::info!(
-                    job_id = %job_id,
-                    step = %step.step_name,
-                    attempt,
-                    max_retries,
-                    delay_ms,
-                    "[agent] initial dispatch: retrying"
-                );
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-            }
-
-            call_result = match tokio::time::timeout(
-                LLM_CALL_TIMEOUT,
-                call_llm(
-                    provider_config,
-                    model_name,
-                    &rendered_prompt,
-                    rendered_system.as_deref(),
-                    &action_spec,
-                ),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => Err(anyhow::anyhow!(
-                    "LLM API call timed out after {}s",
-                    LLM_CALL_TIMEOUT.as_secs()
-                )),
-            };
-
-            match &call_result {
-                Ok(_) => break,
-                Err(e) if is_transient_error(e) && attempt < max_retries => continue,
-                Err(_) => break,
-            }
-        }
+        let call_result = execute_single_turn_with_retry(
+            &resolved.provider_config,
+            &resolved.model_name,
+            &resolved.rendered_prompt,
+            resolved.rendered_system.as_deref(),
+            &resolved.action_spec,
+        )
+        .await;
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
-        let completed_step_name = step.step_name.clone();
+        let completed_step_name = resolved.step_name.clone();
 
         match call_result {
             Ok(response) => {
@@ -826,8 +491,8 @@ pub async fn dispatch_initial_agent_steps(
                     obj.insert(
                         "_meta".to_string(),
                         serde_json::json!({
-                            "model": model_name,
-                            "provider": provider_name,
+                            "model": resolved.model_name,
+                            "provider": resolved.provider_name,
                             "input_tokens": response.input_tokens,
                             "output_tokens": response.output_tokens,
                             "latency_ms": elapsed_ms,
@@ -837,22 +502,23 @@ pub async fn dispatch_initial_agent_steps(
                 }
                 tracing::info!(
                     job_id = %job_id,
-                    step = %step.step_name,
+                    step = %resolved.step_name,
                     elapsed_ms,
                     output_tokens = response.output_tokens,
                     "[agent] initial dispatch: step completed"
                 );
-                JobStepRepo::mark_completed(pool, job_id, &step.step_name, Some(output)).await?;
+                JobStepRepo::mark_completed(pool, job_id, &resolved.step_name, Some(output))
+                    .await?;
             }
             Err(e) => {
                 let err_msg = format!("{:#}", e);
                 tracing::error!(
                     job_id = %job_id,
-                    step = %step.step_name,
+                    step = %resolved.step_name,
                     "[agent] initial dispatch: step failed — {}",
                     err_msg
                 );
-                JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err_msg).await?;
+                JobStepRepo::mark_failed(pool, job_id, &resolved.step_name, &err_msg).await?;
             }
         }
 
@@ -925,52 +591,204 @@ async fn orchestrate_step(
     }
 }
 
+/// Resolved and rendered agent step, ready for LLM dispatch.
+struct ResolvedAgentStep {
+    step_name: String,
+    action_spec: ActionDef,
+    provider_name: String,
+    provider_config: AgentProviderConfig,
+    model_name: String,
+    rendered_prompt: String,
+    rendered_system: Option<String>,
+}
+
+/// Resolve and render an agent step from the DB row.
+///
+/// Handles: `action_spec` deserialization, provider lookup, render context
+/// building, `each` variable injection, input template rendering, prompt and
+/// system_prompt rendering, and empty-prompt rejection.
+///
+/// Returns `Ok(None)` when the step has been marked failed and orchestrated
+/// internally (so the caller can `continue` its loop). Returns
+/// `Ok(Some(resolved))` on success.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_and_render_step(
+    pool: &sqlx::PgPool,
+    agents_config: &AgentsConfig,
+    workspace_config: &WorkspaceConfig,
+    job_id: Uuid,
+    job_row: &stroem_db::JobRow,
+    steps: &[stroem_db::JobStepRow],
+    step: &stroem_db::JobStepRow,
+    task: &stroem_common::models::workflow::TaskDef,
+) -> Result<Option<ResolvedAgentStep>> {
+    // Deserialize the action spec
+    let action_spec: ActionDef = match step.action_spec.as_ref() {
+        Some(spec) => serde_json::from_value(spec.clone())
+            .context("Failed to deserialize agent action_spec")?,
+        None => {
+            let err = "Missing action_spec for agent step";
+            JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
+            orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+            return Ok(None);
+        }
+    };
+
+    let provider_name = match action_spec.provider.as_deref() {
+        Some(p) => p.to_string(),
+        None => {
+            let err = "Agent step missing provider";
+            JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
+            orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+            return Ok(None);
+        }
+    };
+
+    let provider_config = match agents_config.providers.get(&provider_name) {
+        Some(p) => p.clone(),
+        None => {
+            let err = format!("Unknown agent provider: {}", provider_name);
+            JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+            orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+            return Ok(None);
+        }
+    };
+
+    // Build render context from completed steps
+    let mut render_ctx =
+        crate::job_creator::build_step_render_context(job_row, steps, workspace_config);
+
+    // Inject `each` variable for for_each loop instances (mirrors rendering.rs)
+    if step.loop_source.is_some() {
+        if let Some(ref item) = step.loop_item {
+            let each_val = serde_json::json!({
+                "item": item,
+                "index": step.loop_index,
+                "total": step.loop_total,
+            });
+            if let Some(obj) = render_ctx.as_object_mut() {
+                obj.insert("each".to_string(), each_val);
+            }
+        }
+    }
+
+    // Resolve flow-step input templates and replace `input` in the context
+    // so prompt/system_prompt can use {{ input.X }} for resolved step input.
+    if let Some(ref input) = step.input {
+        if let Some(input_map) = input.as_object() {
+            if !input_map.is_empty() {
+                let map: std::collections::HashMap<String, serde_json::Value> = input_map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                match stroem_common::template::render_input_map(&map, &render_ctx) {
+                    Ok(resolved) => {
+                        if let Some(ctx_obj) = render_ctx.as_object_mut() {
+                            ctx_obj.insert("input".to_string(), resolved);
+                        }
+                    }
+                    Err(e) => {
+                        let err = format!(
+                            "Failed to render input for agent step '{}': {:#}",
+                            step.step_name, e
+                        );
+                        JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                        orchestrate_step(pool, job_id, &step.step_name, task, workspace_config)
+                            .await;
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    // Render prompt template
+    let rendered_prompt = match action_spec.prompt.as_deref() {
+        Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
+            Ok(p) => p,
+            Err(e) => {
+                let err = format!("Failed to render prompt template: {:#}", e);
+                JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+                return Ok(None);
+            }
+        },
+        None => {
+            let err = "Agent step missing prompt";
+            JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
+            orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+            return Ok(None);
+        }
+    };
+
+    // Reject empty prompts — an empty string would waste an LLM API call
+    if rendered_prompt.trim().is_empty() {
+        let err = "Agent step prompt rendered to empty string";
+        JobStepRepo::mark_failed(pool, job_id, &step.step_name, err).await?;
+        orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+        return Ok(None);
+    }
+
+    // Render system_prompt template (optional)
+    let rendered_system = match action_spec.system_prompt.as_deref() {
+        Some(tmpl) => match stroem_common::template::render_template(tmpl, &render_ctx) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                let err = format!("Failed to render system_prompt template: {:#}", e);
+                JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                orchestrate_step(pool, job_id, &step.step_name, task, workspace_config).await;
+                return Ok(None);
+            }
+        },
+        None => None,
+    };
+
+    let model_name = action_spec
+        .model
+        .as_deref()
+        .unwrap_or(&provider_config.model)
+        .to_string();
+
+    Ok(Some(ResolvedAgentStep {
+        step_name: step.step_name.clone(),
+        action_spec,
+        provider_name,
+        provider_config,
+        model_name,
+        rendered_prompt,
+        rendered_system,
+    }))
+}
+
+/// Response from a single-turn LLM call.
 #[derive(Debug)]
-struct LlmResponse {
+struct SingleTurnResponse {
     content: serde_json::Value,
     input_tokens: u64,
     output_tokens: u64,
 }
 
-/// Call the LLM provider using rig-core.
+/// Execute a single-turn LLM call with retry logic and timeout.
 ///
-/// Builds a fresh client per call (caching can be added later if needed).
-/// Uses the `Agent::prompt()` interface for simple single-turn prompts.
+/// Uses `CompletionModel::completion()` (via `loop_dispatch::call_completion`)
+/// to obtain real token usage counts, unlike the former `Agent::prompt()`
+/// approach that returned 0 for both token counts.
 ///
-/// # Temperature and max_tokens
-///
-/// Values from `action` take precedence over `provider_config` defaults.
-///
-/// # Structured output (`output`)
-///
-/// When `action.output` is set, `OutputDef::to_json_schema()` converts it to
-/// JSON Schema and the system prompt is augmented with instructions to return a
-/// JSON object matching the schema. The response is then parsed as a JSON
-/// object; if parsing fails the call returns an error.
-///
-/// # Token tracking
-///
-/// The `Prompt` trait returns a `String` with no usage metadata. Token counts
-/// are currently returned as `0`.
-/// TODO: switch to the lower-level completion API when rig exposes per-call
-/// usage in a stable interface.
-async fn call_llm(
+/// Retry strategy: exponential backoff (1s, 2s, 4s, …) with ±25% jitter,
+/// up to `provider_config.max_retries` attempts. Only transient errors are
+/// retried (see `is_transient_error`).
+async fn execute_single_turn_with_retry(
     provider_config: &AgentProviderConfig,
     model_name: &str,
     prompt: &str,
     system_prompt: Option<&str>,
     action: &ActionDef,
-) -> Result<LlmResponse> {
-    use rig::completion::Prompt as _;
-    use rig::prelude::CompletionClient as _;
+) -> Result<SingleTurnResponse> {
+    use rig::completion::{Message, Usage};
+    use rig::message::{Text, UserContent};
+    use rig::OneOrMany;
 
-    // Resolve temperature: action override takes precedence over provider default.
-    let temperature = action.temperature.or(provider_config.temperature);
-
-    // Resolve max_tokens: action override takes precedence over provider default.
-    let max_tokens = action.max_tokens.unwrap_or(provider_config.max_tokens);
-
-    // If output is set, convert to JSON Schema and augment the system prompt.
+    // Build effective system prompt with optional schema suffix
     let schema_suffix: Option<String> = action.output.as_ref().map(|output_def| {
         let schema = output_def.to_json_schema();
         let schema_str =
@@ -988,165 +806,80 @@ async fn call_llm(
         (None, None) => None,
     };
 
-    /// Build a rig provider client, configure an agent, and prompt it.
-    macro_rules! call_provider {
-        ($client_type:ty, $label:expr, $api_key:expr) => {{
-            let mut builder = <$client_type>::builder().api_key($api_key);
-            if let Some(ref endpoint) = provider_config.api_endpoint {
-                builder = builder.base_url(endpoint);
+    let temperature = action.temperature.or(provider_config.temperature);
+    let max_tokens = action.max_tokens.unwrap_or(provider_config.max_tokens);
+
+    let max_retries = provider_config.max_retries;
+    let mut call_result: Result<(String, Usage)> = Err(anyhow::anyhow!("LLM call not attempted"));
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            // Exponential backoff: 1s, 2s, 4s, 8s, … with ±25% jitter.
+            // Deterministic jitter avoids pulling in the `rand` crate.
+            let base_ms = 1000u64 * (1u64 << (attempt - 1).min(6));
+            let jitter = (attempt as u64 * 7919) % (base_ms / 4 + 1);
+            let delay_ms = base_ms + jitter;
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        let prompt_msg = Message::User {
+            content: OneOrMany::one(UserContent::Text(Text {
+                text: prompt.to_string(),
+            })),
+        };
+
+        let request = rig::completion::CompletionRequest {
+            model: None,
+            preamble: effective_system.clone(),
+            chat_history: OneOrMany::one(prompt_msg),
+            documents: vec![],
+            tools: vec![],
+            temperature: temperature.map(f64::from),
+            max_tokens: Some(u64::from(max_tokens)),
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        };
+
+        call_result = match tokio::time::timeout(
+            LLM_CALL_TIMEOUT,
+            super::loop_dispatch::call_completion(provider_config, model_name, request),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                // Extract text from the assistant response
+                let text = resp
+                    .choice
+                    .iter()
+                    .filter_map(|c| match c {
+                        rig::completion::AssistantContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok((text, resp.usage))
             }
-            let client = builder
-                .build()
-                .context(concat!("Failed to build ", $label, " client"))?;
-            let mut ab = client.agent(model_name);
-            if let Some(ref sys) = effective_system {
-                ab = ab.preamble(sys);
-            }
-            ab = ab.max_tokens(u64::from(max_tokens));
-            if let Some(temp) = temperature {
-                ab = ab.temperature(f64::from(temp));
-            }
-            ab.build()
-                .prompt(prompt)
-                .await
-                .context(concat!($label, " API call failed"))?
-        }};
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "LLM API call timed out after {}s",
+                LLM_CALL_TIMEOUT.as_secs()
+            )),
+        };
+
+        match &call_result {
+            Ok(_) => break,
+            Err(e) if is_transient_error(e) && attempt < max_retries => continue,
+            Err(_) => break,
+        }
     }
 
-    let require_api_key = || -> Result<&str> {
-        provider_config
-            .api_key
-            .as_deref()
-            .context("Agent provider requires api_key")
-    };
+    let (response_text, usage) = call_result?;
 
-    let response_text = match provider_config.provider_type.as_str() {
-        // Standard providers (api_key required)
-        "anthropic" => call_provider!(
-            rig::providers::anthropic::Client,
-            "Anthropic",
-            require_api_key()?.to_string()
-        ),
-        "cohere" => call_provider!(
-            rig::providers::cohere::Client,
-            "Cohere",
-            require_api_key()?.to_string()
-        ),
-        "deepseek" => call_provider!(
-            rig::providers::deepseek::Client,
-            "DeepSeek",
-            require_api_key()?.to_string()
-        ),
-        "galadriel" => call_provider!(
-            rig::providers::galadriel::Client,
-            "Galadriel",
-            require_api_key()?.to_string()
-        ),
-        "gemini" => call_provider!(
-            rig::providers::gemini::Client,
-            "Gemini",
-            require_api_key()?.to_string()
-        ),
-        "groq" => call_provider!(
-            rig::providers::groq::Client,
-            "Groq",
-            require_api_key()?.to_string()
-        ),
-        "huggingface" => call_provider!(
-            rig::providers::huggingface::Client,
-            "HuggingFace",
-            require_api_key()?.to_string()
-        ),
-        "hyperbolic" => call_provider!(
-            rig::providers::hyperbolic::Client,
-            "Hyperbolic",
-            require_api_key()?.to_string()
-        ),
-        "mira" => call_provider!(
-            rig::providers::mira::Client,
-            "Mira",
-            require_api_key()?.to_string()
-        ),
-        "mistral" => call_provider!(
-            rig::providers::mistral::Client,
-            "Mistral",
-            require_api_key()?.to_string()
-        ),
-        "moonshot" => call_provider!(
-            rig::providers::moonshot::Client,
-            "Moonshot",
-            require_api_key()?.to_string()
-        ),
-        "openrouter" => call_provider!(
-            rig::providers::openrouter::Client,
-            "OpenRouter",
-            require_api_key()?.to_string()
-        ),
-        "perplexity" => call_provider!(
-            rig::providers::perplexity::Client,
-            "Perplexity",
-            require_api_key()?.to_string()
-        ),
-        "together" => call_provider!(
-            rig::providers::together::Client,
-            "Together",
-            require_api_key()?.to_string()
-        ),
-        "xai" => call_provider!(
-            rig::providers::xai::Client,
-            "xAI",
-            require_api_key()?.to_string()
-        ),
-        // OpenAI: uses CompletionsClient for chat completions endpoint
-        "openai" => call_provider!(
-            rig::providers::openai::CompletionsClient,
-            "OpenAI",
-            require_api_key()?.to_string()
-        ),
-        // Azure: typed auth + required api_endpoint
-        "azure" => {
-            let api_key = require_api_key()?;
-            let endpoint = provider_config
-                .api_endpoint
-                .as_deref()
-                .context("Azure provider requires api_endpoint")?;
-            let auth = rig::providers::azure::AzureOpenAIAuth::ApiKey(api_key.to_string());
-            let client = rig::providers::azure::Client::builder()
-                .api_key(auth)
-                .azure_endpoint(endpoint.to_string())
-                .build()
-                .context("Failed to build Azure client")?;
-            let mut ab = client.agent(model_name);
-            if let Some(ref sys) = effective_system {
-                ab = ab.preamble(sys);
-            }
-            ab = ab.max_tokens(u64::from(max_tokens));
-            if let Some(temp) = temperature {
-                ab = ab.temperature(f64::from(temp));
-            }
-            ab.build()
-                .prompt(prompt)
-                .await
-                .context("Azure API call failed")?
-        }
-        // Local providers: no API key needed
-        "ollama" => call_provider!(
-            rig::providers::ollama::Client,
-            "Ollama",
-            rig::client::Nothing
-        ),
-        "llamafile" => call_provider!(
-            rig::providers::llamafile::Client,
-            "Llamafile",
-            rig::client::Nothing
-        ),
-        other => bail!("Unknown agent provider type: {}", other),
-    };
-
-    // When output is set, the response must be a valid JSON object.
+    // Parse the response text into the output JSON value
     let content = if action.output.is_some() {
+        // Structured output: must be a JSON object
         let trimmed = response_text.trim();
-        // Strip markdown code fences if the model wrapped the JSON anyway
         let json_str = strip_code_fences(trimmed);
         match serde_json::from_str::<serde_json::Value>(json_str) {
             Ok(json) if json.is_object() => json,
@@ -1165,20 +898,17 @@ async fn call_llm(
             }
         }
     } else {
-        // No schema: try to parse as JSON, fall back to text wrapper
+        // Unstructured: try JSON, fall back to text wrapper
         match serde_json::from_str::<serde_json::Value>(&response_text) {
             Ok(json) if json.is_object() => json,
             _ => serde_json::json!({ "text": response_text }),
         }
     };
 
-    // Token usage is not exposed through the Prompt trait (returns String only).
-    // TODO: switch to the lower-level completion API when rig exposes per-call
-    // token usage in a stable interface.
-    Ok(LlmResponse {
+    Ok(SingleTurnResponse {
         content,
-        input_tokens: 0,
-        output_tokens: 0,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
     })
 }
 
@@ -1267,11 +997,13 @@ mod tests {
             model: "model".to_string(),
             max_tokens: 4096,
             temperature: None,
-            max_retries: 3,
+            max_retries: 0,
         };
         let action = make_action(None);
 
-        let result = call_llm(&provider_config, "some-model", "hello", None, &action).await;
+        let result =
+            execute_single_turn_with_retry(&provider_config, "some-model", "hello", None, &action)
+                .await;
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
@@ -1291,11 +1023,11 @@ mod tests {
             model: "claude-3-5-haiku-latest".to_string(),
             max_tokens: 4096,
             temperature: None,
-            max_retries: 3,
+            max_retries: 0,
         };
         let action = make_action(None);
 
-        let result = call_llm(
+        let result = execute_single_turn_with_retry(
             &provider_config,
             "claude-3-5-haiku-latest",
             "hello",
@@ -1322,10 +1054,12 @@ mod tests {
             model: "llama3".to_string(),
             max_tokens: 4096,
             temperature: None,
-            max_retries: 3,
+            max_retries: 0,
         };
         let action = make_action(None);
-        let result = call_llm(&provider_config, "llama3", "hello", None, &action).await;
+        let result =
+            execute_single_turn_with_retry(&provider_config, "llama3", "hello", None, &action)
+                .await;
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         // Must fail with connection error, NOT with "requires api_key"
@@ -1335,8 +1069,8 @@ mod tests {
             msg
         );
         assert!(
-            msg.contains("Ollama API call failed"),
-            "Expected Ollama API call error (connection), got: {}",
+            msg.contains("Ollama completion call failed"),
+            "Expected Ollama completion call error (connection), got: {}",
             msg
         );
     }
@@ -1351,10 +1085,12 @@ mod tests {
             model: "gpt-4o".to_string(),
             max_tokens: 4096,
             temperature: None,
-            max_retries: 3,
+            max_retries: 0,
         };
         let action = make_action(None);
-        let result = call_llm(&provider_config, "gpt-4o", "hello", None, &action).await;
+        let result =
+            execute_single_turn_with_retry(&provider_config, "gpt-4o", "hello", None, &action)
+                .await;
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
@@ -1364,8 +1100,8 @@ mod tests {
         );
     }
 
-    /// Every provider in SUPPORTED_AGENT_PROVIDERS must be handled in call_llm
-    /// (not hit the catch-all "Unknown agent provider type" arm).
+    /// Every provider in SUPPORTED_AGENT_PROVIDERS must be handled in the
+    /// dispatch (not hit the catch-all "Unknown agent provider type" arm).
     #[tokio::test]
     async fn test_dispatch_covers_all_supported_providers() {
         let action = make_action(None);
@@ -1377,15 +1113,22 @@ mod tests {
                 model: "test-model".to_string(),
                 max_tokens: 4096,
                 temperature: None,
-                max_retries: 3,
+                max_retries: 0,
             };
-            let result = call_llm(&provider_config, "test-model", "hello", None, &action).await;
+            let result = execute_single_turn_with_retry(
+                &provider_config,
+                "test-model",
+                "hello",
+                None,
+                &action,
+            )
+            .await;
             // All should fail (unreachable endpoint) but NOT with "Unknown agent provider type"
             assert!(result.is_err());
             let msg = format!("{:#}", result.unwrap_err());
             assert!(
                 !msg.contains("Unknown agent provider type"),
-                "Provider '{}' is not handled in call_llm dispatch: {}",
+                "Provider '{}' is not handled in dispatch: {}",
                 provider_type,
                 msg
             );

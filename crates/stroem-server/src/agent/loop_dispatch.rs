@@ -511,9 +511,10 @@ fn build_final_output(action_spec: &ActionDef, response_text: &str) -> Result<se
 
 /// Call the LLM completion endpoint using rig-core.
 ///
-/// Uses the same provider dispatch as single-turn, but via the lower-level
-/// `CompletionModel::completion()` interface instead of `Agent::prompt()`.
-async fn call_completion(
+/// Uses the lower-level `CompletionModel::completion()` interface which
+/// returns real token usage counts. Used by both the multi-turn dispatch
+/// loop and the single-turn path in `dispatch.rs`.
+pub(super) async fn call_completion(
     provider_config: &AgentProviderConfig,
     model_name: &str,
     request: CompletionRequest,
@@ -672,8 +673,8 @@ async fn call_completion(
 }
 
 /// Simplified completion response (provider-independent).
-struct CompletionResponse {
-    choice: OneOrMany<AssistantContent>,
-    usage: Usage,
-    message_id: Option<String>,
+pub(super) struct CompletionResponse {
+    pub(super) choice: OneOrMany<AssistantContent>,
+    pub(super) usage: Usage,
+    pub(super) message_id: Option<String>,
 }

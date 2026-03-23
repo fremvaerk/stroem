@@ -257,7 +257,7 @@ Last updated: 2026-03-13.
 - [x] Agent dispatch module (handle_agent_steps) with rig-core integration
 - [x] Integration into orchestrate_after_step / propagate_to_parent
 - [x] Structured output via OutputDef → JSON Schema (prompt engineering + JSON parsing)
-- [ ] Token usage tracking (rig's Prompt trait doesn't expose it — investigate lower-level completion API)
+- [x] Token usage tracking — single-turn now uses `CompletionModel::completion()` via shared `call_completion`, returns real `Usage`
 - [x] Retry logic for transient LLM errors (429, 500, 502, 503, 529 + connection/timeout)
 - [x] Temperature / max_tokens passthrough to rig agent builder
 - [x] Initial agent step dispatch at job creation time (via agents_config parameter)
@@ -274,7 +274,7 @@ Last updated: 2026-03-13.
 - [x] No cancellation check in dispatch loop — fixed: checks job status != "cancelled" on each iteration — `dispatch.rs`
 - [x] No timeout on LLM calls — fixed: 120s `tokio::time::timeout` wrapper — `dispatch.rs`
 - [x] `is_transient_error` false positives — fixed: uses specific prefixes (`status: 500`, `http 500`) instead of bare `"500"` — `dispatch.rs`
-- [ ] ~200 lines duplicated between `handle_agent_steps` and `dispatch_initial_agent_steps` — extract shared dispatch logic — `dispatch.rs`
+- [x] ~200 lines duplicated between `handle_agent_steps` and `dispatch_initial_agent_steps` — extracted `resolve_and_render_step` + `execute_single_turn_with_retry` shared helpers — `dispatch.rs`
 - [x] Secrets in prompts sent to external LLM APIs — documented in agent-actions.md Security Considerations section
 - [ ] No SSRF validation on `api_endpoint` — could point to internal services. Validate against private IP ranges in config — `config.rs`
 - [x] Missing `#[serde(deny_unknown_fields)]` on `AgentsConfig` and `AgentProviderConfig` — fixed — `config.rs`
@@ -348,7 +348,7 @@ Last updated: 2026-03-13.
 - [x] Redundant dead branch removed — `loop_dispatch.rs`
 
 #### Remaining (not yet fixed)
-- [ ] Underscore/hyphen normalization enables task name collisions — `tools.rs`, `loop_dispatch.rs`
+- [x] Underscore/hyphen normalization collision detection — validation rejects tasks/MCP servers with same normalized name — `validation.rs`
 - [ ] No rate limit on tool calls per turn / unbounded JSONB state growth — `loop_dispatch.rs`, `state.rs`
 - [ ] TOCTOU race in concurrent tool call resolution — `job_recovery.rs`
 - [ ] MCP client shutdown on WaitingForTools — stateful MCP servers lose state — `dispatch.rs`
