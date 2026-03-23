@@ -48,6 +48,7 @@ Last updated: 2026-03-13.
 - [x] Workspace retry: documented `names()` excludes `GitSource::new()` failures, `list_workspace_info()` includes both
 - [ ] No heartbeat failure → worker re-registration logic
 - [x] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
+- [x] Move agent dispatch from server to workers — workers now claim agent steps, execute LLM calls, and manage MCP connections. Server only validates provider names. stroem-agent crate holds shared dispatch logic.
 - [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
 - [x] Folder workspace revision pinning — server-side TarballCache keyed by (workspace, revision), workers download pinned revision via `?revision=` query param, ClaimResponse includes job revision, stale cache entries cleaned up during retention sweep
 
@@ -252,10 +253,10 @@ Last updated: 2026-03-13.
 - [x] validate_agent_action() with 14 unit tests
 - [x] compute_required_tags / derive_runner for agent type
 - [x] DB migration 023: action_type CHECK + agent_state column
-- [x] Worker claim filter excludes agent steps
-- [x] ServerConfig: AgentsConfig + AgentProviderConfig
-- [x] Agent dispatch module (handle_agent_steps) with rig-core integration
-- [x] Integration into orchestrate_after_step / propagate_to_parent
+- [x] Worker claim filter: agent steps now claimable by workers with "agent" tag (moved from server-side dispatch)
+- [x] AgentsConfig + AgentProviderConfig (shared via stroem-agent crate)
+- [x] Agent dispatch: moved from server-side (handle_agent_steps) to worker-side (AgentExecutor) via stroem-agent crate
+- [x] Integration into orchestrate_after_step / propagate_to_parent (agent_tool re-claim pattern)
 - [x] Structured output via OutputDef → JSON Schema (prompt engineering + JSON parsing)
 - [x] Token usage tracking — single-turn now uses `CompletionModel::completion()` via shared `call_completion`, returns real `Usage`
 - [x] Retry logic for transient LLM errors (429, 500, 502, 503, 529 + connection/timeout)
@@ -294,8 +295,8 @@ Last updated: 2026-03-13.
 - [ ] Agent-only job: creation → step running → LLM call → step completed → job completed
 - [ ] Agent step failure: LLM error → step failed → job failed
 - [ ] Chained agent steps: step A output available in step B prompt via `{{ step_a.output.field }}`
-- [ ] Mixed workflow: script step → agent step (handoff from worker to server dispatch)
-- [ ] Worker cannot claim agent steps (SQL filter correctness)
+- [ ] Mixed workflow: script step → agent step (both on worker)
+- [x] Worker claims agent steps with "agent" tag (SQL filter updated)
 - [ ] Recovery sweeper ignores agent steps (unmatched step timeout)
 - [ ] `when: false` skips agent step without LLM call
 - [ ] `continue_on_failure: true` + failed predecessor → agent step still dispatched
@@ -309,7 +310,7 @@ Last updated: 2026-03-13.
 - [ ] Non-transient error: exactly one attempt, no retry
 - [x] `strip_code_fences` with no closing fence (malformed input)
 - [ ] Empty prompt after template rendering → step fails
-- [ ] `dispatch_initial_agent_steps` unknown provider → step marked failed
+- [x] `dispatch_initial_agent_steps` removed — agent steps now dispatched by workers
 
 ### 7B+C: Multi-turn Agent Tools & MCP Client (2026-03-22)
 
@@ -418,6 +419,64 @@ Last updated: 2026-03-13.
 - [x] MCP client manager via rmcp
 - [x] MCP tool discovery + execution
 - [x] Mixed sync (MCP) / async (task) tool calls
+
+### 7D: Move Agent Dispatch to Workers (2026-03-23)
+
+- [x] `stroem-agent` shared crate (config, state, tools, provider, dispatch, loop_dispatch, mcp_client)
+- [x] Extended ClaimResponse with agent fields (provider name, rendered prompt, MCP servers, agent_state, task tool schemas)
+- [x] 3 new worker API endpoints (task-tool, suspend, agent-state)
+- [x] Worker-side AgentExecutor with WorkerAgentContext (HTTP-based AgentContext impl)
+- [x] Agent step routing in worker poller (agent steps skip workspace download)
+- [x] Claim SQL updated: agent steps claimable by workers with "agent" tag
+- [x] `compute_required_tags("agent")` returns `["agent"]`
+- [x] Server-side dispatch removed: deleted `crates/stroem-server/src/agent/` module entirely
+- [x] `rig-core` removed as direct server dependency (transitive via stroem-agent for shared types)
+- [x] `propagate_to_parent` handles `agent_tool` child completions: injects results into `resolved_tool_results`, marks step ready for re-claim
+- [x] `approve_step` handles agent ask_user: injects response into `agent_state`, marks step ready for re-claim
+- [x] `ResolvedToolResult` struct + `resolved_tool_results` field on `AgentConversationState`
+- [x] Worker config: `agents: Option<AgentsConfig>` + `tags: ["script", "agent"]`
+
+### 7D Review Fixes (2026-03-23)
+
+#### Critical
+- [x] `agent_suspend_step` status transition broken — fixed: single atomic SQL transitions from `running` to `suspended` while setting output — `worker_api/jobs.rs`
+
+#### Important
+- [x] Raw SQL UPDATEs lack status guards — fixed: added `AND status = 'running'` / `AND status = 'suspended'` guards — `job_recovery.rs`, `web/api/jobs.rs`
+- [x] Task tool parameter schemas lost on worker side — fixed: `TaskToolInfo.parameters_schema` carries pre-built JSON Schema from server — `loop_dispatch.rs`, `agent_executor.rs`
+- [x] `resolved_tool_results.drain(..)` before LLM call can lose data — fixed: uses `.iter().clone()` then `.clear()` after injection — `loop_dispatch.rs`
+- [x] No tools-list validation on `agent_task_tool` endpoint — fixed: validates task_name against step's `action_spec.tools` array — `worker_api/jobs.rs`
+- [x] Agent log events not pushed to server — fixed: `WorkerAgentContext::log` calls `client.push_logs()` — `agent_executor.rs`
+- [x] `unwrap_or_default()` on `serde_json::to_value` silently destroys conversation state — fixed: uses `.context()?` — `job_recovery.rs`
+- [x] Duplicated system prompt / response parsing logic — fixed: inline code replaced with calls to `build_effective_system` / `build_final_output` — `dispatch.rs`
+- [x] MCP server auth tokens over-shared — fixed: filters to only MCP servers referenced by step's tools — `worker_api/jobs.rs`
+
+#### Minor
+- [x] Unused `_cancel_token` parameter — documented cancellation gap in doc comment — `agent_executor.rs`
+- [x] Double `get_steps_for_job` in claim handler — fixed: reuses `all_steps_for_job` from earlier fetch — `worker_api/jobs.rs`
+- [x] `.unwrap()` on hardcoded YAML in `build_tool_definitions` — changed to `.expect()` — `loop_dispatch.rs`
+- [x] Prompt template render errors silently dropped — fixed: `tracing::warn!` on render failure — `worker_api/jobs.rs`
+- [ ] No retry on transient HTTP errors in worker agent context methods (task-tool, suspend, agent-state) — `client.rs`
+- [x] Deterministic "jitter" in retry backoff — documented as intentional trade-off — `dispatch.rs`
+- [ ] No worker identity verification on new endpoints — any authenticated worker can call task-tool/suspend/agent-state for any job/step — `worker_api/jobs.rs`
+
+### 7D Missing Tests
+
+#### Critical (zero coverage on core logic)
+- [ ] `dispatch_agent_loop` — happy path (no tools), task tool call, ask_user, resume with resolved_tool_results, max turns exceeded, cancellation. Needs mock `AgentContext` — `loop_dispatch.rs`
+- [ ] `propagate_to_parent` agent_tool branch — completed child, failed child, partial resolution, missing agent_state fallback — `job_recovery.rs`
+- [x] `execute_agent_step` early-return error paths — 6 tests: missing provider, missing config, unknown provider, empty/missing prompt, missing action_spec — `agent_executor.rs`
+
+#### Important (new endpoints/paths with no tests)
+- [ ] `agent_task_tool` / `agent_suspend_step` / `agent_save_state` handler tests — `worker_api/jobs.rs`
+- [ ] `approve_step` agent ask_user path — valid agent_state, missing agent_state fallback, wrong action_type — `web/api/jobs.rs`
+- [ ] Worker client methods — `agent_task_tool`, `agent_suspend_step`, `agent_save_state` request/response format — `client.rs`
+
+#### Medium (public function gaps)
+- [x] `build_effective_system` — 4 tests: all combinations of system_prompt ± output schema — `dispatch.rs`
+- [x] `build_final_output` — 7 tests: structured output, code fences, non-object error, invalid JSON, unstructured fallback — `dispatch.rs`
+- [ ] Worker poller agent routing — workspace download skipped, WaitingForTools/Suspended don't report completion — `poller.rs`
+- [x] `state.rs` — 3 tests: `resolved_tool_results` round-trip, empty omission, backward compat — `state.rs`
 
 ## Phase 5: Advanced Flow Control
 

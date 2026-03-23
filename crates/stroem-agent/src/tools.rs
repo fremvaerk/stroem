@@ -57,7 +57,7 @@ pub fn ask_user_tool_definition() -> ToolDefinition {
 /// - `boolean` → `"boolean"`
 /// - `date`, `datetime` → `"string"` (with format)
 /// - anything else (connection types) → `"object"`
-fn input_schema_to_json_schema(input: &HashMap<String, InputFieldDef>) -> serde_json::Value {
+pub fn input_schema_to_json_schema(input: &HashMap<String, InputFieldDef>) -> serde_json::Value {
     if input.is_empty() {
         return serde_json::json!({
             "type": "object",

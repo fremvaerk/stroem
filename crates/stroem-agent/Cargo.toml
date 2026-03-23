@@ -1,0 +1,32 @@
+[package]
+name = "stroem-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["mcp"]
+mcp = ["dep:rmcp"]
+
+[dependencies]
+# Core
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+# LLM framework
+rig-core.workspace = true
+
+# MCP client (optional)
+rmcp = { workspace = true, optional = true }
+
+# HTTP client (for SSE MCP transport)
+reqwest.workspace = true
+
+# Internal
+stroem-common.workspace = true

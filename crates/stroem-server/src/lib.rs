@@ -1,6 +1,4 @@
 pub mod acl;
-#[cfg(feature = "agent")]
-pub mod agent;
 pub mod auth;
 pub mod cancellation;
 pub mod config;

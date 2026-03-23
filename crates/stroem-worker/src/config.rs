@@ -30,6 +30,10 @@ pub struct WorkerConfig {
     /// In addition to the current revision, this many old revisions are retained
     /// to avoid deleting directories still in use by running steps.
     pub max_retained_revisions: Option<usize>,
+    /// Agent (LLM) provider configuration (optional, enables agent step execution).
+    #[cfg(feature = "agent")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<stroem_agent::config::AgentsConfig>,
 }
 
 impl WorkerConfig {

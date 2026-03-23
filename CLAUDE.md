@@ -20,8 +20,9 @@ Phase 7: AI agent actions & MCP integration.
 - **stroem-common**: Shared types, models, DAG walker, Tera templating, validation
 - **stroem-db**: PostgreSQL layer via sqlx (runtime queries), migrations, repositories
 - **stroem-runner**: Execution backends (ShellRunner, DockerRunner via bollard, KubeRunner via kube). ShellRunner handles multi-language scripts (shell, Python, JS/TS, Go). All runners enabled by default.
-- **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed, agent dispatch
-- **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs
+- **stroem-agent**: Shared LLM dispatch logic (rig-core, MCP client), used by workers. Config types shared with server.
+- **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed
+- **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs, handles agent step dispatch
 - **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs, workspaces)
 
 ## Conventions
@@ -167,8 +168,9 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Startup scripts**: Worker and runner images use `docker/entrypoint.sh` which sources `*.sh` from `/etc/stroem/startup.d/` before the main process. DockerRunner always bind-mounts this path (WithWorkspace mode). KubeRunner injects a ConfigMap volume when `runner_startup_configmap` is set in worker config. Helm chart provides `startupScript`, `worker.startupScript`, and `runner.startupScript` values.
 
 ### Tags and Step Claiming
-- Workers declare `tags` — e.g. `["script", "docker", "gpu"]`
+- Workers declare `tags` — e.g. `["script", "docker", "gpu", "agent"]`
 - Steps compute `required_tags` from action type/runner + explicit tags
+- Agent steps require `"agent"` tag (computed by `compute_required_tags("agent")`)
 - Claim SQL: `required_tags <@ worker_tags::jsonb` (all required tags must be in worker's tag set)
 - GIN index on `job_step.required_tags` for efficient containment queries
 
@@ -310,26 +312,28 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Untyped connections (no `type` field) skip type validation but still work as task inputs
 
 ### Agent Actions (type: agent — LLM Calls)
-- `type: agent` — LLM call as a workflow step, server-side dispatch (like `type: task`)
-- Config: `agents.providers` in `server-config.yaml` with `type` (provider type), `api_key`, `model`, `max_tokens`, `temperature`, `max_retries`
+- `type: agent` — LLM call as a workflow step, worker-side dispatch. Workers with `"agent"` tag claim and execute agent steps.
+- **Worker requirements**: Workers need `tags: ["script", "agent"]` (or at least `"agent"`) and an `agents:` section in `worker-config.yaml` with LLM provider API keys
+- **Server config** (validation-only): Optional `agents.providers` in `server-config.yaml` for provider name validation at YAML load time. Server does NOT store API keys.
 - Supports 19 providers: anthropic, azure, cohere, deepseek, galadriel, gemini, groq, huggingface, hyperbolic, llamafile, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together, xai
 - `ActionDef` fields: `provider`, `model`, `system_prompt`, `prompt` (Tera templates), `output` (OutputDef, converted to JSON Schema at dispatch), `temperature`, `max_tokens`
-- `prompt` and `system_prompt` are Tera templates rendered at dispatch time with standard context (input, step outputs, secrets)
+- `prompt` and `system_prompt` are Tera templates rendered at claim time with standard context (input, step outputs, secrets)
 - **Structured output**: when `output` is set, `OutputDef::to_json_schema()` produces a JSON Schema injected into the system prompt; response is parsed as JSON; output includes `_meta` with model, provider, tokens, latency
-- Server-side dispatch: `handle_agent_steps()` in `agent/dispatch.rs`, called from `orchestrate_after_step` and at job creation
-- Workers never claim agent steps (filtered in claim SQL alongside `type: task`)
+- Worker-side dispatch: `crates/stroem-agent/src/dispatch.rs` in `stroem-agent` crate, executed on worker after step claim
+- At claim time, server sends `provider` name only; worker looks up API key from its local `agents:` config
 - Uses `rig-core` (v0.33) for LLM provider abstraction (19 providers, custom endpoints)
-- Feature-gated: `agent` cargo feature on stroem-server (enabled by default)
+- Feature-gated: `agent` cargo feature on stroem-worker (enabled by default)
 - DB: migration `023_agent_type.sql` adds `'agent'` to action_type CHECK + `agent_state` JSONB column
-- **Multi-turn dispatch** (Phase 7B+C): When `tools` is non-empty or `interactive: true`, uses custom dispatch loop (`agent/loop_dispatch.rs`) with rig's `CompletionModel::completion()` for raw LLM calls
-- **Tool types**: `tools: [{task: "task-name"}, {mcp: "server-name"}]` — task tools create child jobs (async), MCP tools call external servers (sync)
-- **ask_user**: `interactive: true` enables the `ask_user` tool — suspends step for human input, resumes via approve endpoint
-- **Conversation state**: `AgentConversationState` in `agent/state.rs` — persisted as JSONB in `agent_state` column, restored on resume
-- **MCP client**: `agent/mcp_client.rs` — connects to configured MCP servers via stdio or SSE (Streamable HTTP) transport, discovers tools, calls them synchronously
+- **Multi-turn dispatch** (Phase 7B+C): When `tools` is non-empty or `interactive: true`, uses custom dispatch loop in `stroem-agent` with rig's `CompletionModel::completion()` for raw LLM calls
+- **Tool types**: `tools: [{task: "task-name"}, {mcp: "server-name"}]` — task tools create child jobs (async via server endpoint), MCP tools call external servers (sync)
+- **ask_user**: `interactive: true` enables the `ask_user` tool — worker suspends step, user approves via server endpoint, worker re-claims step to resume
+- **Conversation state**: `AgentConversationState` persisted as JSONB in `agent_state` column, restored on worker re-claim
+- **MCP client**: MCP servers (stdio, SSE) spawn on worker, not server. `stroem-agent` connects to configured MCP servers via stdio or SSE (Streamable HTTP) transport, discovers tools, calls them synchronously
 - **MCP server config**: `mcp_servers:` in workspace YAML — `McpServerDef` with `type: stdio|sse`, `command`, `args`, `env`, `url`
-- **Task tool flow**: LLM calls tool → child job created (`source_type: agent_tool`) → `propagate_to_parent` detects agent step → resumes dispatch loop
-- **ask_user flow**: LLM calls `ask_user` → step suspended → `POST /api/jobs/{id}/steps/{step}/approve` with user response → dispatch resumes
+- **Task tool flow**: Worker's LLM calls task tool → worker creates child job via server endpoint, saves conversation state, releases step → child completes → server marks step ready → worker re-claims and resumes dispatch loop
+- **ask_user flow**: Worker's LLM calls `ask_user` → step suspended → user approves via `POST /api/jobs/{id}/steps/{step}/approve` → server marks ready → worker re-claims and resumes dispatch
 - **Max turns**: `max_turns` safety limit (default 25, max 100) prevents unbounded loops
+- **Server role**: Server handles orchestration (child job creation for task tools, suspension/approval, hook firing). Workers handle LLM dispatch and tool invocation.
 - DB: migration `025_agent_tool_source.sql` adds `'agent_tool'` to source_type CHECK
 
 ### Approval Gates (type: approval — Human-in-the-Loop)

@@ -2,7 +2,7 @@ use crate::job_completion::JobCompletionEvent;
 use crate::log_storage::JobLogMeta;
 use crate::orchestrator;
 use crate::state::AppState;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::job::{JobStatus, SourceType, StepStatus};
@@ -115,20 +115,6 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             .append_server_log(
                 job_id,
                 &format!("[orchestration] Failed to handle task steps: {:#}", e),
-            )
-            .await;
-    }
-
-    // Handle any newly-promoted type: agent steps
-    #[cfg(feature = "agent")]
-    if let Err(e) =
-        crate::agent::dispatch::handle_agent_steps(state, &workspace, &job.workspace, job_id).await
-    {
-        tracing::error!("Failed to handle agent steps for job {}: {:#}", job_id, e);
-        state
-            .append_server_log(
-                job_id,
-                &format!("[orchestration] Failed to handle agent steps: {:#}", e),
             )
             .await;
     }
@@ -252,6 +238,84 @@ async fn propagate_to_parent(
     parent_job_id: Uuid,
     parent_step: &str,
 ) -> Result<()> {
+    // Special handling for agent_tool child jobs: the parent step is an agent step
+    // that needs to resume its dispatch loop on a worker. Instead of marking completed/failed,
+    // we inject the tool result into agent_state and mark the step ready for re-claim.
+    if child_job.source_type == "agent_tool" {
+        let parent_steps = JobStepRepo::get_steps_for_job(&state.pool, parent_job_id).await?;
+        if let Some(parent_step_row) = parent_steps.iter().find(|s| s.step_name == parent_step) {
+            if let Some(ref state_val) = parent_step_row.agent_state {
+                if let Ok(mut conv_state) = serde_json::from_value::<
+                    stroem_agent::state::AgentConversationState,
+                >(state_val.clone())
+                {
+                    let tool_result_text = if child_job.status == JobStatus::Completed.as_ref() {
+                        child_job
+                            .output
+                            .as_ref()
+                            .map(|o| serde_json::to_string(o).unwrap_or_default())
+                            .unwrap_or_else(|| "Task completed successfully".to_string())
+                    } else {
+                        format!("Task failed: {}", child_job.status)
+                    };
+
+                    if let Some(resolved) = conv_state.resolve_tool_call(child_job.job_id) {
+                        conv_state.resolved_tool_results.push(
+                            stroem_agent::state::ResolvedToolResult {
+                                tool_call_id: resolved.tool_call_id,
+                                result_text: tool_result_text,
+                            },
+                        );
+                    }
+
+                    let updated_state = serde_json::to_value(&conv_state)
+                        .context("serialize agent conversation state")?;
+                    JobStepRepo::update_agent_state(
+                        &state.pool,
+                        parent_job_id,
+                        parent_step,
+                        updated_state,
+                    )
+                    .await?;
+
+                    if conv_state.all_tool_calls_resolved() {
+                        // All tools done — mark step ready so a worker can re-claim it
+                        sqlx::query(
+                            "UPDATE job_step SET status = 'ready', ready_at = NOW(), worker_id = NULL \
+                             WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
+                        )
+                        .bind(parent_job_id)
+                        .bind(parent_step)
+                        .execute(&state.pool)
+                        .await?;
+
+                        tracing::info!(
+                            parent_job_id = %parent_job_id,
+                            step = %parent_step,
+                            "Agent step marked ready for re-claim after all task tools completed"
+                        );
+                    } else {
+                        tracing::info!(
+                            parent_job_id = %parent_job_id,
+                            step = %parent_step,
+                            pending = conv_state.pending_tool_calls.len(),
+                            "Agent tool completed, still waiting for more tools"
+                        );
+                    }
+
+                    return Ok(());
+                }
+            }
+        }
+
+        // Fallback: if we could not parse agent state, fall through to normal propagation
+        tracing::warn!(
+            parent_job_id = %parent_job_id,
+            step = %parent_step,
+            "Could not process agent_tool child completion — falling through to normal propagation"
+        );
+    }
+
     if child_job.status == JobStatus::Completed.as_ref() {
         JobStepRepo::mark_completed(
             &state.pool,
@@ -338,23 +402,6 @@ async fn propagate_to_parent(
                 parent_job_id,
             )
             .await?;
-
-            // Handle any newly-promoted agent steps in the parent
-            #[cfg(feature = "agent")]
-            if let Err(e) = crate::agent::dispatch::handle_agent_steps(
-                state,
-                &parent_ws,
-                &parent_job.workspace,
-                parent_job_id,
-            )
-            .await
-            {
-                tracing::error!(
-                    "Failed to handle agent steps for parent job {}: {:#}",
-                    parent_job_id,
-                    e
-                );
-            }
 
             // Handle any newly-promoted approval steps in the parent,
             // and fire on_suspended hooks for steps that just became suspended (FIX 3).

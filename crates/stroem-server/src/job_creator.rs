@@ -62,7 +62,7 @@ fn create_job_for_task_inner<'a>(
     parent_job_id: Option<Uuid>,
     parent_step_name: Option<&'a str>,
     revision: Option<&'a str>,
-    agents_config: Option<&'a AgentsConfig>,
+    _agents_config: Option<&'a AgentsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
     Box::pin(async move {
         // Look up task
@@ -224,25 +224,6 @@ fn create_job_for_task_inner<'a>(
                 "Failed to handle initial approval steps: {:#}",
                 e
             );
-        }
-
-        // Handle any initially-ready type: agent steps (server-side LLM dispatch)
-        if let Some(cfg) = agents_config {
-            if let Err(e) = crate::agent::dispatch::dispatch_initial_agent_steps(
-                pool,
-                cfg,
-                workspace_config,
-                workspace_name,
-                job_id,
-            )
-            .await
-            {
-                tracing::error!(
-                    job_id = %job_id,
-                    "Failed to dispatch initial agent steps: {:#}",
-                    e
-                );
-            }
         }
 
         // If all steps ended up terminal (e.g. all skipped by when conditions),

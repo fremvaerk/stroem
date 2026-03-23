@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/stroem-agent",
     "crates/stroem-common",
     "crates/stroem-db",
     "crates/stroem-runner",
@@ -95,6 +96,7 @@ tar = "0.4"
 tempfile = "3"
 
 # Internal crates
+stroem-agent = { path = "crates/stroem-agent" }
 stroem-common = { path = "crates/stroem-common" }
 stroem-db = { path = "crates/stroem-db" }
 stroem-runner = { path = "crates/stroem-runner" }

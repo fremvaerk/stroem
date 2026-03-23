@@ -314,6 +314,12 @@ mod tests {
             runner: None,
             timeout_secs: None,
             revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
         }
     }
 

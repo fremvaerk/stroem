@@ -61,7 +61,51 @@ pub(crate) async fn execute_claimed_step(
     ws_cache: Arc<WorkspaceCache>,
     step: crate::client::ClaimedStep,
     worker_id: Uuid,
+    #[cfg(feature = "agent")] agents_config: Option<Arc<stroem_agent::config::AgentsConfig>>,
 ) {
+    // ── Agent step routing ────────────────────────────────────────────────────
+    // Agent steps are dispatched entirely on the worker without a workspace.
+    // They make LLM API calls directly using the local provider config.
+    #[cfg(feature = "agent")]
+    if step.action_type == "agent" {
+        // Create a per-step cancellation token (used by the dispatch loop)
+        let step_cancel = CancellationToken::new();
+
+        let result = crate::agent_executor::execute_agent_step(
+            &client,
+            &step,
+            agents_config.as_deref(),
+            step_cancel,
+        )
+        .await;
+
+        match result {
+            crate::agent_executor::AgentResult::Completed { output } => {
+                if let Err(e) = client
+                    .report_step_complete(step.job_id, &step.step_name, 0, Some(output), None)
+                    .await
+                {
+                    tracing::error!("Failed to report agent step complete: {:#}", e);
+                }
+            }
+            crate::agent_executor::AgentResult::WaitingForTools
+            | crate::agent_executor::AgentResult::Suspended => {
+                // Worker's work is done — step stays running/suspended on server.
+                // It will be re-claimed once child jobs finish or user approves.
+            }
+            crate::agent_executor::AgentResult::Failed { error } => {
+                push_error_log(&client, step.job_id, &step.step_name, &error).await;
+                if let Err(e) = client
+                    .report_step_complete(step.job_id, &step.step_name, 1, None, Some(error))
+                    .await
+                {
+                    tracing::error!("Failed to report agent step failure: {:#}", e);
+                }
+            }
+        }
+        return;
+    }
+
     // Ensure workspace is downloaded and up-to-date (or pinned to a specific
     // revision). The guard keeps the revision directory alive (ref-counted) for
     // the duration of step execution, preventing cleanup from deleting it.
@@ -317,6 +361,9 @@ pub async fn run_worker(
         &config.workspace_cache_dir,
         config.max_retained_revisions,
     ));
+    #[cfg(feature = "agent")]
+    let agents_config: Option<Arc<stroem_agent::config::AgentsConfig>> =
+        config.agents.map(Arc::new);
 
     // Ensure workspace cache base directory exists
     std::fs::create_dir_all(&config.workspace_cache_dir)
@@ -427,6 +474,8 @@ pub async fn run_worker(
                 let client_clone = client.clone();
                 let executor_clone = executor.clone();
                 let ws_cache_clone = workspace_cache.clone();
+                #[cfg(feature = "agent")]
+                let agents_config_clone = agents_config.clone();
 
                 // Spawn a task to execute the step, releasing the permit when done
                 tokio::spawn(async move {
@@ -437,6 +486,8 @@ pub async fn run_worker(
                         ws_cache_clone,
                         step,
                         worker_id,
+                        #[cfg(feature = "agent")]
+                        agents_config_clone,
                     )
                     .await;
                 });
@@ -849,6 +900,12 @@ mod tests {
                 runner: Some("local".to_string()),
                 timeout_secs: None,
                 revision: None,
+                agent_provider_name: None,
+                agent_prompt: None,
+                agent_system_prompt: None,
+                mcp_servers: None,
+                agent_state: None,
+                agent_tool_tasks: None,
             }
         }
 
@@ -886,7 +943,16 @@ mod tests {
             let step = make_step(job_id, "echo hello");
 
             // Should complete without panicking
-            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
 
             // Verify the complete endpoint was called (mock will fail test if not matched
             // when verify_received_requests is configured; here we rely on no panic)
@@ -932,7 +998,16 @@ mod tests {
             let job_id = Uuid::new_v4();
             let step = make_step(job_id, "echo hello");
 
-            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
 
             // wiremock asserts `expect(1)` is satisfied on drop
         }
@@ -970,7 +1045,16 @@ mod tests {
             let step = make_step(job_id, "exit 1");
 
             // Should complete without panicking even on command failure
-            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -1009,7 +1093,16 @@ mod tests {
             step.revision = Some("pinned-rev-123".to_string());
 
             // Should complete successfully, using the pinned revision endpoint
-            execute_claimed_step(client, executor, ws_cache, step, Uuid::new_v4()).await;
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
 
             // wiremock verifies the ?revision= query param was sent (via expect(1))
         }

@@ -283,6 +283,7 @@ impl TestEnv {
             request_timeout_secs: None,
             connect_timeout_secs: None,
             max_retained_revisions: None,
+            agents: None,
         };
 
         let worker_cancel = cancel_token.clone();

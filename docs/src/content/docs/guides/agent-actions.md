@@ -7,9 +7,9 @@ Agent actions let you call LLMs as first-class workflow steps. Supports 19 LLM p
 
 ## Quick Start
 
-### 1. Configure a provider
+### 1. Configure worker for agent execution
 
-In your `server-config.yaml`:
+Workers need to be configured with LLM provider API keys. In your `worker-config.yaml`:
 
 ```yaml
 agents:
@@ -27,6 +27,24 @@ agents:
       api_key: "${OPENAI_API_KEY}"
       model: gpt-4o
       max_tokens: 1024
+
+# Worker must also declare agent tag
+tags: ["script", "agent"]
+```
+
+**Server configuration** (optional, for validation only):
+
+Optionally define providers in `server-config.yaml` for YAML validation at load time. The server does NOT store API keys.
+
+```yaml
+agents:
+  providers:
+    - id: anthropic-main
+      type: anthropic
+      model: claude-opus-4-1-20250805
+    - id: openai-gpt4
+      type: openai
+      model: gpt-4o
 ```
 
 ### 2. Define an agent action
@@ -95,7 +113,7 @@ tasks:
 
 ## Provider Configuration
 
-Agent actions dispatch to a configured provider. The server loads providers from `server-config.yaml`.
+Agent actions execute on workers, which load providers from their `worker-config.yaml`. The server optionally validates provider names from `server-config.yaml`.
 
 ### Supported Providers
 

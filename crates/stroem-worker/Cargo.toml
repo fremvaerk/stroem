@@ -10,6 +10,9 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+async-trait.workspace = true
+rig-core = { workspace = true, optional = true }
+stroem-agent = { workspace = true, optional = true }
 stroem-common.workspace = true
 stroem-runner.workspace = true
 tokio.workspace = true
@@ -25,9 +28,11 @@ tar.workspace = true
 rustls = { workspace = true, optional = true }
 
 [features]
-default = ["docker", "kubernetes"]
+default = ["docker", "kubernetes", "agent"]
 docker = ["stroem-runner/docker"]
 kubernetes = ["stroem-runner/kubernetes", "rustls"]
+agent = ["dep:stroem-agent", "dep:rig-core", "mcp"]
+mcp = ["stroem-agent/mcp"]
 
 [dev-dependencies]
 tempfile.workspace = true

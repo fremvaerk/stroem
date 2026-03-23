@@ -57,6 +57,27 @@ pub struct ClaimResponse {
     /// job, avoiding workspace-update races. Absent when there is no work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+
+    // ── Agent step fields ──────────────────────────────────────────
+    /// Provider name for agent steps (worker looks up full config locally).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_provider_name: Option<String>,
+    /// Rendered prompt for agent steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_prompt: Option<String>,
+    /// Rendered system prompt for agent steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_system_prompt: Option<String>,
+    /// MCP server definitions from workspace config (for agent steps).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_servers:
+        Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    /// Saved conversation state for resuming multi-turn agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<serde_json::Value>,
+    /// Task tool schemas — task name → {description, input schema}.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tool_tasks: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +116,31 @@ struct LogEntry<'a> {
 #[derive(Debug, Deserialize)]
 pub struct CompleteJobRequest {
     pub output: Option<serde_json::Value>,
+}
+
+/// POST /worker/jobs/:id/steps/:step/task-tool — Worker requests child job creation
+#[derive(Debug, Deserialize)]
+pub struct TaskToolRequest {
+    pub task_name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskToolResponse {
+    pub child_job_id: String,
+}
+
+/// POST /worker/jobs/:id/steps/:step/suspend — Worker suspends step for ask_user
+#[derive(Debug, Deserialize)]
+pub struct SuspendStepRequest {
+    pub agent_state: serde_json::Value,
+    pub message: String,
+}
+
+/// POST /worker/jobs/:id/steps/:step/agent-state — Worker saves intermediate agent state
+#[derive(Debug, Deserialize)]
+pub struct SaveAgentStateRequest {
+    pub agent_state: serde_json::Value,
 }
 
 /// POST /worker/register - Register a worker
@@ -204,6 +250,12 @@ pub async fn claim_job(
                 runner: None,
                 timeout_secs: None,
                 revision: None,
+                agent_provider_name: None,
+                agent_prompt: None,
+                agent_system_prompt: None,
+                mcp_servers: None,
+                agent_state: None,
+                agent_tool_tasks: None,
             })
             .into_response());
         }
@@ -234,16 +286,16 @@ pub async fn claim_job(
     // Fetch workspace config once — used for template rendering, secrets, and action defaults
     let ws_config = state.get_workspace(&job.workspace).await;
 
-    // Fetch completed step outputs for template rendering context
-    let completed_steps: Vec<(String, Option<serde_json::Value>)> =
-        match JobStepRepo::get_steps_for_job(&state.pool, step.job_id).await {
-            Ok(all_steps) => all_steps
-                .into_iter()
-                .filter(|s| s.status == StepStatus::Completed.as_ref())
-                .map(|s| (s.step_name, s.output))
-                .collect(),
-            Err(_) => vec![],
-        };
+    // Fetch all steps once — reused for both completed-step template context and agent rendering.
+    let all_steps_for_job = JobStepRepo::get_steps_for_job(&state.pool, step.job_id)
+        .await
+        .unwrap_or_default();
+
+    let completed_steps: Vec<(String, Option<serde_json::Value>)> = all_steps_for_job
+        .iter()
+        .filter(|s| s.status == StepStatus::Completed.as_ref())
+        .map(|s| (s.step_name.clone(), s.output.clone()))
+        .collect();
 
     // Render step input and apply action defaults
     let rendered_input = if let Some(ref workspace) = ws_config {
@@ -327,6 +379,119 @@ pub async fn claim_job(
         tracing::warn!("Failed to persist rendered input: {:#}", e);
     }
 
+    // ── Agent step rendering ─────────────────────────────────────────
+    // For agent steps, resolve templates server-side and populate extra fields.
+    let (
+        agent_provider_name,
+        agent_prompt,
+        agent_system_prompt,
+        mcp_servers_val,
+        agent_state_val,
+        agent_tool_tasks,
+    ) = if step.action_type == "agent" {
+        // Deserialize action spec to get agent fields
+        let action_def: Option<stroem_common::models::workflow::ActionDef> = rendered_action_spec
+            .as_ref()
+            .and_then(|s| serde_json::from_value(s.clone()).ok());
+
+        let provider_name = action_def.as_ref().and_then(|a| a.provider.clone());
+
+        // Reuse the full steps list fetched earlier — avoids a second DB round-trip.
+        let render_ctx = if let Some(ref workspace) = ws_config {
+            crate::job_creator::build_step_render_context(&job, &all_steps_for_job, workspace)
+        } else {
+            serde_json::json!({})
+        };
+
+        // Render prompt and system_prompt templates
+        let prompt = action_def
+            .as_ref()
+            .and_then(|a| a.prompt.as_deref())
+            .and_then(
+                |tmpl| match stroem_common::template::render_template(tmpl, &render_ctx) {
+                    Ok(rendered) => Some(rendered),
+                    Err(e) => {
+                        tracing::warn!("Failed to render agent prompt template: {:#}", e);
+                        None
+                    }
+                },
+            );
+
+        let system = action_def
+            .as_ref()
+            .and_then(|a| a.system_prompt.as_deref())
+            .and_then(
+                |tmpl| match stroem_common::template::render_template(tmpl, &render_ctx) {
+                    Ok(rendered) => Some(rendered),
+                    Err(e) => {
+                        tracing::warn!("Failed to render agent system_prompt template: {:#}", e);
+                        None
+                    }
+                },
+            );
+
+        // MCP servers: only send servers referenced by the step's tools
+        let mcp = if let (Some(ref action), Some(ref ws)) = (&action_def, &ws_config) {
+            let referenced: std::collections::HashSet<&str> = action
+                .tools
+                .iter()
+                .filter_map(|t| match t {
+                    stroem_common::models::workflow::AgentToolRef::Mcp { mcp } => {
+                        Some(mcp.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if referenced.is_empty() {
+                None
+            } else {
+                let filtered: std::collections::HashMap<_, _> = ws
+                    .mcp_servers
+                    .iter()
+                    .filter(|(name, _)| referenced.contains(name.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if filtered.is_empty() {
+                    None
+                } else {
+                    Some(filtered)
+                }
+            }
+        } else {
+            None
+        };
+
+        // Agent state for resume (from DB)
+        let agent_st = step.agent_state.clone();
+
+        // Build task tool infos for LLM tool definitions
+        let task_tools = if let (Some(ref action), Some(ref workspace)) = (&action_def, &ws_config)
+        {
+            let mut tools_map = serde_json::Map::new();
+            for tool_ref in &action.tools {
+                if let stroem_common::models::workflow::AgentToolRef::Task { task } = tool_ref {
+                    if let Some(task_def) = workspace.tasks.get(task) {
+                        tools_map.insert(task.clone(), serde_json::json!({
+                                "description": task_def.description,
+                                "input": stroem_agent::tools::input_schema_to_json_schema(&task_def.input),
+                            }));
+                    }
+                }
+            }
+            if tools_map.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(tools_map))
+            }
+        } else {
+            None
+        };
+
+        (provider_name, prompt, system, mcp, agent_st, task_tools)
+    } else {
+        (None, None, None, None, None, None)
+    };
+
     Ok(Json(ClaimResponse {
         workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
@@ -340,6 +505,12 @@ pub async fn claim_job(
         runner: Some(step.runner),
         timeout_secs: step.timeout_secs,
         revision: job.revision.clone(),
+        agent_provider_name,
+        agent_prompt,
+        agent_system_prompt,
+        mcp_servers: mcp_servers_val,
+        agent_state: agent_state_val,
+        agent_tool_tasks,
     })
     .into_response())
 }
@@ -472,6 +643,147 @@ pub async fn complete_job(
     Ok(Json(json!({"status": "ok"})))
 }
 
+/// POST /worker/jobs/:id/steps/:step/task-tool
+/// Worker requests child job creation for a task tool call.
+#[tracing::instrument(skip(state))]
+pub async fn agent_task_tool(
+    State(state): State<Arc<AppState>>,
+    Path((job_id, step_name)): Path<(Uuid, String)>,
+    Json(req): Json<TaskToolRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let job = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
+
+    // Validate task_name is in the agent step's allowed tools list
+    let step = stroem_db::JobStepRepo::get_steps_for_job(&state.pool, job_id)
+        .await
+        .context("get job steps")?
+        .into_iter()
+        .find(|s| s.step_name == step_name)
+        .ok_or_else(|| AppError::not_found("Step"))?;
+
+    if let Some(ref spec) = step.action_spec {
+        if let Some(tools) = spec.get("tools").and_then(|v| v.as_array()) {
+            let allowed = tools
+                .iter()
+                .any(|t| t.get("task").and_then(|v| v.as_str()) == Some(&req.task_name));
+            if !allowed {
+                return Err(AppError::BadRequest(format!(
+                    "Task '{}' is not in the agent step's allowed tools list",
+                    req.task_name
+                )));
+            }
+        }
+    }
+
+    let workspace = state
+        .get_workspace(&job.workspace)
+        .await
+        .ok_or_else(|| AppError::not_found("Workspace"))?;
+
+    let source_id = format!("{}/{}", job_id, step_name);
+
+    let child_job_id = crate::job_creator::create_job_for_task(
+        &state.pool,
+        &workspace,
+        &job.workspace,
+        &req.task_name,
+        req.input,
+        "agent_tool",
+        Some(&source_id),
+        job.revision.as_deref(),
+        None, // agents_config not needed — orchestrator handles child agent steps
+    )
+    .await
+    .context("create child job for task tool")?;
+
+    tracing::info!(
+        job_id = %job_id,
+        step = %step_name,
+        child_job_id = %child_job_id,
+        task = %req.task_name,
+        "Created child job for agent task tool"
+    );
+
+    Ok(Json(TaskToolResponse {
+        child_job_id: child_job_id.to_string(),
+    }))
+}
+
+/// POST /worker/jobs/:id/steps/:step/suspend
+/// Worker suspends step for ask_user.
+#[tracing::instrument(skip(state))]
+pub async fn agent_suspend_step(
+    State(state): State<Arc<AppState>>,
+    Path((job_id, step_name)): Path<(Uuid, String)>,
+    Json(req): Json<SuspendStepRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Save agent state
+    stroem_db::JobStepRepo::update_agent_state(&state.pool, job_id, &step_name, req.agent_state)
+        .await
+        .context("save agent state")?;
+
+    // Atomically set output and transition from running to suspended
+    let output = serde_json::json!({ "approval_message": req.message });
+    sqlx::query(
+        "UPDATE job_step SET status = 'suspended', suspended_at = NOW(), \
+         output = $3 WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
+    )
+    .bind(job_id)
+    .bind(&step_name)
+    .bind(output)
+    .execute(&state.pool)
+    .await
+    .context("suspend agent step")?;
+
+    state
+        .append_server_log(
+            job_id,
+            &format!(
+                "[agent] Step '{}': waiting for user input (ask_user)",
+                step_name
+            ),
+        )
+        .await;
+
+    // Fire on_suspended hooks
+    let job = JobRepo::get(&state.pool, job_id).await.context("get job")?;
+    if let Some(ref job) = job {
+        if let Some(workspace) = state.get_workspace(&job.workspace).await {
+            if let Some(task) = workspace.tasks.get(&job.task_name) {
+                crate::hooks::fire_suspended_hooks(
+                    &state,
+                    &workspace,
+                    job,
+                    task,
+                    &step_name,
+                    &req.message,
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({"status": "suspended"})))
+}
+
+/// POST /worker/jobs/:id/steps/:step/agent-state
+/// Worker saves intermediate agent state before releasing step.
+#[tracing::instrument(skip(state))]
+pub async fn agent_save_state(
+    State(state): State<Arc<AppState>>,
+    Path((job_id, step_name)): Path<(Uuid, String)>,
+    Json(req): Json<SaveAgentStateRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    stroem_db::JobStepRepo::update_agent_state(&state.pool, job_id, &step_name, req.agent_state)
+        .await
+        .context("save agent state")?;
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +803,12 @@ mod tests {
             runner: Some("local".to_string()),
             timeout_secs: None,
             revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -567,6 +885,12 @@ mod tests {
             runner: None,
             timeout_secs: None,
             revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -588,6 +912,12 @@ mod tests {
             runner: Some("local".to_string()),
             timeout_secs: None,
             revision: Some("abc123".to_string()),
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -609,6 +939,12 @@ mod tests {
             runner: None,
             timeout_secs: None,
             revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(

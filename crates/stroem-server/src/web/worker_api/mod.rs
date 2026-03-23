@@ -67,6 +67,18 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs/{id}/cancelled", get(jobs::check_cancelled))
         .route("/jobs/{id}/logs", post(jobs::append_log))
         .route("/jobs/{id}/complete", post(jobs::complete_job))
+        .route(
+            "/jobs/{id}/steps/{step}/task-tool",
+            post(jobs::agent_task_tool),
+        )
+        .route(
+            "/jobs/{id}/steps/{step}/suspend",
+            post(jobs::agent_suspend_step),
+        )
+        .route(
+            "/jobs/{id}/steps/{step}/agent-state",
+            post(jobs::agent_save_state),
+        )
         .route("/workspace/{ws}", get(workspace::download_workspace))
         .layer(middleware::from_fn_with_state(
             state.clone(),

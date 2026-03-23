@@ -1549,12 +1549,20 @@ pub fn validate_mcp_servers(
 /// Compute the required worker tags for an action.
 /// These tags must all be present on a worker for it to claim a step using this action.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
-    // Task, agent, and approval actions are handled server-side, not by workers
-    if action.action_type == "task"
-        || action.action_type == "agent"
-        || action.action_type == "approval"
-    {
+    // Task and approval actions are handled server-side, not by workers
+    if action.action_type == "task" || action.action_type == "approval" {
         return vec![];
+    }
+
+    // Agent actions require a worker with the "agent" tag
+    if action.action_type == "agent" {
+        let mut tags = vec!["agent".to_string()];
+        for tag in &action.tags {
+            if !tags.contains(tag) {
+                tags.push(tag.clone());
+            }
+        }
+        return tags;
     }
 
     let base_tag = match action.action_type.as_str() {
@@ -5521,7 +5529,27 @@ prompt: "Do something"
 "#,
         )
         .unwrap();
-        assert_eq!(compute_required_tags(&action), Vec::<String>::new());
+        // Agent steps now require a worker with the "agent" tag
+        assert_eq!(compute_required_tags(&action), vec!["agent".to_string()]);
+    }
+
+    #[test]
+    fn test_compute_required_tags_agent_with_extra_tags() {
+        use crate::models::workflow::ActionDef;
+        let action: ActionDef = serde_yaml::from_str(
+            r#"
+type: agent
+provider: openai
+prompt: "Do something"
+tags: [gpu, custom]
+"#,
+        )
+        .unwrap();
+        // "agent" tag is always first, extra tags appended
+        assert_eq!(
+            compute_required_tags(&action),
+            vec!["agent".to_string(), "gpu".to_string(), "custom".to_string()]
+        );
     }
 
     #[test]

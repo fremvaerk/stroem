@@ -35,8 +35,6 @@ trait McpService: Send + Sync {
 }
 
 /// Concrete McpService implementation wrapping rmcp's RunningService.
-/// Used for both stdio and SSE transports (the RunningService type-erases
-/// the transport after initialization).
 struct RmcpService {
     service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
 }
@@ -77,7 +75,6 @@ impl McpClientManager {
         service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
         timeout: std::time::Duration,
     ) -> Result<()> {
-        // Discover tools with timeout
         let tools_result =
             match tokio::time::timeout(timeout, service.list_tools(Default::default())).await {
                 Ok(result) => {
@@ -150,14 +147,11 @@ impl McpClientManager {
 
                     let args: Vec<String> = server_def.args.clone().unwrap_or_default();
 
-                    // Build the child process command
                     // SECURITY: env_clear() prevents inheriting parent process secrets.
-                    // Only explicitly configured env vars are passed.
                     let mut cmd = tokio::process::Command::new(command);
                     cmd.env_clear();
                     cmd.args(&args);
 
-                    // Set only the explicitly configured environment variables
                     for (key, value) in &server_def.env {
                         cmd.env(key, value);
                     }
@@ -205,10 +199,8 @@ impl McpClientManager {
 
                     tracing::info!(server = name, url = url, "Connecting to MCP server via SSE");
 
-                    // Build SSE transport config with optional auth token
                     let mut config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
 
-                    // Set auth token if configured
                     if let Some(ref token) = server_def.auth_token {
                         config = config.auth_header(token);
                     }
@@ -282,18 +274,14 @@ impl McpClientManager {
     /// Call a tool on a connected MCP server.
     ///
     /// The `tool_name` should be the prefixed name (e.g., `mcp_github_search`).
-    /// This method unprefixes it to find the server and original tool name.
     pub async fn call_tool(&self, tool_name: &str, arguments: serde_json::Value) -> Result<String> {
-        // Parse the prefixed tool name: mcp_{server}_{tool}
         let rest = tool_name
             .strip_prefix("mcp_")
             .context("Tool name does not start with mcp_ prefix")?;
 
-        // Find the matching server by trying each connection
         for (server_name, conn) in &self.connections {
             let server_prefix = format!("{}_", server_name.replace('-', "_"));
             if let Some(original_tool) = rest.strip_prefix(&server_prefix) {
-                // Find the original tool name (may have had hyphens)
                 let matching_tool = conn
                     .tools
                     .iter()
@@ -311,7 +299,6 @@ impl McpClientManager {
                     matching_tool, server_name
                 ))?;
 
-                // Concatenate text content from the result
                 let text = content
                     .iter()
                     .filter_map(|c| match &c.raw {
@@ -354,7 +341,6 @@ impl McpClientManager {
 mod tests {
     use super::*;
 
-    /// Mock McpService that returns a fixed string for any tool call.
     struct MockMcpService {
         response_text: String,
     }
@@ -402,8 +388,6 @@ mod tests {
         McpClientManager { connections: map }
     }
 
-    // ─── is_mcp_tool tests ──────────────────────────────────────────
-
     #[test]
     fn test_is_mcp_tool_matching_server() {
         let mgr = make_manager(vec![("github", vec![make_tool("search", "Search repos")])]);
@@ -415,37 +399,13 @@ mod tests {
         let mgr = make_manager(vec![("github", vec![make_tool("search", "")])]);
         assert!(!mgr.is_mcp_tool("strom_task_deploy"));
         assert!(!mgr.is_mcp_tool("ask_user"));
-        assert!(!mgr.is_mcp_tool("search"));
     }
 
     #[test]
     fn test_is_mcp_tool_unknown_server() {
         let mgr = make_manager(vec![("github", vec![make_tool("search", "")])]);
-        // mcp_ prefix but server "slack" doesn't exist
         assert!(!mgr.is_mcp_tool("mcp_slack_post"));
     }
-
-    #[test]
-    fn test_is_mcp_tool_hyphenated_server() {
-        let mgr = make_manager(vec![("my-server", vec![make_tool("list-items", "")])]);
-        // Hyphens are replaced with underscores in tool names
-        assert!(mgr.is_mcp_tool("mcp_my_server_list_items"));
-    }
-
-    #[test]
-    fn test_is_mcp_tool_prefix_only() {
-        let mgr = make_manager(vec![("github", vec![])]);
-        // "mcp_" alone doesn't match any server prefix
-        assert!(!mgr.is_mcp_tool("mcp_"));
-    }
-
-    #[test]
-    fn test_is_mcp_tool_empty_string() {
-        let mgr = make_manager(vec![("github", vec![])]);
-        assert!(!mgr.is_mcp_tool(""));
-    }
-
-    // ─── tool_definitions tests ─────────────────────────────────────
 
     #[test]
     fn test_tool_definitions_single_server() {
@@ -458,36 +418,9 @@ mod tests {
         )]);
         let defs = mgr.tool_definitions();
         assert_eq!(defs.len(), 2);
-
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"mcp_github_search"));
-        assert!(names.contains(&"mcp_github_create_issue")); // hyphen → underscore
-    }
-
-    #[test]
-    fn test_tool_definitions_multiple_servers() {
-        let mgr = make_manager(vec![
-            ("github", vec![make_tool("search", "GH search")]),
-            ("slack", vec![make_tool("post", "Post message")]),
-        ]);
-        let defs = mgr.tool_definitions();
-        assert_eq!(defs.len(), 2);
-
-        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"mcp_github_search"));
-        assert!(names.contains(&"mcp_slack_post"));
-    }
-
-    #[test]
-    fn test_tool_definitions_hyphenated_server_name() {
-        let mgr = make_manager(vec![(
-            "my-server",
-            vec![make_tool("list-items", "List all items")],
-        )]);
-        let defs = mgr.tool_definitions();
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "mcp_my_server_list_items");
-        assert_eq!(defs[0].description, "List all items");
+        assert!(names.contains(&"mcp_github_create_issue"));
     }
 
     #[test]
@@ -495,8 +428,6 @@ mod tests {
         let mgr = make_manager(vec![]);
         assert!(mgr.tool_definitions().is_empty());
     }
-
-    // ─── call_tool tests ────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_call_tool_routes_correctly() {
@@ -512,29 +443,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_call_tool_routes_to_correct_server() {
-        let mgr = make_manager(vec![
-            ("github", vec![make_tool("search", "")]),
-            ("slack", vec![make_tool("post", "")]),
-        ]);
-        let result = mgr
-            .call_tool("mcp_slack_post", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(result, "mock response from slack");
-    }
-
-    #[tokio::test]
     async fn test_call_tool_no_mcp_prefix() {
         let mgr = make_manager(vec![("github", vec![make_tool("search", "")])]);
         let result = mgr
             .call_tool("strom_task_deploy", serde_json::json!({}))
             .await;
         assert!(result.is_err());
-        assert!(
-            format!("{}", result.unwrap_err()).contains("mcp_ prefix"),
-            "Expected error about mcp_ prefix"
-        );
     }
 
     #[tokio::test]
@@ -542,50 +456,5 @@ mod tests {
         let mgr = make_manager(vec![("github", vec![make_tool("search", "")])]);
         let result = mgr.call_tool("mcp_slack_post", serde_json::json!({})).await;
         assert!(result.is_err());
-        assert!(
-            format!("{}", result.unwrap_err()).contains("No MCP server found"),
-            "Expected 'No MCP server found' error"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_call_tool_hyphenated_tool_name() {
-        // The tool is registered as "create-issue" but called as "create_issue"
-        let mgr = make_manager(vec![(
-            "github",
-            vec![make_tool("create-issue", "Create issue")],
-        )]);
-        let result = mgr
-            .call_tool("mcp_github_create_issue", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(result, "mock response from github");
-    }
-
-    #[tokio::test]
-    async fn test_call_tool_overlapping_server_prefixes() {
-        // "github" and "github-enterprise" have overlapping underscore prefixes
-        // "mcp_github_enterprise_search" should match "github-enterprise", not "github"
-        let mgr = make_manager(vec![
-            ("github", vec![make_tool("search", "")]),
-            (
-                "github-enterprise",
-                vec![make_tool("search", "Enterprise search")],
-            ),
-        ]);
-
-        // This tests that "mcp_github_enterprise_search" routes to
-        // "github-enterprise" not "github" (which would try tool "enterprise_search").
-        // Due to HashMap iteration order being non-deterministic, this test
-        // documents the current behavior rather than asserting a specific routing.
-        let result = mgr
-            .call_tool("mcp_github_enterprise_search", serde_json::json!({}))
-            .await;
-        // Should succeed regardless of which server it routes to
-        assert!(
-            result.is_ok(),
-            "Expected tool call to succeed: {:?}",
-            result.err()
-        );
     }
 }

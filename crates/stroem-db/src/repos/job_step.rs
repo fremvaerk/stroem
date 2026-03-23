@@ -236,7 +236,7 @@ impl JobStepRepo {
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'agent', 'approval')
+                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'approval')
                 ORDER BY random()
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1

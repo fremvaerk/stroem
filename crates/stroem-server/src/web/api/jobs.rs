@@ -14,6 +14,7 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_db::{JobRepo, JobStepRepo};
@@ -619,10 +620,10 @@ pub async fn approve_step(
             step_name, step.status
         )));
     }
-    if step.action_type != "approval" {
+    if step.action_type != "approval" && step.action_type != "agent" {
         return Err(AppError::Conflict(format!(
-            "Step '{}' is not an approval step",
-            step_name
+            "Step '{}' is not an approval or agent step (type: {})",
+            step_name, step.action_type
         )));
     }
 
@@ -661,6 +662,78 @@ pub async fn approve_step(
     }
 
     if req.approved {
+        // ── Agent ask_user approval: inject response into agent_state, mark ready ──
+        if step.action_type == "agent" {
+            // Build the user response text from the approval input
+            let user_response = req
+                .input
+                .as_ref()
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .unwrap_or_else(|| "Approved".to_string());
+
+            // Get the agent conversation state
+            if let Some(ref state_val) = step.agent_state {
+                if let Ok(mut conv_state) = serde_json::from_value::<
+                    stroem_agent::state::AgentConversationState,
+                >(state_val.clone())
+                {
+                    // Get the ask_user tool_call_id
+                    let tool_call_id = conv_state
+                        .ask_user_call
+                        .take()
+                        .map(|a| a.tool_call_id)
+                        .unwrap_or_default();
+
+                    conv_state.suspended_for_ask_user = false;
+
+                    // Store the user response as a resolved tool result
+                    conv_state.resolved_tool_results.push(
+                        stroem_agent::state::ResolvedToolResult {
+                            tool_call_id,
+                            result_text: user_response,
+                        },
+                    );
+
+                    // Save updated state
+                    let updated_state = serde_json::to_value(&conv_state)
+                        .context("serialize agent conversation state")?;
+                    JobStepRepo::update_agent_state(&state.pool, job_id, &step_name, updated_state)
+                        .await
+                        .context("save agent state after ask_user approval")?;
+
+                    // Mark step ready for re-claim by a worker
+                    sqlx::query(
+                        "UPDATE job_step SET status = 'ready', ready_at = NOW(), worker_id = NULL \
+                         WHERE job_id = $1 AND step_name = $2 AND status = 'suspended'",
+                    )
+                    .bind(job_id)
+                    .bind(&step_name)
+                    .execute(&state.pool)
+                    .await
+                    .context("mark agent step ready for re-claim")?;
+
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!(
+                                "[agent] Step '{}' ask_user approved by {} — marked ready for re-claim",
+                                step_name, approver
+                            ),
+                        )
+                        .await;
+
+                    return Ok(Json(json!({"status": "approved"})));
+                }
+            }
+
+            // Fallback if agent_state is missing — treat like normal approval
+            tracing::warn!(
+                "Agent step '{}' missing agent_state during ask_user approval — falling through to normal approval",
+                step_name
+            );
+        }
+
+        // ── Normal approval gate handling ──────────────────────────────
         // FIX 5: merge approval metadata into existing output (preserves approval_message)
         let mut output = step.output.clone().unwrap_or(json!({}));
         if let Some(obj) = output.as_object_mut() {

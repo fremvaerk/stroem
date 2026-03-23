@@ -28,6 +28,25 @@ pub struct ClaimedStep {
     pub runner: Option<String>,
     pub timeout_secs: Option<i32>,
     pub revision: Option<String>,
+    /// Name of the provider to use for agent steps (e.g. "anthropic").
+    #[serde(default)]
+    pub agent_provider_name: Option<String>,
+    /// Rendered prompt for agent steps.
+    #[serde(default)]
+    pub agent_prompt: Option<String>,
+    /// Rendered system prompt for agent steps.
+    #[serde(default)]
+    pub agent_system_prompt: Option<String>,
+    /// MCP server definitions for agent steps with MCP tools.
+    #[serde(default)]
+    pub mcp_servers:
+        Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    /// Persisted conversation state for resuming suspended agent steps.
+    #[serde(default)]
+    pub agent_state: Option<serde_json::Value>,
+    /// Task tool metadata keyed by task name.
+    #[serde(default)]
+    pub agent_tool_tasks: Option<serde_json::Value>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -45,6 +64,13 @@ struct ClaimResponse {
     pub runner: Option<String>,
     pub timeout_secs: Option<i32>,
     pub revision: Option<String>,
+    pub agent_provider_name: Option<String>,
+    pub agent_prompt: Option<String>,
+    pub agent_system_prompt: Option<String>,
+    pub mcp_servers:
+        Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    pub agent_state: Option<serde_json::Value>,
+    pub agent_tool_tasks: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,6 +247,12 @@ impl ServerClient {
             runner: resp.runner,
             timeout_secs: resp.timeout_secs,
             revision: resp.revision,
+            agent_provider_name: resp.agent_provider_name,
+            agent_prompt: resp.agent_prompt,
+            agent_system_prompt: resp.agent_system_prompt,
+            mcp_servers: resp.mcp_servers,
+            agent_state: resp.agent_state,
+            agent_tool_tasks: resp.agent_tool_tasks,
         };
 
         Ok(Some(step))
@@ -374,6 +406,101 @@ impl ServerClient {
         Ok(resp.cancelled)
     }
 
+    /// POST /worker/jobs/{id}/steps/{step}/task-tool
+    ///
+    /// Request the server to create a child job for a task tool call.
+    /// Returns the child job's UUID.
+    #[tracing::instrument(skip(self, input))]
+    pub async fn agent_task_tool(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        task_name: &str,
+        input: serde_json::Value,
+    ) -> anyhow::Result<Uuid> {
+        let url = format!(
+            "{}/worker/jobs/{}/steps/{}/task-tool",
+            self.base_url, job_id, step_name
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&serde_json::json!({
+                "task_name": task_name,
+                "input": input,
+            }))
+            .send()
+            .await
+            .context("agent_task_tool request failed")?;
+        let resp = Self::check_response(resp, "Agent task-tool").await?;
+        let body: serde_json::Value = resp.json().await.context("parse task-tool response")?;
+        let child_id = body["child_job_id"]
+            .as_str()
+            .context("missing child_job_id in response")?;
+        Uuid::parse_str(child_id).context("invalid child_job_id UUID")
+    }
+
+    /// POST /worker/jobs/{id}/steps/{step}/suspend
+    ///
+    /// Suspend an agent step for `ask_user` — saves conversation state and
+    /// marks the step as `suspended` on the server.
+    #[tracing::instrument(skip(self, agent_state))]
+    pub async fn agent_suspend_step(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        agent_state: serde_json::Value,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/worker/jobs/{}/steps/{}/suspend",
+            self.base_url, job_id, step_name
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&serde_json::json!({
+                "agent_state": agent_state,
+                "message": message,
+            }))
+            .send()
+            .await
+            .context("agent_suspend_step request failed")?;
+        Self::check_response(resp, "Agent suspend step").await?;
+        Ok(())
+    }
+
+    /// POST /worker/jobs/{id}/steps/{step}/agent-state
+    ///
+    /// Save intermediate agent conversation state (pending tool calls) so the
+    /// step can be resumed after task-tool child jobs complete.
+    #[tracing::instrument(skip(self, agent_state))]
+    pub async fn agent_save_state(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        agent_state: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/worker/jobs/{}/steps/{}/agent-state",
+            self.base_url, job_id, step_name
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&serde_json::json!({
+                "agent_state": agent_state,
+            }))
+            .send()
+            .await
+            .context("agent_save_state request failed")?;
+        Self::check_response(resp, "Agent save state").await?;
+        Ok(())
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(
@@ -520,6 +647,12 @@ mod tests {
             runner: None,
             timeout_secs: None,
             revision: Some("deadbeef".to_string()),
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
         };
         let json = serde_json::to_value(&step_with_revision).unwrap();
         assert_eq!(json["revision"], "deadbeef");

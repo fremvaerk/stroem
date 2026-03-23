@@ -28,6 +28,10 @@ pub struct AgentConversationState {
     /// Details of the ask_user call (present when `suspended_for_ask_user` is true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_user_call: Option<AskUserCall>,
+    /// Tool results collected from completed child jobs, populated by the server on
+    /// `agent_tool` child job completion. The worker drains these when resuming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_tool_results: Vec<ResolvedToolResult>,
 }
 
 /// A task-tool call that created a child job.
@@ -50,6 +54,19 @@ pub struct AskUserCall {
     pub message: String,
 }
 
+/// A resolved tool result from a completed child job.
+///
+/// Populated by the server in `propagate_to_parent` when an `agent_tool` child job
+/// completes. The worker reads these out of `resolved_tool_results` when resuming
+/// the dispatch loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedToolResult {
+    /// The tool_call_id from the original LLM tool call.
+    pub tool_call_id: String,
+    /// The result text to feed back to the LLM.
+    pub result_text: String,
+}
+
 impl Default for AgentConversationState {
     fn default() -> Self {
         Self::new()
@@ -67,6 +84,7 @@ impl AgentConversationState {
             pending_tool_calls: Vec::new(),
             suspended_for_ask_user: false,
             ask_user_call: None,
+            resolved_tool_results: Vec::new(),
         }
     }
 
@@ -179,6 +197,50 @@ mod tests {
         assert!(resolved.is_some());
         assert_eq!(state.pending_tool_calls.len(), 1);
         assert_eq!(state.pending_tool_calls[0].child_job_id, id2);
+    }
+
+    #[test]
+    fn test_resolved_tool_results_round_trip() {
+        let mut state = AgentConversationState::new();
+        state.resolved_tool_results.push(ResolvedToolResult {
+            tool_call_id: "tc1".to_string(),
+            result_text: "success".to_string(),
+        });
+
+        let json = serde_json::to_value(&state).unwrap();
+        assert!(json.get("resolved_tool_results").is_some());
+        let results = json["resolved_tool_results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["tool_call_id"], "tc1");
+        assert_eq!(results[0]["result_text"], "success");
+
+        let restored: AgentConversationState = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.resolved_tool_results.len(), 1);
+    }
+
+    #[test]
+    fn test_resolved_tool_results_empty_omitted() {
+        let state = AgentConversationState::new();
+        let json = serde_json::to_value(&state).unwrap();
+        assert!(
+            json.get("resolved_tool_results").is_none(),
+            "empty resolved_tool_results should be omitted from JSON"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tool_results_backward_compat() {
+        // Old JSON without resolved_tool_results should deserialize fine
+        let json = serde_json::json!({
+            "messages": [],
+            "turn": 2,
+            "total_input_tokens": 100,
+            "total_output_tokens": 50,
+            "pending_tool_calls": [],
+            "suspended_for_ask_user": false
+        });
+        let state: AgentConversationState = serde_json::from_value(json).unwrap();
+        assert!(state.resolved_tool_results.is_empty());
     }
 
     #[test]
