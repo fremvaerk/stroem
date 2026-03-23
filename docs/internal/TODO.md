@@ -356,6 +356,23 @@ Last updated: 2026-03-13.
 - [ ] No audit trail for agent-created child jobs — `loop_dispatch.rs`
 - [ ] No SSRF validation on MCP server URLs — `mcp_client.rs`
 
+### SSE Transport Review Fixes (2026-03-23)
+
+#### Important
+- [ ] `SseMcpService` is byte-for-byte duplicate of `StdioMcpService` — replace both with a single `RmcpService` wrapper — `mcp_client.rs:38-85`
+- [ ] ~50 lines duplicated between stdio and sse `connect()` branches (timeout, tool discovery, McpToolInfo mapping) — extract shared `connect_and_discover()` helper — `mcp_client.rs:115-313`
+- [ ] `env` field documented as "stdio only" but silently used for SSE auth via `MCP_AUTH_TOKEN` convention — add dedicated `auth_token: Option<String>` field to `McpServerDef` or update docs — `workflow.rs:162`, `mcp_client.rs:231`
+- [ ] `timeout_secs` doc comment ambiguous — says "Connection timeout" but applies to init + tool discovery — `workflow.rs:165`
+
+#### Minor
+- [ ] URL not validated for scheme/format in `validate_mcp_servers` — empty string or `file://` URL gives confusing runtime error — `validation.rs`
+- [ ] `reqwest::Client::default()` per SSE connection — no shared connection pool (acceptable at current scale) — `mcp_client.rs:237`
+
+#### Missing Tests
+- [ ] `is_mcp_tool()` with hyphen-normalized server names — `mcp_client.rs`
+- [ ] `tool_definitions()` prefix generation with multiple servers — `mcp_client.rs`
+- [ ] `call_tool()` routing with overlapping server name prefixes (e.g., `github` vs `github-enterprise`) — `mcp_client.rs`
+
 ### 7B: Multi-turn + tools + ask_user (depends on 5d + 7A)
 - [x] Strom task tools via rig Tool trait (StromTaskTool)
 - [x] Built-in ask_user tool (reuses Phase 5d suspended status)
