@@ -120,18 +120,31 @@ pub async fn execute_single_turn_with_retry(
 }
 
 /// Strip a single layer of markdown code fences (```json ... ``` or ``` ... ```).
+/// Also handles prose before the fence (e.g. "Here is the result:\n```json\n{...}\n```").
 pub fn strip_code_fences(s: &str) -> &str {
     let s = s.trim();
-    if let Some(rest) = s.strip_prefix("```") {
-        // Skip optional language tag on the first line
-        let after_tag = if let Some(nl) = rest.find('\n') {
-            &rest[nl + 1..]
-        } else {
-            return s; // No newline — malformed fence, return as-is
-        };
-        if let Some(end) = after_tag.rfind("```") {
-            return after_tag[..end].trim();
-        }
+
+    // Find the opening ``` — either at the start or embedded after prose
+    let fence_start = if s.starts_with("```") {
+        Some(0)
+    } else {
+        s.find("```")
+    };
+
+    let fence_start = match fence_start {
+        Some(pos) => pos,
+        None => return s,
+    };
+
+    // Skip the ``` and the optional language tag on the first line
+    let rest = &s[fence_start + 3..];
+    let after_tag = if let Some(nl) = rest.find('\n') {
+        &rest[nl + 1..]
+    } else {
+        return s; // No newline after opening fence — malformed, return as-is
+    };
+    if let Some(end) = after_tag.find("```") {
+        return after_tag[..end].trim();
     }
     s
 }
@@ -374,5 +387,23 @@ mod tests {
     fn test_strip_code_fences_only_opening() {
         let input = "```";
         assert_eq!(strip_code_fences(input), input);
+    }
+
+    #[test]
+    fn test_strip_code_fences_prose_before_fence() {
+        let input = "Here is the result: ```json\n{\"key\":\"val\"}\n```";
+        assert_eq!(strip_code_fences(input), r#"{"key":"val"}"#);
+    }
+
+    #[test]
+    fn test_strip_code_fences_prose_before_fence_newline() {
+        let input = "I'll document the review:\n```json\n{\"actions\": \"done\"}\n```";
+        assert_eq!(strip_code_fences(input), r#"{"actions": "done"}"#);
+    }
+
+    #[test]
+    fn test_strip_code_fences_prose_after_fence_ignored() {
+        let input = "```json\n{\"key\":\"val\"}\n```\nSome trailing text";
+        assert_eq!(strip_code_fences(input), r#"{"key":"val"}"#);
     }
 }
