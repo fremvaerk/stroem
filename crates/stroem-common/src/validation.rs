@@ -3521,13 +3521,12 @@ on_success:
         let yaml = r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
 
 connections:
   prod_db:
@@ -3544,9 +3543,8 @@ connections:
         let yaml = r#"
 connection_types:
   custom:
-    properties:
-      data:
-        type: array
+    data:
+      type: array
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
@@ -3577,13 +3575,12 @@ connections:
         let yaml = r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
 
 connections:
   prod_db:
@@ -3602,10 +3599,9 @@ connections:
         let yaml = r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
+    host:
+      type: string
+      required: true
 
 connections:
   prod_db:
@@ -3652,10 +3648,9 @@ connections:
         let yaml = r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
+    host:
+      type: string
+      required: true
 
 actions:
   run-migration:

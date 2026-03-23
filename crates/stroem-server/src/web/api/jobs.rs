@@ -1387,10 +1387,7 @@ mod tests {
     fn test_extract_agent_response_empty_string_falls_through() {
         let input = json!({"response": ""});
         // Empty response should fall through to JSON serialization, not send empty string to LLM
-        assert_eq!(
-            extract_agent_response(Some(&input)),
-            r#"{"response":""}"#
-        );
+        assert_eq!(extract_agent_response(Some(&input)), r#"{"response":""}"#);
     }
 
     #[test]
@@ -1410,10 +1407,7 @@ mod tests {
     #[test]
     fn test_extract_agent_response_bare_string() {
         let input = json!("just a string");
-        assert_eq!(
-            extract_agent_response(Some(&input)),
-            r#""just a string""#
-        );
+        assert_eq!(extract_agent_response(Some(&input)), r#""just a string""#);
     }
 
     #[test]
@@ -1425,9 +1419,6 @@ mod tests {
     #[test]
     fn test_extract_agent_response_null_value() {
         let input = json!({"response": null});
-        assert_eq!(
-            extract_agent_response(Some(&input)),
-            r#"{"response":null}"#
-        );
+        assert_eq!(extract_agent_response(Some(&input)), r#"{"response":null}"#);
     }
 }

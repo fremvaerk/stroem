@@ -807,10 +807,9 @@ tasks:
         action: slack-notify
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
+    host:
+      type: string
+      required: true
 triggers:
   nightly:
     type: scheduler
@@ -1171,13 +1170,12 @@ tasks:
         depends_on: [deploy]
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
 "#,
         )
         .unwrap();
@@ -1327,13 +1325,12 @@ tasks:
         depends_on: [deploy]
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
 "#,
         )
         .unwrap();

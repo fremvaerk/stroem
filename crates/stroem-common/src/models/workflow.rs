@@ -16,8 +16,10 @@ pub struct ConnectionPropertyDef {
     pub secret: bool,
 }
 
-/// Connection type definition — a schema for connections
+/// Connection type definition — a schema for connections.
+/// Properties are defined directly under the type name in YAML (no `properties:` wrapper).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct ConnectionTypeDef {
     pub properties: HashMap<String, ConnectionPropertyDef>,
 }
@@ -1989,23 +1991,22 @@ actions:
         let yaml = r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
-      database:
-        type: string
-        required: true
-      user:
-        type: string
-        required: true
-      password:
-        type: string
-        required: true
-        secret: true
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
+    database:
+      type: string
+      required: true
+    user:
+      type: string
+      required: true
+    password:
+      type: string
+      required: true
+      secret: true
 "#;
         let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.connection_types.len(), 1);
@@ -2034,13 +2035,12 @@ connection_types:
         let yaml = r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
 
 connections:
   prod_db:
@@ -2084,9 +2084,8 @@ connections:
             r#"
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
+    host:
+      type: string
 connections:
   db1:
     type: postgres
@@ -2099,9 +2098,8 @@ connections:
             r#"
 connection_types:
   redis:
-    properties:
-      url:
-        type: string
+    url:
+      type: string
 connections:
   cache1:
     type: redis

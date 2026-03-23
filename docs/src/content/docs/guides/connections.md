@@ -12,23 +12,22 @@ Define reusable schemas for connections using `connection_types`. Each property 
 ```yaml
 connection_types:
   postgres:
-    properties:
-      host:
-        type: string
-        required: true
-      port:
-        type: integer
-        default: 5432
-      database:
-        type: string
-        required: true
-      user:
-        type: string
-        required: true
-      password:
-        type: string
-        required: true
-        secret: true
+    host:
+      type: string
+      required: true
+    port:
+      type: integer
+      default: 5432
+    database:
+      type: string
+      required: true
+    user:
+      type: string
+      required: true
+    password:
+      type: string
+      required: true
+      secret: true
 ```
 
 Supported property types: `string`, `text`, `integer`, `number`, `boolean`, `date`, `datetime`.

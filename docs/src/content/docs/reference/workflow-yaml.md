@@ -608,12 +608,11 @@ Define schemas for reusable connection configurations.
 ```yaml
 connection_types:
   postgres:
-    properties:
-      host: { type: string, required: true }
-      port: { type: integer, default: 5432 }
-      database: { type: string, required: true }
-      username: { type: string, required: true }
-      password: { type: string, required: true, secret: true }
+    host: { type: string, required: true }
+    port: { type: integer, default: 5432 }
+    database: { type: string, required: true }
+    username: { type: string, required: true }
+    password: { type: string, required: true, secret: true }
 ```
 
 ## Connections
