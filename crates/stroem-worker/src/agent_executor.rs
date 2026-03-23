@@ -237,6 +237,17 @@ pub async fn execute_agent_step(
 
     let start = std::time::Instant::now();
 
+    // Log dispatch start
+    let tool_count = action_spec.tools.len();
+    ctx.log(
+        job_id,
+        &format!(
+            "[agent] Step '{}': calling {}/{} ({} tools, interactive={})",
+            step_name, provider_name, model_name, tool_count, action_spec.interactive
+        ),
+    )
+    .await;
+
     // Dispatch: multi-turn when tools or interactive flag are present; otherwise single-turn.
     let is_multi_turn = !action_spec.tools.is_empty() || action_spec.interactive;
 

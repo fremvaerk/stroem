@@ -49,6 +49,39 @@ pub async fn create_job_for_task(
     .await
 }
 
+/// Create a child job with parent tracking.
+///
+/// Used by `agent_task_tool` endpoint and `handle_task_steps` to create
+/// sub-jobs that propagate back to the parent step on completion.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_child_job_for_task(
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    parent_job_id: Uuid,
+    parent_step_name: &str,
+    revision: Option<&str>,
+) -> Result<Uuid> {
+    create_job_for_task_inner(
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        Some(parent_job_id),
+        Some(parent_step_name),
+        revision,
+        None,
+    )
+    .await
+}
+
 /// Create a job with parent tracking (for type: task sub-jobs).
 #[allow(clippy::too_many_arguments)]
 fn create_job_for_task_inner<'a>(

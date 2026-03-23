@@ -685,7 +685,7 @@ pub async fn agent_task_tool(
 
     let source_id = format!("{}/{}", job_id, step_name);
 
-    let child_job_id = crate::job_creator::create_job_for_task(
+    let child_job_id = crate::job_creator::create_child_job_for_task(
         &state.pool,
         &workspace,
         &job.workspace,
@@ -693,8 +693,9 @@ pub async fn agent_task_tool(
         req.input,
         "agent_tool",
         Some(&source_id),
+        job_id,
+        &step_name,
         job.revision.as_deref(),
-        None, // agents_config not needed — orchestrator handles child agent steps
     )
     .await
     .context("create child job for task tool")?;
