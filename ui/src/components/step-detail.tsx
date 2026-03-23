@@ -51,7 +51,8 @@ export function StepDetail({ jobId, step, onRefresh }: StepDetailProps) {
 
   const isStreaming = step.status === "running";
   const isSuspendedApproval =
-    step.status === "suspended" && step.action_type === "approval";
+    step.status === "suspended" &&
+    (step.action_type === "approval" || step.action_type === "agent");
 
   return (
     <div className="space-y-3">

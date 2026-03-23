@@ -58,7 +58,8 @@ export function ApprovalPage() {
   }
 
   const isSuspended =
-    step.status === "suspended" && step.action_type === "approval";
+    step.status === "suspended" &&
+    (step.action_type === "approval" || step.action_type === "agent");
   const isCompleted = step.status === "completed";
   const isFailed = step.status === "failed";
   const isPending = step.status === "pending" || step.status === "ready";
