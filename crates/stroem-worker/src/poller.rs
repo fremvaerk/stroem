@@ -68,6 +68,14 @@ pub(crate) async fn execute_claimed_step(
     // They make LLM API calls directly using the local provider config.
     #[cfg(feature = "agent")]
     if step.action_type == "agent" {
+        // Report step start so the job transitions from pending to running
+        if let Err(e) = client
+            .report_step_start(step.job_id, &step.step_name, worker_id)
+            .await
+        {
+            tracing::error!("Failed to report agent step start: {:#}", e);
+        }
+
         // Create a per-step cancellation token (used by the dispatch loop)
         let step_cancel = CancellationToken::new();
 
