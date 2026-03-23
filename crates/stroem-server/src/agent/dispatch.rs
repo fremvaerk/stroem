@@ -683,6 +683,18 @@ async fn resolve_and_render_step(
                     .collect();
                 match stroem_common::template::render_input_map(&map, &render_ctx) {
                     Ok(resolved) => {
+                        // Persist rendered input to DB so the job detail API shows
+                        // resolved values instead of raw Tera templates.
+                        if let Err(e) = JobStepRepo::update_input(
+                            pool,
+                            job_id,
+                            &step.step_name,
+                            Some(resolved.clone()),
+                        )
+                        .await
+                        {
+                            tracing::warn!("Failed to persist rendered input: {:#}", e);
+                        }
                         if let Some(ctx_obj) = render_ctx.as_object_mut() {
                             ctx_obj.insert("input".to_string(), resolved);
                         }

@@ -354,6 +354,14 @@ pub async fn handle_task_steps(
             rendered_input
         };
 
+        // Persist rendered input to DB so the job detail API shows resolved values.
+        if let Err(e) =
+            JobStepRepo::update_input(pool, job_id, &step.step_name, Some(rendered_input.clone()))
+                .await
+        {
+            tracing::warn!("Failed to persist rendered input: {:#}", e);
+        }
+
         // Mark step as running (server-side, so we don't process it again)
         JobStepRepo::mark_running_server(pool, job_id, &step.step_name).await?;
 
@@ -844,6 +852,17 @@ pub async fn handle_approval_steps(
                         .collect();
                     match render_input_map(&map, &context_value) {
                         Ok(resolved) => {
+                            // Persist rendered input to DB for the job detail API.
+                            if let Err(e) = JobStepRepo::update_input(
+                                pool,
+                                job_id,
+                                &step.step_name,
+                                Some(resolved.clone()),
+                            )
+                            .await
+                            {
+                                tracing::warn!("Failed to persist rendered input: {:#}", e);
+                            }
                             if let Some(ctx_obj) = context_value.as_object_mut() {
                                 ctx_obj.insert("input".to_string(), resolved);
                             }
