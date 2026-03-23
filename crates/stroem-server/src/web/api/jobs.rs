@@ -249,10 +249,10 @@ pub async fn get_job(
                 "loop_total": step.loop_total,
                 "depends_on": serde_json::Value::Array(vec![]),
             });
-            // For approval steps, always surface approval-specific fields so the
-            // UI can show the message and input schema after the step leaves the
+            // For approval and agent steps, always surface approval-specific fields so
+            // the UI can show the message and input schema after the step leaves the
             // suspended state (e.g. approved, rejected, or timed out). (FIX 7)
-            if step.action_type == "approval" {
+            if step.action_type == "approval" || step.action_type == "agent" {
                 if let Some(ref output) = step.output {
                     if let Some(msg) = output.get("approval_message") {
                         step_json["approval_message"] = msg.clone();
