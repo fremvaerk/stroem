@@ -59,6 +59,31 @@ impl McpService for StdioMcpService {
     }
 }
 
+/// Concrete implementation for SSE (Streamable HTTP) transport.
+struct SseMcpService {
+    service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+}
+
+#[async_trait::async_trait]
+impl McpService for SseMcpService {
+    async fn call_tool(&self, params: CallToolRequestParams) -> Result<Vec<Content>> {
+        let result = self
+            .service
+            .call_tool(params)
+            .await
+            .context("MCP tool call failed")?;
+        Ok(result.content)
+    }
+
+    async fn cancel(self: Box<Self>) -> Result<()> {
+        self.service
+            .cancel()
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP shutdown failed: {}", e))?;
+        Ok(())
+    }
+}
+
 /// Manages connections to multiple MCP servers.
 ///
 /// Created per agent step dispatch — connects to all referenced MCP servers,
@@ -70,8 +95,7 @@ pub struct McpClientManager {
 impl McpClientManager {
     /// Connect to the given MCP servers and discover their tools.
     ///
-    /// Currently only supports `stdio` transport. SSE transport support
-    /// can be added when the rmcp crate's SSE client features are stable.
+    /// Supports `stdio` (child process) and `sse` (Streamable HTTP) transports.
     pub async fn connect(
         mcp_servers: &HashMap<String, McpServerDef>,
         server_names: &[&str],
@@ -189,10 +213,97 @@ impl McpClientManager {
                     );
                 }
                 "sse" => {
-                    // SSE transport not yet supported in agent dispatch.
-                    tracing::warn!(
-                        "MCP server '{}' uses SSE transport which is not yet supported for agent tools",
-                        name
+                    let url = server_def
+                        .url
+                        .as_deref()
+                        .context(format!("MCP server '{}' missing url", name))?;
+
+                    tracing::info!(
+                        server = name,
+                        url = url,
+                        "Connecting to MCP server via SSE"
+                    );
+
+                    // Build SSE transport config with optional auth header from env
+                    let mut config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
+
+                    // If an auth token is provided in env vars, set it as the auth header
+                    if let Some(token) = server_def.env.get("MCP_AUTH_TOKEN") {
+                        config = config.auth_header(token);
+                    }
+
+                    let transport =
+                        rmcp::transport::StreamableHttpClientTransport::with_client(
+                            reqwest::Client::default(),
+                            config,
+                        );
+
+                    let timeout = std::time::Duration::from_secs(u64::from(
+                        server_def.timeout_secs.unwrap_or(30),
+                    ));
+                    let service = match tokio::time::timeout(
+                        timeout,
+                        rmcp::serve_client((), transport),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            result.context(format!("Failed to initialize MCP server '{}'", name))?
+                        }
+                        Err(_) => {
+                            bail!(
+                                "MCP server '{}' initialization timed out after {}s",
+                                name,
+                                timeout.as_secs()
+                            );
+                        }
+                    };
+
+                    // Discover tools
+                    let tools_result =
+                        match tokio::time::timeout(timeout, service.list_tools(Default::default()))
+                            .await
+                        {
+                            Ok(result) => result.context(format!(
+                                "Failed to list tools from MCP server '{}'",
+                                name
+                            ))?,
+                            Err(_) => {
+                                bail!(
+                                    "MCP server '{}' tool discovery timed out after {}s",
+                                    name,
+                                    timeout.as_secs()
+                                );
+                            }
+                        };
+
+                    let tools: Vec<McpToolInfo> = tools_result
+                        .tools
+                        .into_iter()
+                        .map(|t| {
+                            let input_schema =
+                                serde_json::to_value(&*t.input_schema).unwrap_or_default();
+                            McpToolInfo {
+                                name: t.name.to_string(),
+                                description: t.description.as_deref().unwrap_or("").to_string(),
+                                input_schema,
+                            }
+                        })
+                        .collect();
+
+                    tracing::info!(
+                        server = name,
+                        tool_count = tools.len(),
+                        "Connected to MCP server via SSE"
+                    );
+
+                    connections.insert(
+                        name.to_string(),
+                        McpConnection {
+                            service: Box::new(SseMcpService { service }),
+                            tools,
+                            name: name.to_string(),
+                        },
                     );
                 }
                 other => {

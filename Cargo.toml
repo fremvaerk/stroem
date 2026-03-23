@@ -76,7 +76,7 @@ k8s-openapi = { version = "0.27", features = ["latest"] }
 dashmap = "6"
 
 # MCP server
-rmcp = { version = "1.2", default-features = false, features = ["server", "client", "macros", "transport-streamable-http-server", "transport-child-process"] }
+rmcp = { version = "1.2", default-features = false, features = ["server", "client", "macros", "transport-streamable-http-server", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 http = "1"
 

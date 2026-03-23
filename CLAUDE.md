@@ -321,7 +321,16 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Uses `rig-core` (v0.33) for LLM provider abstraction (19 providers, custom endpoints)
 - Feature-gated: `agent` cargo feature on stroem-server (enabled by default)
 - DB: migration `023_agent_type.sql` adds `'agent'` to action_type CHECK + `agent_state` JSONB column
-- Future: Phase 7B adds multi-turn with tools + ask_user (depends on Phase 5d approval gates)
+- **Multi-turn dispatch** (Phase 7B+C): When `tools` is non-empty or `interactive: true`, uses custom dispatch loop (`agent/loop_dispatch.rs`) with rig's `CompletionModel::completion()` for raw LLM calls
+- **Tool types**: `tools: [{task: "task-name"}, {mcp: "server-name"}]` — task tools create child jobs (async), MCP tools call external servers (sync)
+- **ask_user**: `interactive: true` enables the `ask_user` tool — suspends step for human input, resumes via approve endpoint
+- **Conversation state**: `AgentConversationState` in `agent/state.rs` — persisted as JSONB in `agent_state` column, restored on resume
+- **MCP client**: `agent/mcp_client.rs` — connects to configured MCP servers via stdio or SSE (Streamable HTTP) transport, discovers tools, calls them synchronously
+- **MCP server config**: `mcp_servers:` in workspace YAML — `McpServerDef` with `type: stdio|sse`, `command`, `args`, `env`, `url`
+- **Task tool flow**: LLM calls tool → child job created (`source_type: agent_tool`) → `propagate_to_parent` detects agent step → resumes dispatch loop
+- **ask_user flow**: LLM calls `ask_user` → step suspended → `POST /api/jobs/{id}/steps/{step}/approve` with user response → dispatch resumes
+- **Max turns**: `max_turns` safety limit (default 25, max 100) prevents unbounded loops
+- DB: migration `025_agent_tool_source.sql` adds `'agent_tool'` to source_type CHECK
 
 ### Approval Gates (type: approval — Human-in-the-Loop)
 - `type: approval` — pauses execution for human approve/reject, server-side dispatch (like `type: task`)

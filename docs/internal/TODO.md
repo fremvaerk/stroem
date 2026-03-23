@@ -325,7 +325,7 @@ Last updated: 2026-03-13.
 - [x] Validation: tools, max_turns, interactive, MCP server defs, workspace-level tool refs
 - [x] DB migration 025: agent_tool source_type
 - [x] update_agent_state repo helper
-- [ ] SSE transport for MCP servers (currently only stdio)
+- [x] SSE transport for MCP servers (stdio + SSE via Streamable HTTP client)
 - [ ] Token usage tracking via CompletionModel (partially implemented)
 
 ### 7B+C Review Fixes (2026-03-22)
