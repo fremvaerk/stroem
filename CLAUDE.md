@@ -459,6 +459,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `crates/stroem-server/src/recovery.rs` — background sweeper that detects stale workers
 - `crates/stroem-server/src/job_recovery.rs` — shared orchestration logic (used by both `complete_step` handler and recovery sweeper)
 - Config: optional `recovery` section in `server-config.yaml` with `heartbeat_timeout_secs` (default 120), `sweep_interval_secs` (default 60), and `unmatched_step_timeout_secs` (default 30)
+- Data retention: separate `retention` section with `worker_hours`, `job_days`, `interval_secs` (all optional, disabled by default)
 - Always active with defaults when config section is absent (`#[serde(default)]`)
 - Sweep cycle (4 phases): Phase 1: mark stale workers inactive → fail their running steps → orchestrate. Phase 2: fail steps that exceeded their timeout. Phase 3: cancel jobs that exceeded their timeout. Phase 4: fail ready steps with no matching active worker (after `unmatched_step_timeout_secs`).
 - Worker heartbeat (`POST /worker/heartbeat`) also sets `status = 'active'`, so returning workers auto-reactivate

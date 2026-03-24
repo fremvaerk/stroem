@@ -241,20 +241,26 @@ pub struct RecoveryConfig {
     /// Seconds a ready step can wait without a matching worker before being failed (default: 30)
     #[serde(default = "default_unmatched_step_timeout")]
     pub unmatched_step_timeout_secs: u64,
+}
+
+/// Data retention configuration for cleaning up old workers, jobs, and logs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionConfig {
     /// Hours after which inactive workers are deleted (default: disabled).
     /// Only workers with `status = 'inactive'` and `last_heartbeat` older than
     /// this threshold are removed.
     #[serde(default)]
-    pub worker_retention_hours: Option<u64>,
-    /// Days after which local log files for terminal jobs are deleted (default: disabled).
-    /// Only logs for completed, failed, or cancelled jobs are removed.
+    pub worker_hours: Option<u64>,
+    /// Days after which terminal jobs and their logs are deleted (default: disabled).
+    /// Only completed, failed, cancelled, or skipped jobs are removed.
     #[serde(default)]
-    pub log_retention_days: Option<u64>,
+    pub job_days: Option<u64>,
     /// How often the retention cleanup runs in seconds (default: 3600 — once per hour).
-    /// The retention cleanup is rate-limited independently of the main sweep interval so
+    /// The retention cleanup is rate-limited independently of the recovery sweep interval so
     /// that frequent sweeps do not trigger expensive deletion scans on every cycle.
     #[serde(default = "default_retention_interval")]
-    pub retention_interval_secs: u64,
+    pub interval_secs: u64,
 }
 
 fn default_heartbeat_timeout() -> u64 {
@@ -276,9 +282,16 @@ impl Default for RecoveryConfig {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
             unmatched_step_timeout_secs: 30,
-            worker_retention_hours: None,
-            log_retention_days: None,
-            retention_interval_secs: 3600,
+        }
+    }
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            worker_hours: None,
+            job_days: None,
+            interval_secs: 3600,
         }
     }
 }
@@ -302,6 +315,8 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     #[serde(default)]
     pub recovery: RecoveryConfig,
+    #[serde(default)]
+    pub retention: RetentionConfig,
     /// ACL configuration (optional — when absent, all authenticated users have full access)
     pub acl: Option<AclConfig>,
     /// MCP server endpoint configuration (optional)
@@ -335,14 +350,14 @@ impl ServerConfig {
         if self.recovery.unmatched_step_timeout_secs < 5 {
             anyhow::bail!("unmatched_step_timeout_secs must be at least 5");
         }
-        if let Some(hours) = self.recovery.worker_retention_hours {
+        if let Some(hours) = self.retention.worker_hours {
             if hours < 1 {
-                anyhow::bail!("worker_retention_hours must be at least 1");
+                anyhow::bail!("retention.worker_hours must be at least 1");
             }
         }
-        if let Some(days) = self.recovery.log_retention_days {
+        if let Some(days) = self.retention.job_days {
             if days < 1 {
-                anyhow::bail!("log_retention_days must be at least 1");
+                anyhow::bail!("retention.job_days must be at least 1");
             }
         }
         if let Some(ref agents) = self.agents {

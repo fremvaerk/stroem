@@ -137,7 +137,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig};
+    use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig};
     use crate::workspace::WorkspaceManager;
     use tempfile::TempDir;
 
@@ -163,6 +163,7 @@ mod tests {
                 unmatched_step_timeout_secs: 30,
                 ..Default::default()
             },
+            retention: RetentionConfig::default(),
             acl: None,
             mcp: None,
             agents: None,

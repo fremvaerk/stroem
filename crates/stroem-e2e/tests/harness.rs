@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
-    DbConfig, LogStorageConfig, RecoveryConfig, ServerConfig, WorkspaceSourceDef,
+    DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
@@ -223,6 +223,7 @@ impl TestEnv {
                 unmatched_step_timeout_secs: 30,
                 ..Default::default()
             },
+            retention: RetentionConfig::default(),
             acl: None,
             mcp: None,
             agents: None,

@@ -10,7 +10,9 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
-use stroem_server::config::{DbConfig, LogStorageConfig, RecoveryConfig, ServerConfig};
+use stroem_server::config::{
+    DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
+};
 use stroem_server::job_recovery::{handle_job_terminal, orchestrate_after_step};
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
@@ -57,6 +59,7 @@ fn setup_state(
             unmatched_step_timeout_secs: 30,
             ..Default::default()
         },
+        retention: RetentionConfig::default(),
         acl: None,
         mcp: None,
         agents: None,

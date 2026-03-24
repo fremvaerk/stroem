@@ -277,7 +277,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
     let now = chrono::Utc::now().timestamp();
     let last = state.last_retention_run.load(Ordering::Relaxed);
-    let interval = state.config.recovery.retention_interval_secs as i64;
+    let interval = state.config.retention.interval_secs as i64;
     if now - last >= interval {
         retention_cleanup(state).await;
         state.last_retention_run.store(now, Ordering::Relaxed);
@@ -290,7 +290,7 @@ async fn sweep(state: &AppState) -> Result<()> {
 /// Errors in individual deletions are logged but do not fail the sweep.
 async fn retention_cleanup(state: &AppState) {
     // Worker retention
-    if let Some(hours) = state.config.recovery.worker_retention_hours {
+    if let Some(hours) = state.config.retention.worker_hours {
         match WorkerRepo::delete_stale(&state.pool, hours as f64).await {
             Ok(count) if count > 0 => {
                 tracing::info!(
@@ -310,7 +310,7 @@ async fn retention_cleanup(state: &AppState) {
     tarball_cache_cleanup(state).await;
 
     // Log retention — delete old terminal jobs, their local logs, and S3 logs
-    if let Some(days) = state.config.recovery.log_retention_days {
+    if let Some(days) = state.config.retention.job_days {
         const BATCH_SIZE: i64 = 1000;
         match JobRepo::get_old_terminal_jobs(&state.pool, days as f64, BATCH_SIZE).await {
             Ok(jobs) if !jobs.is_empty() => {
@@ -421,7 +421,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovery_cancellation() {
-        use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, ServerConfig};
+        use crate::config::{
+            DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
+        };
         use crate::log_storage::LogStorage;
         use crate::workspace::WorkspaceManager;
         use std::collections::HashMap;
@@ -448,6 +450,7 @@ mod tests {
                 unmatched_step_timeout_secs: 30,
                 ..Default::default()
             },
+            retention: RetentionConfig::default(),
             acl: None,
             mcp: None,
             agents: None,

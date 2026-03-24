@@ -12,8 +12,8 @@ use stroem_common::models::workflow::{
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, UserRepo, WorkerRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
-    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, McpConfig, ServerConfig,
-    WorkspaceSourceDef,
+    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, McpConfig, RetentionConfig,
+    ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::job_creator::create_job_for_task;
 use stroem_server::log_storage::LogStorage;
@@ -275,6 +275,7 @@ async fn setup_with_mcp() -> Result<(
         worker_token: "mcp-test-token-secret-long-enough-32c".to_string(),
         auth: None,
         recovery: Default::default(),
+        retention: RetentionConfig::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
@@ -324,6 +325,7 @@ async fn setup_mcp_disabled() -> Result<(
         worker_token: "mcp-test-token-secret-long-enough-32c".to_string(),
         auth: None,
         recovery: Default::default(),
+        retention: RetentionConfig::default(),
         acl: None,
         mcp: None, // MCP disabled
         agents: None,
@@ -382,6 +384,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
             }),
         }),
         recovery: Default::default(),
+        retention: RetentionConfig::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
@@ -1133,6 +1136,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         worker_token: "mcp-test-token-secret-long-enough-32c".to_string(),
         auth: None,
         recovery: Default::default(),
+        retention: RetentionConfig::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
         agents: None,

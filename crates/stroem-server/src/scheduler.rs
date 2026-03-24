@@ -797,7 +797,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_cancellation() {
-        use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, ServerConfig};
+        use crate::config::{
+            DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
+        };
         use crate::log_storage::LogStorage;
         use tokio_util::sync::CancellationToken;
 
@@ -829,6 +831,7 @@ mod tests {
                 unmatched_step_timeout_secs: 30,
                 ..Default::default()
             },
+            retention: RetentionConfig::default(),
             acl: None,
             mcp: None,
             agents: None,

@@ -151,7 +151,9 @@ pub fn is_cancelled(state: &AppState, job_id: Uuid) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, ServerConfig};
+    use crate::config::{
+        DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
+    };
     use crate::log_storage::LogStorage;
     use crate::workspace::WorkspaceManager;
     use sqlx::PgPool;
@@ -181,6 +183,7 @@ mod tests {
                 unmatched_step_timeout_secs: 30,
                 ..Default::default()
             },
+            retention: RetentionConfig::default(),
             acl: None,
             mcp: None,
             agents: None,

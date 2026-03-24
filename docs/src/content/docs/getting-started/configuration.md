@@ -38,13 +38,15 @@ workspaces:
   #   ref: main
   #   poll_interval_secs: 60
 worker_token: "change-in-production"
-# Optional: worker recovery and data retention settings
+# Optional: worker recovery settings
 # recovery:
 #   heartbeat_timeout_secs: 120
 #   sweep_interval_secs: 60
 #   unmatched_step_timeout_secs: 30
-#   worker_retention_hours: 2       # Delete inactive workers older than 2h
-#   log_retention_days: 30          # Delete terminal jobs and logs older than 30d
+# Optional: data retention settings
+# retention:
+#   worker_hours: 2                 # Delete inactive workers older than 2h
+#   job_days: 30                    # Delete terminal jobs and logs older than 30d
 # Optional: authentication
 # auth:
 #   jwt_secret: "your-jwt-secret"
@@ -97,6 +99,7 @@ worker_token: "change-in-production"
 | `workspaces` | Yes | Map of workspace definitions (see [Multi-Workspace](/guides/multi-workspace/)) |
 | `worker_token` | Yes | Shared secret for worker authentication |
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
+| `retention` | No | Data retention settings (see [Retention](/operations/retention/)) |
 | `auth` | No | Authentication config (see [Authentication](/operations/authentication/)) |
 | `acl` | No | Access control list configuration (see [Authorization](/operations/authorization/)) |
 | `agents` | No | Agent/LLM provider configuration (see [Agent Actions](/guides/agent-actions/)) |
