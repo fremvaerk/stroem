@@ -54,7 +54,7 @@ jobs:
       # Package archives
       - name: Package
         run: |
-          for bin in stroem-server stroem-worker stroem-cli; do
+          for bin in stroem-server stroem-worker stroem stroem-api; do
             tar czf "${bin}-x86_64-unknown-linux-gnu.tar.gz" \
               -C target/release "${bin}"
           done
@@ -63,7 +63,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: binaries-linux-amd64
-          path: stroem-*-x86_64-unknown-linux-gnu.tar.gz
+          path: |
+            stroem-*-x86_64-unknown-linux-gnu.tar.gz
+            stroem-x86_64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   build-server:

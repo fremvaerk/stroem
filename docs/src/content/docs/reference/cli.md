@@ -3,16 +3,19 @@ title: CLI
 description: Command-line interface reference
 ---
 
-The `stroem` CLI provides both local execution and remote server interaction.
+Strøm provides two CLI binaries:
 
-## Setup
+- **`stroem`** — Local workspace tool for exploring and running tasks without a server
+- **`stroem-api`** — Remote server client for triggering jobs and querying a running Strøm server
+
+## `stroem` (Local)
+
+Local workspace commands. No server required.
 
 ```bash
-# Set the server URL (default: http://localhost:8080)
-export STROEM_URL=http://localhost:8080
+# Set the workspace path (default: current directory)
+stroem --path /path/to/workspace <command>
 ```
-
-## Commands
 
 ### `run`
 
@@ -43,76 +46,16 @@ Limitations:
 - `for_each` iterations always run sequentially regardless of the `sequential` setting
 - Only `type: script` with local runner is supported — docker, pod, task, agent, and approval steps are rejected
 
-### `workspaces`
-
-List all configured workspaces.
-
-```bash
-stroem workspaces
-```
-
-### `tasks`
-
-List tasks across all workspaces or filter by workspace.
-
-```bash
-# List all tasks
-stroem tasks
-
-# Filter by workspace
-stroem tasks --workspace data-team
-```
-
-### `trigger`
-
-Execute a task and create a new job.
-
-```bash
-# Trigger with default input
-stroem trigger hello-world
-
-# Trigger with input
-stroem trigger hello-world --input '{"name": "CLI"}'
-
-# Trigger in a specific workspace
-stroem trigger etl-pipeline --workspace data-team --input '{"date": "2025-01-01"}'
-```
-
-### `status`
-
-Check the status of a job.
-
-```bash
-stroem status <job-id>
-```
-
-### `logs`
-
-View the logs of a job.
-
-```bash
-stroem logs <job-id>
-```
-
-### `jobs`
-
-List recent jobs.
-
-```bash
-# List last 10 jobs
-stroem jobs --limit 10
-```
-
 ### `validate`
 
 Validate workflow YAML files before deploying.
 
 ```bash
-# Validate a single file
-stroem validate workspace/.workflows/deploy.yaml
+# Validate current directory
+stroem validate
 
-# Validate all files in a directory
-stroem validate workspace/.workflows/
+# Validate a specific path
+stroem validate /path/to/workspace/.workflows/
 ```
 
 The validator checks:
@@ -123,3 +66,116 @@ The validator checks:
 - DAG cycle detection
 - Trigger cron expression syntax
 - Hook action references
+
+### `tasks`
+
+List all tasks in the workspace.
+
+```bash
+stroem tasks
+stroem --path /path/to/workspace tasks
+```
+
+### `actions`
+
+List all actions in the workspace.
+
+```bash
+stroem actions
+```
+
+### `triggers`
+
+List all triggers (scheduler and webhook) in the workspace.
+
+```bash
+stroem triggers
+```
+
+### `inspect`
+
+Show detailed information about a single task: input schema, flow steps with dependencies, hooks.
+
+```bash
+stroem inspect deploy-pipeline
+```
+
+## `stroem-api` (Remote)
+
+Remote server commands. Requires a running Strøm server.
+
+```bash
+# Set the server URL (default: http://localhost:8080)
+export STROEM_URL=http://localhost:8080
+
+# Set authentication token (optional)
+export STROEM_TOKEN=strm_your_api_key
+```
+
+### `trigger`
+
+Execute a task and create a new job.
+
+```bash
+# Trigger with default input
+stroem-api trigger hello-world
+
+# Trigger with input
+stroem-api trigger hello-world --input '{"name": "CLI"}'
+
+# Trigger in a specific workspace
+stroem-api trigger etl-pipeline --workspace data-team --input '{"date": "2025-01-01"}'
+```
+
+### `status`
+
+Check the status of a job.
+
+```bash
+stroem-api status <job-id>
+```
+
+### `logs`
+
+View the logs of a job.
+
+```bash
+stroem-api logs <job-id>
+```
+
+### `jobs`
+
+List recent jobs.
+
+```bash
+# List last 10 jobs
+stroem-api jobs --limit 10
+```
+
+### `tasks`
+
+List tasks from the server (across workspaces).
+
+```bash
+# List all tasks
+stroem-api tasks
+
+# Filter by workspace
+stroem-api tasks --workspace data-team
+```
+
+### `cancel`
+
+Cancel a running or pending job.
+
+```bash
+stroem-api cancel <job-id>
+```
+
+### `workspaces`
+
+List all configured workspaces on the server.
+
+```bash
+stroem-api workspaces
+```

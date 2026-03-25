@@ -173,11 +173,52 @@ Last updated: 2026-03-13.
 - [x] `--path` workspace directory used as workdir — `test_integ_workspace_path_used_as_workdir`
 - [x] `for_each` exceeds max items — `test_evaluate_for_each_exceeds_limit`
 
+## CLI: Binary Split Review (2026-03-25)
+
+### Critical (must fix)
+- [x] `completed_count` usize underflow in `local/run.rs:331` — fixed: uses `saturating_sub` to prevent wrap/panic
+- [x] UTF-8 truncation panic in `local/tasks.rs` and `local/actions.rs` — fixed: `truncate_desc` helper uses `char_indices()` for safe boundary + strips newlines
+- [x] Release artifact glob in `release.yml:66` — fixed: multi-line path pattern includes both `stroem-*-x86_64-...` and `stroem-x86_64-...`
+
+### Important (should fix)
+- [x] `stroem --path /foo run task` silently ignores the global `--path` — fixed: removed Run's own `--path`, now uses global flag
+- [x] Per-workspace errors silently swallowed in `remote/tasks.rs` — fixed: prints warning to stderr on non-success response
+
+### Minor
+- [x] Path containment check bypassed when `canonicalize()` fails — fixed: prints warning when source path doesn't exist
+- [x] Disabled triggers shown without visual indicator — fixed: appends " [disabled]" to trigger name
+- [x] Newlines in descriptions break table formatting — fixed: `truncate_desc` strips `\n`/`\r` before truncation
+
+### Missing Tests: New Local Commands
+- [x] `inspect` step extras: `for_each`, `when`, `timeout`, `continue_on_failure`, `sequential` display branches
+- [x] `inspect` task-level `timeout` display
+- [x] `inspect` `on_suspended` hooks display
+- [x] `inspect` empty flow (0 steps)
+- [x] `tasks` description truncation at boundary (37/40 chars)
+- [x] `tasks` sorting order (alphabetical) assertion
+- [x] `tasks` folder absent (`-` fallback)
+- [x] `actions` description truncation at boundary (27/30 chars)
+- [x] `actions` runner/language absent (`-` fallback)
+- [x] `triggers` webhook `mode: None` path (defaults to "async")
+- [x] `triggers` scheduler with timezone display
+
+### Missing Tests: Argument Parsing
+- [x] `logs` subcommand `_requires_job_id` test
+- [x] `trigger` short `-w` flag test
+- [x] `--path` flag after subcommand (`stroem tasks --path /foo`)
+- [ ] `STROEM_TOKEN` / `STROEM_URL` env var parsing untested (requires env manipulation in tests, skipped)
+
+### Missing Tests: Edge Cases
+- [x] `for_each` where all iterations fail with `continue_on_failure: true` (regression test for underflow)
+- [x] `validate` with malformed YAML file (`.yaml` with invalid syntax)
+- [x] `build_client` with non-ASCII token characters (control chars rejected, error propagated)
+- [x] Non-ASCII task descriptions at truncation boundary (`truncate_desc_multibyte_safe`)
+
 ## Test Coverage
 
 ### Done
 - [x] Orchestrator unit tests (9 integration tests: DAG promotion, failures, continue_on_failure, diamond joins)
-- [x] CLI tests (35 unit tests: arg parsing, URL construction, validation, response checking)
+- [x] CLI tests (136 unit tests across stroem + stroem-api: arg parsing, URL construction, validation, response checking, local commands, edge cases)
 - [x] Frontend Vitest tests (119 tests: StatusBadge, useAsyncData, api.ts, formatting)
 - [x] DB-level tests for mark_failed, mark_skipped, mark_cancelled, transaction rollback, parent/child
 - [x] E2E: single-step execution, multi-step output propagation

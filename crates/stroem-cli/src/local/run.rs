@@ -328,7 +328,10 @@ async fn run_dag(
         }
     }
 
-    let completed_count = completed.len() - skipped.len() - failed_count;
+    let completed_count = completed
+        .len()
+        .saturating_sub(skipped.len())
+        .saturating_sub(failed_count);
     Ok(RunSummary {
         completed: completed_count,
         skipped: skipped.len(),
@@ -457,6 +460,10 @@ fn build_run_config(
                 }
                 Some(canon.to_string_lossy().to_string())
             } else {
+                eprintln!(
+                    "  WARN: source path '{}' does not exist, cannot verify it stays within workspace",
+                    rendered
+                );
                 Some(src_path.to_string_lossy().to_string())
             }
         }
@@ -1289,10 +1296,6 @@ tasks:
 
     #[tokio::test]
     async fn test_run_for_each_continue_on_failure() {
-        // for_each over ["ok", "bad", "fine"] where "bad" causes exit 1.
-        // continue_on_failure: true — placeholder should be counted as failed
-        // (any_failed=true, placeholder completes with failure noted in failed_count).
-        // The script uses `test` which exits 1 when the comparison is false.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.yaml"),
@@ -1308,20 +1311,14 @@ tasks:
         let summary = run_dag(task, &config, &input, dir.path(), &cancel)
             .await
             .unwrap();
-        // The for_each placeholder itself is counted in completed (completed.insert(step_name)),
-        // but failed_count is incremented for the failed iteration. The placeholder is NOT in
-        // skipped, so completed_count = completed.len() - skipped.len() - failed_count = 1 - 0 - 1 = 0.
-        // failed = 1 (the one bad iteration).
         assert_eq!(summary.failed, 1, "one iteration should fail");
         assert_eq!(summary.skipped, 0, "no steps should be skipped");
     }
 
-    // --- Error path tests (test_err_* prefix) ---
+    // --- Error path tests ---
 
     #[test]
     fn test_err_nonexistent_workspace_path() {
-        // workspace_loader::load_workspace fails with a clear error for missing directories;
-        // this covers the same code path that cmd_run hits before Path::canonicalize.
         let result = workspace_loader::load_workspace(Path::new("/tmp/nonexistent_stroem_99999"));
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1334,8 +1331,6 @@ tasks:
 
     #[test]
     fn test_err_invalid_input_json() {
-        // Validates the JSON parsing that cmd_run applies to the --input argument.
-        // serde_json::from_str must reject non-JSON strings.
         let result = serde_json::from_str::<serde_json::Value>("not-json");
         assert!(
             result.is_err(),
@@ -1345,7 +1340,6 @@ tasks:
 
     #[test]
     fn test_err_cyclic_dag_rejected() {
-        // A two-node cycle (a depends on b, b depends on a) must be caught by validate_dag.
         let mut flow = HashMap::new();
         flow.insert("a".to_string(), make_step("act", vec!["b"]));
         flow.insert("b".to_string(), make_step("act", vec!["a"]));
@@ -1357,12 +1351,10 @@ tasks:
         );
     }
 
-    // --- Integration tests (test_integ_* prefix) ---
+    // --- Integration tests ---
 
     #[tokio::test]
     async fn test_integ_for_each_output_accessible_downstream() {
-        // A for_each step aggregates iteration outputs; a downstream step must be
-        // able to run after the loop completes (both count as completed steps).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.yaml"),
@@ -1379,7 +1371,6 @@ tasks:
             .await
             .unwrap();
 
-        // loop placeholder + after = 2 completed; 0 failed; 0 skipped
         assert_eq!(
             summary.completed, 2,
             "loop placeholder and after step should both complete"
@@ -1390,8 +1381,6 @@ tasks:
 
     #[tokio::test]
     async fn test_integ_workspace_path_used_as_workdir() {
-        // Scripts run with workspace_path as their working directory; `pwd` succeeds
-        // regardless of the actual path value, confirming the runner uses the given dir.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.yaml"),
@@ -1414,8 +1403,6 @@ tasks:
 
     #[tokio::test]
     async fn test_integ_cascade_skip_diamond_dag() {
-        // Diamond topology: root (when: false) -> left, right -> join.
-        // Skipping root due to a false `when` condition must cascade-skip all four steps.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.yaml"),
@@ -1435,5 +1422,43 @@ tasks:
         assert_eq!(summary.completed, 0, "No steps should run to completion");
         assert_eq!(summary.skipped, 4, "All four steps must be cascade-skipped");
         assert_eq!(summary.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_for_each_all_fail_continue_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.yaml"),
+            r#"
+actions:
+  fail:
+    type: script
+    script: exit 1
+tasks:
+  test:
+    flow:
+      step1:
+        action: fail
+        for_each: ["a", "b", "c"]
+        continue_on_failure: true
+"#,
+        )
+        .unwrap();
+
+        let (config, _) = workspace_loader::load_workspace(dir.path()).unwrap();
+        let task = &config.tasks["test"];
+        let input = json!({});
+        let cancel = CancellationToken::new();
+
+        let summary = run_dag(task, &config, &input, dir.path(), &cancel)
+            .await
+            .unwrap();
+        // 3 iterations all fail — completed_count should be 0 (not underflow)
+        assert_eq!(
+            summary.completed, 0,
+            "no steps should complete successfully"
+        );
+        assert_eq!(summary.failed, 3, "all three iterations should fail");
+        assert_eq!(summary.skipped, 0);
     }
 }
