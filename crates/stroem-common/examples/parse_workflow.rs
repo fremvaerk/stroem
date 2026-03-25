@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use stroem_common::dag;
-use stroem_common::models::workflow::WorkflowConfig;
+use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::validation;
 
 fn main() {
@@ -48,7 +48,7 @@ triggers:
 
     // Parse the workflow
     println!("Parsing workflow YAML...");
-    let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
     // Validate the workflow
     println!("Validating workflow...");

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use stroem_common::dag;
-use stroem_common::models::workflow::WorkflowConfig;
+use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::template;
 use stroem_common::validation;
 
@@ -67,7 +67,7 @@ tasks:
 "#;
 
     // Parse the workflow
-    let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
     // Validate the workflow
     let warnings = validation::validate_workflow_config(&config).unwrap();
@@ -158,7 +158,7 @@ tasks:
           count: 42
 "#;
 
-    let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
     let task = config.tasks.get("test").unwrap();
 
     // Simulate rendering step1 input
@@ -239,7 +239,7 @@ triggers:
     enabled: true
 "#;
 
-    let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
     // Validate
     let warnings = validation::validate_workflow_config(&config).unwrap();
@@ -304,7 +304,7 @@ tasks:
         depends_on: [test-a, test-b]
 "#;
 
-    let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+    let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
     let warnings = validation::validate_workflow_config(&config).unwrap();
     assert_eq!(warnings.len(), 0);
 

@@ -309,7 +309,7 @@ pub struct HookDef {
 /// - **Inline**: `type: script`, `script: ...` etc. — defines the action inline
 ///
 /// Inline actions are automatically hoisted to the config's actions map during
-/// `WorkflowConfig` deserialization.
+/// `WorkspaceConfig` deserialization.
 #[derive(Debug, Clone, Serialize)]
 pub struct FlowStep {
     pub action: String, // action name or library/action
@@ -341,7 +341,7 @@ pub struct FlowStep {
     #[serde(default)]
     pub sequential: bool,
     /// Temporary storage for inline action definitions during deserialization.
-    /// Automatically moved to `config.actions` during `WorkflowConfig` deserialization.
+    /// Automatically moved to `config.actions` during `WorkspaceConfig` deserialization.
     #[serde(skip)]
     pub inline_action: Option<ActionDef>,
 }
@@ -648,39 +648,29 @@ fn default_true() -> bool {
     true
 }
 
-/// Top-level workflow config - represents one YAML file.
+/// Workspace configuration — parsed from YAML and merged across files.
 ///
-/// Inline actions in flow steps are automatically hoisted to the `actions` map
-/// during deserialization. Callers never need to call a separate hoist step.
+/// Deserializes from individual YAML files (with automatic inline action hoisting)
+/// and supports merging multiple configs into one via [`merge()`](Self::merge).
 #[derive(Debug, Clone, Serialize, Default)]
-pub struct WorkflowConfig {
-    #[serde(default)]
+pub struct WorkspaceConfig {
     pub secrets: HashMap<String, serde_json::Value>,
-    #[serde(default)]
     pub connection_types: HashMap<String, ConnectionTypeDef>,
-    #[serde(default)]
     pub connections: HashMap<String, ConnectionDef>,
-    #[serde(default)]
     pub actions: HashMap<String, ActionDef>,
-    #[serde(default)]
     pub tasks: HashMap<String, TaskDef>,
-    #[serde(default)]
     pub triggers: HashMap<String, TriggerDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_success: Vec<HookDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_error: Vec<HookDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_suspended: Vec<HookDef>,
     /// MCP server definitions available to agent actions in this workspace.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub mcp_servers: HashMap<String, McpServerDef>,
 }
 
-/// Raw deserialization target for WorkflowConfig — converted via `From` to auto-hoist
-/// inline actions. This is an internal type; callers use `WorkflowConfig` directly.
+/// Raw deserialization target for WorkspaceConfig — converted via `From` to auto-hoist
+/// inline actions. This is an internal type; callers use `WorkspaceConfig` directly.
 #[derive(Deserialize)]
-struct WorkflowConfigRaw {
+struct WorkspaceConfigRaw {
     #[serde(default)]
     secrets: HashMap<String, serde_json::Value>,
     #[serde(default)]
@@ -703,9 +693,9 @@ struct WorkflowConfigRaw {
     mcp_servers: HashMap<String, McpServerDef>,
 }
 
-impl From<WorkflowConfigRaw> for WorkflowConfig {
-    fn from(raw: WorkflowConfigRaw) -> Self {
-        let mut config = WorkflowConfig {
+impl From<WorkspaceConfigRaw> for WorkspaceConfig {
+    fn from(raw: WorkspaceConfigRaw) -> Self {
+        let mut config = WorkspaceConfig {
             secrets: raw.secrets,
             connection_types: raw.connection_types,
             connections: raw.connections,
@@ -722,16 +712,21 @@ impl From<WorkflowConfigRaw> for WorkflowConfig {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkflowConfig {
+impl<'de> Deserialize<'de> for WorkspaceConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        WorkflowConfigRaw::deserialize(deserializer).map(WorkflowConfig::from)
+        WorkspaceConfigRaw::deserialize(deserializer).map(WorkspaceConfig::from)
     }
 }
 
-impl WorkflowConfig {
+impl WorkspaceConfig {
+    /// Create a new empty workspace config
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Move inline action definitions from flow steps into the config's `actions` map.
     ///
     /// For each step with an `inline_action`, this generates a synthetic action name
@@ -751,49 +746,9 @@ impl WorkflowConfig {
             }
         }
     }
-}
 
-/// Merged workspace - all YAML files combined
-#[derive(Debug, Clone, Default)]
-pub struct WorkspaceConfig {
-    pub secrets: HashMap<String, serde_json::Value>,
-    pub connection_types: HashMap<String, ConnectionTypeDef>,
-    pub connections: HashMap<String, ConnectionDef>,
-    pub actions: HashMap<String, ActionDef>,
-    pub tasks: HashMap<String, TaskDef>,
-    pub triggers: HashMap<String, TriggerDef>,
-    pub on_success: Vec<HookDef>,
-    pub on_error: Vec<HookDef>,
-    pub on_suspended: Vec<HookDef>,
-    /// MCP server definitions merged from all workspace YAML files.
-    pub mcp_servers: HashMap<String, McpServerDef>,
-}
-
-impl From<WorkspaceConfig> for WorkflowConfig {
-    fn from(ws: WorkspaceConfig) -> Self {
-        Self {
-            secrets: ws.secrets,
-            connection_types: ws.connection_types,
-            connections: ws.connections,
-            actions: ws.actions,
-            tasks: ws.tasks,
-            triggers: ws.triggers,
-            on_success: ws.on_success,
-            on_error: ws.on_error,
-            on_suspended: ws.on_suspended,
-            mcp_servers: ws.mcp_servers,
-        }
-    }
-}
-
-impl WorkspaceConfig {
-    /// Create a new empty workspace config
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Merge another workflow config into this workspace
-    pub fn merge(&mut self, config: WorkflowConfig) {
+    /// Merge another config into this workspace
+    pub fn merge(&mut self, config: WorkspaceConfig) {
         self.secrets.extend(config.secrets);
         self.connection_types.extend(config.connection_types);
         self.connections.extend(config.connections);
@@ -1025,7 +980,7 @@ actions:
         category:
           type: string
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("classify").unwrap();
         assert!(
             action.output.is_none(),
@@ -1136,7 +1091,7 @@ tasks:
         input:
           name: "{{ input.name }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.actions.len(), 1);
         assert_eq!(config.tasks.len(), 1);
 
@@ -1166,7 +1121,7 @@ actions:
       cpu: "500m"
       memory: "512Mi"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let backup = config.actions.get("backup").unwrap();
         assert_eq!(backup.action_type, "docker");
         assert_eq!(backup.image.as_ref().unwrap(), "company/db-backup:v2.1");
@@ -1187,7 +1142,7 @@ triggers:
     task: nightly-backup
     enabled: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("nightly").unwrap();
         assert_eq!(trigger.trigger_type_str(), "scheduler");
         match trigger {
@@ -1208,7 +1163,7 @@ triggers:
     task: some-task
     timezone: "Europe/Copenhagen"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("nightly").unwrap();
         assert_eq!(trigger.timezone(), Some("Europe/Copenhagen"));
         assert_eq!(trigger.task(), "some-task");
@@ -1223,7 +1178,7 @@ triggers:
     cron: "0 2 * * *"
     task: some-task
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("nightly").unwrap();
         assert!(trigger.timezone().is_none());
     }
@@ -1240,7 +1195,7 @@ triggers:
     mode: sync
     timeout_secs: 60
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("on-push").unwrap();
         assert_eq!(trigger.trigger_type_str(), "webhook");
         assert_eq!(trigger.task(), "ci-pipeline");
@@ -1270,7 +1225,7 @@ triggers:
     name: deploy
     task: do-deploy
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("on-push").unwrap();
         match trigger {
             TriggerDef::Webhook {
@@ -1285,7 +1240,7 @@ triggers:
 
     #[test]
     fn test_workspace_merge() {
-        let config1: WorkflowConfig = serde_yaml::from_str(
+        let config1: WorkspaceConfig = serde_yaml::from_str(
             r#"
 actions:
   action1:
@@ -1300,7 +1255,7 @@ tasks:
         )
         .unwrap();
 
-        let config2: WorkflowConfig = serde_yaml::from_str(
+        let config2: WorkspaceConfig = serde_yaml::from_str(
             r#"
 actions:
   action2:
@@ -1334,7 +1289,7 @@ tasks:
       step1:
         action: test
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         assert_eq!(task.mode, "distributed");
     }
@@ -1348,7 +1303,7 @@ triggers:
     cron: "* * * * * *"
     task: test-task
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("test").unwrap();
         assert!(trigger.enabled());
     }
@@ -1362,7 +1317,7 @@ tasks:
       step1:
         action: action1
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         let step = task.flow.get("step1").unwrap();
         assert!(!step.continue_on_failure);
@@ -1379,7 +1334,7 @@ tasks:
         depends_on: [step0]
         continue_on_failure: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         let step = task.flow.get("step1").unwrap();
         assert!(step.continue_on_failure);
@@ -1400,7 +1355,7 @@ tasks:
         action: action3
         depends_on: [step1, step2]
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
 
         let step1 = task.flow.get("step1").unwrap();
@@ -1427,7 +1382,7 @@ actions:
     env:
       DB_PASSWORD: "{{ secret.db_password }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.secrets.len(), 2);
         assert_eq!(
             config.secrets.get("db_password").unwrap(),
@@ -1449,7 +1404,7 @@ secrets:
     host: "ref+sops://secrets.enc.yaml#/db/host"
   api_key: "ref+vault://secret/data/api#key"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.secrets.len(), 2);
 
         // db is a nested object
@@ -1480,7 +1435,7 @@ actions:
     runner: docker
     script: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("test").unwrap();
         assert_eq!(action.runner.as_deref(), Some("docker"));
     }
@@ -1495,7 +1450,7 @@ actions:
     tags: ["node-20", "gpu"]
     script: "npm test"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("test").unwrap();
         assert_eq!(action.tags, vec!["node-20", "gpu"]);
     }
@@ -1510,7 +1465,7 @@ actions:
     entrypoint: ["/app/run"]
     command: ["--env", "prod"]
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("deploy").unwrap();
         assert_eq!(
             action.entrypoint.as_ref().unwrap(),
@@ -1530,7 +1485,7 @@ actions:
     type: script
     script: "echo test"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
         assert!(action.runner.is_none());
         assert!(action.tags.is_empty());
@@ -1562,7 +1517,7 @@ tasks:
         action: run-cleanup
         depends_on: [build]
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("run-cleanup").unwrap();
         assert_eq!(action.action_type, "task");
         assert_eq!(action.task.as_deref(), Some("cleanup-resources"));
@@ -1580,7 +1535,7 @@ tasks:
       step1:
         action: deploy
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("deploy-staging").unwrap();
         assert_eq!(task.folder.as_deref(), Some("deploy/staging"));
     }
@@ -1594,14 +1549,14 @@ tasks:
       step1:
         action: test
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         assert!(task.folder.is_none());
     }
 
     #[test]
     fn test_workspace_merge_secrets() {
-        let config1: WorkflowConfig = serde_yaml::from_str(
+        let config1: WorkspaceConfig = serde_yaml::from_str(
             r#"
 secrets:
   db_password: "ref+awsssm:///prod/db/password"
@@ -1613,7 +1568,7 @@ actions:
         )
         .unwrap();
 
-        let config2: WorkflowConfig = serde_yaml::from_str(
+        let config2: WorkspaceConfig = serde_yaml::from_str(
             r#"
 secrets:
   api_key: "ref+vault://secret/data/api#key"
@@ -1666,7 +1621,7 @@ tasks:
         input:
           message: "Deploy FAILED"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("release").unwrap();
         assert_eq!(task.on_success.len(), 2);
         assert_eq!(task.on_error.len(), 1);
@@ -1691,7 +1646,7 @@ tasks:
       step1:
         action: test
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("test").unwrap();
         assert!(task.on_success.is_empty());
         assert!(task.on_error.is_empty());
@@ -1724,7 +1679,7 @@ actions:
                 memory: "256Mi"
                 cpu: "500m"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("curl-foo").unwrap();
         assert_eq!(action.action_type, "pod");
         let manifest = action.manifest.as_ref().unwrap();
@@ -1752,7 +1707,7 @@ actions:
     image: alpine:latest
     cmd: "echo hello"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
         assert!(action.manifest.is_none());
     }
@@ -1774,7 +1729,7 @@ on_error:
     input:
       message: "Job FAILED"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.on_success.len(), 1);
         assert_eq!(config.on_error.len(), 1);
         assert_eq!(config.on_success[0].action, "notify");
@@ -1797,14 +1752,14 @@ actions:
     type: script
     script: "echo Hello"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.on_success.is_empty());
         assert!(config.on_error.is_empty());
     }
 
     #[test]
     fn test_workspace_merge_hooks() {
-        let config1: WorkflowConfig = serde_yaml::from_str(
+        let config1: WorkspaceConfig = serde_yaml::from_str(
             r#"
 actions:
   notify:
@@ -1818,7 +1773,7 @@ on_success:
         )
         .unwrap();
 
-        let config2: WorkflowConfig = serde_yaml::from_str(
+        let config2: WorkspaceConfig = serde_yaml::from_str(
             r#"
 on_success:
   - action: notify
@@ -1962,7 +1917,7 @@ actions:
         type: string
         required: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("deploy").unwrap();
         let env_field = action.input.get("env").unwrap();
         assert!(!env_field.secret);
@@ -1981,7 +1936,7 @@ actions:
         secret: true
         default: "{{ secret.DEPLOY_KEY }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("deploy").unwrap();
         let key_field = action.input.get("api_key").unwrap();
         assert!(key_field.secret);
@@ -2025,7 +1980,7 @@ connection_types:
       required: true
       secret: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.connection_types.len(), 1);
 
         let pg = config.connection_types.get("postgres").unwrap();
@@ -2068,7 +2023,7 @@ connections:
     user: "admin"
     password: "secret123"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.connections.len(), 1);
 
         let conn = config.connections.get("prod_db").unwrap();
@@ -2088,7 +2043,7 @@ connections:
     url: "https://api.example.com"
     token: "abc123"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let conn = config.connections.get("custom_api").unwrap();
         assert!(conn.connection_type.is_none());
         assert_eq!(conn.values.get("url").unwrap(), "https://api.example.com");
@@ -2097,7 +2052,7 @@ connections:
 
     #[test]
     fn test_workspace_merge_connections() {
-        let config1: WorkflowConfig = serde_yaml::from_str(
+        let config1: WorkspaceConfig = serde_yaml::from_str(
             r#"
 connection_types:
   postgres:
@@ -2111,7 +2066,7 @@ connections:
         )
         .unwrap();
 
-        let config2: WorkflowConfig = serde_yaml::from_str(
+        let config2: WorkspaceConfig = serde_yaml::from_str(
             r#"
 connection_types:
   redis:
@@ -2515,7 +2470,7 @@ connections:
     // --- Inline action tests ---
     //
     // Inline actions are automatically hoisted during deserialization (via the
-    // custom Deserialize impl on WorkflowConfig). After parse, inline actions
+    // custom Deserialize impl on WorkspaceConfig). After parse, inline actions
     // are already in config.actions with synthetic `_inline:{task}:{step}` names,
     // and the step's `action` field references that name.
 
@@ -2529,7 +2484,7 @@ tasks:
         type: script
         script: "echo Hello"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         // Action should be auto-hoisted during parse
         assert_eq!(config.actions.len(), 1);
@@ -2566,7 +2521,7 @@ tasks:
         type: script
         script: "echo Inline"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         // Original action + hoisted inline
         assert_eq!(config.actions.len(), 2);
@@ -2597,7 +2552,7 @@ tasks:
         input:
           msg: "hello"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let task = config.tasks.get("pipeline").unwrap();
         let second = task.flow.get("second").unwrap();
@@ -2623,7 +2578,7 @@ tasks:
         env:
           NODE_ENV: production
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let action = config.actions.get("_inline:build:compile").unwrap();
         assert_eq!(action.action_type, "docker");
@@ -2649,7 +2604,7 @@ tasks:
         script: "rm -rf tmp"
         continue_on_failure: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let step = config
             .tasks
             .get("deploy")
@@ -2671,7 +2626,7 @@ tasks:
       oops:
         cmd: "echo oops"
 "#;
-        let result = serde_yaml::from_str::<WorkflowConfig>(yaml);
+        let result = serde_yaml::from_str::<WorkspaceConfig>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2692,7 +2647,7 @@ tasks:
         type: script
         cmd: "echo oops"
 "#;
-        let result = serde_yaml::from_str::<WorkflowConfig>(yaml);
+        let result = serde_yaml::from_str::<WorkspaceConfig>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("both"), "Error should mention 'both': {}", err);
@@ -2713,7 +2668,7 @@ tasks:
         type: script
         script: "echo child"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let action = config.actions.get("_inline:parent:run-child").unwrap();
         assert_eq!(action.action_type, "task");
@@ -2732,7 +2687,7 @@ tasks:
         script: "npm test"
         tags: ["node-20"]
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let action = config.actions.get("_inline:test:run-tests").unwrap();
         assert_eq!(action.action_type, "script");
@@ -2766,7 +2721,7 @@ tasks:
         input:
           env: "{{ input.env }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let result = validate_workflow_config(&config);
         assert!(
@@ -2788,7 +2743,7 @@ tasks:
       oops:
         type: script
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let result = validate_workflow_config(&config);
         assert!(
@@ -2807,7 +2762,7 @@ actions:
     type: script
     script: "echo Hello"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("greet").unwrap();
         assert_eq!(action.name.as_deref(), Some("Greet User"));
         assert_eq!(
@@ -2831,7 +2786,7 @@ tasks:
       step1:
         action: greet
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("hello").unwrap();
         assert_eq!(task.name.as_deref(), Some("Hello World"));
         assert_eq!(
@@ -2853,7 +2808,7 @@ actions:
         description: The user's name
         required: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("greet").unwrap();
         let field = action.input.get("name").unwrap();
         assert_eq!(field.description.as_deref(), Some("The user's name"));
@@ -2878,7 +2833,7 @@ tasks:
       run:
         action: generate
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("report").unwrap();
 
         let start = task.input.get("start_date").unwrap();
@@ -2910,7 +2865,7 @@ tasks:
         name: Say Hello
         description: Greet the user by name
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("hello").unwrap();
         let step = task.flow.get("say-hi").unwrap();
         assert_eq!(step.name.as_deref(), Some("Say Hello"));
@@ -2929,7 +2884,7 @@ tasks:
         name: Say Hello
         description: Greet the user
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("hello").unwrap();
         let step = task.flow.get("say-hi").unwrap();
         // name/description go to the step, not the hoisted action
@@ -2956,7 +2911,7 @@ tasks:
       step1:
         action: greet
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
 
         let action = config.actions.get("greet").unwrap();
         assert!(action.name.is_none());
@@ -2991,7 +2946,7 @@ tasks:
       run:
         action: deploy
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("deploy").unwrap();
         let field = task.input.get("env").unwrap();
 
@@ -3019,7 +2974,7 @@ tasks:
       run:
         action: deploy
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("deploy").unwrap();
         let field = task.input.get("region").unwrap();
 
@@ -3039,7 +2994,7 @@ tasks:
       run:
         action: deploy
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("deploy").unwrap();
         let field = task.input.get("env").unwrap();
 
@@ -3065,7 +3020,7 @@ tasks:
       run:
         action: generate
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("report").unwrap();
 
         let date_field = task.input.get("start_date").unwrap();
@@ -3091,7 +3046,7 @@ actions:
       - click
     interpreter: "python3.12"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("analyse").unwrap();
         assert_eq!(action.language.as_deref(), Some("python"));
         assert_eq!(action.dependencies, vec!["requests", "click"]);
@@ -3106,7 +3061,7 @@ actions:
     type: script
     script: "echo hello"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let action = config.actions.get("simple").unwrap();
         assert!(action.language.is_none());
         assert!(action.dependencies.is_empty());
@@ -3131,7 +3086,7 @@ tasks:
       run:
         action: generate
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("report").unwrap();
 
         assert_eq!(task.input.get("start_date").unwrap().order, Some(1));
@@ -3159,7 +3114,7 @@ tasks:
                     depends_on: [check]
                     when: "{{ check.output.success }}"
         "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("pipeline").unwrap();
         assert!(task.flow.get("check").unwrap().when.is_none());
         assert_eq!(
@@ -3184,7 +3139,7 @@ tasks:
                     depends_on: [check]
                     when: "{{ check.output.success }}"
         "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("pipeline").unwrap();
         assert_eq!(
             task.flow.get("deploy").unwrap().when.as_deref(),
@@ -3205,7 +3160,7 @@ tasks:
                   check:
                     action: check
         "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("pipeline").unwrap();
         assert!(task.flow.get("check").unwrap().when.is_none());
     }
@@ -3228,7 +3183,7 @@ tasks:
         input:
           item: "{{ each.item }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("main").unwrap();
         let step = task.flow.get("loop-step").unwrap();
         assert_eq!(step.action, "process");
@@ -3255,7 +3210,7 @@ tasks:
         input:
           region: "{{ each.item }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("main").unwrap();
         let step = task.flow.get("deploy").unwrap();
         assert!(step.for_each.is_some());
@@ -3282,7 +3237,7 @@ tasks:
         for_each: ["a", "b", "c"]
         sequential: true
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("main").unwrap();
         let step = task.flow.get("migrate").unwrap();
         assert!(step.sequential);
@@ -3302,7 +3257,7 @@ tasks:
         action: process
         for_each: ["a", "b"]
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("main").unwrap();
         let step = task.flow.get("process").unwrap();
         assert!(!step.sequential);
@@ -3321,7 +3276,7 @@ tasks:
       step:
         action: process
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("main").unwrap();
         let step = task.flow.get("step").unwrap();
         assert!(step.for_each.is_none());
@@ -3342,7 +3297,7 @@ tasks:
         input:
           val: "{{ each.item }}"
 "#;
-        let config: WorkflowConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("main").unwrap();
         let step = task.flow.get("process").unwrap();
         assert!(step.for_each.is_some());

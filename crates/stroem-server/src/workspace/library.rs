@@ -1114,26 +1114,6 @@ tasks:
         );
     }
 
-    /// Build a `WorkflowConfig` from a `WorkspaceConfig` so we can call the
-    /// validation helpers, which operate on the single-file type.
-    fn workspace_config_to_workflow_config(
-        ws: WorkspaceConfig,
-    ) -> stroem_common::models::workflow::WorkflowConfig {
-        stroem_common::models::workflow::WorkflowConfig {
-            secrets: ws.secrets,
-            connection_types: ws.connection_types,
-            connections: ws.connections,
-            actions: ws.actions,
-            tasks: ws.tasks,
-            triggers: ws.triggers,
-
-            on_success: ws.on_success,
-            on_error: ws.on_error,
-            on_suspended: ws.on_suspended,
-            mcp_servers: ws.mcp_servers,
-        }
-    }
-
     /// Full integration test: folder library on disk → WorkspaceManager::new()
     /// → merged config → validation passes.
     ///
@@ -1283,8 +1263,7 @@ tasks:
         );
 
         // Full validation with library references enabled — must return Ok
-        let workflow_config = workspace_config_to_workflow_config((*config).clone());
-        let result = validate_workflow_config_with_libraries(&workflow_config);
+        let result = validate_workflow_config_with_libraries(&(*config).clone());
         assert!(
             result.is_ok(),
             "validate_workflow_config_with_libraries must succeed; error: {:?}",
@@ -1396,8 +1375,7 @@ tasks:
             "'common.nonexistent-action' must NOT be in the merged config"
         );
 
-        let workflow_config = workspace_config_to_workflow_config((*config).clone());
-        let result = validate_workflow_config_with_libraries(&workflow_config);
+        let result = validate_workflow_config_with_libraries(&(*config).clone());
         assert!(
             result.is_err(),
             "validate_workflow_config_with_libraries must return Err for unknown library ref"

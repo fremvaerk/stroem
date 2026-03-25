@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::models::workflow::{WorkflowConfig, WorkspaceConfig};
+use crate::models::workflow::WorkspaceConfig;
 
 /// Maximum recursion depth for subdirectory scanning (matches `compute_revision`).
 const MAX_SCAN_DEPTH: usize = 10;
@@ -79,7 +79,7 @@ pub fn scan_and_merge_yaml_files(
             }
         };
 
-        let mut config: WorkflowConfig = match serde_yaml::from_str(&content) {
+        let mut config: WorkspaceConfig = match serde_yaml::from_str(&content) {
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("Skipping '{}': failed to parse YAML: {}", display_path, e);

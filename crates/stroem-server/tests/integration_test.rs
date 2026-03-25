@@ -10493,7 +10493,7 @@ tasks:
         action: run-self
         depends_on: [step1]
 "#;
-    let config: stroem_common::models::workflow::WorkflowConfig =
+    let config: stroem_common::models::workflow::WorkspaceConfig =
         serde_yaml::from_str(yaml).unwrap();
     let result = validate_workflow_config(&config);
     assert!(result.is_err());

@@ -7,11 +7,10 @@ Shared types, models, DAG walker, templating, and validation for Strøm v2.
 ### Models (`src/models/`)
 
 - **workflow.rs**: YAML workflow definitions
-  - `WorkflowConfig`: Top-level workflow file (actions, tasks, triggers)
-  - `ActionDef`: Reusable execution units (shell, docker, pod types)
+  - `WorkspaceConfig`: Workspace configuration (actions, tasks, triggers), parsed from YAML and merged across files
+  - `ActionDef`: Reusable execution units (script, docker, pod types)
   - `TaskDef`: Multi-step workflows with DAG
   - `TriggerDef`: Automated task execution (scheduler, webhook)
-  - `WorkspaceConfig`: Merged configuration from multiple YAML files
 
 - **job.rs**: Runtime job models
   - `Job`: Task execution instance
@@ -46,12 +45,12 @@ Shared types, models, DAG walker, templating, and validation for Strøm v2.
 ## Usage
 
 ```rust
-use stroem_common::models::workflow::WorkflowConfig;
+use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::validation;
 use stroem_common::dag;
 
 // Parse workflow YAML
-let config: WorkflowConfig = serde_yaml::from_str(yaml)?;
+let config: WorkspaceConfig = serde_yaml::from_str(yaml)?;
 
 // Validate
 let warnings = validation::validate_workflow_config(&config)?;

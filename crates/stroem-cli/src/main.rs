@@ -468,50 +468,22 @@ fn jobs_url(server: &str, limit: i64) -> String {
 
 fn validate_workspace(path: &str) -> Result<()> {
     use std::path::Path;
-    use stroem_common::models::workflow::WorkflowConfig;
     use stroem_common::validation::validate_workflow_config;
     use stroem_common::workspace_loader;
 
     let path = Path::new(path);
 
-    // Single file mode: validate one YAML file (backward compat)
-    if path.is_file() {
-        let content = stroem_common::sops::read_yaml_file(path)?;
-        let config: WorkflowConfig = serde_yaml::from_str(&content)
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
-        match validate_workflow_config(&config) {
-            Ok(warnings) => {
-                println!("[OK] {}", path.display());
-                for w in warnings {
-                    println!("  WARN: {}", w);
-                }
-            }
-            Err(e) => {
-                println!("[FAIL] {}: {:#}", path.display(), e);
-                anyhow::bail!("Validation failed");
-            }
-        }
-        return Ok(());
-    }
-
-    // Directory mode: full workspace loading (scan, merge, render, validate)
-    let (workspace, load_warnings) = workspace_loader::load_workspace(path)
+    let (config, load_warnings) = workspace_loader::load_workspace(path)
         .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
 
     for w in &load_warnings {
         println!("  WARN: {}", w);
     }
 
-    let num_actions = workspace.actions.len();
-    let num_tasks = workspace.tasks.len();
-    let num_triggers = workspace.triggers.len();
-
-    if num_actions == 0 && num_tasks == 0 && num_triggers == 0 {
+    if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
         println!("No workflow definitions found at {}", path.display());
         return Ok(());
     }
-
-    let config: WorkflowConfig = workspace.into();
 
     match validate_workflow_config(&config) {
         Ok(warnings) => {
@@ -520,7 +492,9 @@ fn validate_workspace(path: &str) -> Result<()> {
             }
             println!(
                 "[OK] Workspace loaded: {} actions, {} tasks, {} triggers",
-                num_actions, num_tasks, num_triggers
+                config.actions.len(),
+                config.tasks.len(),
+                config.triggers.len()
             );
         }
         Err(e) => {
@@ -536,8 +510,6 @@ fn validate_workspace(path: &str) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
     // ---------------------------------------------------------------------------
     // Argument parsing helpers
@@ -883,46 +855,6 @@ mod tests {
     // ---------------------------------------------------------------------------
     // validate_workspace — file-system integration (no HTTP)
     // ---------------------------------------------------------------------------
-
-    #[test]
-    fn validate_workspace_succeeds_on_valid_single_file() {
-        let mut file = NamedTempFile::with_suffix(".yaml").unwrap();
-        writeln!(
-            file,
-            r#"
-tasks:
-  hello:
-    flow:
-      step1:
-        action: greet
-actions:
-  greet:
-    type: script
-    script: echo hello
-"#
-        )
-        .unwrap();
-        let result = validate_workspace(file.path().to_str().unwrap());
-        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-    }
-
-    #[test]
-    fn validate_workspace_fails_on_invalid_single_file() {
-        let mut file = NamedTempFile::with_suffix(".yaml").unwrap();
-        writeln!(
-            file,
-            r#"
-tasks:
-  broken:
-    flow:
-      step1:
-        action: nonexistent_action
-"#
-        )
-        .unwrap();
-        let result = validate_workspace(file.path().to_str().unwrap());
-        assert!(result.is_err());
-    }
 
     #[test]
     fn validate_workspace_empty_directory_returns_ok() {

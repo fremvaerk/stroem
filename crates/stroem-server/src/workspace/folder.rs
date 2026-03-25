@@ -585,7 +585,7 @@ actions:
         let temp_dir = TempDir::new().unwrap();
 
         // Write .sops.yaml — serde_yaml will parse it; unknown fields are
-        // silently ignored, producing an empty WorkflowConfig.
+        // silently ignored, producing an empty WorkspaceConfig.
         fs::write(
             temp_dir.path().join(".sops.yaml"),
             "creation_rules:\n  - path_regex: \\.sops\\.yaml$\n    age: age1test\n",
