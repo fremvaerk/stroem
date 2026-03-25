@@ -3,7 +3,7 @@ title: CLI
 description: Command-line interface reference
 ---
 
-The `stroem` CLI communicates with the server over HTTP.
+The `stroem` CLI provides both local execution and remote server interaction.
 
 ## Setup
 
@@ -13,6 +13,35 @@ export STROEM_URL=http://localhost:8080
 ```
 
 ## Commands
+
+### `run`
+
+Run a task locally without a server. Loads the workspace, walks the task's DAG, and executes each step via the local shell runner. Only `type: script` with `runner: local` (default) is supported — docker, pod, task, agent, and approval steps are rejected upfront.
+
+```bash
+# Run a task in the current directory
+stroem run my-task
+
+# Run from a specific workspace path
+stroem run my-task --path /path/to/workspace
+
+# Run with input
+stroem run deploy --input '{"env": "staging"}'
+```
+
+Supports:
+- DAG dependency ordering
+- Template rendering (`{{ input.* }}`, `{{ step.output.* }}`, `{{ secret.* }}`)
+- `when` conditions (skip steps based on expressions)
+- `for_each` loops (iterate over arrays)
+- Cascade-skip (downstream steps skipped when all dependencies are skipped)
+- `Ctrl+C` graceful cancellation
+- `OUTPUT: {json}` parsing for step outputs
+
+Limitations:
+- Steps execute sequentially, even when the DAG allows parallelism
+- `for_each` iterations always run sequentially regardless of the `sequential` setting
+- Only `type: script` with local runner is supported — docker, pod, task, agent, and approval steps are rejected
 
 ### `workspaces`
 

@@ -55,6 +55,9 @@ mime_guess = "2"
 # Config loading with env override
 config = { version = "0.15", default-features = false, features = ["yaml"] }
 
+# Graceful shutdown
+ctrlc = "3"
+
 # Scheduler
 croner = "3"
 chrono-tz = "0.10"
@@ -99,4 +102,4 @@ tempfile = "3"
 stroem-agent = { path = "crates/stroem-agent" }
 stroem-common = { path = "crates/stroem-common" }
 stroem-db = { path = "crates/stroem-db" }
-stroem-runner = { path = "crates/stroem-runner" }
+stroem-runner = { path = "crates/stroem-runner", default-features = false }

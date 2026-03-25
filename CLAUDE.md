@@ -23,7 +23,7 @@ Phase 7: AI agent actions & MCP integration.
 - **stroem-agent**: Shared LLM dispatch logic (rig-core, MCP client), used by workers. Config types shared with server.
 - **stroem-server**: Axum API server, orchestrator, multi-workspace manager (folder + git sources), log storage, embedded UI via rust-embed
 - **stroem-worker**: Worker process: polls server, downloads workspace tarballs, executes steps, streams logs, handles agent step dispatch
-- **stroem-cli**: CLI tool (validate, trigger, status, logs, tasks, jobs, workspaces)
+- **stroem-cli**: CLI tool (run, validate, trigger, status, logs, tasks, jobs, workspaces). `run` executes tasks locally via ShellRunner without a server.
 
 ## Conventions
 

@@ -139,6 +139,40 @@ Last updated: 2026-03-13.
 - [x] `vite.config.ts` suppresses proxy errors silently
 - [ ] Job duration insights: show average/p50/p95 duration for a task and per-step, estimated time remaining on running jobs and individual steps, and a duration history chart on the job detail page (with per-step breakdown)
 
+## CLI: `stroem run` (local task execution, 2026-03-25)
+
+### Critical (must fix)
+- [x] `build_run_config` ignores `--path`, uses `cwd()` instead — fixed: `cmd_run` canonicalizes path, threads `workspace_path: &Path` through `run_dag` → `execute_step` → `build_run_config`
+- [x] `continue_on_failure` failures not counted in summary — fixed: added `failed_count: usize` counter, incremented on every failure regardless of `continue_on_failure`
+
+### Important (should fix)
+- [x] No `for_each` item count limit — fixed: `MAX_FOR_EACH_ITEMS = 10_000` check in `evaluate_for_each`
+- [x] `std::process::exit(1)` bypasses async cleanup — fixed: `cmd_run` returns `Result<bool>`, `main` calls `process::exit(1)` after async cleanup
+- [x] Step timeouts silently ignored — fixed: `execute_step` wraps `runner.execute()` in `tokio::time::timeout` when `step.timeout` is set
+
+### Minor
+- [x] `ctrlc::set_handler` error silently dropped via `.ok()` — fixed: propagates with `.context()?`
+- [x] Path traversal with `action.source` — fixed: canonicalized source path checked with `starts_with(workspace_path)`
+- [x] Parallel DAG branches run sequentially — documented as limitation in `docs/src/content/docs/reference/cli.md`
+- [x] `sequential: false` on `for_each` not honored — documented as limitation in `docs/src/content/docs/reference/cli.md`
+
+### Missing Tests
+- [x] `continue_on_failure = true` — `test_run_continue_on_failure`
+- [x] `continue_on_failure` inside `for_each` — `test_run_for_each_continue_on_failure`
+- [x] Empty `for_each` array — `test_run_for_each_empty_array`
+- [x] Step output used in downstream `when` condition — `test_run_when_with_step_output`
+- [x] Invalid `--input` JSON — `test_err_invalid_input_json`
+- [ ] Non-object `--input` JSON (e.g., `"[1,2,3]"`) — returns clear error or handles gracefully
+- [ ] Action with neither `script` nor `source` — clear error from runner
+- [x] Diamond-shaped cascade-skip topology — `test_cascade_skip_diamond` + `test_integ_cascade_skip_diamond_dag`
+- [x] Non-existent `--path` workspace directory — `test_err_nonexistent_workspace_path`
+- [x] Cyclic DAG rejected before execution starts — `test_err_cyclic_dag_rejected`
+- [x] `for_each` template rendering to JSON object (not array) — `test_evaluate_for_each_json_object_errors`
+- [x] `for_each` output aggregation accessible by downstream step — `test_integ_for_each_output_accessible_downstream`
+- [x] `runner: pod` rejection — `test_validate_actions_rejects_pod_runner`
+- [x] `--path` workspace directory used as workdir — `test_integ_workspace_path_used_as_workdir`
+- [x] `for_each` exceeds max items — `test_evaluate_for_each_exceeds_limit`
+
 ## Test Coverage
 
 ### Done

@@ -1,3 +1,5 @@
+mod run;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use reqwest::Client;
@@ -31,6 +33,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run a task locally without a server
+    Run {
+        /// Task name
+        task: String,
+        /// Path to workspace root (default: current directory)
+        #[arg(long, default_value = ".")]
+        path: String,
+        /// Input as JSON string
+        #[arg(long)]
+        input: Option<String>,
+    },
     /// Validate workflow YAML files
     Validate {
         /// Path to workspace root or specific YAML file (default: current directory)
@@ -86,6 +99,12 @@ async fn main() -> Result<()> {
     let client = build_client(cli.token.as_deref())?;
 
     match cli.command {
+        Commands::Run { task, path, input } => {
+            let success = run::cmd_run(&task, &path, input.as_deref()).await?;
+            if !success {
+                std::process::exit(1);
+            }
+        }
         Commands::Validate { path } => {
             let path = path.unwrap_or_else(|| ".".to_string());
             validate_workspace(&path)?;
@@ -647,6 +666,51 @@ mod tests {
             } => {
                 assert_eq!(task, "deploy");
                 assert_eq!(workspace, "prod");
+                assert_eq!(input.as_deref(), Some(r#"{"env":"staging"}"#));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Subcommand: run
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn run_subcommand_requires_task() {
+        let result = parse(&["stroem", "run"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_subcommand_default_path() {
+        let cli = parse(&["stroem", "run", "deploy"]).unwrap();
+        match cli.command {
+            Commands::Run { task, path, input } => {
+                assert_eq!(task, "deploy");
+                assert_eq!(path, ".");
+                assert!(input.is_none());
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_accepts_input_and_path() {
+        let cli = parse(&[
+            "stroem",
+            "run",
+            "deploy",
+            "--path",
+            "/workspace",
+            "--input",
+            r#"{"env":"staging"}"#,
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Run { task, path, input } => {
+                assert_eq!(task, "deploy");
+                assert_eq!(path, "/workspace");
                 assert_eq!(input.as_deref(), Some(r#"{"env":"staging"}"#));
             }
             _ => panic!("unexpected command variant"),
