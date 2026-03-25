@@ -498,7 +498,7 @@ fn validate_workspace(path: &str) -> Result<()> {
             );
         }
         Err(e) => {
-            println!("[FAIL] {:#}", e);
+            eprintln!("[FAIL] {:#}", e);
             anyhow::bail!("Validation failed");
         }
     }

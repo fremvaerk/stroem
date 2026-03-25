@@ -16,10 +16,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
 
-// Re-export scan_and_merge_yaml_files from stroem-common so server-internal
-// callers (folder.rs, library.rs) continue to work without changes.
-pub(crate) use stroem_common::workspace_loader::scan_and_merge_yaml_files;
-
 /// Trait for workspace sources (folder, git, etc.)
 #[async_trait]
 pub trait WorkspaceSource: Send + Sync {

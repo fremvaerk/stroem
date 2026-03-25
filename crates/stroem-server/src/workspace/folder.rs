@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use blake2::{Blake2s256, Digest};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use stroem_common::models::workflow::WorkspaceConfig;
 
-use super::{scan_and_merge_yaml_files, WorkspaceSource};
+use super::WorkspaceSource;
 
 /// Folder-based workspace source
 pub struct FolderSource {
@@ -87,38 +87,11 @@ impl WorkspaceSource for FolderSource {
     }
 }
 
-/// Load workspace from a folder containing workflow YAML files
+/// Load workspace from a folder containing workflow YAML files.
 /// Looks for .workflows/ subdirectory, or scans the folder itself if it contains YAML files.
 /// Returns the config paired with per-file warnings for files that were skipped.
 pub async fn load_folder_workspace(path: &str) -> Result<(WorkspaceConfig, Vec<String>)> {
-    let base_path = Path::new(path);
-
-    if !base_path.exists() {
-        anyhow::bail!("Workspace path does not exist: {}", path);
-    }
-
-    // Check for .workflows/ subdirectory
-    let workflows_dir = base_path.join(".workflows");
-    let scan_dir = if workflows_dir.exists() && workflows_dir.is_dir() {
-        workflows_dir
-    } else {
-        base_path.to_path_buf()
-    };
-
-    // Scan YAML files, decrypting SOPS-encrypted files where present.
-    // Bad individual files are skipped and returned as warnings.
-    let (mut workspace, warnings) = scan_and_merge_yaml_files(&scan_dir, false, true)
-        .with_context(|| format!("Failed to scan workspace directory: {:?}", scan_dir))?;
-
-    // Render secret values through Tera (resolves {{ 'ref+...' | vals }} at load time)
-    workspace
-        .render_secrets()
-        .context("Failed to render workspace secrets")?;
-
-    // Render connection values (resolve templates + apply type defaults)
-    workspace
-        .render_connections()
-        .context("Failed to render workspace connections")?;
+    let (workspace, warnings) = stroem_common::workspace_loader::load_workspace(Path::new(path))?;
 
     tracing::debug!(
         "Loaded workspace: {} actions, {} tasks, {} triggers, {} secrets, {} connection_types, {} connections",

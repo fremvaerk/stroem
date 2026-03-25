@@ -164,7 +164,7 @@ pub fn load_workspace(path: &Path) -> Result<(WorkspaceConfig, Vec<String>)> {
     };
 
     let (mut workspace, warnings) = scan_and_merge_yaml_files(&scan_dir, false, true)
-        .with_context(|| format!("Failed to scan workspace directory: {:?}", scan_dir))?;
+        .with_context(|| format!("Failed to scan workspace directory: {}", scan_dir.display()))?;
 
     workspace
         .render_secrets()
@@ -340,5 +340,82 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(config.actions.len(), 0);
         assert_eq!(config.tasks.len(), 0);
+    }
+
+    #[test]
+    fn test_skip_sops_true_skips_sops_files() {
+        let dir = TempDir::new().unwrap();
+
+        // Regular YAML file
+        fs::write(
+            dir.path().join("actions.yaml"),
+            "actions:\n  greet:\n    type: script\n    script: echo hello\n",
+        )
+        .unwrap();
+
+        // SOPS-encrypted file (naming convention: *.sops.yaml)
+        fs::write(
+            dir.path().join("secrets.sops.yaml"),
+            "secrets:\n  db_password: ENC[AES256_GCM,data:abc]\nsops:\n  version: 3\n",
+        )
+        .unwrap();
+
+        // skip_sops=true: SOPS file should be silently skipped (no warning)
+        let (config, warnings) = scan_and_merge_yaml_files(dir.path(), true, false).unwrap();
+        assert_eq!(config.actions.len(), 1);
+        assert!(config.actions.contains_key("greet"));
+        assert!(
+            warnings.is_empty(),
+            "skip_sops=true should not produce warnings for SOPS files"
+        );
+    }
+
+    #[test]
+    fn test_skip_sops_false_attempts_sops_decryption() {
+        let dir = TempDir::new().unwrap();
+
+        // Regular YAML file
+        fs::write(
+            dir.path().join("actions.yaml"),
+            "actions:\n  greet:\n    type: script\n    script: echo hello\n",
+        )
+        .unwrap();
+
+        // SOPS-encrypted file — sops CLI not available, so decryption fails → warning
+        fs::write(
+            dir.path().join("secrets.sops.yaml"),
+            "secrets:\n  db_password: ENC[AES256_GCM,data:abc]\nsops:\n  version: 3\n",
+        )
+        .unwrap();
+
+        // skip_sops=false: SOPS file should be attempted and produce a warning on failure
+        let (config, warnings) = scan_and_merge_yaml_files(dir.path(), false, false).unwrap();
+        assert_eq!(config.actions.len(), 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("sops"),
+            "Warning should mention sops: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn test_infer_folders_preserves_explicit_folder() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("data");
+        fs::create_dir(&sub).unwrap();
+        fs::write(
+            sub.join("etl.yaml"),
+            "tasks:\n  etl:\n    folder: custom\n    flow:\n      s1:\n        action: run\n",
+        )
+        .unwrap();
+
+        let (config, _) = scan_and_merge_yaml_files(dir.path(), false, true).unwrap();
+        let task = config.tasks.get("etl").unwrap();
+        assert_eq!(
+            task.folder,
+            Some("custom".to_string()),
+            "Explicit folder should not be overridden by subdirectory inference"
+        );
     }
 }

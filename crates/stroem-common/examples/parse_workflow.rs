@@ -7,14 +7,14 @@ fn main() {
     let yaml = r#"
 actions:
   greet:
-    type: shell
-    cmd: "echo Hello {{ input.name }}"
+    type: script
+    script: "echo Hello {{ input.name }}"
     input:
       name: { type: string, required: true }
 
   shout:
-    type: shell
-    cmd: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
+    type: script
+    script: "echo {{ input.message }} | tr '[:lower:]' '[:upper:]'"
     input:
       message: { type: string, required: true }
 
@@ -34,7 +34,7 @@ tasks:
         action: shout
         depends_on: [say-hello]
         input:
-          message: "{{ say-hello.output.greeting }}"
+          message: "{{ say_hello.output.greeting }}"
 
 triggers:
   every-minute:
