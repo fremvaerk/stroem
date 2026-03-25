@@ -1438,8 +1438,16 @@ mod tests {
         let result = render_for_each_template("{{ step1.output }}", &ctx);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("[object]"), "Error should contain '[object]': {}", msg);
-        assert!(msg.contains("json_encode()"), "Error should suggest json_encode(): {}", msg);
+        assert!(
+            msg.contains("[object]"),
+            "Error should contain '[object]': {}",
+            msg
+        );
+        assert!(
+            msg.contains("json_encode()"),
+            "Error should suggest json_encode(): {}",
+            msg
+        );
     }
 
     #[test]
@@ -1450,8 +1458,16 @@ mod tests {
         let result = render_for_each_template("{{ step1.output }}", &ctx);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("non-JSON"), "Error should mention non-JSON: {}", msg);
-        assert!(!msg.contains("json_encode"), "Error should NOT suggest json_encode for plain strings: {}", msg);
+        assert!(
+            msg.contains("non-JSON"),
+            "Error should mention non-JSON: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("json_encode"),
+            "Error should NOT suggest json_encode for plain strings: {}",
+            msg
+        );
     }
 
     #[test]
@@ -1462,7 +1478,11 @@ mod tests {
         let result = render_for_each_template("{{ count }}", &ctx);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("must evaluate to a JSON array"), "Error should mention array requirement: {}", msg);
+        assert!(
+            msg.contains("must evaluate to a JSON array"),
+            "Error should mention array requirement: {}",
+            msg
+        );
     }
 
     #[test]
