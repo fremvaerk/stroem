@@ -769,6 +769,23 @@ pub struct WorkspaceConfig {
     pub mcp_servers: HashMap<String, McpServerDef>,
 }
 
+impl From<WorkspaceConfig> for WorkflowConfig {
+    fn from(ws: WorkspaceConfig) -> Self {
+        Self {
+            secrets: ws.secrets,
+            connection_types: ws.connection_types,
+            connections: ws.connections,
+            actions: ws.actions,
+            tasks: ws.tasks,
+            triggers: ws.triggers,
+            on_success: ws.on_success,
+            on_error: ws.on_error,
+            on_suspended: ws.on_suspended,
+            mcp_servers: ws.mcp_servers,
+        }
+    }
+}
+
 impl WorkspaceConfig {
     /// Create a new empty workspace config
     pub fn new() -> Self {

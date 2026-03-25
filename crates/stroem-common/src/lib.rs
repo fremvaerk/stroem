@@ -6,3 +6,4 @@ pub mod models;
 pub mod sops;
 pub mod template;
 pub mod validation;
+pub mod workspace_loader;

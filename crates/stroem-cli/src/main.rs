@@ -33,8 +33,8 @@ struct Cli {
 enum Commands {
     /// Validate workflow YAML files
     Validate {
-        /// Path to workflow file or directory
-        path: String,
+        /// Path to workspace root or specific YAML file (default: current directory)
+        path: Option<String>,
     },
     /// Trigger a task execution
     Trigger {
@@ -87,7 +87,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Validate { path } => {
-            validate_workflows(&path)?;
+            let path = path.unwrap_or_else(|| ".".to_string());
+            validate_workspace(&path)?;
         }
         Commands::Trigger {
             task,
@@ -465,71 +466,67 @@ fn jobs_url(server: &str, limit: i64) -> String {
     format!("{}/api/jobs?limit={}", server, limit)
 }
 
-/// Recursively collect all .yaml/.yml files under a directory.
-fn collect_yaml_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        let path = entry.path();
-        if ft.is_dir() {
-            files.extend(collect_yaml_files(&path)?);
-        } else if path
-            .extension()
-            .map(|ext| ext == "yaml" || ext == "yml")
-            .unwrap_or(false)
-        {
-            files.push(path);
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-fn validate_workflows(path: &str) -> Result<()> {
+fn validate_workspace(path: &str) -> Result<()> {
     use std::path::Path;
     use stroem_common::models::workflow::WorkflowConfig;
     use stroem_common::validation::validate_workflow_config;
+    use stroem_common::workspace_loader;
 
     let path = Path::new(path);
 
-    let files: Vec<_> = if path.is_dir() {
-        collect_yaml_files(path)?
-    } else {
-        vec![path.to_path_buf()]
-    };
-
-    if files.is_empty() {
-        println!("No YAML files found at {}", path.display());
+    // Single file mode: validate one YAML file (backward compat)
+    if path.is_file() {
+        let content = stroem_common::sops::read_yaml_file(path)?;
+        let config: WorkflowConfig = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        match validate_workflow_config(&config) {
+            Ok(warnings) => {
+                println!("[OK] {}", path.display());
+                for w in warnings {
+                    println!("  WARN: {}", w);
+                }
+            }
+            Err(e) => {
+                println!("[FAIL] {}: {:#}", path.display(), e);
+                anyhow::bail!("Validation failed");
+            }
+        }
         return Ok(());
     }
 
-    let mut all_valid = true;
+    // Directory mode: full workspace loading (scan, merge, render, validate)
+    let (workspace, load_warnings) = workspace_loader::load_workspace(path)
+        .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
 
-    for file in &files {
-        let content = stroem_common::sops::read_yaml_file(file)?;
-        match serde_yaml::from_str::<WorkflowConfig>(&content) {
-            Ok(config) => match validate_workflow_config(&config) {
-                Ok(warnings) => {
-                    println!("[OK] {}", file.display());
-                    for w in warnings {
-                        println!("  WARN: {}", w);
-                    }
-                }
-                Err(e) => {
-                    println!("[FAIL] {}: {:#}", file.display(), e);
-                    all_valid = false;
-                }
-            },
-            Err(e) => {
-                println!("[FAIL] {}: parse error: {:#}", file.display(), e);
-                all_valid = false;
-            }
-        }
+    for w in &load_warnings {
+        println!("  WARN: {}", w);
     }
 
-    if !all_valid {
-        anyhow::bail!("Validation failed for one or more files");
+    let num_actions = workspace.actions.len();
+    let num_tasks = workspace.tasks.len();
+    let num_triggers = workspace.triggers.len();
+
+    if num_actions == 0 && num_tasks == 0 && num_triggers == 0 {
+        println!("No workflow definitions found at {}", path.display());
+        return Ok(());
+    }
+
+    let config: WorkflowConfig = workspace.into();
+
+    match validate_workflow_config(&config) {
+        Ok(warnings) => {
+            for w in &warnings {
+                println!("  WARN: {}", w);
+            }
+            println!(
+                "[OK] Workspace loaded: {} actions, {} tasks, {} triggers",
+                num_actions, num_tasks, num_triggers
+            );
+        }
+        Err(e) => {
+            println!("[FAIL] {:#}", e);
+            anyhow::bail!("Validation failed");
+        }
     }
 
     Ok(())
@@ -743,15 +740,18 @@ mod tests {
     fn validate_subcommand_captures_path() {
         let cli = parse(&["stroem", "validate", "/tmp/workflow.yaml"]).unwrap();
         match cli.command {
-            Commands::Validate { path } => assert_eq!(path, "/tmp/workflow.yaml"),
+            Commands::Validate { path } => assert_eq!(path, Some("/tmp/workflow.yaml".to_string())),
             _ => panic!("unexpected command variant"),
         }
     }
 
     #[test]
-    fn validate_subcommand_requires_path() {
-        let result = parse(&["stroem", "validate"]);
-        assert!(result.is_err());
+    fn validate_subcommand_defaults_to_none() {
+        let cli = parse(&["stroem", "validate"]).unwrap();
+        match cli.command {
+            Commands::Validate { path } => assert!(path.is_none()),
+            _ => panic!("unexpected command variant"),
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -881,11 +881,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // validate_workflows — file-system integration (no HTTP)
+    // validate_workspace — file-system integration (no HTTP)
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn validate_workflows_succeeds_on_valid_yaml() {
+    fn validate_workspace_succeeds_on_valid_single_file() {
         let mut file = NamedTempFile::with_suffix(".yaml").unwrap();
         writeln!(
             file,
@@ -902,12 +902,12 @@ actions:
 "#
         )
         .unwrap();
-        let result = validate_workflows(file.path().to_str().unwrap());
+        let result = validate_workspace(file.path().to_str().unwrap());
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
     }
 
     #[test]
-    fn validate_workflows_fails_on_invalid_yaml() {
+    fn validate_workspace_fails_on_invalid_single_file() {
         let mut file = NamedTempFile::with_suffix(".yaml").unwrap();
         writeln!(
             file,
@@ -920,73 +920,123 @@ tasks:
 "#
         )
         .unwrap();
-        let result = validate_workflows(file.path().to_str().unwrap());
+        let result = validate_workspace(file.path().to_str().unwrap());
         assert!(result.is_err());
     }
 
     #[test]
-    fn validate_workflows_on_empty_directory_returns_ok() {
+    fn validate_workspace_empty_directory_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        // No YAML files — should report "No YAML files found" and return Ok
-        let result = validate_workflows(dir.path().to_str().unwrap());
+        let result = validate_workspace(dir.path().to_str().unwrap());
         assert!(result.is_ok());
     }
 
     #[test]
-    fn validate_workflows_skips_non_yaml_files_in_directory() {
+    fn validate_workspace_skips_non_yaml_files() {
         let dir = tempfile::tempdir().unwrap();
-        // Write a .txt file that would be invalid YAML if parsed
         let txt = dir.path().join("not-a-workflow.txt");
         std::fs::write(&txt, "{{{{invalid").unwrap();
-        // Should ignore the .txt file and see no YAML files → Ok
-        let result = validate_workflows(dir.path().to_str().unwrap());
+        let result = validate_workspace(dir.path().to_str().unwrap());
         assert!(result.is_ok());
     }
 
     #[test]
-    fn validate_workflows_validates_all_yaml_files_in_directory() {
+    fn validate_workspace_cross_file_references() {
         let dir = tempfile::tempdir().unwrap();
 
-        // One valid workflow
+        // Action in file A
         std::fs::write(
-            dir.path().join("valid.yaml"),
+            dir.path().join("actions.yaml"),
             r#"
-tasks:
-  t1:
-    flow:
-      s1:
-        action: a1
 actions:
-  a1:
+  greet:
     type: script
-    script: echo ok
+    script: echo hello
 "#,
         )
         .unwrap();
 
-        // One invalid workflow — references a non-existent action
+        // Task in file B references action from file A
         std::fs::write(
-            dir.path().join("invalid.yaml"),
+            dir.path().join("tasks.yaml"),
             r#"
 tasks:
-  t2:
+  hello:
     flow:
-      s1:
+      step1:
+        action: greet
+"#,
+        )
+        .unwrap();
+
+        let result = validate_workspace(dir.path().to_str().unwrap());
+        assert!(
+            result.is_ok(),
+            "Cross-file references should validate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn validate_workspace_detects_missing_action_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            dir.path().join("actions.yaml"),
+            r#"
+actions:
+  greet:
+    type: script
+    script: echo hello
+"#,
+        )
+        .unwrap();
+
+        // Task references a non-existent action
+        std::fs::write(
+            dir.path().join("tasks.yaml"),
+            r#"
+tasks:
+  broken:
+    flow:
+      step1:
         action: missing_action
 "#,
         )
         .unwrap();
 
-        let result = validate_workflows(dir.path().to_str().unwrap());
+        let result = validate_workspace(dir.path().to_str().unwrap());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Validation failed"));
     }
 
     #[test]
-    fn validate_workflows_recurses_into_subdirectories() {
+    fn validate_workspace_with_workflows_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join(".workflows");
+        std::fs::create_dir(&workflows).unwrap();
+
+        std::fs::write(
+            workflows.join("test.yaml"),
+            r#"
+actions:
+  greet:
+    type: script
+    script: echo hello
+tasks:
+  hello:
+    flow:
+      step1:
+        action: greet
+"#,
+        )
+        .unwrap();
+
+        let result = validate_workspace(dir.path().to_str().unwrap());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_workspace_recurses_into_subdirectories() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
@@ -1006,35 +1056,8 @@ actions:
         )
         .unwrap();
 
-        let result = validate_workflows(dir.path().to_str().unwrap());
+        let result = validate_workspace(dir.path().to_str().unwrap());
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn collect_yaml_files_includes_yml_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.yml"), "tasks: {}").unwrap();
-        std::fs::write(dir.path().join("b.yaml"), "tasks: {}").unwrap();
-        std::fs::write(dir.path().join("c.json"), "{}").unwrap();
-
-        let files = collect_yaml_files(dir.path()).unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(files.iter().any(|p| p.file_name().unwrap() == "a.yml"));
-        assert!(files.iter().any(|p| p.file_name().unwrap() == "b.yaml"));
-    }
-
-    #[test]
-    fn collect_yaml_files_root_and_subdirectory() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("root.yaml"), "tasks: {}").unwrap();
-        let sub = dir.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("nested.yaml"), "tasks: {}").unwrap();
-
-        let files = collect_yaml_files(dir.path()).unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(files.iter().any(|p| p.file_name().unwrap() == "root.yaml"));
-        assert!(files.iter().any(|p| p.file_name().unwrap() == "nested.yaml"));
     }
 
     // ---------------------------------------------------------------------------

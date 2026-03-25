@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use stroem_common::models::workflow::WorkspaceConfig;
 
 use crate::config::{GitAuthConfig, LibraryDef};
-use crate::workspace::scan_and_merge_yaml_files;
+use stroem_common::workspace_loader::scan_and_merge_yaml_files;
 
 /// Validate that a library name is safe for filesystem paths, tar entries, and URL segments.
 /// Must start with an alphanumeric char, followed by alphanumeric, underscore, or hyphen.
