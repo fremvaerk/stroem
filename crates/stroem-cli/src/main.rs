@@ -465,6 +465,26 @@ fn jobs_url(server: &str, limit: i64) -> String {
     format!("{}/api/jobs?limit={}", server, limit)
 }
 
+/// Recursively collect all .yaml/.yml files under a directory.
+fn collect_yaml_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_yaml_files(&path)?);
+        } else if path
+            .extension()
+            .map(|ext| ext == "yaml" || ext == "yml")
+            .unwrap_or(false)
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 fn validate_workflows(path: &str) -> Result<()> {
     use std::path::Path;
     use stroem_common::models::workflow::WorkflowConfig;
@@ -473,16 +493,7 @@ fn validate_workflows(path: &str) -> Result<()> {
     let path = Path::new(path);
 
     let files: Vec<_> = if path.is_dir() {
-        std::fs::read_dir(path)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "yaml" || ext == "yml")
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path())
-            .collect()
+        collect_yaml_files(path)?
     } else {
         vec![path.to_path_buf()]
     };
@@ -971,6 +982,31 @@ tasks:
             .unwrap_err()
             .to_string()
             .contains("Validation failed"));
+    }
+
+    #[test]
+    fn validate_workflows_recurses_into_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(
+            sub.join("nested.yaml"),
+            r#"
+tasks:
+  t1:
+    flow:
+      s1:
+        action: a1
+actions:
+  a1:
+    type: script
+    script: echo ok
+"#,
+        )
+        .unwrap();
+
+        let result = validate_workflows(dir.path().to_str().unwrap());
+        assert!(result.is_ok());
     }
 
     // ---------------------------------------------------------------------------
