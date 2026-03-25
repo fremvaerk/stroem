@@ -470,8 +470,9 @@ fn collect_yaml_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> 
     let mut files = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
         let path = entry.path();
-        if path.is_dir() {
+        if ft.is_dir() {
             files.extend(collect_yaml_files(&path)?);
         } else if path
             .extension()
@@ -1007,6 +1008,33 @@ actions:
 
         let result = validate_workflows(dir.path().to_str().unwrap());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn collect_yaml_files_includes_yml_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.yml"), "tasks: {}").unwrap();
+        std::fs::write(dir.path().join("b.yaml"), "tasks: {}").unwrap();
+        std::fs::write(dir.path().join("c.json"), "{}").unwrap();
+
+        let files = collect_yaml_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|p| p.file_name().unwrap() == "a.yml"));
+        assert!(files.iter().any(|p| p.file_name().unwrap() == "b.yaml"));
+    }
+
+    #[test]
+    fn collect_yaml_files_root_and_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.yaml"), "tasks: {}").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("nested.yaml"), "tasks: {}").unwrap();
+
+        let files = collect_yaml_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|p| p.file_name().unwrap() == "root.yaml"));
+        assert!(files.iter().any(|p| p.file_name().unwrap() == "nested.yaml"));
     }
 
     // ---------------------------------------------------------------------------

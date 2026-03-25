@@ -644,72 +644,27 @@ fn parse_for_each_items(
     render_for_each_template(expr, render_ctx)
 }
 
-/// Try to resolve a simple `{{ dotted.path }}` expression directly from the
-/// JSON context, bypassing Tera rendering.  Tera stringifies objects/arrays
-/// as `[object]`, which breaks `for_each`.  By resolving the path ourselves
-/// we preserve the original JSON value.
-fn try_resolve_simple_variable(
-    template: &str,
-    render_ctx: &serde_json::Value,
-) -> Option<serde_json::Value> {
-    let trimmed = template.trim();
-    let inner = trimmed.strip_prefix("{{")?.strip_suffix("}}")?.trim();
-
-    // Must be a simple dotted identifier — reject Tera operators, filters,
-    // array index syntax, and hyphens (Strøm sanitizes step-name hyphens to
-    // underscores in the render context, so `build-app` → `build_app`).
-    if inner.contains('|')
-        || inner.contains('(')
-        || inner.contains(' ')
-        || inner.contains('+')
-        || inner.contains('[')
-        || inner.contains('-')
-        || inner.contains('~')
-        || inner.contains('*')
-    {
-        return None;
-    }
-
-    let mut current = render_ctx;
-    for segment in inner.split('.') {
-        if segment.is_empty() {
-            return None;
-        }
-        current = current.get(segment)?;
-    }
-    Some(current.clone())
-}
-
 /// Render a Tera template and parse the result as a JSON array.
 fn render_for_each_template(
     template: &str,
     render_ctx: &serde_json::Value,
 ) -> Result<Vec<serde_json::Value>> {
-    // Fast path: resolve simple variable references directly from context
-    // to avoid Tera stringifying objects/arrays as "[object]".
-    if let Some(value) = try_resolve_simple_variable(template, render_ctx) {
-        return match value {
-            serde_json::Value::Array(arr) => Ok(arr),
-            // String value might contain a JSON array (e.g. step output stored as string)
-            serde_json::Value::String(ref s) => {
-                let parsed: serde_json::Value = serde_json::from_str(s)
-                    .with_context(|| format!("for_each expression must evaluate to a JSON array, got string: {}", s))?;
-                match parsed {
-                    serde_json::Value::Array(arr) => Ok(arr),
-                    _ => bail!("for_each expression must evaluate to a JSON array, got {}", parsed),
-                }
-            }
-            _ => bail!(
-                "for_each expression must evaluate to a JSON array, got {}",
-                value
-            ),
-        };
-    }
-
     let rendered = stroem_common::template::render_template(template, render_ctx)
         .context("Failed to render for_each template")?;
-    let value: serde_json::Value = serde_json::from_str(&rendered)
-        .with_context(|| format!("for_each template rendered to non-JSON: {}", rendered))?;
+    let value: serde_json::Value = serde_json::from_str(&rendered).with_context(|| {
+        // Detect the common "[object]" rendering that Tera produces for
+        // objects/arrays and suggest the fix.
+        if rendered.contains("[object]") {
+            format!(
+                "for_each template rendered to non-JSON: {}. \
+                 Hint: Tera renders objects/arrays as \"[object]\". \
+                 Use the `json_encode()` filter, e.g. {{{{ step.output | json_encode() }}}}",
+                rendered,
+            )
+        } else {
+            format!("for_each template rendered to non-JSON: {}", rendered)
+        }
+    })?;
     match value {
         serde_json::Value::Array(arr) => Ok(arr),
         _ => bail!(
@@ -1473,166 +1428,52 @@ mod tests {
         assert_eq!(items[2].as_i64().unwrap(), 3);
     }
 
-    // --- try_resolve_simple_variable tests ---
+    // --- render_for_each_template: error message tests ---
 
     #[test]
-    fn test_resolve_simple_variable_dotted_path() {
+    fn test_for_each_object_rendering_suggests_json_encode() {
+        // Tera renders objects as "[object]" — the error message should
+        // suggest using the json_encode() filter.
         let ctx = json!({"step1": {"output": [{"a": 1}, {"a": 2}]}});
-        let result = try_resolve_simple_variable("{{ step1.output }}", &ctx);
-        assert_eq!(result.unwrap(), json!([{"a": 1}, {"a": 2}]));
-    }
-
-    #[test]
-    fn test_resolve_simple_variable_with_whitespace() {
-        let ctx = json!({"items": [1, 2, 3]});
-        let result = try_resolve_simple_variable("  {{  items  }}  ", &ctx);
-        assert_eq!(result.unwrap(), json!([1, 2, 3]));
-    }
-
-    #[test]
-    fn test_resolve_simple_variable_with_filter_returns_none() {
-        let ctx = json!({"items": [1, 2, 3]});
-        let result = try_resolve_simple_variable("{{ items | json_encode() }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_simple_variable_missing_path_returns_none() {
-        let ctx = json!({"step1": {"output": [1]}});
-        let result = try_resolve_simple_variable("{{ step1.missing }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_simple_variable_not_template_returns_none() {
-        let ctx = json!({});
-        let result = try_resolve_simple_variable("[1, 2, 3]", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_for_each_simple_variable_with_objects() {
-        // Simulates the real use case: for_each referencing an array of objects
-        // from a prior step's output — without json_encode filter.
-        let expr = r#""{{ step1.output }}""#;
-        let ctx = json!({"step1": {"output": [{"date": "2025-01-06"}, {"date": "2025-01-13"}]}});
-        let items = parse_for_each_items(expr, &ctx).unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["date"], "2025-01-06");
-        assert_eq!(items[1]["date"], "2025-01-13");
-    }
-
-    // --- try_resolve_simple_variable: operator/syntax rejection ---
-
-    #[test]
-    fn test_resolve_rejects_array_index_syntax() {
-        let ctx = json!({"items": [10, 20, 30]});
-        let result = try_resolve_simple_variable("{{ items[0] }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_rejects_hyphenated_path() {
-        // Strøm sanitizes step-name hyphens to underscores in the context.
-        // The fast path should reject hyphens and fall through to Tera.
-        let ctx = json!({"get_list": {"output": [1, 2]}});
-        let result = try_resolve_simple_variable("{{ get-list.output }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_rejects_tilde_operator() {
-        let ctx = json!({"a": "hello", "b": "world"});
-        let result = try_resolve_simple_variable("{{ a~b }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_rejects_multiply_operator() {
-        let ctx = json!({"a": 2, "b": 3});
-        let result = try_resolve_simple_variable("{{ a*b }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    // --- try_resolve_simple_variable: path edge cases ---
-
-    #[test]
-    fn test_resolve_rejects_double_dot() {
-        let ctx = json!({"step1": {"output": [1]}});
-        let result = try_resolve_simple_variable("{{ step1..output }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_rejects_leading_dot() {
-        let ctx = json!({"output": [1, 2]});
-        let result = try_resolve_simple_variable("{{ .output }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_rejects_trailing_dot() {
-        let ctx = json!({"step1": {"": [1]}});
-        let result = try_resolve_simple_variable("{{ step1. }}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_returns_none_for_tera_block() {
-        let ctx = json!({"items": [1, 2]});
-        let result = try_resolve_simple_variable("{% for x in items %}{{ x }}{% endfor %}", &ctx);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_resolve_returns_none_for_trailing_content() {
-        let ctx = json!({"items": [1]});
-        let result = try_resolve_simple_variable("{{ items }} extra", &ctx);
-        assert!(result.is_none());
-    }
-
-    // --- render_for_each_template: fast path error cases ---
-
-    #[test]
-    fn test_for_each_fast_path_string_not_json_errors() {
-        let ctx = json!({"step1": {"output": "not json at all"}});
         let result = render_for_each_template("{{ step1.output }}", &ctx);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("must evaluate to a JSON array"));
-        assert!(msg.contains("not json at all"));
+        assert!(msg.contains("[object]"), "Error should contain '[object]': {}", msg);
+        assert!(msg.contains("json_encode()"), "Error should suggest json_encode(): {}", msg);
     }
 
     #[test]
-    fn test_for_each_fast_path_string_json_object_errors() {
-        let ctx = json!({"step1": {"output": r#"{"key": 1}"#}});
+    fn test_for_each_non_json_error_without_object_hint() {
+        // When the rendered output is non-JSON but not the [object] pattern,
+        // the error should not include the json_encode hint.
+        let ctx = json!({"step1": {"output": "hello"}});
         let result = render_for_each_template("{{ step1.output }}", &ctx);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must evaluate to a JSON array"));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("non-JSON"), "Error should mention non-JSON: {}", msg);
+        assert!(!msg.contains("json_encode"), "Error should NOT suggest json_encode for plain strings: {}", msg);
     }
 
     #[test]
-    fn test_for_each_fast_path_object_value_errors() {
-        let ctx = json!({"step1": {"output": {"key": "value"}}});
-        let result = render_for_each_template("{{ step1.output }}", &ctx);
+    fn test_for_each_valid_json_non_array_errors() {
+        // A template that renders to valid JSON but not an array should
+        // produce a clear "must evaluate to a JSON array" error.
+        let ctx = json!({"count": 5});
+        let result = render_for_each_template("{{ count }}", &ctx);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must evaluate to a JSON array"));
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("must evaluate to a JSON array"), "Error should mention array requirement: {}", msg);
     }
 
     #[test]
-    fn test_for_each_fast_path_boolean_value_errors() {
-        let ctx = json!({"step1": {"output": true}});
-        let result = render_for_each_template("{{ step1.output }}", &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_for_each_fast_path_string_json_array_succeeds() {
-        // Step output is a string containing a JSON array — should be parsed
-        let ctx = json!({"step1": {"output": r#"["a","b","c"]"#}});
-        let items = render_for_each_template("{{ step1.output }}", &ctx).unwrap();
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0], "a");
+    fn test_for_each_json_encode_filter_produces_correct_result() {
+        // Validates that applying json_encode() — the fix suggested by the
+        // error hint — actually works for arrays of objects.
+        let ctx = json!({"step1": {"output": [{"x": 1}, {"x": 2}]}});
+        let items = render_for_each_template("{{ step1.output | json_encode() }}", &ctx).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["x"], 1);
+        assert_eq!(items[1]["x"], 2);
     }
 
     // --- build_step_render_context with for_each aggregated output ---
