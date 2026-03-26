@@ -17,9 +17,9 @@ test.describe("Jobs", () => {
     // Wait for at least one job row to appear with a status text
     const firstRow = page.locator("table tbody tr").first();
     await expect(firstRow).toBeVisible();
-    // Status cell should contain a recognized status
+    // Status cell (3rd column: Task, Workspace, Status)
     await expect(
-      firstRow.locator("td").nth(1),
+      firstRow.locator("td").nth(2),
     ).toContainText(/(pending|running|completed|failed)/);
   });
 
@@ -198,9 +198,9 @@ test.describe("Jobs", () => {
 
     await page.goto(`/jobs/${jobId}`);
 
-    // Both steps should be visible
-    await expect(page.getByText("step-fail")).toBeVisible();
-    await expect(page.getByText("step-after")).toBeVisible();
+    // Both steps should be visible (use first() since step name may appear in multiple places)
+    await expect(page.getByText("step-fail").first()).toBeVisible();
+    await expect(page.getByText("step-after").first()).toBeVisible();
 
     // Error message from the failed step should be visible
     await expect(
@@ -235,8 +235,8 @@ test.describe("Jobs", () => {
     expect(stepAfter.status).toBe("completed");
 
     await page.goto(`/jobs/${jobId}`);
-    await expect(page.getByText("step-fail")).toBeVisible();
-    await expect(page.getByText("step-after")).toBeVisible();
+    await expect(page.getByText("step-fail").first()).toBeVisible();
+    await expect(page.getByText("step-after").first()).toBeVisible();
   });
 
   test("step logs show timestamps and stderr coloring", async ({

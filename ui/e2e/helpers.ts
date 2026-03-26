@@ -8,8 +8,16 @@ export async function login(page: Page) {
   await page.waitForURL("/");
 }
 
-/** Get a Bearer token for server-side API calls. */
+// Cached token to avoid rate limiting on /api/auth/login.
+// JWT has 15min TTL — more than enough for a test run.
+let cachedToken: string | null = null;
+let tokenBaseURL: string | null = null;
+
+/** Get a Bearer token for server-side API calls (cached). */
 export async function getAuthToken(baseURL: string): Promise<string> {
+  if (cachedToken && tokenBaseURL === baseURL) {
+    return cachedToken;
+  }
   const res = await fetch(`${baseURL}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -22,6 +30,8 @@ export async function getAuthToken(baseURL: string): Promise<string> {
     throw new Error(`Login failed: ${res.status} ${await res.text()}`);
   }
   const { access_token } = await res.json();
+  cachedToken = access_token;
+  tokenBaseURL = baseURL;
   return access_token;
 }
 
@@ -70,7 +80,7 @@ export async function triggerJob(
 
 /**
  * Wait for a job to reach a terminal state (completed or failed).
- * Uses authenticated fetch.
+ * Uses authenticated fetch with cached token.
  */
 export async function waitForJob(
   baseURL: string,

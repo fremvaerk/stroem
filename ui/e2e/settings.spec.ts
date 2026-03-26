@@ -10,7 +10,8 @@ test.describe("Settings - API Key Management", () => {
   });
 
   test("settings page renders with API Keys section", async ({ page }) => {
-    await expect(page.getByText("API Keys")).toBeVisible();
+    // CardTitle renders as a div, not a heading. Scope to main content area.
+    await expect(page.locator("main").getByText("API Keys").first()).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Create API Key" }),
     ).toBeVisible();
@@ -159,11 +160,13 @@ test.describe("Settings - API Key Management", () => {
     const keyCode = revealDialog.locator("code").first();
     const keyText = await keyCode.textContent();
 
-    // Click Copy
-    await revealDialog.getByRole("button", { name: /Copy/ }).click();
-
-    // Button label changes to "Copied"
-    await expect(revealDialog.getByRole("button", { name: /Copied/ })).toBeVisible();
+    // Click Copy — button label changes to "Copied" for 2s
+    const copyBtn = revealDialog.getByRole("button", { name: /Copy/ });
+    await copyBtn.click();
+    // Check button text changed (use short timeout since it resets after 2s)
+    await expect(
+      revealDialog.getByRole("button", { name: /Copied/ }),
+    ).toBeVisible({ timeout: 1500 });
 
     // Clipboard check: may not be available in all headless environments
     try {
