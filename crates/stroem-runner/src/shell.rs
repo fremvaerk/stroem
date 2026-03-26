@@ -43,9 +43,19 @@ impl Runner for ShellRunner {
             if let Some(ref command) = config.cmd {
                 let mut c = tokio::process::Command::new("sh");
                 c.arg("-c").arg(command);
+                if !config.args.is_empty() {
+                    c.arg("sh"); // $0 placeholder for sh -c positional args
+                    for a in &config.args {
+                        c.arg(a);
+                    }
+                }
                 c
             } else if let Some(ref script) = config.script {
-                tokio::process::Command::new(script)
+                let mut c = tokio::process::Command::new(script);
+                for a in &config.args {
+                    c.arg(a);
+                }
+                c
             } else {
                 anyhow::bail!("RunConfig must have either cmd or script");
             }
@@ -61,6 +71,7 @@ impl Runner for ShellRunner {
                 &script_path,
                 &config.dependencies,
                 config.interpreter.as_deref(),
+                &config.args,
             )?;
 
             // Handle non-uv deps that need a prefix install command.
@@ -117,6 +128,7 @@ impl Runner for ShellRunner {
                 script_path,
                 &config.dependencies,
                 config.interpreter.as_deref(),
+                &config.args,
             )?;
 
             let mut c = tokio::process::Command::new(&binary);
@@ -316,6 +328,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         }
     }
 
@@ -491,6 +504,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         // spawn will fail because the working directory doesn't exist, or return non-zero
         let result = runner.execute(config, None, CancellationToken::new()).await;
@@ -629,6 +643,77 @@ mod tests {
             captured.iter().any(|l| l.line.contains("before_cancel")),
             "partial log line missing after cancellation"
         );
+    }
+
+    #[tokio::test]
+    async fn test_shell_inline_with_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = shell_config(Some("echo $1 $2"), None, HashMap::new());
+        config.workdir = dir.path().to_str().unwrap().to_string();
+        config.args = vec!["hello".to_string(), "world".to_string()];
+
+        let runner = ShellRunner;
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(result.stdout.as_bytes()).to_string();
+        assert!(
+            stdout.contains("hello world"),
+            "expected args as $1 $2, got: {}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_source_with_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_args.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho \"arg1=$1 arg2=$2\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut config = shell_config(None, None, HashMap::new());
+        config.workdir = dir.path().to_str().unwrap().to_string();
+        config.script = Some(script_path.to_string_lossy().to_string());
+        config.args = vec!["foo".to_string(), "bar".to_string()];
+
+        let runner = ShellRunner;
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(result.stdout.as_bytes()).to_string();
+        assert!(
+            stdout.contains("arg1=foo") && stdout.contains("arg2=bar"),
+            "expected positional args, got: {}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shell_inline_empty_args_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = shell_config(Some("echo hello"), None, HashMap::new());
+        config.workdir = dir.path().to_str().unwrap().to_string();
+        config.args = vec![];
+
+        let runner = ShellRunner;
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(result.stdout.as_bytes()).to_string();
+        assert!(stdout.contains("hello"), "got: {}", stdout);
     }
 
     #[tokio::test]

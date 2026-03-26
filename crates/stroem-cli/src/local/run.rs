@@ -479,6 +479,13 @@ fn build_run_config(
     // Inject standard env vars
     env.insert("STROEM_STEP_NAME".to_string(), step_name.to_string());
 
+    // Render args templates
+    let args: Vec<String> = action
+        .args
+        .iter()
+        .map(|a| render_template(a, ctx).context("Failed to render args template"))
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(RunConfig {
         cmd,
         script,
@@ -494,6 +501,7 @@ fn build_run_config(
         language: action.language.clone(),
         dependencies: action.dependencies.clone(),
         interpreter: action.interpreter.clone(),
+        args,
     })
 }
 
@@ -587,6 +595,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
             tags: vec![],
             image: None,
             command: None,
@@ -735,6 +744,29 @@ mod tests {
         assert_eq!(config.language.as_deref(), Some("python"));
         assert_eq!(config.dependencies, vec!["requests"]);
         assert_eq!(config.interpreter.as_deref(), Some("/usr/bin/python3"));
+    }
+
+    #[test]
+    fn test_build_run_config_renders_args_templates() {
+        let mut action = make_action("script");
+        action.args = vec!["{{ input.env }}".to_string(), "--flag".to_string()];
+        let ctx = json!({"input": {"env": "staging"}, "secret": {}});
+        let workspace = std::path::Path::new("/tmp/test-workspace");
+
+        let config = build_run_config("step1", &action, &ctx, workspace).unwrap();
+        assert_eq!(config.args, vec!["staging", "--flag"]);
+    }
+
+    #[test]
+    fn test_build_run_config_args_template_error_propagated() {
+        let mut action = make_action("script");
+        // Use an invalid Tera expression to trigger an error
+        action.args = vec!["{{ invalid | nonexistent_filter }}".to_string()];
+        let ctx = json!({"input": {}, "secret": {}});
+        let workspace = std::path::Path::new("/tmp/test-workspace");
+
+        let result = build_run_config("step1", &action, &ctx, workspace);
+        assert!(result.is_err(), "template error should propagate");
     }
 
     // --- validate_actions_local tests ---

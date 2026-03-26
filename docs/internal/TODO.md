@@ -21,6 +21,8 @@ Last updated: 2026-03-13.
 - [ ] Refresh tokens not invalidated on password change (30-day window)
 - [x] Error messages leak internal details — `AppError::Internal` logs server-side, returns generic "Internal server error" to clients
 - [ ] `vals` CLI executed via PATH — susceptible to binary replacement
+- [x] `file_path` not shell-escaped in `build_container_file_cmd` — interpolated raw into `sh -c` strings. Fixed: `shell_escape()` applied in non-passthrough branches. Passthrough (exec-form) branches unaffected.
+- [x] `interpreter_override` not shell-escaped at point of use in container commands — validation restricts charset to `[a-zA-Z0-9._\-/+]` which is safe. Added SECURITY comment at interpolation sites documenting the invariant.
 
 ## Architecture
 
@@ -259,6 +261,33 @@ Last updated: 2026-03-13.
 - [x] Workspace retry: watcher sets error on continued failure test
 - [x] Workspace retry: `get_revision()` returns None for errored-after-healthy workspace test
 - [ ] Git workspace source auth failure test
+
+### Script `args` Feature Test Gaps (2026-03-26)
+- [x] Validation: `agent` action with `args` rejected
+- [x] Validation: `approval` action with `args` rejected
+- [x] Server rendering: `render_action_spec` renders args Tera templates (e.g. `["{{ input.x }}"]` → `["prod"]`)
+- [x] Server rendering: args with step output context (`{{ build.output.artifact }}`)
+- [x] Server rendering: args with secret context (`{{ secret.api_token }}`)
+- [x] Server rendering: args with hyphenated step name sanitization
+- [x] Executor: `build_run_config` extracts args from action_spec JSON
+- [x] Executor: `build_run_config` defaults to empty vec when args key absent
+- [x] Executor: non-string values in args array silently dropped (filter_map behavior)
+- [x] CLI: `build_run_config` renders args Tera templates
+- [x] CLI: args template render error propagated (not silently dropped)
+- [x] ShellRunner: shell inline script with args (verify `$1` receives value)
+- [x] ShellRunner: shell source file with args (verify positional args)
+- [ ] ShellRunner: non-shell (Python) with args (verify `sys.argv`) — needs Python on CI runner
+- [x] DockerRunner: `build_container_config` WithWorkspace + shell + args
+- [x] DockerRunner: `build_container_config` WithWorkspace + Python + args
+- [x] KubeRunner: `build_pod_json_with_workspace` shell + args
+- [x] `build_container_script_cmd` with args for TypeScript, JavaScript, Go languages
+- [x] `build_container_file_cmd` with args for TypeScript, JavaScript, Go languages
+- [x] `build_container_script_cmd` args with special characters (`$HOME`, backticks, newlines)
+- [x] Shell escape assertion: verify single-quote escaping for `it's` → `'it'\''s'`
+- [x] Args + dependencies + interpreter ordering (`uv run --with dep script.py arg1`)
+- [ ] Args combined with `for_each` loop instances using `{{ each.item }}` — pre-existing limitation: `render_action_spec` context does not include `each` variable (same for env, cmd, script fields). Use `{{ input.x }}` with step input mapping as workaround.
+- [x] Security: `file_path` shell-escaped in `build_container_file_cmd` non-passthrough branches
+- [x] Security: SECURITY comment at `interpreter_override` interpolation sites
 
 ### Job Revision Tracking Test Gaps (2026-03-20)
 - [x] API detail response (`GET /api/jobs/{id}`) asserts `revision` field in JSON

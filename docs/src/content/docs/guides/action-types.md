@@ -82,6 +82,28 @@ actions:
       env: { type: string, default: "staging" }
 ```
 
+### CLI arguments
+
+Pass arguments to scripts using the `args` field. Each element is a Tera template:
+
+```yaml
+actions:
+  deploy:
+    type: script
+    source: actions/deploy.sh
+    args:
+      - "{{ input.environment }}"
+      - "--region"
+      - "{{ input.region }}"
+    input:
+      environment: { type: string }
+      region: { type: string, default: "us-east-1" }
+```
+
+For shell scripts, args become positional parameters (`$1`, `$2`, ...). For other languages, they appear as standard command-line arguments (e.g. `sys.argv[1:]` in Python).
+
+The `args` field is only valid on `type: script` actions. Docker and pod actions should use `cmd`, `command`, or `entrypoint` instead.
+
 ### Environment variables
 
 Actions can declare environment variables. Values support templating:

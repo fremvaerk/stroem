@@ -276,6 +276,16 @@ impl StepExecutor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        let args = action_spec
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(RunConfig {
             cmd,
             script,
@@ -291,6 +301,7 @@ impl StepExecutor {
             language,
             dependencies,
             interpreter,
+            args,
         })
     }
 }
@@ -1073,6 +1084,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
             tags: vec![],
             image: None,
             command: None,
@@ -1122,6 +1134,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
             tags: vec![],
             image: None,
             command: None,
@@ -1155,5 +1168,40 @@ mod tests {
             config.script,
             Some("/workspace/scripts/deploy.sh".to_string())
         );
+    }
+
+    #[test]
+    fn test_build_run_config_with_args() {
+        let spec = serde_json::json!({
+            "script": "echo hello",
+            "args": ["--env", "prod", "--verbose"]
+        });
+        let executor = StepExecutor::new();
+        let step = test_step(Some(spec));
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.args, vec!["--env", "prod", "--verbose"]);
+    }
+
+    #[test]
+    fn test_build_run_config_no_args_defaults_to_empty() {
+        let spec = serde_json::json!({
+            "script": "echo hello"
+        });
+        let executor = StepExecutor::new();
+        let step = test_step(Some(spec));
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert!(config.args.is_empty());
+    }
+
+    #[test]
+    fn test_build_run_config_args_skips_non_string_values() {
+        let spec = serde_json::json!({
+            "script": "echo hello",
+            "args": ["valid", 42, null, true, "also-valid"]
+        });
+        let executor = StepExecutor::new();
+        let step = test_step(Some(spec));
+        let config = executor.build_run_config(&step, "/workspace").unwrap();
+        assert_eq!(config.args, vec!["valid", "also-valid"]);
     }
 }

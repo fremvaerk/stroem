@@ -55,6 +55,7 @@ impl DockerRunner {
                     if lang.is_shell()
                         && config.dependencies.is_empty()
                         && config.interpreter.is_none()
+                        && config.args.is_empty()
                     {
                         vec!["sh".to_string(), "-c".to_string(), command.clone()]
                     } else {
@@ -63,6 +64,7 @@ impl DockerRunner {
                             lang,
                             &config.dependencies,
                             config.interpreter.as_deref(),
+                            &config.args,
                         )
                     }
                 } else if let Some(ref script) = config.script {
@@ -71,16 +73,18 @@ impl DockerRunner {
                     if lang.is_shell()
                         && config.dependencies.is_empty()
                         && config.interpreter.is_none()
+                        && config.args.is_empty()
                     {
                         vec!["sh".to_string(), "-c".to_string(), script.clone()]
                     } else {
-                        // Non-shell language or deps/interpreter specified: invoke the correct
-                        // interpreter on the file rather than running it with sh.
+                        // Non-shell language, deps/interpreter specified, or args present:
+                        // invoke the correct interpreter on the file.
                         script_exec::build_container_file_cmd(
                             script,
                             lang,
                             &config.dependencies,
                             config.interpreter.as_deref(),
+                            &config.args,
                         )
                     }
                 } else {
@@ -136,6 +140,7 @@ impl DockerRunner {
                                 lang,
                                 &config.dependencies,
                                 config.interpreter.as_deref(),
+                                &[], // args forbidden on docker type, always empty
                             )
                         }
                     })
@@ -400,6 +405,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -443,6 +449,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -469,6 +476,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -501,6 +509,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -542,6 +551,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec!["requests".to_string()],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -570,12 +580,13 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: Some("python3.12".to_string()),
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
         let cmd = container_config.cmd.unwrap();
         assert!(
-            cmd[2].contains("python3.12 /workspace/actions/run.py"),
+            cmd[2].contains("python3.12 '/workspace/actions/run.py'"),
             "must use the interpreter override: {}",
             cmd[2]
         );
@@ -598,6 +609,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -631,6 +643,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -669,6 +682,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -701,6 +715,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -735,6 +750,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -761,6 +777,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -792,6 +809,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -820,6 +838,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -864,6 +883,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -906,6 +926,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let result = runner
@@ -914,6 +935,69 @@ mod tests {
             .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("hello-from-docker"));
+    }
+
+    #[test]
+    fn test_build_container_config_with_workspace_shell_args() {
+        let config = RunConfig {
+            cmd: Some("echo $1 $2".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/ws".to_string(),
+            action_type: "script".to_string(),
+            image: Some("debian:bookworm-slim".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec!["hello".to_string(), "world".to_string()],
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        // When args present, shell passthrough is skipped → goes through build_container_script_cmd
+        // which uses sh -c "script" sh arg1 arg2
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert_eq!(cmd[2], "echo $1 $2");
+        assert_eq!(cmd[3], "sh");
+        assert_eq!(cmd[4], "hello");
+        assert_eq!(cmd[5], "world");
+    }
+
+    #[test]
+    fn test_build_container_config_with_workspace_python_args() {
+        let config = RunConfig {
+            cmd: Some("import sys; print(sys.argv)".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/ws".to_string(),
+            action_type: "script".to_string(),
+            image: Some("python:3.12".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: Some("python".to_string()),
+            dependencies: vec![],
+            interpreter: None,
+            args: vec!["--verbose".to_string()],
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let cmd = container_config.cmd.unwrap();
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert!(
+            cmd[2].contains("'--verbose'"),
+            "args must be in command: {}",
+            cmd[2]
+        );
     }
 
     /// Integration test: Docker cancellation kills the container.
@@ -937,6 +1021,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let token = CancellationToken::new();

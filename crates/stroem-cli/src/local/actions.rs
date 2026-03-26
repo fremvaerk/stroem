@@ -73,6 +73,7 @@ mod tests {
             language: language.map(|s| s.to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
             tags: vec![],
             image: None,
             command: None,

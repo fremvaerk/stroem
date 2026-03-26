@@ -142,12 +142,13 @@ pub fn cleanup_temp_script(path: &Path) {
 
 /// Build the full command (binary + args) to execute a script file.
 ///
-/// Returns `(program, args)` where args includes any pre-args + dep args + script path.
+/// Returns `(program, args)` where args includes any pre-args + dep args + script path + script_args.
 pub fn build_script_command(
     lang: ScriptLanguage,
     script_path: &Path,
     deps: &[String],
     interpreter_override: Option<&str>,
+    script_args: &[String],
 ) -> Result<(String, Vec<String>)> {
     let (binary, pre_args) = resolve_toolchain(lang, interpreter_override)?;
 
@@ -159,6 +160,9 @@ pub fn build_script_command(
     }
 
     args.push(script_path.to_string_lossy().to_string());
+
+    // Append user-provided script arguments
+    args.extend(script_args.iter().cloned());
 
     Ok((binary, args))
 }
@@ -183,28 +187,62 @@ pub fn build_script_command(
 /// use stroem_common::language::ScriptLanguage;
 ///
 /// // Shell: simple passthrough
-/// let cmd = build_container_file_cmd("/workspace/run.sh", ScriptLanguage::Shell, &[], None);
+/// let cmd = build_container_file_cmd("/workspace/run.sh", ScriptLanguage::Shell, &[], None, &[]);
 /// assert_eq!(cmd, vec!["sh", "-c", "/workspace/run.sh"]);
 ///
-/// // Python: generates interpreter-detection chain pointing at the file
-/// let cmd = build_container_file_cmd("/workspace/hello.py", ScriptLanguage::Python, &[], None);
+/// // Python: generates interpreter-detection chain pointing at the file (path is shell-escaped)
+/// let cmd = build_container_file_cmd("/workspace/hello.py", ScriptLanguage::Python, &[], None, &[]);
 /// assert_eq!(cmd[0], "sh");
 /// assert!(cmd[2].contains("command -v uv"));
-/// assert!(cmd[2].contains("/workspace/hello.py"));
+/// assert!(cmd[2].contains("'/workspace/hello.py'"));
 /// ```
 pub fn build_container_file_cmd(
     file_path: &str,
     lang: ScriptLanguage,
     deps: &[String],
     interpreter_override: Option<&str>,
+    script_args: &[String],
 ) -> Vec<String> {
+    let args_suffix = if script_args.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            script_args
+                .iter()
+                .map(|a| shell_escape(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
+
     if lang.is_shell() && deps.is_empty() && interpreter_override.is_none() {
-        return vec!["sh".to_string(), "-c".to_string(), file_path.to_string()];
+        if script_args.is_empty() {
+            return vec!["sh".to_string(), "-c".to_string(), file_path.to_string()];
+        } else {
+            // sh -c "file_path" sh arg1 arg2 — POSIX positional args ($1, $2, ...)
+            let mut result = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                file_path.to_string(),
+                "sh".to_string(),
+            ];
+            result.extend(script_args.iter().cloned());
+            return result;
+        }
     }
+
+    // Shell-escape the file path to prevent injection when interpolated into sh -c strings.
+    // The passthrough case (shell + no deps + no interpreter + no args) returns exec-form
+    // vectors where each element is a separate OS argument, so escaping is not needed there.
+    let escaped_path = shell_escape(file_path);
 
     let mut script = String::new();
 
     // Build the interpreter invocation for the file path.
+    // SECURITY: `interpreter_override` is validated at parse time to contain only
+    // [a-zA-Z0-9._\-/+] characters (see validation.rs), so it is safe to interpolate
+    // directly into shell command strings without escaping.
     if let Some(interp) = interpreter_override {
         if interp == "uv" && !deps.is_empty() {
             let with_args = deps
@@ -212,7 +250,9 @@ pub fn build_container_file_cmd(
                 .map(|d| format!("--with {}", shell_escape(d)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            script.push_str(&format!("{interp} run {with_args} {file_path}"));
+            script.push_str(&format!(
+                "{interp} run {with_args} {escaped_path}{args_suffix}"
+            ));
         } else {
             // Install deps first (e.g. python3 -m pip install ...), then run the file.
             if let Some(install_cmd) = build_dep_install_prefix(lang, interp, deps) {
@@ -226,9 +266,9 @@ pub fn build_container_file_cmd(
                 .unwrap_or_default();
             let pre = pre_args.join(" ");
             if pre.is_empty() {
-                script.push_str(&format!("{interp} {file_path}"));
+                script.push_str(&format!("{interp} {escaped_path}{args_suffix}"));
             } else {
-                script.push_str(&format!("{interp} {pre} {file_path}"));
+                script.push_str(&format!("{interp} {pre} {escaped_path}{args_suffix}"));
             }
         }
     } else {
@@ -246,15 +286,17 @@ pub fn build_container_file_cmd(
                     .map(|d| format!("--with {}", shell_escape(d)))
                     .collect::<Vec<_>>()
                     .join(" ");
-                branch.push_str(&format!("{binary} run {with_args} {file_path}"));
+                branch.push_str(&format!(
+                    "{binary} run {with_args} {escaped_path}{args_suffix}"
+                ));
             } else {
                 if let Some(install_cmd) = build_dep_install_prefix(lang, binary, deps) {
                     branch.push_str(&format!("{install_cmd}\n  "));
                 }
                 if pre.is_empty() {
-                    branch.push_str(&format!("{binary} {file_path}"));
+                    branch.push_str(&format!("{binary} {escaped_path}{args_suffix}"));
                 } else {
-                    branch.push_str(&format!("{binary} {pre} {file_path}"));
+                    branch.push_str(&format!("{binary} {pre} {escaped_path}{args_suffix}"));
                 }
             }
 
@@ -299,11 +341,37 @@ pub fn build_container_script_cmd(
     lang: ScriptLanguage,
     deps: &[String],
     interpreter_override: Option<&str>,
+    script_args: &[String],
 ) -> Vec<String> {
     if lang.is_shell() && deps.is_empty() && interpreter_override.is_none() {
-        // Shell with no special config — use the original sh -c path
-        return vec!["sh".to_string(), "-c".to_string(), content.to_string()];
+        if script_args.is_empty() {
+            // Shell with no special config — use the original sh -c path
+            return vec!["sh".to_string(), "-c".to_string(), content.to_string()];
+        } else {
+            // sh -c "code" sh arg1 arg2 — POSIX positional args ($1, $2, ...)
+            let mut result = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                content.to_string(),
+                "sh".to_string(),
+            ];
+            result.extend(script_args.iter().cloned());
+            return result;
+        }
     }
+
+    let args_suffix = if script_args.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            script_args
+                .iter()
+                .map(|a| shell_escape(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    };
 
     let ext = lang.extension();
     // UUID in path prevents collisions between concurrent container executions (Fix I4).
@@ -328,7 +396,9 @@ pub fn build_container_script_cmd(
                 .map(|d| format!("--with {}", shell_escape(d)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            script.push_str(&format!("{interp} run {with_args} {script_file}"));
+            script.push_str(&format!(
+                "{interp} run {with_args} {script_file}{args_suffix}"
+            ));
         } else {
             if let Some(install_cmd) = build_dep_install_prefix(lang, interp, deps) {
                 script.push_str(&format!("{install_cmd}\n"));
@@ -341,9 +411,9 @@ pub fn build_container_script_cmd(
                 .unwrap_or_default();
             let pre = pre_args.join(" ");
             if pre.is_empty() {
-                script.push_str(&format!("{interp} {script_file}"));
+                script.push_str(&format!("{interp} {script_file}{args_suffix}"));
             } else {
-                script.push_str(&format!("{interp} {pre} {script_file}"));
+                script.push_str(&format!("{interp} {pre} {script_file}{args_suffix}"));
             }
         }
     } else {
@@ -363,15 +433,17 @@ pub fn build_container_script_cmd(
                     .map(|d| format!("--with {}", shell_escape(d)))
                     .collect::<Vec<_>>()
                     .join(" ");
-                branch.push_str(&format!("{binary} run {with_args} {script_file}"));
+                branch.push_str(&format!(
+                    "{binary} run {with_args} {script_file}{args_suffix}"
+                ));
             } else {
                 if let Some(install_cmd) = build_dep_install_prefix(lang, binary, deps) {
                     branch.push_str(&format!("{install_cmd}\n  "));
                 }
                 if pre.is_empty() {
-                    branch.push_str(&format!("{binary} {script_file}"));
+                    branch.push_str(&format!("{binary} {script_file}{args_suffix}"));
                 } else {
-                    branch.push_str(&format!("{binary} {pre} {script_file}"));
+                    branch.push_str(&format!("{binary} {pre} {script_file}{args_suffix}"));
                 }
             }
 
@@ -539,13 +611,14 @@ mod tests {
 
     #[test]
     fn test_build_container_script_cmd_shell_passthrough() {
-        let cmd = build_container_script_cmd("echo hello", ScriptLanguage::Shell, &[], None);
+        let cmd = build_container_script_cmd("echo hello", ScriptLanguage::Shell, &[], None, &[]);
         assert_eq!(cmd, vec!["sh", "-c", "echo hello"]);
     }
 
     #[test]
     fn test_build_container_script_cmd_python() {
-        let cmd = build_container_script_cmd("print('hello')", ScriptLanguage::Python, &[], None);
+        let cmd =
+            build_container_script_cmd("print('hello')", ScriptLanguage::Python, &[], None, &[]);
         assert_eq!(cmd.len(), 3);
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -560,8 +633,8 @@ mod tests {
     fn test_build_container_script_cmd_delimiter_is_unique() {
         // Each invocation must produce a different delimiter so concurrent containers
         // cannot collide or inject content across heredocs.
-        let cmd1 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None);
-        let cmd2 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None);
+        let cmd1 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None, &[]);
+        let cmd2 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None, &[]);
         let delim1 = cmd1[2].lines().find(|l| l.contains("STROEM_EOF_")).unwrap();
         let delim2 = cmd2[2].lines().find(|l| l.contains("STROEM_EOF_")).unwrap();
         assert_ne!(
@@ -573,8 +646,8 @@ mod tests {
     #[test]
     fn test_build_container_script_cmd_script_path_is_unique() {
         // Each invocation must produce a different /tmp script path.
-        let cmd1 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None);
-        let cmd2 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None);
+        let cmd1 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None, &[]);
+        let cmd2 = build_container_script_cmd("x=1", ScriptLanguage::Python, &[], None, &[]);
         let path1 = cmd1[2]
             .lines()
             .find(|l| l.contains("/tmp/_stroem_script_"))
@@ -598,6 +671,7 @@ mod tests {
             ScriptLanguage::Python,
             &[tricky.to_string()],
             None,
+            &[],
         );
         assert!(
             cmd[2].contains("'pkg'\\''evil'"),
@@ -613,6 +687,7 @@ mod tests {
             ScriptLanguage::Python,
             &[],
             Some("python3.12"),
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -628,14 +703,20 @@ mod tests {
             ScriptLanguage::Python,
             &["requests".to_string()],
             None,
+            &[],
         );
         assert!(cmd[2].contains("--with 'requests'"));
     }
 
     #[test]
     fn test_build_container_script_cmd_javascript() {
-        let cmd =
-            build_container_script_cmd("console.log('hi')", ScriptLanguage::JavaScript, &[], None);
+        let cmd = build_container_script_cmd(
+            "console.log('hi')",
+            ScriptLanguage::JavaScript,
+            &[],
+            None,
+            &[],
+        );
         assert!(cmd[2].contains("command -v bun"));
         assert!(cmd[2].contains("command -v node"));
         // The path contains a UUID, so match on the stable prefix and extension.
@@ -650,6 +731,7 @@ mod tests {
             ScriptLanguage::Go,
             &[],
             None,
+            &[],
         );
         // The path contains a UUID, so match on the stable prefix and extension.
         assert!(cmd[2].contains("/tmp/_stroem_script_"));
@@ -661,7 +743,8 @@ mod tests {
 
     #[test]
     fn test_build_container_file_cmd_shell_passthrough() {
-        let cmd = build_container_file_cmd("/workspace/run.sh", ScriptLanguage::Shell, &[], None);
+        let cmd =
+            build_container_file_cmd("/workspace/run.sh", ScriptLanguage::Shell, &[], None, &[]);
         assert_eq!(cmd, vec!["sh", "-c", "/workspace/run.sh"]);
     }
 
@@ -672,6 +755,7 @@ mod tests {
             ScriptLanguage::Python,
             &[],
             None,
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -679,9 +763,9 @@ mod tests {
         assert!(!cmd[2].contains("STROEM_EOF"), "must not use heredoc");
         assert!(cmd[2].contains("command -v uv"));
         assert!(cmd[2].contains("command -v python3"));
-        assert!(cmd[2].contains("/workspace/actions/hello.py"));
-        // uv branch uses "uv run /workspace/..."
-        assert!(cmd[2].contains("uv run /workspace/actions/hello.py"));
+        assert!(cmd[2].contains("'/workspace/actions/hello.py'"));
+        // uv branch uses "uv run '/workspace/...'" (path is shell-escaped)
+        assert!(cmd[2].contains("uv run '/workspace/actions/hello.py'"));
     }
 
     #[test]
@@ -691,11 +775,12 @@ mod tests {
             ScriptLanguage::Python,
             &["requests".to_string()],
             None,
+            &[],
         );
         assert!(!cmd[2].contains("STROEM_EOF"), "must not use heredoc");
         // uv branch: --with flag
         assert!(cmd[2].contains("--with 'requests'"));
-        assert!(cmd[2].contains("/workspace/actions/fetch.py"));
+        assert!(cmd[2].contains("'/workspace/actions/fetch.py'"));
     }
 
     #[test]
@@ -705,10 +790,11 @@ mod tests {
             ScriptLanguage::Python,
             &[],
             Some("python3.12"),
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert!(!cmd[2].contains("STROEM_EOF"), "must not use heredoc");
-        assert!(cmd[2].contains("python3.12 /workspace/actions/hello.py"));
+        assert!(cmd[2].contains("python3.12 '/workspace/actions/hello.py'"));
     }
 
     #[test]
@@ -718,8 +804,9 @@ mod tests {
             ScriptLanguage::Python,
             &["httpx".to_string()],
             Some("uv"),
+            &[],
         );
-        assert!(cmd[2].contains("uv run --with 'httpx' /workspace/actions/run.py"));
+        assert!(cmd[2].contains("uv run --with 'httpx' '/workspace/actions/run.py'"));
     }
 
     #[test]
@@ -729,11 +816,12 @@ mod tests {
             ScriptLanguage::JavaScript,
             &[],
             None,
+            &[],
         );
         assert!(!cmd[2].contains("STROEM_EOF"), "must not use heredoc");
         assert!(cmd[2].contains("command -v bun"));
         assert!(cmd[2].contains("command -v node"));
-        assert!(cmd[2].contains("/workspace/actions/script.js"));
+        assert!(cmd[2].contains("'/workspace/actions/script.js'"));
     }
 
     #[test]
@@ -743,19 +831,25 @@ mod tests {
             ScriptLanguage::TypeScript,
             &[],
             None,
+            &[],
         );
         assert!(!cmd[2].contains("STROEM_EOF"), "must not use heredoc");
         assert!(cmd[2].contains("command -v bun"));
         assert!(cmd[2].contains("command -v deno"));
-        assert!(cmd[2].contains("/workspace/actions/task.ts"));
+        assert!(cmd[2].contains("'/workspace/actions/task.ts'"));
     }
 
     #[test]
     fn test_build_container_file_cmd_go() {
-        let cmd =
-            build_container_file_cmd("/workspace/actions/main.go", ScriptLanguage::Go, &[], None);
+        let cmd = build_container_file_cmd(
+            "/workspace/actions/main.go",
+            ScriptLanguage::Go,
+            &[],
+            None,
+            &[],
+        );
         assert!(!cmd[2].contains("STROEM_EOF"), "must not use heredoc");
-        assert!(cmd[2].contains("go run /workspace/actions/main.go"));
+        assert!(cmd[2].contains("go run '/workspace/actions/main.go'"));
     }
 
     #[test]
@@ -765,6 +859,7 @@ mod tests {
             ScriptLanguage::Python,
             &["pkg'evil".to_string()],
             None,
+            &[],
         );
         assert!(
             cmd[2].contains("'pkg'\\''evil'"),
@@ -826,6 +921,7 @@ mod tests {
             ScriptLanguage::TypeScript,
             &[],
             None,
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -856,6 +952,7 @@ mod tests {
             ScriptLanguage::Shell,
             &["bash-dep".to_string()],
             None,
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -876,7 +973,7 @@ mod tests {
     fn test_build_container_script_cmd_shell_with_interpreter() {
         // Shell with an interpreter override must NOT use the passthrough path.
         let cmd =
-            build_container_script_cmd("echo hello", ScriptLanguage::Shell, &[], Some("bash"));
+            build_container_script_cmd("echo hello", ScriptLanguage::Shell, &[], Some("bash"), &[]);
         assert_eq!(cmd[0], "sh");
         // Must NOT be the three-element passthrough
         assert!(
@@ -905,6 +1002,7 @@ mod tests {
             ScriptLanguage::Python,
             &["httpx".to_string(), "certifi".to_string()],
             Some("uv"),
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -931,6 +1029,7 @@ mod tests {
             ScriptLanguage::Python,
             &[],
             Some("python3.12"),
+            &[],
         );
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
@@ -985,6 +1084,319 @@ mod tests {
             perms.mode() & 0o777,
             0o700,
             "script file must have 0o700 permissions"
+        );
+    }
+
+    // ─── Script args tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_build_container_script_cmd_shell_with_args() {
+        let args = vec!["--env".to_string(), "production".to_string()];
+        let cmd = build_container_script_cmd("echo $1 $2", ScriptLanguage::Shell, &[], None, &args);
+        // sh -c "echo $1 $2" sh --env production
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert_eq!(cmd[2], "echo $1 $2");
+        assert_eq!(cmd[3], "sh"); // $0 placeholder
+        assert_eq!(cmd[4], "--env");
+        assert_eq!(cmd[5], "production");
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_shell_no_args_unchanged() {
+        let cmd = build_container_script_cmd("echo hello", ScriptLanguage::Shell, &[], None, &[]);
+        assert_eq!(cmd, vec!["sh", "-c", "echo hello"]);
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_python_with_args() {
+        let args = vec!["--input".to_string(), "data.csv".to_string()];
+        let cmd = build_container_script_cmd(
+            "import sys; print(sys.argv)",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        // The command string should contain the args shell-escaped
+        assert!(cmd[2].contains("--input"));
+        assert!(cmd[2].contains("data.csv"));
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_shell_with_args() {
+        let args = vec!["arg1".to_string(), "arg 2".to_string()];
+        let cmd =
+            build_container_file_cmd("/workspace/run.sh", ScriptLanguage::Shell, &[], None, &args);
+        // sh -c "/workspace/run.sh" sh arg1 "arg 2"
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert_eq!(cmd[2], "/workspace/run.sh");
+        assert_eq!(cmd[3], "sh"); // $0 placeholder
+        assert_eq!(cmd[4], "arg1");
+        assert_eq!(cmd[5], "arg 2");
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_shell_no_args_unchanged() {
+        let cmd =
+            build_container_file_cmd("/workspace/run.sh", ScriptLanguage::Shell, &[], None, &[]);
+        assert_eq!(cmd, vec!["sh", "-c", "/workspace/run.sh"]);
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_python_with_args() {
+        let args = vec!["--epochs".to_string(), "10".to_string()];
+        let cmd = build_container_file_cmd(
+            "/workspace/train.py",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        // Args should be shell-escaped and appended after the file path
+        assert!(cmd[2].contains("/workspace/train.py"));
+        assert!(cmd[2].contains("--epochs"));
+        assert!(cmd[2].contains("10"));
+    }
+
+    #[test]
+    fn test_build_script_command_with_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test.sh");
+        std::fs::write(&script_path, "#!/bin/bash\necho $@").unwrap();
+
+        let args = vec!["--verbose".to_string()];
+        let (binary, result_args) = build_script_command(
+            ScriptLanguage::Shell,
+            &script_path,
+            &[],
+            Some("bash"),
+            &args,
+        )
+        .unwrap();
+        assert_eq!(binary, "bash");
+        // Last arg should be "--verbose"
+        assert_eq!(result_args.last().unwrap(), "--verbose");
+        // Script path should be second-to-last
+        assert!(result_args[result_args.len() - 2].contains("test.sh"));
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_args_shell_escaped() {
+        let args = vec!["hello world".to_string(), "it's".to_string()];
+        let cmd = build_container_file_cmd(
+            "/workspace/run.py",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &args,
+        );
+        // Args with spaces and quotes should be shell-escaped in the command string
+        let script = &cmd[2];
+        assert!(
+            script.contains("'hello world'") || script.contains("hello\\ world"),
+            "expected shell-escaped 'hello world' in: {}",
+            script
+        );
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_typescript_with_args() {
+        let args = vec!["--port".to_string(), "3000".to_string()];
+        let cmd = build_container_script_cmd(
+            "console.log('hi')",
+            ScriptLanguage::TypeScript,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(cmd[0], "sh");
+        assert!(cmd[2].contains("'--port'"));
+        assert!(cmd[2].contains("'3000'"));
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_javascript_with_args() {
+        let args = vec!["--verbose".to_string()];
+        let cmd = build_container_script_cmd(
+            "console.log('hi')",
+            ScriptLanguage::JavaScript,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(cmd[0], "sh");
+        assert!(cmd[2].contains("'--verbose'"));
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_go_with_args() {
+        let args = vec!["--config".to_string(), "prod.yaml".to_string()];
+        let cmd = build_container_script_cmd("package main", ScriptLanguage::Go, &[], None, &args);
+        assert_eq!(cmd[0], "sh");
+        assert!(cmd[2].contains("'--config'"));
+        assert!(cmd[2].contains("'prod.yaml'"));
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_typescript_with_args() {
+        let args = vec!["--port".to_string(), "8080".to_string()];
+        let cmd = build_container_file_cmd(
+            "/workspace/server.ts",
+            ScriptLanguage::TypeScript,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(cmd[0], "sh");
+        assert!(cmd[2].contains("'/workspace/server.ts'"));
+        assert!(cmd[2].contains("'--port'"));
+        assert!(cmd[2].contains("'8080'"));
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_javascript_with_args() {
+        let args = vec!["run".to_string()];
+        let cmd = build_container_file_cmd(
+            "/workspace/index.js",
+            ScriptLanguage::JavaScript,
+            &[],
+            None,
+            &args,
+        );
+        assert_eq!(cmd[0], "sh");
+        assert!(cmd[2].contains("'/workspace/index.js'"));
+        assert!(cmd[2].contains("'run'"));
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_go_with_args() {
+        let args = vec!["--flag".to_string()];
+        let cmd =
+            build_container_file_cmd("/workspace/main.go", ScriptLanguage::Go, &[], None, &args);
+        assert_eq!(cmd[0], "sh");
+        assert!(cmd[2].contains("'/workspace/main.go'"));
+        assert!(cmd[2].contains("'--flag'"));
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_args_special_chars() {
+        // Test shell metacharacters are properly escaped
+        let args = vec![
+            "$HOME".to_string(),
+            "`whoami`".to_string(),
+            "hello\nworld".to_string(),
+            "a;b".to_string(),
+        ];
+        let cmd = build_container_script_cmd(
+            "import sys; print(sys.argv)",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &args,
+        );
+        let script = &cmd[2];
+        // All dangerous chars must be inside single quotes
+        assert!(script.contains("'$HOME'"), "$ must be quoted: {}", script);
+        assert!(
+            script.contains("'`whoami`'"),
+            "backticks must be quoted: {}",
+            script
+        );
+        assert!(
+            script.contains("'a;b'"),
+            "semicolons must be quoted: {}",
+            script
+        );
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_args_single_quote_escaped() {
+        let args = vec!["it's".to_string()];
+        let cmd = build_container_script_cmd(
+            "import sys; print(sys.argv)",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &args,
+        );
+        let script = &cmd[2];
+        assert!(
+            script.contains("'it'\\''s'"),
+            "single quote must be escaped as '\\'' : {}",
+            script
+        );
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_args_single_quote_escaped() {
+        let args = vec!["it's".to_string()];
+        let cmd = build_container_file_cmd(
+            "/workspace/run.py",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &args,
+        );
+        let script = &cmd[2];
+        assert!(
+            script.contains("'it'\\''s'"),
+            "single quote must be escaped: {}",
+            script
+        );
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_python_with_deps_and_args() {
+        let deps = vec!["requests".to_string()];
+        let args = vec!["--input".to_string(), "data.csv".to_string()];
+        let cmd = build_container_file_cmd(
+            "/workspace/fetch.py",
+            ScriptLanguage::Python,
+            &deps,
+            None,
+            &args,
+        );
+        let script = &cmd[2];
+        // uv branch: deps via --with, then file path, then args
+        assert!(script.contains("--with 'requests'"), "deps: {}", script);
+        assert!(script.contains("'/workspace/fetch.py'"), "path: {}", script);
+        assert!(script.contains("'--input'"), "args: {}", script);
+        assert!(script.contains("'data.csv'"), "args: {}", script);
+    }
+
+    #[test]
+    fn test_build_container_script_cmd_python_with_deps_and_args() {
+        let deps = vec!["pandas".to_string()];
+        let args = vec!["--output".to_string(), "result.json".to_string()];
+        let cmd =
+            build_container_script_cmd("import pandas", ScriptLanguage::Python, &deps, None, &args);
+        let script = &cmd[2];
+        assert!(script.contains("--with 'pandas'"), "deps: {}", script);
+        assert!(script.contains("'--output'"), "args: {}", script);
+        assert!(script.contains("'result.json'"), "args: {}", script);
+    }
+
+    #[test]
+    fn test_build_container_file_cmd_path_shell_escaped() {
+        // Verify the security fix: file paths with spaces/metacharacters are escaped
+        let cmd = build_container_file_cmd(
+            "/workspace/my script.py",
+            ScriptLanguage::Python,
+            &[],
+            None,
+            &[],
+        );
+        let script = &cmd[2];
+        assert!(
+            script.contains("'/workspace/my script.py'"),
+            "file path with spaces must be shell-escaped: {}",
+            script
         );
     }
 }

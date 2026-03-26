@@ -242,6 +242,13 @@ pub fn render_action_spec(
         spec_obj.insert("manifest".to_string(), rendered_manifest);
     }
 
+    // Render args array elements (e.g. ["{{ input.target }}", "--region", "{{ input.region }}"])
+    if let Some(args_val) = spec_obj.get("args") {
+        let rendered_args = render_json_strings(args_val, &spec_context)
+            .context("Failed to render args templates")?;
+        spec_obj.insert("args".to_string(), rendered_args);
+    }
+
     Ok(Some(serde_json::Value::Object(spec_obj)))
 }
 
@@ -348,6 +355,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
             tags: vec![],
             image: None,
             command: None,
@@ -832,6 +840,82 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["script"], "echo hello");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_args_from_input() {
+        let spec = serde_json::json!({
+            "type": "script",
+            "script": "echo test",
+            "args": ["{{ input.target }}", "--region", "{{ input.region }}"]
+        });
+        let input = serde_json::json!({"target": "prod", "region": "us-east-1"});
+        let secrets = serde_json::json!({});
+        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[])
+            .unwrap()
+            .unwrap();
+        let args = result["args"].as_array().unwrap();
+        assert_eq!(args[0], "prod");
+        assert_eq!(args[1], "--region");
+        assert_eq!(args[2], "us-east-1");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_args_from_step_output() {
+        let spec = serde_json::json!({
+            "type": "script",
+            "script": "echo test",
+            "args": ["{{ build.output.artifact }}"]
+        });
+        let input = serde_json::json!({});
+        let secrets = serde_json::json!({});
+        let completed = vec![(
+            "build".to_string(),
+            Some(serde_json::json!({"artifact": "app-v2.tar.gz"})),
+        )];
+        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &completed)
+            .unwrap()
+            .unwrap();
+        let args = result["args"].as_array().unwrap();
+        assert_eq!(args[0], "app-v2.tar.gz");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_args_from_secret() {
+        let spec = serde_json::json!({
+            "type": "script",
+            "script": "echo test",
+            "args": ["--token", "{{ secret.api_token }}"]
+        });
+        let input = serde_json::json!({});
+        let secrets = serde_json::json!({"api_token": "xyz123"});
+        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[])
+            .unwrap()
+            .unwrap();
+        let args = result["args"].as_array().unwrap();
+        assert_eq!(args[0], "--token");
+        assert_eq!(args[1], "xyz123");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_args_with_hyphenated_step_name() {
+        let spec = serde_json::json!({
+            "type": "script",
+            "script": "echo test",
+            "args": ["{{ my_step.output.val }}"]
+        });
+        let input = serde_json::json!({});
+        let secrets = serde_json::json!({});
+        // Step name has hyphen — should be sanitized to underscore in context
+        let completed = vec![(
+            "my-step".to_string(),
+            Some(serde_json::json!({"val": "foo"})),
+        )];
+        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &completed)
+            .unwrap()
+            .unwrap();
+        let args = result["args"].as_array().unwrap();
+        assert_eq!(args[0], "foo");
     }
 
     // -------------------------------------------------------------------------

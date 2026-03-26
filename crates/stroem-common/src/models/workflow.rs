@@ -221,6 +221,11 @@ pub struct ActionDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpreter: Option<String>,
 
+    /// CLI arguments to pass to the script. Each element is a Tera template string.
+    /// Only valid on `type: script` actions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+
     // Tags for worker routing
     #[serde(default)]
     pub tags: Vec<String>,

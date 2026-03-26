@@ -469,6 +469,7 @@ mod tests {
                 language: None,
                 dependencies: vec![],
                 interpreter: None,
+                args: vec![],
                 tags: vec![],
                 image: None,
                 command: None,

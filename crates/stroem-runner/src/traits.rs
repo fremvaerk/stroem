@@ -60,6 +60,8 @@ pub struct RunConfig {
     pub dependencies: Vec<String>,
     /// Override auto-detected interpreter binary.
     pub interpreter: Option<String>,
+    /// CLI arguments to pass to the script (already Tera-rendered).
+    pub args: Vec<String>,
 }
 
 /// A callback for receiving log lines as they're produced

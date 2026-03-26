@@ -943,6 +943,17 @@ fn validate_script_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
         ));
     }
 
+    // Validate args entries are non-empty
+    for (i, arg) in action.args.iter().enumerate() {
+        if arg.is_empty() {
+            bail!(
+                "Action '{}' has empty args entry at index {}",
+                action_name,
+                i
+            );
+        }
+    }
+
     Ok(warnings)
 }
 
@@ -1003,6 +1014,12 @@ fn validate_docker_action(action: &ActionDef, action_name: &str) -> Result<Vec<S
     if action.interpreter.is_some() {
         bail!(
             "Action '{}' is type 'docker' but has 'interpreter' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if !action.args.is_empty() {
+        bail!(
+            "Action '{}' is type 'docker' but has 'args' field (only valid for script actions; use cmd/command/entrypoint for docker)",
             action_name
         );
     }
@@ -1069,6 +1086,12 @@ fn validate_pod_action(action: &ActionDef, action_name: &str) -> Result<Vec<Stri
     if action.interpreter.is_some() {
         bail!(
             "Action '{}' is type 'pod' but has 'interpreter' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if !action.args.is_empty() {
+        bail!(
+            "Action '{}' is type 'pod' but has 'args' field (only valid for script actions; use cmd/command/entrypoint for pod)",
             action_name
         );
     }
@@ -1139,6 +1162,12 @@ fn validate_task_action(action: &ActionDef, action_name: &str) -> Result<Vec<Str
     if action.interpreter.is_some() {
         bail!(
             "Action '{}' is type 'task' but has 'interpreter' field (only valid for script actions)",
+            action_name
+        );
+    }
+    if !action.args.is_empty() {
+        bail!(
+            "Action '{}' is type 'task' but has 'args' field (only valid for script actions)",
             action_name
         );
     }
@@ -1227,6 +1256,12 @@ fn validate_agent_action(action: &ActionDef, action_name: &str) -> Result<Vec<St
     if action.interpreter.is_some() {
         bail!(
             "Action '{}' is type 'agent' but has 'interpreter' field",
+            action_name
+        );
+    }
+    if !action.args.is_empty() {
+        bail!(
+            "Action '{}' is type 'agent' but has 'args' field (only valid for script actions)",
             action_name
         );
     }
@@ -1452,6 +1487,12 @@ fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec
     if action.interpreter.is_some() {
         bail!(
             "Action '{}' is type 'approval' but has 'interpreter' field",
+            action_name
+        );
+    }
+    if !action.args.is_empty() {
+        bail!(
+            "Action '{}' is type 'approval' but has 'args' field (only valid for script actions)",
             action_name
         );
     }
@@ -5827,6 +5868,200 @@ on_suspended:
         assert!(
             result.unwrap_err().to_string().contains("does_not_exist"),
             "expected missing action error"
+        );
+    }
+
+    // ─── Script args validation tests ───────────────────────────────────────
+
+    #[test]
+    fn test_script_action_with_args_valid() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    source: scripts/deploy.sh
+    args:
+      - "--env"
+      - "production"
+tasks:
+  run:
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected ok but got: {:?}", result);
+    }
+
+    #[test]
+    fn test_script_action_with_args_and_inline_script_valid() {
+        let yaml = r#"
+actions:
+  greet:
+    type: script
+    script: 'echo "Hello $1"'
+    args:
+      - "world"
+tasks:
+  run:
+    flow:
+      step1:
+        action: greet
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_ok(), "expected ok but got: {:?}", result);
+    }
+
+    #[test]
+    fn test_script_action_with_empty_arg_rejected() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    source: scripts/deploy.sh
+    args:
+      - "--env"
+      - ""
+tasks:
+  run:
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("empty args entry"),
+            "expected empty args error"
+        );
+    }
+
+    #[test]
+    fn test_docker_action_with_args_rejected() {
+        let yaml = r#"
+actions:
+  build:
+    type: docker
+    image: node:20
+    args:
+      - "--verbose"
+tasks:
+  run:
+    flow:
+      step1:
+        action: build
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("args"), "expected args error, got: {}", err);
+        assert!(
+            err.contains("cmd/command/entrypoint"),
+            "expected hint, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_pod_action_with_args_rejected() {
+        let yaml = r#"
+actions:
+  train:
+    type: pod
+    image: pytorch/pytorch:2.1.0
+    args:
+      - "--epochs"
+      - "10"
+tasks:
+  run:
+    flow:
+      step1:
+        action: train
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("args"), "expected args error, got: {}", err);
+    }
+
+    #[test]
+    fn test_task_action_with_args_rejected() {
+        let yaml = r#"
+actions:
+  run-sub:
+    type: task
+    task: sub-task
+    args:
+      - "nope"
+tasks:
+  sub-task:
+    flow:
+      step1:
+        action: run-sub
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("args"));
+    }
+
+    #[test]
+    fn test_agent_action_with_args_rejected() {
+        let yaml = r#"
+actions:
+  analyze:
+    type: agent
+    provider: anthropic
+    prompt: "Analyze data"
+    args:
+      - "nope"
+tasks:
+  run:
+    flow:
+      step1:
+        action: analyze
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("args"), "expected args error, got: {}", err);
+        assert!(
+            err.contains("agent"),
+            "expected agent type in error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_approval_action_with_args_rejected() {
+        let yaml = r#"
+actions:
+  gate:
+    type: approval
+    message: "Approve deployment?"
+    args:
+      - "nope"
+tasks:
+  run:
+    flow:
+      step1:
+        action: gate
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("args"), "expected args error, got: {}", err);
+        assert!(
+            err.contains("approval"),
+            "expected approval type in error, got: {}",
+            err
         );
     }
 

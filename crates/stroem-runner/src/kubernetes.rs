@@ -68,7 +68,11 @@ impl KubeRunner {
     ) -> serde_json::Value {
         let lang = ScriptLanguage::from_str_opt(config.language.as_deref());
         let cmd = if let Some(ref command) = config.cmd {
-            if lang.is_shell() && config.dependencies.is_empty() && config.interpreter.is_none() {
+            if lang.is_shell()
+                && config.dependencies.is_empty()
+                && config.interpreter.is_none()
+                && config.args.is_empty()
+            {
                 vec!["sh".to_string(), "-c".to_string(), command.clone()]
             } else {
                 script_exec::build_container_script_cmd(
@@ -76,21 +80,27 @@ impl KubeRunner {
                     lang,
                     &config.dependencies,
                     config.interpreter.as_deref(),
+                    &config.args,
                 )
             }
         } else if let Some(ref script) = config.script {
             // `script` is already an absolute path resolved by the executor
             // (e.g. "/workspace/actions/hello.py").
-            if lang.is_shell() && config.dependencies.is_empty() && config.interpreter.is_none() {
+            if lang.is_shell()
+                && config.dependencies.is_empty()
+                && config.interpreter.is_none()
+                && config.args.is_empty()
+            {
                 vec!["sh".to_string(), "-c".to_string(), script.clone()]
             } else {
-                // Non-shell language or deps/interpreter specified: invoke the correct
-                // interpreter on the file rather than running it with sh.
+                // Non-shell language, deps/interpreter specified, or args present:
+                // invoke the correct interpreter on the file.
                 script_exec::build_container_file_cmd(
                     script,
                     lang,
                     &config.dependencies,
                     config.interpreter.as_deref(),
+                    &config.args,
                 )
             }
         } else {
@@ -188,6 +198,7 @@ impl KubeRunner {
                     lang,
                     &config.dependencies,
                     config.interpreter.as_deref(),
+                    &[], // args forbidden on pod type, always empty
                 );
                 container["command"] = serde_json::json!(script_cmd);
             }
@@ -1496,6 +1507,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let mut labels = HashMap::new();
@@ -1568,6 +1580,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let mut labels = HashMap::new();
@@ -1617,6 +1630,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let mut labels = HashMap::new();
@@ -1663,6 +1677,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let mut labels = HashMap::new();
@@ -1728,6 +1743,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let mut labels = HashMap::new();
@@ -1803,6 +1819,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let result = runner
@@ -1836,6 +1853,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -1899,6 +1917,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -1958,6 +1977,7 @@ mod tests {
             language: None, // default shell
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -1998,6 +2018,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec!["requests".to_string()],
             interpreter: None,
+            args: vec![],
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2091,6 +2112,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         }
     }
 
@@ -2234,6 +2256,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2363,6 +2386,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2417,6 +2441,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2483,6 +2508,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2525,6 +2551,7 @@ mod tests {
             language: Some("python".to_string()),
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2566,6 +2593,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3392,6 +3420,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_build_pod_json_with_workspace_shell_args() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+        let config = RunConfig {
+            cmd: Some("echo $1".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/ws".to_string(),
+            action_type: "script".to_string(),
+            image: Some("debian:bookworm-slim".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec!["hello".to_string()],
+        };
+
+        let pod = runner.build_pod_json_with_workspace(
+            "test-pod",
+            &config,
+            "default",
+            &HashMap::new(),
+            "debian:bookworm-slim",
+            &[],
+        );
+
+        let cmd = pod["spec"]["containers"][0]["command"].as_array().unwrap();
+        // With args, falls through to build_container_script_cmd
+        assert_eq!(cmd[0], "sh");
+        assert_eq!(cmd[1], "-c");
+        assert_eq!(cmd[2], "echo $1");
+        assert_eq!(cmd[3], "sh");
+        assert_eq!(cmd[4], "hello");
+    }
+
     /// Integration test: Kubernetes cancellation deletes the pod.
     /// Run with: cargo test -p stroem-runner --features kubernetes -- --ignored test_kube_cancellation
     #[tokio::test]
@@ -3417,6 +3488,7 @@ mod tests {
             language: None,
             dependencies: vec![],
             interpreter: None,
+            args: vec![],
         };
 
         let token = CancellationToken::new();
