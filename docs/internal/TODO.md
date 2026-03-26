@@ -252,7 +252,7 @@ Last updated: 2026-03-13.
 - [ ] Worker semaphore/max-concurrent limit test
 - [ ] E2E: cron scheduler trigger fires job
 - [ ] E2E: multi-workspace scenarios
-- [ ] Playwright: Settings page (API key management)
+- [x] Playwright: Settings page (API key management) — 10 tests in settings.spec.ts
 - [ ] Playwright: OIDC login flow
 - [ ] Playwright: webhook trigger display
 - [ ] Playwright: Dashboard content
