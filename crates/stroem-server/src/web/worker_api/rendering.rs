@@ -137,7 +137,7 @@ pub fn prepare_step_action_input(
     Ok(Some(prepared))
 }
 
-/// Render action_spec templates (env, cmd, script, source, manifest).
+/// Render action_spec templates (env, cmd, script, source, manifest, args).
 ///
 /// Returns `None` if `action_spec` is `None`. Returns the spec unchanged if
 /// it is not a JSON object.
@@ -146,6 +146,9 @@ pub fn render_action_spec(
     rendered_input: Option<&serde_json::Value>,
     secrets: &serde_json::Value,
     completed_steps: &[(String, Option<serde_json::Value>)],
+    loop_item: Option<&serde_json::Value>,
+    loop_index: Option<i32>,
+    loop_total: Option<i32>,
 ) -> Result<Option<serde_json::Value>> {
     let original_spec = match action_spec {
         Some(s) => s,
@@ -171,6 +174,19 @@ pub fn render_action_spec(
         let safe_name = step_name.replace('-', "_");
         spec_ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
     }
+
+    // Inject `each` variable for for_each loop instance steps
+    if let (Some(item), Some(index)) = (loop_item, loop_index) {
+        spec_ctx.insert(
+            "each".to_string(),
+            serde_json::json!({
+                "item": item,
+                "index": index,
+                "total": loop_total,
+            }),
+        );
+    }
+
     let spec_context = serde_json::Value::Object(spec_ctx);
 
     // Render env values if present
@@ -260,6 +276,9 @@ pub fn render_image(
     rendered_input: Option<&serde_json::Value>,
     secrets: &serde_json::Value,
     completed_steps: &[(String, Option<serde_json::Value>)],
+    loop_item: Option<&serde_json::Value>,
+    loop_index: Option<i32>,
+    loop_total: Option<i32>,
 ) -> Result<Option<String>> {
     let image_str = match image {
         Some(s) => s,
@@ -282,6 +301,19 @@ pub fn render_image(
         let safe_name = step_name.replace('-', "_");
         spec_ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
     }
+
+    // Inject `each` variable for for_each loop instance steps
+    if let (Some(item), Some(index)) = (loop_item, loop_index) {
+        spec_ctx.insert(
+            "each".to_string(),
+            serde_json::json!({
+                "item": item,
+                "index": index,
+                "total": loop_total,
+            }),
+        );
+    }
+
     let spec_context = serde_json::Value::Object(spec_ctx);
 
     let img_opt = Some(image_str.to_string());
@@ -669,7 +701,7 @@ mod tests {
     #[test]
     fn test_render_action_spec_none_returns_none() {
         let secrets = json!({});
-        let result = render_action_spec(None, None, &secrets, &[]).unwrap();
+        let result = render_action_spec(None, None, &secrets, &[], None, None, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -677,7 +709,8 @@ mod tests {
     fn test_render_action_spec_non_object_returns_unchanged() {
         let spec = json!("just a string");
         let secrets = json!({});
-        let result = render_action_spec(Some(&spec), None, &secrets, &[]).unwrap();
+        let result =
+            render_action_spec(Some(&spec), None, &secrets, &[], None, None, None).unwrap();
         assert_eq!(result, Some(json!("just a string")));
     }
 
@@ -687,9 +720,17 @@ mod tests {
         let rendered_input = json!({"key": "world"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&rendered_input),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(result["env"]["MY_VAR"], "prefix-world");
     }
@@ -700,9 +741,17 @@ mod tests {
         let rendered_input = json!({"message": "hello"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&rendered_input),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(result["cmd"], "echo hello");
     }
@@ -713,9 +762,17 @@ mod tests {
         let rendered_input = json!({"greeting": "hi"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&rendered_input),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(result["script"], "#!/bin/bash\necho hi");
     }
@@ -732,9 +789,17 @@ mod tests {
         let rendered_input = json!({"sa_name": "my-service-account"});
         let secrets = json!({});
 
-        let result = render_action_spec(Some(&spec), Some(&rendered_input), &secrets, &[])
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&rendered_input),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(
             result["manifest"]["spec"]["serviceAccountName"],
@@ -749,15 +814,23 @@ mod tests {
     #[test]
     fn test_render_image_none_returns_none() {
         let secrets = json!({});
-        let result = render_image(None, None, &secrets, &[]).unwrap();
+        let result = render_image(None, None, &secrets, &[], None, None, None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_render_image_no_template_syntax_returns_unchanged() {
         let secrets = json!({});
-        let result =
-            render_image(Some("my-registry/my-image:latest"), None, &secrets, &[]).unwrap();
+        let result = render_image(
+            Some("my-registry/my-image:latest"),
+            None,
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Some("my-registry/my-image:latest".to_string()));
     }
 
@@ -770,6 +843,9 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(result, Some("my-registry/app:v1.2.3".to_string()));
@@ -784,6 +860,9 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(result, Some("private.registry.io/app:latest".to_string()));
@@ -806,6 +885,9 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &completed_steps,
+            None,
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -822,9 +904,17 @@ mod tests {
         let secrets = json!({});
         let completed_steps = vec![("classify".to_string(), Some(json!({"category": "feature"})))];
 
-        let result = render_action_spec(Some(&spec), None, &secrets, &completed_steps)
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            None,
+            &secrets,
+            &completed_steps,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(result["env"]["CATEGORY"], "feature");
     }
@@ -835,9 +925,17 @@ mod tests {
         let secrets = json!({});
         let completed_steps = vec![("my-step".to_string(), Some(json!({"value": "hello"})))];
 
-        let result = render_action_spec(Some(&spec), None, &secrets, &completed_steps)
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            None,
+            &secrets,
+            &completed_steps,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(result["script"], "echo hello");
     }
@@ -851,7 +949,7 @@ mod tests {
         });
         let input = serde_json::json!({"target": "prod", "region": "us-east-1"});
         let secrets = serde_json::json!({});
-        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[])
+        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[], None, None, None)
             .unwrap()
             .unwrap();
         let args = result["args"].as_array().unwrap();
@@ -873,9 +971,17 @@ mod tests {
             "build".to_string(),
             Some(serde_json::json!({"artifact": "app-v2.tar.gz"})),
         )];
-        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &completed)
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&input),
+            &secrets,
+            &completed,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         let args = result["args"].as_array().unwrap();
         assert_eq!(args[0], "app-v2.tar.gz");
     }
@@ -889,7 +995,7 @@ mod tests {
         });
         let input = serde_json::json!({});
         let secrets = serde_json::json!({"api_token": "xyz123"});
-        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[])
+        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[], None, None, None)
             .unwrap()
             .unwrap();
         let args = result["args"].as_array().unwrap();
@@ -911,9 +1017,17 @@ mod tests {
             "my-step".to_string(),
             Some(serde_json::json!({"val": "foo"})),
         )];
-        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &completed)
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&input),
+            &secrets,
+            &completed,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         let args = result["args"].as_array().unwrap();
         assert_eq!(args[0], "foo");
     }
@@ -1157,5 +1271,61 @@ mod tests {
         assert_eq!(input_val["sql"], "SELECT 1");
         assert_eq!(input_val["clickhouse"]["host"], "ch.example.com");
         assert!(input_val.get("extra_field").is_none());
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_args_with_each_context() {
+        let spec = serde_json::json!({
+            "type": "script",
+            "script": "echo test",
+            "args": ["{{ each.item }}", "--index", "{{ each.index }}"]
+        });
+        let input = serde_json::json!({});
+        let secrets = serde_json::json!({});
+        let loop_item = serde_json::json!("my-item");
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&input),
+            &secrets,
+            &[],
+            Some(&loop_item),
+            Some(2),
+            Some(5),
+        )
+        .unwrap()
+        .unwrap();
+        let args = result["args"].as_array().unwrap();
+        assert_eq!(args[0], "my-item");
+        assert_eq!(args[1], "--index");
+        assert_eq!(args[2], "2");
+    }
+
+    #[test]
+    fn test_render_action_spec_renders_env_with_each_context() {
+        let spec = serde_json::json!({
+            "type": "script",
+            "script": "echo test",
+            "env": {
+                "ITEM": "{{ each.item }}",
+                "INDEX": "{{ each.index }}"
+            }
+        });
+        let input = serde_json::json!({});
+        let secrets = serde_json::json!({});
+        let loop_item = serde_json::json!("batch-42");
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&input),
+            &secrets,
+            &[],
+            Some(&loop_item),
+            Some(3),
+            Some(10),
+        )
+        .unwrap()
+        .unwrap();
+        let env = result["env"].as_object().unwrap();
+        assert_eq!(env["ITEM"], "batch-42");
+        assert_eq!(env["INDEX"], "3");
     }
 }

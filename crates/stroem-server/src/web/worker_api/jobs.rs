@@ -344,6 +344,9 @@ pub async fn claim_job(
         rendered_input.as_ref(),
         &secrets_value,
         &completed_steps,
+        step.loop_item.as_ref(),
+        step.loop_index,
+        step.loop_total,
     ) {
         Ok(spec) => spec,
         Err(e) => {
@@ -358,6 +361,9 @@ pub async fn claim_job(
         rendered_input.as_ref(),
         &secrets_value,
         &completed_steps,
+        step.loop_item.as_ref(),
+        step.loop_index,
+        step.loop_total,
     ) {
         Ok(img) => img,
         Err(e) => {

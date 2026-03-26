@@ -285,7 +285,7 @@ Last updated: 2026-03-13.
 - [x] `build_container_script_cmd` args with special characters (`$HOME`, backticks, newlines)
 - [x] Shell escape assertion: verify single-quote escaping for `it's` → `'it'\''s'`
 - [x] Args + dependencies + interpreter ordering (`uv run --with dep script.py arg1`)
-- [ ] Args combined with `for_each` loop instances using `{{ each.item }}` — pre-existing limitation: `render_action_spec` context does not include `each` variable (same for env, cmd, script fields). Use `{{ input.x }}` with step input mapping as workaround.
+- [x] `each` context (`each.item`, `each.index`, `each.total`) now available in `render_action_spec` and `render_image` — works in env, cmd, script, source, manifest, args, and image fields for `for_each` loop instances
 - [x] Security: `file_path` shell-escaped in `build_container_file_cmd` non-passthrough branches
 - [x] Security: SECURITY comment at `interpreter_override` interpolation sites
 
