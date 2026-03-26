@@ -8,14 +8,9 @@ export async function login(page: Page) {
   await page.waitForURL("/");
 }
 
-export async function triggerJob(
-  baseURL: string,
-  taskName: string,
-  input: Record<string, unknown> = {},
-  workspace = "default",
-): Promise<string> {
-  // Login to get token
-  const loginRes = await fetch(`${baseURL}/api/auth/login`, {
+/** Get a Bearer token for server-side API calls. */
+export async function getAuthToken(baseURL: string): Promise<string> {
+  const res = await fetch(`${baseURL}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -23,21 +18,44 @@ export async function triggerJob(
       password: "admin",
     }),
   });
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-
-  if (loginRes.ok) {
-    const { access_token } = await loginRes.json();
-    headers["Authorization"] = `Bearer ${access_token}`;
+  if (!res.ok) {
+    throw new Error(`Login failed: ${res.status} ${await res.text()}`);
   }
+  const { access_token } = await res.json();
+  return access_token;
+}
 
-  const res = await fetch(
-    `${baseURL}/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(taskName)}/execute`,
+/** Authenticated fetch wrapper for server-side API calls from tests. */
+export async function apiFetch(
+  baseURL: string,
+  path: string,
+  token: string,
+  init?: RequestInit,
+): Promise<Response> {
+  return fetch(`${baseURL}${path}`, {
+    ...init,
+    headers: {
+      ...((init?.headers as Record<string, string>) || {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+}
+
+export async function triggerJob(
+  baseURL: string,
+  taskName: string,
+  input: Record<string, unknown> = {},
+  workspace = "default",
+): Promise<string> {
+  const token = await getAuthToken(baseURL);
+
+  const res = await apiFetch(
+    baseURL,
+    `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(taskName)}/execute`,
+    token,
     {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ input }),
     },
   );
@@ -48,4 +66,28 @@ export async function triggerJob(
 
   const data = await res.json();
   return data.job_id;
+}
+
+/**
+ * Wait for a job to reach a terminal state (completed or failed).
+ * Uses authenticated fetch.
+ */
+export async function waitForJob(
+  baseURL: string,
+  jobId: string,
+  timeoutMs = 30000,
+): Promise<{ status: string; [key: string]: unknown }> {
+  const token = await getAuthToken(baseURL);
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await apiFetch(baseURL, `/api/jobs/${jobId}`, token);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "completed" || data.status === "failed") {
+        return data;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`Job ${jobId} did not complete within ${timeoutMs}ms`);
 }

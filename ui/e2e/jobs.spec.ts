@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, triggerJob } from "./helpers";
+import { login, triggerJob, waitForJob, getAuthToken, apiFetch } from "./helpers";
 
 test.describe("Jobs", () => {
   test.beforeEach(async ({ page }) => {
@@ -32,11 +32,7 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete so steps have data
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     await page.goto(`/jobs/${jobId}`);
     // Should show the task name
@@ -66,14 +62,11 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     // Verify the API response has started_at set
-    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const token = await getAuthToken(baseURL!);
+    const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
     expect(apiData.started_at).not.toBeNull();
     expect(apiData.completed_at).not.toBeNull();
@@ -101,14 +94,11 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     // Verify job completed successfully with output
-    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const token = await getAuthToken(baseURL!);
+    const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
     expect(apiData.status).toBe("completed");
     expect(apiData.output).not.toBeNull();
@@ -129,11 +119,7 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     await page.goto(`/jobs/${jobId}`);
     // Should NOT show "Job Output" (terminal step `shout-it` has no OUTPUT:)
@@ -147,14 +133,11 @@ test.describe("Jobs", () => {
     const jobId = await triggerJob(baseURL!, "always-failing");
 
     // Wait for job to complete (fail)
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     // Verify it failed via API
-    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const token = await getAuthToken(baseURL!);
+    const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
     expect(apiData.status).toBe("failed");
 
@@ -189,13 +172,10 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete (fail)
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
-    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const token = await getAuthToken(baseURL!);
+    const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
     expect(apiData.status).toBe("failed");
 
@@ -230,13 +210,10 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete (fail)
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
-    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const token = await getAuthToken(baseURL!);
+    const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
     // Job should be failed (step-fail failed), but step-after should have run
     expect(apiData.status).toBe("failed");
@@ -264,11 +241,7 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     await page.goto(`/jobs/${jobId}`);
 
@@ -302,13 +275,10 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
-    const apiRes = await fetch(`${baseURL}/api/jobs/${jobId}`);
+    const token = await getAuthToken(baseURL!);
+    const apiRes = await apiFetch(baseURL!, `/api/jobs/${jobId}`, token);
     const apiData = await apiRes.json();
 
     // The transform step should have empty depends_on
@@ -333,11 +303,7 @@ test.describe("Jobs", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     await page.goto(`/jobs/${jobId}`);
     await expect(

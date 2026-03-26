@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, triggerJob } from "./helpers";
+import { login, triggerJob, waitForJob } from "./helpers";
 
 test.describe("Console and network errors audit", () => {
   test("no console errors or failed network requests across all pages", async ({
@@ -41,11 +41,7 @@ test.describe("Console and network errors audit", () => {
     });
 
     // Wait for job to complete
-    await expect(async () => {
-      const res = await fetch(`${baseURL}/api/jobs/${jobId}`);
-      const data = await res.json();
-      expect(["completed", "failed"]).toContain(data.status);
-    }).toPass({ timeout: 30000 });
+    await waitForJob(baseURL!, jobId);
 
     // 1. Login
     await login(page);
