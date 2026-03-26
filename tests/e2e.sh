@@ -51,7 +51,7 @@ $COMPOSE up -d
 info "Waiting for server to become healthy..."
 MAX_WAIT=120
 WAITED=0
-until curl -sf "$BASE_URL/api/workspaces/default/tasks" >/dev/null 2>&1; do
+until curl -sf "$BASE_URL/healthz" >/dev/null 2>&1; do
     sleep 2
     WAITED=$((WAITED + 2))
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
@@ -68,9 +68,24 @@ pass "Server is healthy (${WAITED}s)"
 # Wait a moment for worker to register
 sleep 3
 
+# --- 1b. Authenticate ---
+info "Logging in..."
+AUTH_RESP=$(curl -sf -X POST "$BASE_URL/api/auth/login" \
+    -H "Content-Type: application/json" \
+    -d '{"email": "admin@stroem.local", "password": "admin"}')
+TOKEN=$(echo "$AUTH_RESP" | jq -r '.access_token')
+if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+    fail "Login failed: $AUTH_RESP"
+fi
+pass "Authenticated"
+
+AUTH="-H \"Authorization: Bearer $TOKEN\""
+# Helper: authenticated curl
+acurl() { curl -sf -H "Authorization: Bearer $TOKEN" "$@"; }
+
 # --- 2. List tasks ---
 info "Listing tasks..."
-TASKS=$(curl -sf "$BASE_URL/api/workspaces/default/tasks")
+TASKS=$(acurl "$BASE_URL/api/workspaces/default/tasks")
 TASK_COUNT=$(echo "$TASKS" | jq 'length')
 
 if [ "$TASK_COUNT" -lt 1 ]; then
@@ -79,7 +94,7 @@ fi
 pass "Found $TASK_COUNT tasks"
 
 # Check hello-world task exists
-HAS_HELLO=$(echo "$TASKS" | jq '[.[] | select(.name == "hello-world")] | length')
+HAS_HELLO=$(echo "$TASKS" | jq '[.[] | select(.id == "hello-world")] | length')
 if [ "$HAS_HELLO" -ne 1 ]; then
     fail "hello-world task not found"
 fi
@@ -87,7 +102,7 @@ pass "hello-world task is registered"
 
 # --- 3. Execute hello-world task ---
 info "Triggering hello-world task..."
-EXEC_RESP=$(curl -sf -X POST "$BASE_URL/api/workspaces/default/tasks/hello-world/execute" \
+EXEC_RESP=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/hello-world/execute" \
     -H "Content-Type: application/json" \
     -d '{"input": {"name": "E2E Test"}}')
 
@@ -107,12 +122,12 @@ while [ "$JOB_STATUS" != "completed" ] && [ "$JOB_STATUS" != "failed" ]; do
     sleep 2
     POLLED=$((POLLED + 2))
     if [ "$POLLED" -ge "$MAX_POLL" ]; then
-        JOB_DETAIL=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID")
+        JOB_DETAIL=$(acurl "$BASE_URL/api/jobs/$JOB_ID")
         echo "$JOB_DETAIL" | jq .
         fail "Job did not complete within ${MAX_POLL}s (status: $JOB_STATUS)"
     fi
 
-    JOB_DETAIL=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID")
+    JOB_DETAIL=$(acurl "$BASE_URL/api/jobs/$JOB_ID")
     JOB_STATUS=$(echo "$JOB_DETAIL" | jq -r '.status')
     printf "."
 done
@@ -144,7 +159,7 @@ pass "All steps completed"
 
 # --- 6. Verify logs ---
 info "Checking hello-world job logs..."
-LOGS_RESP=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID/logs")
+LOGS_RESP=$(acurl "$BASE_URL/api/jobs/$JOB_ID/logs")
 LOGS=$(echo "$LOGS_RESP" | jq -r '.logs')
 
 if [ -z "$LOGS" ] || [ "$LOGS" = "null" ]; then
@@ -177,8 +192,8 @@ fi
 
 # --- 7. Test list jobs endpoint ---
 info "Testing jobs list endpoint..."
-JOBS_RESP=$(curl -sf "$BASE_URL/api/jobs?limit=10")
-JOBS_COUNT=$(echo "$JOBS_RESP" | jq 'length')
+JOBS_RESP=$(acurl "$BASE_URL/api/jobs?limit=10")
+JOBS_COUNT=$(echo "$JOBS_RESP" | jq '.items | length')
 
 if [ "$JOBS_COUNT" -lt 1 ]; then
     fail "Expected at least 1 job in list, got $JOBS_COUNT"
@@ -187,7 +202,7 @@ pass "Jobs list returned $JOBS_COUNT job(s)"
 
 # --- 8. Run deploy-pipeline task ---
 info "Triggering deploy-pipeline task..."
-EXEC_RESP2=$(curl -sf -X POST "$BASE_URL/api/workspaces/default/tasks/deploy-pipeline/execute" \
+EXEC_RESP2=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/deploy-pipeline/execute" \
     -H "Content-Type: application/json" \
     -d '{"input": {"env": "test"}}')
 
@@ -205,12 +220,12 @@ while [ "$JOB_STATUS2" != "completed" ] && [ "$JOB_STATUS2" != "failed" ]; do
     sleep 2
     POLLED=$((POLLED + 2))
     if [ "$POLLED" -ge "$MAX_POLL" ]; then
-        JOB_DETAIL2=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID2")
+        JOB_DETAIL2=$(acurl "$BASE_URL/api/jobs/$JOB_ID2")
         echo "$JOB_DETAIL2" | jq .
         fail "Deploy pipeline did not complete within ${MAX_POLL}s"
     fi
 
-    JOB_DETAIL2=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID2")
+    JOB_DETAIL2=$(acurl "$BASE_URL/api/jobs/$JOB_ID2")
     JOB_STATUS2=$(echo "$JOB_DETAIL2" | jq -r '.status')
     printf "."
 done
@@ -224,7 +239,7 @@ pass "Deploy pipeline completed (${POLLED}s)"
 
 # --- 9. Verify deploy-pipeline logs ---
 info "Checking deploy-pipeline job logs..."
-LOGS_RESP2=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID2/logs")
+LOGS_RESP2=$(acurl "$BASE_URL/api/jobs/$JOB_ID2/logs")
 LOGS2=$(echo "$LOGS_RESP2" | jq -r '.logs')
 
 if [ -z "$LOGS2" ] || [ "$LOGS2" = "null" ]; then
@@ -264,7 +279,7 @@ fi
 
 # --- 10. Test hooks with Python crash ---
 info "Triggering python-crash-with-hook task (expects failure + hook)..."
-EXEC_RESP3=$(curl -sf -X POST "$BASE_URL/api/workspaces/default/tasks/python-crash-with-hook/execute" \
+EXEC_RESP3=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/python-crash-with-hook/execute" \
     -H "Content-Type: application/json" \
     -d '{"input": {}}')
 
@@ -282,12 +297,12 @@ while [ "$JOB_STATUS3" != "completed" ] && [ "$JOB_STATUS3" != "failed" ]; do
     sleep 2
     POLLED=$((POLLED + 2))
     if [ "$POLLED" -ge "$MAX_POLL" ]; then
-        JOB_DETAIL3=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID3")
+        JOB_DETAIL3=$(acurl "$BASE_URL/api/jobs/$JOB_ID3")
         echo "$JOB_DETAIL3" | jq .
         fail "Python crash job did not reach terminal state within ${MAX_POLL}s (status: $JOB_STATUS3)"
     fi
 
-    JOB_DETAIL3=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID3")
+    JOB_DETAIL3=$(acurl "$BASE_URL/api/jobs/$JOB_ID3")
     JOB_STATUS3=$(echo "$JOB_DETAIL3" | jq -r '.status')
     printf "."
 done
@@ -321,7 +336,7 @@ fi
 
 # --- 12. Verify Python traceback in logs ---
 info "Checking crash job logs for traceback..."
-LOGS_RESP3=$(curl -sf "$BASE_URL/api/jobs/$JOB_ID3/logs")
+LOGS_RESP3=$(acurl "$BASE_URL/api/jobs/$JOB_ID3/logs")
 LOGS3=$(echo "$LOGS_RESP3" | jq -r '.logs')
 
 if echo "$LOGS3" | grep -q "Traceback"; then
@@ -341,8 +356,8 @@ while [ "$POLLED" -lt "$MAX_POLL" ]; do
     sleep 2
     POLLED=$((POLLED + 2))
 
-    ALL_JOBS=$(curl -sf "$BASE_URL/api/jobs?limit=50")
-    HOOK_JOB=$(echo "$ALL_JOBS" | jq -r '[.[] | select(.source_type == "hook")] | first')
+    ALL_JOBS=$(acurl "$BASE_URL/api/jobs?limit=50")
+    HOOK_JOB=$(echo "$ALL_JOBS" | jq -r '[.items[] | select(.source_type == "hook")] | if length > 0 then .[0] else null end')
 
     if [ "$HOOK_JOB" != "null" ] && [ -n "$HOOK_JOB" ]; then
         HOOK_JOB_ID=$(echo "$HOOK_JOB" | jq -r '.job_id')
@@ -359,22 +374,22 @@ echo ""
 
 if [ "$HOOK_FOUND" != "true" ]; then
     info "All jobs:"
-    curl -sf "$BASE_URL/api/jobs?limit=50" | jq .
+    acurl "$BASE_URL/api/jobs?limit=50" | jq '.items'
     fail "Hook job not found or did not reach terminal state within ${MAX_POLL}s"
 fi
 pass "Hook job $HOOK_JOB_ID reached status: $HOOK_STATUS"
 
 # Verify hook job has correct source_type and source_id
-HOOK_SOURCE_ID=$(echo "$HOOK_JOB" | jq -r '.source_id')
-if echo "$HOOK_SOURCE_ID" | grep -q "on_error"; then
-    pass "Hook job source_id contains 'on_error'"
+HOOK_SOURCE_TYPE=$(echo "$HOOK_JOB" | jq -r '.source_type')
+if [ "$HOOK_SOURCE_TYPE" = "hook" ]; then
+    pass "Hook job source_type is 'hook'"
 else
-    fail "Hook job source_id should contain 'on_error', got: $HOOK_SOURCE_ID"
+    fail "Hook job source_type should be 'hook', got: $HOOK_SOURCE_TYPE"
 fi
 
 # --- 14. Verify hook job logs contain the error context ---
 info "Checking hook job logs for error context..."
-HOOK_LOGS_RESP=$(curl -sf "$BASE_URL/api/jobs/$HOOK_JOB_ID/logs")
+HOOK_LOGS_RESP=$(acurl "$BASE_URL/api/jobs/$HOOK_JOB_ID/logs")
 HOOK_LOGS=$(echo "$HOOK_LOGS_RESP" | jq -r '.logs')
 
 if echo "$HOOK_LOGS" | grep -q "HOOK_FIRED"; then

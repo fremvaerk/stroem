@@ -33,7 +33,7 @@ services:
       STROEM_CONFIG: /etc/stroem/server-config.yaml
       RUST_LOG: info
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/tasks || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/healthz || exit 1"]
       interval: 3s
       timeout: 5s
       retries: 20

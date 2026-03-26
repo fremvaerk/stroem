@@ -1,8 +1,8 @@
 actions:
   python-crash:
     type: script
+    language: python
     script: |
-      python3 -c "
       import sys
 
       def process_data(data):
@@ -13,7 +13,6 @@ actions:
           print(result)
 
       main()
-      "
 
   log-hook-result:
     type: script
