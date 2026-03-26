@@ -717,6 +717,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_python_inline_with_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = shell_config(
+            Some("import sys; print(' '.join(sys.argv[1:]))"),
+            None,
+            HashMap::new(),
+        );
+        config.workdir = dir.path().to_str().unwrap().to_string();
+        config.language = Some("python".to_string());
+        config.args = vec!["hello".to_string(), "world".to_string()];
+
+        let runner = ShellRunner;
+        let result = runner
+            .execute(config, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let stdout = String::from_utf8_lossy(result.stdout.as_bytes()).to_string();
+        assert!(
+            stdout.contains("hello world"),
+            "expected args in sys.argv, got: {}",
+            stdout
+        );
+    }
+
+    #[tokio::test]
     async fn test_cancellation_no_duplicate_callbacks() {
         let runner = ShellRunner::new();
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));

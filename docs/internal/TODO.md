@@ -276,7 +276,7 @@ Last updated: 2026-03-13.
 - [x] CLI: args template render error propagated (not silently dropped)
 - [x] ShellRunner: shell inline script with args (verify `$1` receives value)
 - [x] ShellRunner: shell source file with args (verify positional args)
-- [ ] ShellRunner: non-shell (Python) with args (verify `sys.argv`) — needs Python on CI runner
+- [x] ShellRunner: non-shell (Python) with args (verify `sys.argv`)
 - [x] DockerRunner: `build_container_config` WithWorkspace + shell + args
 - [x] DockerRunner: `build_container_config` WithWorkspace + Python + args
 - [x] KubeRunner: `build_pod_json_with_workspace` shell + args
