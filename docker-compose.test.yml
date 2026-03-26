@@ -9,6 +9,8 @@ services:
     depends_on:
       server:
         condition: service_healthy
+      worker:
+        condition: service_started
     environment:
       BASE_URL: http://server:8080
       CI: "true"
