@@ -19,13 +19,14 @@ test.describe("Tasks", () => {
     // Click the first task link
     await page.locator("table tbody tr td a").first().click();
     await expect(page.locator("h1")).toBeVisible();
-    // Should show Run Task button
-    await expect(page.locator("text=Run Task")).toBeVisible();
+    // Should show Run Task submit button (not the card title)
+    await expect(page.getByRole("button", { name: "Run Task" })).toBeVisible();
   });
 
   test("task detail shows DAG for multi-step task", async ({ page }) => {
     // Navigate to data-pipeline task (multi-step: transform -> summarize)
     await page.goto("/workspaces/default/tasks/data-pipeline");
+    await page.waitForLoadState("networkidle");
     await expect(
       page.getByRole("heading", { name: "data-pipeline" }),
     ).toBeVisible();
@@ -42,8 +43,8 @@ test.describe("Tasks", () => {
     await page.click("text=Tasks");
     await page.locator("table tbody tr td a").first().click();
 
-    // Click Run Task
-    await page.click("text=Run Task");
+    // Click Run Task button (not the card title which also contains this text)
+    await page.getByRole("button", { name: "Run Task" }).click();
     // Dialog should open
     await expect(page.locator('[role="dialog"]')).toBeVisible();
 
