@@ -903,6 +903,42 @@ Last updated: 2026-03-13.
 - [x] Zero-value config validation: `worker_retention_hours` and `log_retention_days` must be >= 1 if set.
 - [x] Retention interval: `retention_interval_secs` config (default 3600) with `last_retention_run` atomic tracking in AppState.
 
+## Review: Event Source Triggers (2026-03-27)
+
+### Critical
+- [ ] `source_id` format mismatch: server creates jobs with `"{workspace}/{trigger_name}"` (`server/event_source.rs:373`), worker sends `"{job_id}/{step_name}"` (`worker/event_source.rs:987`). Emitted jobs can't be traced back to trigger. Fix: worker should use source_id from action_spec.
+- [ ] Worker never calls `report_step_start()` for event source steps — jobs stay `pending` forever in DB/UI (`worker/event_source.rs:972`). Fix: add `client.report_step_start()` at start of `execute_event_source`.
+- [ ] Resolved secrets stored in plaintext in `action_spec` JSON in `job_step` table (`server/event_source.rs:255`). Unlike regular steps (which resolve at claim time), event source secrets persist in DB indefinitely. Fix: store raw templates, resolve at claim time.
+
+### Important
+- [ ] Fingerprint excludes `task`, `input`, `restart_policy`, `backoff_secs`, `max_in_flight` — changing target task doesn't trigger job replacement (`server/event_source.rs:280-320`).
+- [ ] Duplicate active jobs for same `source_id` silently lost in reconciliation HashMap — orphaned jobs never cancelled (`server/event_source.rs:77-80`). Fix: collect all jobs per source_id, cancel all but newest.
+- [ ] Race: worker claims event source step but semaphore full — step stays `running` in DB, stuck until recovery sweep (`worker/poller.rs:495-516`). Fix: report step failure when semaphore unavailable.
+- [ ] Event source steps with `restart_policy: never` that exit leave step `running` in DB forever (`worker/event_source.rs:1030-1037`). Fix: report step completion when supervision loop exits.
+- [ ] Worker shutdown drain doesn't wait for event source tasks — only regular semaphore drained (`worker/poller.rs:590-617`). Fix: also drain `event_source_semaphore`.
+
+### Minor
+- [ ] `max_in_flight` parsed but never enforced — dead code with `#[allow(dead_code)]` (`worker/event_source.rs:33`). Implement or remove.
+- [ ] K8s pod name collision on restart — deterministic name + async deletion can cause 409 Conflict (`worker/event_source.rs:665-676`). Fix: append random suffix.
+- [ ] K8s pod log stream can't distinguish stdout from stderr — all lines parsed as JSON, stderr causes "malformed JSON" warnings (`worker/event_source.rs:798-866`).
+- [ ] Zero delay on success restart with `restart_policy: always` can cause tight-loop spinning (`worker/event_source.rs:1074`). Fix: minimum 1s delay.
+- [ ] `merge_input` doc says "deep-merge" but does shallow merge (`worker/event_source.rs:170`). Fix doc comment.
+- [ ] No request body size limit on emit endpoint. Fix: add explicit `DefaultBodyLimit`.
+- [ ] No rate limiting on emit endpoint — runaway event source can flood server with job creation.
+- [ ] Docker event source containers run without security restrictions (no `--no-new-privileges`, no cap-drop) (`worker/event_source.rs:446-453`).
+- [ ] Emit endpoint allows any authenticated worker to create jobs for any workspace/task — no scope validation (`server/worker_api/event_source.rs:38-91`).
+
+### Missing Tests
+- [ ] `compute_fingerprint` — determinism, order-independence of deps/env, field sensitivity, None vs empty string
+- [ ] `reconcile` integration tests — create/replace-on-change/skip-unchanged/cancel-removed branches (needs testcontainers)
+- [ ] `emit_event` HTTP handler — happy path, 404 workspace, auth required, empty input, null input
+- [ ] `process_stdout_lines` — valid JSON, malformed, empty lines, cancellation, EOF, input defaults merge
+- [ ] Backoff formula — extract to standalone function and test: zero failures, cap at 300s, overflow safety
+- [ ] `max_event_sources` config — default value (5), explicit value, zero rejection, env override
+- [ ] Poller event source semaphore branching — separate semaphore, full semaphore skip, normal step unaffected
+- [ ] DB migration — insert with `source_type = 'event_source'` succeeds
+- [ ] `restart_policy_str` round-trip for all three variants
+
 ## Bugs Found & Fixed
 
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)
