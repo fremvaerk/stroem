@@ -1,3 +1,4 @@
+pub mod event_source;
 pub mod jobs;
 pub mod rendering;
 pub mod workspace;
@@ -79,6 +80,7 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
             "/jobs/{id}/steps/{step}/agent-state",
             post(jobs::agent_save_state),
         )
+        .route("/event-source/emit", post(event_source::emit_event))
         .route("/workspace/{ws}", get(workspace::download_workspace))
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -21,6 +21,10 @@ pub fn cmd_triggers(config: &WorkspaceConfig) -> Result<()> {
                     let mode_str = mode.as_deref().unwrap_or("async");
                     format!("{} ({})", wh_name, mode_str)
                 }
+                TriggerDef::EventSource { runner, .. } => {
+                    let runner_str = runner.as_deref().unwrap_or("local");
+                    format!("runner: {}", runner_str)
+                }
             };
             let display_name = if trigger.enabled() {
                 name.to_string()

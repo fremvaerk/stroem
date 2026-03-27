@@ -37,7 +37,7 @@ impl TriggerInfo {
         let next_runs = compute_next_runs(trigger, next_runs_count);
         let (cron, timezone) = match trigger {
             TriggerDef::Scheduler { cron, timezone, .. } => (Some(cron.clone()), timezone.clone()),
-            _ => (None, None),
+            TriggerDef::Webhook { .. } | TriggerDef::EventSource { .. } => (None, None),
         };
         Self {
             name: name.to_string(),
@@ -60,7 +60,7 @@ impl TriggerInfo {
 pub fn compute_next_runs(trigger: &TriggerDef, count: usize) -> Vec<DateTime<Utc>> {
     let (cron_expr, tz_str) = match trigger {
         TriggerDef::Scheduler { cron, timezone, .. } => (cron, timezone.as_deref()),
-        _ => return vec![],
+        TriggerDef::Webhook { .. } | TriggerDef::EventSource { .. } => return vec![],
     };
 
     let cron = match CronParser::builder()
@@ -206,6 +206,58 @@ mod tests {
         let trigger = make_trigger("webhook", Some("0 0 * * *"), true);
         let runs = compute_next_runs(&trigger, 5);
         assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn test_compute_next_runs_event_source_type() {
+        // EventSource triggers always return no next_runs (no cron schedule).
+        let trigger = TriggerDef::EventSource {
+            task: "process-events".to_string(),
+            enabled: true,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            script: Some("echo '{}'".to_string()),
+            image: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            manifest: None,
+            restart_policy: Default::default(),
+            backoff_secs: 5,
+            max_in_flight: None,
+        };
+        let runs = compute_next_runs(&trigger, 5);
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn test_trigger_info_event_source_has_no_cron_or_timezone() {
+        let trigger = TriggerDef::EventSource {
+            task: "process-events".to_string(),
+            enabled: true,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            script: Some("echo '{}'".to_string()),
+            image: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            manifest: None,
+            restart_policy: Default::default(),
+            backoff_secs: 5,
+            max_in_flight: None,
+        };
+        let info = TriggerInfo::from_def("my-source", &trigger, 5);
+        let json = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(json["type"], "event_source");
+        assert_eq!(json["task"], "process-events");
+        assert_eq!(json["enabled"], true);
+        assert!(json.get("cron").is_none(), "cron should be absent");
+        assert!(json.get("timezone").is_none(), "timezone should be absent");
+        assert_eq!(json["next_runs"], serde_json::json!([]));
     }
 
     #[test]

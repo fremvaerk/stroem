@@ -34,6 +34,12 @@ pub struct WorkerConfig {
     #[cfg(feature = "agent")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<stroem_agent::config::AgentsConfig>,
+    /// Maximum number of event-source steps this worker will run concurrently (default: 5).
+    ///
+    /// Event-source steps are long-lived and do not consume a slot from `max_concurrent`.
+    /// This separate cap prevents runaway claiming of event-source jobs.
+    #[serde(default = "default_max_event_sources")]
+    pub max_event_sources: usize,
 }
 
 impl WorkerConfig {
@@ -82,6 +88,10 @@ pub struct KubeRunnerConfig {
 
 fn default_tags() -> Vec<String> {
     vec!["script".to_string()]
+}
+
+fn default_max_event_sources() -> usize {
+    5
 }
 
 pub fn load_config(path: &str) -> Result<WorkerConfig> {

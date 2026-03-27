@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
     state.workspaces.start_watchers(cancel_token.clone());
     let _scheduler = stroem_server::scheduler::start(state.clone(), cancel_token.clone());
     let _recovery = stroem_server::recovery::start(state.clone(), cancel_token.clone());
+    let _event_source = stroem_server::event_source::start(state.clone(), cancel_token.clone());
 
     // Build router
     let app = stroem_server::web::build_router(state, cancel_token.clone());
