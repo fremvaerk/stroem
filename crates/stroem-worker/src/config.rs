@@ -559,6 +559,43 @@ workspace_cache_dir: "/tmp/stroem-workspace"
         );
     }
 
+    // ─── max_event_sources tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_max_event_sources_default() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.max_event_sources, 5,
+            "max_event_sources must default to 5 when not set"
+        );
+    }
+
+    #[test]
+    fn test_max_event_sources_explicit() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+max_event_sources: 10
+"#;
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.max_event_sources, 10,
+            "max_event_sources must reflect the configured value"
+        );
+    }
+
     #[test]
     fn test_worker_config_validate_valid() {
         let token = valid_32char_token();

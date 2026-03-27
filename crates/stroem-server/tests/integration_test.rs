@@ -17252,3 +17252,578 @@ async fn test_approval_approve_with_custom_input() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Event Source integration tests ───────────────────────────────────────────
+
+/// Build a workspace that contains a "process-event" task and an EventSource
+/// trigger named "my-source" targeting it.  Used by the emit endpoint tests.
+fn event_source_workspace() -> WorkspaceConfig {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let mut workspace = WorkspaceConfig::default();
+
+    // Minimal script action for the target task.
+    workspace.actions.insert(
+        "process".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo processing".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+        },
+    );
+
+    // Task: process-event
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "process".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "process-event".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    // EventSource trigger: "my-source" → "process-event"
+    workspace.triggers.insert(
+        "my-source".to_string(),
+        TriggerDef::EventSource {
+            task: "process-event".to_string(),
+            enabled: true,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            script: Some("echo test".to_string()),
+            image: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            manifest: None,
+            restart_policy: RestartPolicy::default(),
+            backoff_secs: 5,
+            max_in_flight: None,
+        },
+    );
+
+    workspace
+}
+
+/// Set up a server+DB with the event_source_workspace loaded under "default".
+async fn setup_event_source() -> Result<(
+    Router,
+    AppState,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        agents: None,
+    };
+
+    let workspace = event_source_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = build_router(state.clone(), tokio_util::sync::CancellationToken::new());
+
+    Ok((router, state, pool, temp_dir, container))
+}
+
+// ─── emit endpoint: happy path ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_happy_path() -> Result<()> {
+    let (router, _state, pool, _tmp, _container) = setup_event_source().await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "default",
+                "task": "process-event",
+                "input": {"key": "value"},
+                "source_id": "default/my-source"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK, "emit should return 200");
+
+    let body = body_json(response).await;
+    let job_id_str = body["job_id"]
+        .as_str()
+        .expect("response must contain job_id");
+    let job_id: uuid::Uuid = job_id_str.parse().expect("job_id must be a valid UUID");
+
+    // Verify the created job carries source_type = 'event_source'
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("job must exist in DB");
+    assert_eq!(job.source_type, "event_source");
+    assert_eq!(job.source_id.as_deref(), Some("default/my-source"));
+    assert_eq!(job.task_name, "process-event");
+    assert_eq!(job.workspace, "default");
+
+    Ok(())
+}
+
+// ─── emit endpoint: unknown workspace → 404 ───────────────────────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_unknown_workspace_returns_404() -> Result<()> {
+    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "nonexistent",
+                "task": "process-event",
+                "input": {},
+                "source_id": "nonexistent/my-source"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown workspace must return 404"
+    );
+
+    Ok(())
+}
+
+// ─── emit endpoint: missing worker auth → 401 ─────────────────────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_auth_required() -> Result<()> {
+    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+
+    // Send request without the worker Bearer token
+    let request = Request::builder()
+        .method("POST")
+        .uri("/worker/event-source/emit")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&json!({
+                "workspace": "default",
+                "task": "process-event",
+                "input": {},
+                "source_id": "default/my-source"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let response = router.oneshot(request).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "missing auth must return 401"
+    );
+
+    Ok(())
+}
+
+// ─── emit endpoint: invalid source_id (unknown trigger) → 400 ─────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_invalid_source_id() -> Result<()> {
+    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+
+    // "unknown-trigger" does not exist in the workspace config
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "default",
+                "task": "process-event",
+                "input": {},
+                "source_id": "default/unknown-trigger"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_id for non-existent trigger must return 400"
+    );
+
+    Ok(())
+}
+
+// ─── reconcile tests: observe DB side effects ─────────────────────────────
+
+/// Spawn the event source manager, wait for the initial reconcile pass to
+/// complete (it runs before the 30-second sleep), then shut it down.
+///
+/// Strategy: cancel the token immediately.  `run_loop` calls `reconcile` first
+/// and THEN enters `tokio::select!` for the sleep/cancel branch.  So
+/// cancellation only takes effect after the first reconcile pass completes,
+/// making this function reliable regardless of DB latency.
+async fn run_one_reconcile(state: AppState) {
+    use tokio_util::sync::CancellationToken;
+    let cancel = CancellationToken::new();
+    let handle = stroem_server::event_source::start(state, cancel.clone());
+    // Give the reconcile pass time to run.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    cancel.cancel();
+    match tokio::time::timeout(std::time::Duration::from_secs(10), handle).await {
+        Ok(Ok(())) => {} // task completed normally
+        Ok(Err(e)) => panic!("event source task panicked: {e}"),
+        Err(_) => panic!("event source task timed out"),
+    }
+}
+
+/// Verify the event_source workspace is set up correctly.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_event_source_workspace_setup_diagnostic() -> Result<()> {
+    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+
+    // Verify workspace names
+    let names = state.workspaces.names();
+    assert!(names.contains(&"default"), "workspace 'default' must exist");
+
+    // Verify workspace config has the trigger
+    let config = state
+        .workspaces
+        .get_config("default")
+        .await
+        .expect("'default' workspace must be accessible");
+    assert!(
+        config.triggers.contains_key("my-source"),
+        "workspace must have 'my-source' trigger; triggers: {:?}",
+        config.triggers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        config.tasks.contains_key("process-event"),
+        "workspace must have 'process-event' task"
+    );
+
+    // Verify we can create an event_source job directly
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "_event_source:my-source",
+        "distributed",
+        Some(serde_json::json!({"_fingerprint": "test"})),
+        "event_source",
+        Some("default/my-source"),
+        None,
+    )
+    .await?;
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.source_type, "event_source");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_creates_job_for_new_trigger() -> Result<()> {
+    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+
+    // No event source jobs should exist before reconcile
+    let before: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM job WHERE source_type = 'event_source'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(before.0, 0, "no event source jobs before reconcile");
+
+    run_one_reconcile(state).await;
+
+    // After one reconcile pass, exactly one job must exist for "default/my-source"
+    let job_rows: Vec<(uuid::Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT job_id, task_name, source_id FROM job WHERE source_type = 'event_source'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(job_rows.len(), 1, "reconcile must create exactly one job");
+    let (job_id, task_name, source_id) = &job_rows[0];
+    assert_eq!(task_name, "_event_source:my-source");
+    assert_eq!(source_id.as_deref(), Some("default/my-source"));
+
+    // The job must have one step with action_type = 'event_source' and
+    // required_tags = ["event_source"].
+    let steps = JobStepRepo::get_steps_for_job(&pool, *job_id).await?;
+    assert_eq!(
+        steps.len(),
+        1,
+        "event source job must have exactly one step"
+    );
+    let step = &steps[0];
+    assert_eq!(step.action_type, "event_source");
+    assert_eq!(step.step_name, "event_source");
+
+    // required_tags must include "event_source"
+    let tags = step
+        .required_tags
+        .as_array()
+        .expect("required_tags must be a JSON array");
+    assert!(
+        tags.iter().any(|t| t.as_str() == Some("event_source")),
+        "step required_tags must include 'event_source'; got: {tags:?}"
+    );
+
+    // action_spec must carry the key fields from the trigger config
+    let spec = step
+        .action_spec
+        .as_ref()
+        .expect("action_spec must be present");
+    assert_eq!(
+        spec.get("workspace").and_then(|v| v.as_str()),
+        Some("default"),
+        "action_spec.workspace must be 'default'"
+    );
+    assert_eq!(
+        spec.get("target_task").and_then(|v| v.as_str()),
+        Some("process-event"),
+        "action_spec.target_task must be 'process-event'"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_skips_unchanged_trigger() -> Result<()> {
+    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+
+    // First pass — creates the job
+    run_one_reconcile(state.clone()).await;
+
+    let after_first: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM job \
+         WHERE source_type = 'event_source' \
+           AND status NOT IN ('completed','failed','cancelled','skipped')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after_first.0, 1, "one active job after first reconcile");
+
+    // Second pass — config is unchanged; no new job should be created
+    run_one_reconcile(state).await;
+
+    let after_second: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM job \
+         WHERE source_type = 'event_source' \
+           AND status NOT IN ('completed','failed','cancelled','skipped')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        after_second.0, 1,
+        "second reconcile must not duplicate the job when config is unchanged"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_replaces_job_when_config_changes() -> Result<()> {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+
+    // First reconcile — creates the initial job
+    run_one_reconcile(state.clone()).await;
+
+    let initial: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT job_id FROM job \
+         WHERE source_type = 'event_source' \
+           AND status NOT IN ('completed','failed','cancelled','skipped')",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(initial.len(), 1);
+    let old_job_id = initial[0].0;
+
+    // Build a new AppState with a *changed* script (different fingerprint)
+    let mut changed_workspace = event_source_workspace();
+    changed_workspace.triggers.insert(
+        "my-source".to_string(),
+        TriggerDef::EventSource {
+            task: "process-event".to_string(),
+            enabled: true,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            script: Some("echo changed-script".to_string()),
+            image: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            manifest: None,
+            restart_policy: RestartPolicy::default(),
+            backoff_secs: 5,
+            max_in_flight: None,
+        },
+    );
+    let changed_mgr = WorkspaceManager::from_config("default", changed_workspace);
+    let changed_config = (*state.config).clone();
+    let changed_log = LogStorage::new(&changed_config.log_storage.local_dir);
+    let changed_state = AppState::new(
+        pool.clone(),
+        changed_mgr,
+        changed_config,
+        changed_log,
+        HashMap::new(),
+    );
+
+    // Second reconcile — fingerprint differs, so old job is cancelled and a new one created
+    run_one_reconcile(changed_state).await;
+
+    let old_job = JobRepo::get(&pool, old_job_id)
+        .await?
+        .expect("old job must still be in DB");
+    assert_eq!(
+        old_job.status, "cancelled",
+        "old job must be cancelled when config changes"
+    );
+
+    let active: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT job_id FROM job \
+         WHERE source_type = 'event_source' \
+           AND status NOT IN ('completed','failed','cancelled','skipped')",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        active.len(),
+        1,
+        "exactly one new active job after config change"
+    );
+    assert_ne!(active[0].0, old_job_id, "new job must have a different ID");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_cancels_job_for_removed_trigger() -> Result<()> {
+    let (_router, state, pool, _tmp, _container) = setup_event_source().await?;
+
+    // First reconcile — creates the job
+    run_one_reconcile(state.clone()).await;
+
+    let initial: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT job_id FROM job \
+         WHERE source_type = 'event_source' \
+           AND status NOT IN ('completed','failed','cancelled','skipped')",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(initial.len(), 1);
+    let created_job_id = initial[0].0;
+
+    // Build a new AppState with NO EventSource triggers (trigger was removed)
+    let empty_workspace = WorkspaceConfig::default();
+    let empty_mgr = WorkspaceManager::from_config("default", empty_workspace);
+    let empty_config = (*state.config).clone();
+    let empty_log = LogStorage::new(&empty_config.log_storage.local_dir);
+    let empty_state = AppState::new(
+        pool.clone(),
+        empty_mgr,
+        empty_config,
+        empty_log,
+        HashMap::new(),
+    );
+
+    // Second reconcile — trigger no longer exists, job must be cancelled
+    run_one_reconcile(empty_state).await;
+
+    let job = JobRepo::get(&pool, created_job_id)
+        .await?
+        .expect("job must still be retrievable from DB");
+    assert_eq!(
+        job.status, "cancelled",
+        "job for a removed trigger must be cancelled by reconcile"
+    );
+
+    Ok(())
+}
