@@ -110,8 +110,9 @@ test.describe("Jobs", () => {
     expect(apiData.output).not.toBeNull();
 
     await page.goto(`/jobs/${jobId}`);
-    // "Job Output" is a CardTitle inside a Card — use getByText to find it
-    await expect(page.getByText("Job Output")).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    // "Job Output" is a CardTitle inside a Card
+    await expect(page.getByText("Job Output").first()).toBeVisible();
     // The job output JSON should contain the processed result
     await expect(page.getByText("processed-hello done")).toBeVisible();
   });

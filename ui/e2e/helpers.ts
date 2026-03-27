@@ -13,26 +13,36 @@ export async function login(page: Page) {
 let cachedToken: string | null = null;
 let tokenBaseURL: string | null = null;
 
-/** Get a Bearer token for server-side API calls (cached). */
+/** Get a Bearer token for server-side API calls (cached, with rate-limit retry). */
 export async function getAuthToken(baseURL: string): Promise<string> {
   if (cachedToken && tokenBaseURL === baseURL) {
     return cachedToken;
   }
-  const res = await fetch(`${baseURL}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      email: "admin@stroem.local",
-      password: "admin",
-    }),
-  });
-  if (!res.ok) {
+  // Retry loop to handle 429 rate limiting
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = await fetch(`${baseURL}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "admin@stroem.local",
+        password: "admin",
+      }),
+    });
+    if (res.ok) {
+      const { access_token } = await res.json();
+      cachedToken = access_token;
+      tokenBaseURL = baseURL;
+      return access_token;
+    }
+    if (res.status === 429) {
+      const body = await res.json().catch(() => ({}));
+      const wait = (body.retry_after_secs || 2) * 1000 + 500;
+      await new Promise((r) => setTimeout(r, wait));
+      continue;
+    }
     throw new Error(`Login failed: ${res.status} ${await res.text()}`);
   }
-  const { access_token } = await res.json();
-  cachedToken = access_token;
-  tokenBaseURL = baseURL;
-  return access_token;
+  throw new Error("Login failed after 5 attempts (rate limited)");
 }
 
 /** Authenticated fetch wrapper for server-side API calls from tests. */
