@@ -930,13 +930,13 @@ Last updated: 2026-03-13.
 
 ### Missing Tests
 - [x] `compute_fingerprint` — determinism, order-independence, field sensitivity, None vs empty (6 tests)
-- [ ] `reconcile` integration tests — create/replace-on-change/skip-unchanged/cancel-removed branches (needs testcontainers)
-- [ ] `emit_event` HTTP handler — happy path, 404 workspace, auth required, empty input, null input
-- [ ] `process_stdout_lines` — valid JSON, malformed, empty lines, cancellation, EOF, input defaults merge
+- [x] `reconcile` integration tests — create/replace/skip/cancel branches (5 integration tests)
+- [x] `emit_event` HTTP handler — happy path, 404, auth, invalid source_id (4 integration tests)
+- [ ] `process_stdout_lines` — valid JSON, malformed, empty lines, cancellation, EOF (requires mock client)
 - [x] Backoff formula — extracted to `compute_backoff_delay` with 5 unit tests
-- [ ] `max_event_sources` config — default value (5), explicit value, zero rejection, env override
-- [ ] Poller event source semaphore branching — separate semaphore, full semaphore skip, normal step unaffected
-- [ ] DB migration — insert with `source_type = 'event_source'` succeeds
+- [x] `max_event_sources` config — default value (5), explicit value (2 unit tests)
+- [ ] Poller event source semaphore branching (requires mock server, lower priority)
+- [x] DB migration — source_type + action_type CHECK constraints (2 integration tests)
 - [x] `restart_policy_str` round-trip for all three variants
 
 ## Bugs Found & Fixed
