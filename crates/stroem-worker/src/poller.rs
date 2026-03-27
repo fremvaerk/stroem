@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::client::ServerClient;
 use crate::config::WorkerConfig;
+use crate::event_source;
 use crate::executor::StepExecutor;
 use crate::workspace_cache::WorkspaceCache;
 
@@ -437,12 +438,20 @@ pub async fn run_worker(
 
     // Main poll loop with semaphore for max_concurrent
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
+    // Separate semaphore for long-lived event-source steps (does not count against max_concurrent)
+    let event_source_semaphore = Arc::new(Semaphore::new(config.max_event_sources));
     let poll_interval = Duration::from_secs(config.poll_interval_secs);
 
+    // Kubernetes namespace for event-source pod runner (read from kubernetes config if present)
+    #[cfg(feature = "kubernetes")]
+    let kube_namespace_for_es: Option<String> =
+        config.kubernetes.as_ref().map(|k| k.namespace.clone());
+
     tracing::info!(
-        "Polling for jobs every {}s with max {} concurrent executions",
+        "Polling for jobs every {}s with max {} concurrent executions, max {} event sources",
         config.poll_interval_secs,
-        config.max_concurrent
+        config.max_concurrent,
+        config.max_event_sources,
     );
 
     let mut consecutive_idle: u32 = 0;
@@ -478,6 +487,72 @@ pub async fn run_worker(
                     step.workspace,
                     step.action_name
                 );
+
+                // Event-source steps are long-lived — they must not hold the regular
+                // concurrency permit for their entire lifetime (which could block all other
+                // work from being claimed). Release the regular permit immediately and
+                // acquire a slot from the dedicated event-source semaphore instead.
+                if step.action_type == "event_source" {
+                    drop(permit); // Release the regular concurrency slot right away
+
+                    let es_permit = match event_source_semaphore.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::warn!(
+                                "event_source semaphore full (max {}), failing step '{}' so \
+                                 EventSourceManager can re-create the job",
+                                config.max_event_sources,
+                                step.step_name,
+                            );
+                            // Report the step as failed so the server's EventSourceManager
+                            // can detect the failure and re-create the job on the next cycle
+                            if let Err(e) = client
+                                .report_step_complete(
+                                    step.job_id,
+                                    &step.step_name,
+                                    1,
+                                    None,
+                                    Some("Worker event source capacity full".to_string()),
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    "Failed to report event source step failure: {:#}",
+                                    e
+                                );
+                            }
+                            tokio::select! {
+                                () = tokio::time::sleep(poll_interval) => {}
+                                () = cancel_token.cancelled() => {
+                                    tracing::info!("Shutdown requested, stopping poll loop");
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                    };
+
+                    let es_client = client.clone();
+                    let es_cancel = cancel_token.clone();
+                    let es_worker_id = worker_id;
+                    #[cfg(feature = "kubernetes")]
+                    let es_kube_ns = kube_namespace_for_es.clone();
+
+                    tokio::spawn(async move {
+                        let _es_permit = es_permit; // hold until event source exits
+                        event_source::execute_event_source(
+                            &es_client,
+                            step,
+                            es_cancel,
+                            es_worker_id,
+                            #[cfg(feature = "kubernetes")]
+                            es_kube_ns,
+                        )
+                        .await;
+                    });
+
+                    continue;
+                }
 
                 let client_clone = client.clone();
                 let executor_clone = executor.clone();
@@ -557,6 +632,22 @@ pub async fn run_worker(
                 DRAIN_TIMEOUT_SECS
             );
         }
+    }
+
+    // Also drain event source permits so long-lived event source tasks can finish
+    let es_drain = tokio::time::timeout(
+        Duration::from_secs(DRAIN_TIMEOUT_SECS),
+        event_source_semaphore.acquire_many(
+            u32::try_from(config.max_event_sources).expect("validated at config load"),
+        ),
+    );
+    match es_drain.await {
+        Ok(Ok(_)) => tracing::info!("All event source tasks drained"),
+        Ok(Err(e)) => tracing::warn!("Event source semaphore error during drain: {:#}", e),
+        Err(_) => tracing::warn!(
+            "Event source drain timeout ({}s) exceeded",
+            DRAIN_TIMEOUT_SECS
+        ),
     }
 
     Ok(())

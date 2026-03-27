@@ -26,14 +26,18 @@ dashmap.workspace = true
 flate2.workspace = true
 tar.workspace = true
 rustls = { workspace = true, optional = true }
+bollard = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+tempfile.workspace = true
 
 [features]
 default = ["docker", "kubernetes", "agent"]
-docker = ["stroem-runner/docker"]
-kubernetes = ["stroem-runner/kubernetes", "rustls"]
+docker = ["stroem-runner/docker", "dep:bollard", "dep:futures-util"]
+kubernetes = ["stroem-runner/kubernetes", "rustls", "dep:kube", "dep:k8s-openapi", "dep:futures-util"]
 agent = ["dep:stroem-agent", "dep:rig-core", "mcp"]
 mcp = ["stroem-agent/mcp"]
 
 [dev-dependencies]
-tempfile.workspace = true
 wiremock = "0.6"

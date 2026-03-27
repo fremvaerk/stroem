@@ -2,7 +2,9 @@ pub mod acl;
 pub mod auth;
 pub mod cancellation;
 pub mod config;
+pub mod event_source;
 pub mod hooks;
+
 pub mod job_completion;
 pub mod job_creator;
 pub mod job_recovery;

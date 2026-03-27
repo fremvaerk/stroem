@@ -50,6 +50,19 @@ pub async fn healthz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         all_ok = false;
     }
 
+    // Event source manager liveness
+    let event_source = state
+        .background_tasks
+        .event_source_alive
+        .load(Ordering::Relaxed);
+    checks.insert(
+        "event_source".into(),
+        json!(if event_source { "ok" } else { "stopped" }),
+    );
+    if !event_source {
+        all_ok = false;
+    }
+
     let status = if all_ok {
         "ok"
     } else if db_ok {
@@ -78,6 +91,7 @@ mod tests {
         let tasks = BackgroundTasks::new();
         assert!(!tasks.scheduler_alive.load(Ordering::Relaxed));
         assert!(!tasks.recovery_alive.load(Ordering::Relaxed));
+        assert!(!tasks.event_source_alive.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -85,8 +99,10 @@ mod tests {
         let tasks = BackgroundTasks::new();
         tasks.scheduler_alive.store(true, Ordering::Relaxed);
         tasks.recovery_alive.store(true, Ordering::Relaxed);
+        tasks.event_source_alive.store(true, Ordering::Relaxed);
         assert!(tasks.scheduler_alive.load(Ordering::Relaxed));
         assert!(tasks.recovery_alive.load(Ordering::Relaxed));
+        assert!(tasks.event_source_alive.load(Ordering::Relaxed));
     }
 
     #[test]

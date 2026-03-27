@@ -2,6 +2,7 @@
 pub mod agent_executor;
 pub mod client;
 pub mod config;
+pub mod event_source;
 pub mod executor;
 pub mod poller;
 pub mod secrets;

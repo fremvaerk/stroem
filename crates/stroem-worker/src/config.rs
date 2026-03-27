@@ -34,6 +34,12 @@ pub struct WorkerConfig {
     #[cfg(feature = "agent")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<stroem_agent::config::AgentsConfig>,
+    /// Maximum number of event-source steps this worker will run concurrently (default: 5).
+    ///
+    /// Event-source steps are long-lived and do not consume a slot from `max_concurrent`.
+    /// This separate cap prevents runaway claiming of event-source jobs.
+    #[serde(default = "default_max_event_sources")]
+    pub max_event_sources: usize,
 }
 
 impl WorkerConfig {
@@ -82,6 +88,10 @@ pub struct KubeRunnerConfig {
 
 fn default_tags() -> Vec<String> {
     vec!["script".to_string()]
+}
+
+fn default_max_event_sources() -> usize {
+    5
 }
 
 pub fn load_config(path: &str) -> Result<WorkerConfig> {
@@ -546,6 +556,43 @@ workspace_cache_dir: "/tmp/stroem-workspace"
             err.to_string().contains("poll_interval_secs"),
             "Error should mention poll_interval_secs: {}",
             err
+        );
+    }
+
+    // ─── max_event_sources tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_max_event_sources_default() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+"#;
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.max_event_sources, 5,
+            "max_event_sources must default to 5 when not set"
+        );
+    }
+
+    #[test]
+    fn test_max_event_sources_explicit() {
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "test-token"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+max_event_sources: 10
+"#;
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.max_event_sources, 10,
+            "max_event_sources must reflect the configured value"
         );
     }
 

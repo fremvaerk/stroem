@@ -763,6 +763,7 @@ Last updated: 2026-03-13.
 
 - [x] MCP server endpoint (Phase 7a): 8 tools, Streamable HTTP transport, auth support
 - [x] MCP per-tool ACL enforcement (Phase 7a follow-up)
+- [x] Event source triggers (Phase 5e): `type: event_source` trigger with stdout JSON-line protocol, exponential backoff restart policy, backpressure via `max_in_flight`, EventSourceManager background task
 - [ ] Structured `ask_user` input: allow agent to pass a JSON schema with `ask_user` so the UI renders form fields instead of free-text (same pattern as approval gate `approval_fields`)
 - [ ] Leader election via pg advisory locks for scheduler/recovery
 - [ ] Generate OpenAPI spec with `utoipa`
@@ -901,6 +902,42 @@ Last updated: 2026-03-13.
 - [x] N+1 query: returns `RetentionJobInfo` struct with metadata directly, eliminating per-job `get()`.
 - [x] Zero-value config validation: `worker_retention_hours` and `log_retention_days` must be >= 1 if set.
 - [x] Retention interval: `retention_interval_secs` config (default 3600) with `last_retention_run` atomic tracking in AppState.
+
+## Review: Event Source Triggers (2026-03-27)
+
+### Critical
+- [x] `source_id` format mismatch: worker now builds source_id from action_spec `workspace` + `action_name` to match server's `"{workspace}/{trigger_name}"` format.
+- [x] Worker now calls `report_step_start()` at the start of `execute_event_source` so jobs transition to `running`.
+- [ ] Resolved secrets stored in plaintext in `action_spec` JSON in `job_step` table. Consistent with regular step behavior but longer exposure window. TODO added for resolving at claim time.
+
+### Important
+- [x] Fingerprint now includes `task`, `input`, `restart_policy`, `backoff_secs`, `max_in_flight`.
+- [x] Duplicate active jobs: reconciliation HashMap changed to `Vec` per source_id, duplicates cancelled.
+- [x] Semaphore-full race: worker now reports step failure when event source semaphore is full.
+- [x] Step completion: supervision loop now reports step completion to server on exit (all paths).
+- [x] Worker shutdown now drains both regular and event source semaphores.
+
+### Minor
+- [x] `max_in_flight` backpressure implemented via tokio::sync::Semaphore in stdout processing.
+- [x] K8s pod name now includes random UUID suffix to avoid collision on restart.
+- [ ] K8s pod log stream can't distinguish stdout from stderr — known limitation of `log_stream` API.
+- [x] Minimum 1s delay on success restart to prevent tight-loop spinning.
+- [x] `merge_input` doc corrected from "deep-merge" to "shallow-merge".
+- [x] 256KB body size limit added to emit endpoint via `DefaultBodyLimit`.
+- [ ] No rate limiting on emit endpoint — mitigated by `max_in_flight` backpressure on worker side.
+- [x] Docker containers now have `no-new-privileges` security option.
+- [x] Emit endpoint validates `source_id` against workspace triggers (type, enabled, target task).
+
+### Missing Tests
+- [x] `compute_fingerprint` — determinism, order-independence, field sensitivity, None vs empty (6 tests)
+- [x] `reconcile` integration tests — create/replace/skip/cancel branches (5 integration tests)
+- [x] `emit_event` HTTP handler — happy path, 404, auth, invalid source_id (4 integration tests)
+- [ ] `process_stdout_lines` — valid JSON, malformed, empty lines, cancellation, EOF (requires mock client)
+- [x] Backoff formula — extracted to `compute_backoff_delay` with 5 unit tests
+- [x] `max_event_sources` config — default value (5), explicit value (2 unit tests)
+- [ ] Poller event source semaphore branching (requires mock server, lower priority)
+- [x] DB migration — source_type + action_type CHECK constraints (2 integration tests)
+- [x] `restart_policy_str` round-trip for all three variants
 
 ## Bugs Found & Fixed
 

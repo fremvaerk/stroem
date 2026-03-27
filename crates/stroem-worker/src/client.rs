@@ -501,6 +501,49 @@ impl ServerClient {
         Ok(())
     }
 
+    /// Emit an event-source trigger to the server, creating a new job.
+    ///
+    /// Returns the ID of the created job.
+    #[tracing::instrument(skip(self, input))]
+    pub async fn emit_event_source(
+        &self,
+        workspace: &str,
+        task: &str,
+        input: serde_json::Value,
+        source_id: &str,
+    ) -> Result<String> {
+        let url = format!("{}/worker/event-source/emit", self.base_url);
+        let body = serde_json::json!({
+            "workspace": workspace,
+            "task": task,
+            "input": input,
+            "source_id": source_id,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send event-source emit request")?;
+
+        let response = Self::check_response(response, "Event-source emit").await?;
+
+        #[derive(serde::Deserialize)]
+        struct EmitResponse {
+            job_id: String,
+        }
+
+        let resp: EmitResponse = response
+            .json()
+            .await
+            .context("Failed to parse event-source emit response")?;
+
+        Ok(resp.job_id)
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(

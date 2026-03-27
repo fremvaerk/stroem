@@ -31,12 +31,13 @@ impl Drop for AliveGuard {
     }
 }
 
-/// Tracks liveness of background tasks (scheduler, recovery sweeper).
+/// Tracks liveness of background tasks (scheduler, recovery sweeper, event source manager).
 /// Each flag is `true` while the task is running, `false` after it exits.
 #[derive(Clone)]
 pub struct BackgroundTasks {
     pub scheduler_alive: Arc<AtomicBool>,
     pub recovery_alive: Arc<AtomicBool>,
+    pub event_source_alive: Arc<AtomicBool>,
 }
 
 impl BackgroundTasks {
@@ -44,6 +45,7 @@ impl BackgroundTasks {
         Self {
             scheduler_alive: Arc::new(AtomicBool::new(false)),
             recovery_alive: Arc::new(AtomicBool::new(false)),
+            event_source_alive: Arc::new(AtomicBool::new(false)),
         }
     }
 }

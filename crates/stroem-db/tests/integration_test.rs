@@ -3297,3 +3297,95 @@ async fn test_sub_job_inherits_revision() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Migration 026: event_source constraints ───────────────────────────────
+
+/// Verify that migration 026_event_source.sql added 'event_source' to the
+/// job.source_type CHECK constraint so that event-source-triggered jobs can
+/// be inserted without a constraint violation.
+#[tokio::test]
+async fn test_event_source_job_source_type() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Insert a job with source_type = 'event_source'.
+    // If migration 026 is not applied (or the constraint wasn't updated) this
+    // will fail with a CheckViolation error, making the test a reliable
+    // regression guard.
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "_event_source:my-trigger",
+        "distributed",
+        Some(serde_json::json!({"_fingerprint": "abc123"})),
+        "event_source",
+        None,
+        None,
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id)
+        .await?
+        .expect("job must exist after insert");
+
+    assert_eq!(job.source_type, "event_source");
+    assert_eq!(job.task_name, "_event_source:my-trigger");
+    assert_eq!(job.status, "pending");
+
+    Ok(())
+}
+
+/// Verify that migration 026_event_source.sql also added 'event_source' to
+/// the job_step.action_type CHECK constraint, allowing event-source steps to
+/// be persisted.  This guards against the constraint gap that prevented
+/// `create_event_source_job` from completing.
+#[tokio::test]
+async fn test_event_source_step_action_type() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create parent job first (with allowed source_type)
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "_event_source:my-trigger",
+        "distributed",
+        Some(serde_json::json!({"_fingerprint": "test"})),
+        "event_source",
+        None,
+        None,
+    )
+    .await?;
+
+    // Insert a step with action_type = 'event_source'.
+    // Migration 026 must add 'event_source' to job_step_action_type_check;
+    // otherwise this insert fails with a constraint violation.
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "event_source".to_string(),
+        action_name: "my-trigger".to_string(),
+        action_type: "event_source".to_string(),
+        action_image: None,
+        action_spec: Some(serde_json::json!({"script": "echo test", "runner": "local"})),
+        input: None,
+        status: "ready".to_string(),
+        required_tags: vec!["event_source".to_string()],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+    }];
+
+    JobStepRepo::create_steps(&pool, &steps)
+        .await
+        .expect("inserting an event_source step must succeed after migration 026");
+
+    let created = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(created.len(), 1, "one step must have been created");
+    assert_eq!(created[0].action_type, "event_source");
+    assert_eq!(created[0].step_name, "event_source");
+
+    Ok(())
+}
