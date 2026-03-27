@@ -15,4 +15,4 @@ services:
       BASE_URL: http://server:8080
       CI: "true"
     command: >
-      bash -c "cd /app/ui && npm install && npx playwright install --with-deps chromium && npx playwright test"
+      bash -c "cd /app/ui && npm install -g bun && bun install && bunx playwright install --with-deps chromium && bunx playwright test"
