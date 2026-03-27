@@ -763,6 +763,7 @@ Last updated: 2026-03-13.
 
 - [x] MCP server endpoint (Phase 7a): 8 tools, Streamable HTTP transport, auth support
 - [x] MCP per-tool ACL enforcement (Phase 7a follow-up)
+- [x] Event source triggers (Phase 5e): `type: event_source` trigger with stdout JSON-line protocol, exponential backoff restart policy, backpressure via `max_in_flight`, EventSourceManager background task
 - [ ] Structured `ask_user` input: allow agent to pass a JSON schema with `ask_user` so the UI renders form fields instead of free-text (same pattern as approval gate `approval_fields`)
 - [ ] Leader election via pg advisory locks for scheduler/recovery
 - [ ] Generate OpenAPI spec with `utoipa`

@@ -12,6 +12,7 @@ Phase 5a complete: Conditional flow steps (`when` expressions).
 Phase 5b complete: For-each loops (`for_each` + `sequential`).
 Phase 5c: While loops.
 Phase 5d complete: Approval gates (`type: approval`, `suspended` status, approve/reject API).
+Phase 5e complete: Event source triggers (long-running queue consumers via stdout JSON-line protocol).
 Phase 6: Shared storage & worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -202,10 +203,21 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Auth: Bearer token (API key or JWT) via `tokio::task_local!`. Per-tool ACL checks.
 
 ### Webhook Triggers
-- `TriggerDef` tagged enum: `Scheduler` and `Webhook` variants
+- `TriggerDef` tagged enum: `Scheduler`, `Webhook`, and `EventSource` variants
 - Handler at `/hooks/{name}` (not under `/api/`). Auth: optional `secret` field (query param or Bearer header)
 - Input mapping: `body`, `headers`, `method`, `query` + YAML `input` defaults
 - **Sync/async mode**: `mode: "sync"` waits for completion (default: async). `timeout_secs` max wait (default 30, max 300).
+
+### Event Source Triggers
+- `TriggerDef::EventSource` variant: long-running queue consumer processes. Workers claim and run indefinitely per `restart_policy`.
+- **Stdout protocol**: Each JSON line emitted to stdout (parsed as valid JSON) becomes a job input, merged with trigger `input` defaults. Non-JSON lines silently skipped.
+- **Runner support**: `script` (local/docker/pod) or `image` + `runner` (docker/pod). Language, dependencies, interpreter, manifest fields supported like script actions.
+- **RestartPolicy enum**: `Always` (default), `OnFailure`, `Never` — controls behavior when process exits.
+- **Exponential backoff**: `backoff_secs` field (default 5) — doubled on consecutive failures, capped at 5 minutes. Resets on clean exit.
+- **Backpressure**: `max_in_flight` field limits concurrent pending/running jobs. Worker pauses stdout reading when limit reached, creating natural Unix pipe backoff.
+- **Worker requirements**: Workers claiming event sources must declare `event_source` tag and set `max_event_sources` config (default 1, max concurrent event source triggers per worker).
+- **EventSourceManager**: Server-side background task creating/monitoring event source controller jobs. `POST /worker/event-source/emit` endpoint for workers to emit events.
+- **Job tracking**: Created jobs have `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"` for audit trail.
 
 ### Hooks (on_success / on_error)
 - `HookDef`: `action` + `input` map. Task-level and workspace-level (fallback when task has none).
