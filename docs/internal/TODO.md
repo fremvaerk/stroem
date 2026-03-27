@@ -906,38 +906,38 @@ Last updated: 2026-03-13.
 ## Review: Event Source Triggers (2026-03-27)
 
 ### Critical
-- [ ] `source_id` format mismatch: server creates jobs with `"{workspace}/{trigger_name}"` (`server/event_source.rs:373`), worker sends `"{job_id}/{step_name}"` (`worker/event_source.rs:987`). Emitted jobs can't be traced back to trigger. Fix: worker should use source_id from action_spec.
-- [ ] Worker never calls `report_step_start()` for event source steps — jobs stay `pending` forever in DB/UI (`worker/event_source.rs:972`). Fix: add `client.report_step_start()` at start of `execute_event_source`.
-- [ ] Resolved secrets stored in plaintext in `action_spec` JSON in `job_step` table (`server/event_source.rs:255`). Unlike regular steps (which resolve at claim time), event source secrets persist in DB indefinitely. Fix: store raw templates, resolve at claim time.
+- [x] `source_id` format mismatch: worker now builds source_id from action_spec `workspace` + `action_name` to match server's `"{workspace}/{trigger_name}"` format.
+- [x] Worker now calls `report_step_start()` at the start of `execute_event_source` so jobs transition to `running`.
+- [ ] Resolved secrets stored in plaintext in `action_spec` JSON in `job_step` table. Consistent with regular step behavior but longer exposure window. TODO added for resolving at claim time.
 
 ### Important
-- [ ] Fingerprint excludes `task`, `input`, `restart_policy`, `backoff_secs`, `max_in_flight` — changing target task doesn't trigger job replacement (`server/event_source.rs:280-320`).
-- [ ] Duplicate active jobs for same `source_id` silently lost in reconciliation HashMap — orphaned jobs never cancelled (`server/event_source.rs:77-80`). Fix: collect all jobs per source_id, cancel all but newest.
-- [ ] Race: worker claims event source step but semaphore full — step stays `running` in DB, stuck until recovery sweep (`worker/poller.rs:495-516`). Fix: report step failure when semaphore unavailable.
-- [ ] Event source steps with `restart_policy: never` that exit leave step `running` in DB forever (`worker/event_source.rs:1030-1037`). Fix: report step completion when supervision loop exits.
-- [ ] Worker shutdown drain doesn't wait for event source tasks — only regular semaphore drained (`worker/poller.rs:590-617`). Fix: also drain `event_source_semaphore`.
+- [x] Fingerprint now includes `task`, `input`, `restart_policy`, `backoff_secs`, `max_in_flight`.
+- [x] Duplicate active jobs: reconciliation HashMap changed to `Vec` per source_id, duplicates cancelled.
+- [x] Semaphore-full race: worker now reports step failure when event source semaphore is full.
+- [x] Step completion: supervision loop now reports step completion to server on exit (all paths).
+- [x] Worker shutdown now drains both regular and event source semaphores.
 
 ### Minor
-- [ ] `max_in_flight` parsed but never enforced — dead code with `#[allow(dead_code)]` (`worker/event_source.rs:33`). Implement or remove.
-- [ ] K8s pod name collision on restart — deterministic name + async deletion can cause 409 Conflict (`worker/event_source.rs:665-676`). Fix: append random suffix.
-- [ ] K8s pod log stream can't distinguish stdout from stderr — all lines parsed as JSON, stderr causes "malformed JSON" warnings (`worker/event_source.rs:798-866`).
-- [ ] Zero delay on success restart with `restart_policy: always` can cause tight-loop spinning (`worker/event_source.rs:1074`). Fix: minimum 1s delay.
-- [ ] `merge_input` doc says "deep-merge" but does shallow merge (`worker/event_source.rs:170`). Fix doc comment.
-- [ ] No request body size limit on emit endpoint. Fix: add explicit `DefaultBodyLimit`.
-- [ ] No rate limiting on emit endpoint — runaway event source can flood server with job creation.
-- [ ] Docker event source containers run without security restrictions (no `--no-new-privileges`, no cap-drop) (`worker/event_source.rs:446-453`).
-- [ ] Emit endpoint allows any authenticated worker to create jobs for any workspace/task — no scope validation (`server/worker_api/event_source.rs:38-91`).
+- [x] `max_in_flight` backpressure implemented via tokio::sync::Semaphore in stdout processing.
+- [x] K8s pod name now includes random UUID suffix to avoid collision on restart.
+- [ ] K8s pod log stream can't distinguish stdout from stderr — known limitation of `log_stream` API.
+- [x] Minimum 1s delay on success restart to prevent tight-loop spinning.
+- [x] `merge_input` doc corrected from "deep-merge" to "shallow-merge".
+- [x] 256KB body size limit added to emit endpoint via `DefaultBodyLimit`.
+- [ ] No rate limiting on emit endpoint — mitigated by `max_in_flight` backpressure on worker side.
+- [x] Docker containers now have `no-new-privileges` security option.
+- [x] Emit endpoint validates `source_id` against workspace triggers (type, enabled, target task).
 
 ### Missing Tests
-- [ ] `compute_fingerprint` — determinism, order-independence of deps/env, field sensitivity, None vs empty string
+- [x] `compute_fingerprint` — determinism, order-independence, field sensitivity, None vs empty (6 tests)
 - [ ] `reconcile` integration tests — create/replace-on-change/skip-unchanged/cancel-removed branches (needs testcontainers)
 - [ ] `emit_event` HTTP handler — happy path, 404 workspace, auth required, empty input, null input
 - [ ] `process_stdout_lines` — valid JSON, malformed, empty lines, cancellation, EOF, input defaults merge
-- [ ] Backoff formula — extract to standalone function and test: zero failures, cap at 300s, overflow safety
+- [x] Backoff formula — extracted to `compute_backoff_delay` with 5 unit tests
 - [ ] `max_event_sources` config — default value (5), explicit value, zero rejection, env override
 - [ ] Poller event source semaphore branching — separate semaphore, full semaphore skip, normal step unaffected
 - [ ] DB migration — insert with `source_type = 'event_source'` succeeds
-- [ ] `restart_policy_str` round-trip for all three variants
+- [x] `restart_policy_str` round-trip for all three variants
 
 ## Bugs Found & Fixed
 

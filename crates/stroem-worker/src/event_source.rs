@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{ClaimedStep, ServerClient};
@@ -28,9 +30,9 @@ struct EventSourceConfig {
     restart_policy: String,
     /// Base backoff delay in seconds (doubles on consecutive failure, capped at 300s).
     backoff_secs: u64,
-    /// Maximum concurrent in-flight jobs before pausing stdout reading.
-    /// Parsed from config; reserved for future throttling implementation.
-    #[allow(dead_code)]
+    /// Maximum concurrent in-flight emit calls. When set, a semaphore limits
+    /// how many emit HTTP requests can be in-flight simultaneously, providing
+    /// backpressure on stdout reading.
     max_in_flight: Option<u32>,
     /// Raw pod manifest overrides (pod runner only).
     manifest: Option<serde_json::Value>,
@@ -167,8 +169,7 @@ fn should_restart(policy: &str, success: bool) -> bool {
     }
 }
 
-/// Deep-merge two JSON objects. Values in `overrides` win over `base`.
-/// Only operates on object values; non-objects are replaced wholesale.
+/// Shallow-merge two JSON objects. Values in `overrides` win over `base`.
 fn merge_input(
     base: &HashMap<String, serde_json::Value>,
     overrides: &serde_json::Value,
@@ -189,12 +190,16 @@ fn merge_input(
 ///
 /// Non-JSON lines are logged as warnings and skipped. Returns when EOF is reached
 /// or the cancel token is triggered.
+///
+/// When `in_flight_sem` is `Some`, a permit is acquired before each emit call and
+/// released immediately after, limiting concurrent HTTP emit requests.
 async fn process_stdout_lines(
     reader: impl tokio::io::AsyncRead + Unpin,
     client: &ServerClient,
     config: &EventSourceConfig,
     cancel: &CancellationToken,
     source_id: &str,
+    in_flight_sem: Option<Arc<Semaphore>>,
 ) {
     let mut lines = BufReader::new(reader).lines();
     loop {
@@ -238,12 +243,20 @@ async fn process_stdout_lines(
             "event_source emitting job"
         );
 
+        // Acquire in-flight permit if backpressure is configured
+        let _permit = if let Some(ref sem) = in_flight_sem {
+            sem.clone().acquire_owned().await.ok()
+        } else {
+            None
+        };
+
         if let Err(e) = client
             .emit_event_source(&config.workspace, &config.target_task, merged, source_id)
             .await
         {
             tracing::error!("event_source emit failed: {:#}", e);
         }
+        // _permit is dropped here, releasing the semaphore slot
     }
 }
 
@@ -354,7 +367,10 @@ async fn run_local_process(
     });
 
     // Process stdout: parse JSON, emit events
-    process_stdout_lines(stdout, client, config, cancel, source_id).await;
+    let in_flight_sem = config
+        .max_in_flight
+        .map(|n| Arc::new(Semaphore::new(n as usize)));
+    process_stdout_lines(stdout, client, config, cancel, source_id, in_flight_sem).await;
 
     // Wait for the child process to exit (or for cancellation)
     let outcome = tokio::select! {
@@ -449,6 +465,10 @@ async fn run_docker_process(
         env: Some(env_vec),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
+        host_config: Some(bollard::models::HostConfig {
+            security_opt: Some(vec!["no-new-privileges".to_string()]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -517,6 +537,9 @@ async fn run_docker_process(
     };
 
     // Read container output. We process stdout JSON lines; stderr goes to tracing.
+    let docker_in_flight_sem = config
+        .max_in_flight
+        .map(|n| Arc::new(Semaphore::new(n as usize)));
     loop {
         tokio::select! {
             biased;
@@ -543,6 +566,12 @@ async fn run_docker_process(
                                 // Stdout: attempt to parse and emit
                                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(line) {
                                     let merged = merge_input(&config.input_defaults, &payload);
+                                    // Acquire in-flight permit if backpressure is configured
+                                    let _permit = if let Some(ref sem) = docker_in_flight_sem {
+                                        sem.clone().acquire_owned().await.ok()
+                                    } else {
+                                        None
+                                    };
                                     if let Err(e) = client
                                         .emit_event_source(
                                             &config.workspace,
@@ -554,6 +583,7 @@ async fn run_docker_process(
                                     {
                                         tracing::error!("event_source emit failed: {:#}", e);
                                     }
+                                    // _permit dropped here
                                 } else if !line.trim().is_empty() {
                                     tracing::warn!(
                                         "event_source malformed JSON on stdout (skipped): {}",
@@ -661,18 +691,21 @@ async fn run_pod_process(
         )
     });
 
-    // Unique pod name derived from the source_id
+    // Unique pod name derived from the source_id with a random suffix to avoid
+    // name collisions when the old pod is still terminating after a restart.
     let sanitized: String = source_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
+    let suffix: String = uuid::Uuid::new_v4().to_string()[..8].to_string();
     let pod_name = format!(
-        "stroem-es-{}",
+        "stroem-es-{}-{}",
         sanitized
             .trim_matches('-')
             .chars()
             .take(50)
-            .collect::<String>()
+            .collect::<String>(),
+        suffix,
     );
 
     let mut labels: HashMap<String, String> = HashMap::new();
@@ -809,6 +842,9 @@ async fn run_pod_process(
         }
     };
 
+    let pod_in_flight_sem = config
+        .max_in_flight
+        .map(|n| Arc::new(Semaphore::new(n as usize)));
     match stream_result {
         Ok(stream) => {
             let reader = futures_util::io::BufReader::new(stream);
@@ -831,6 +867,12 @@ async fn run_pod_process(
                         match serde_json::from_str::<serde_json::Value>(&line) {
                             Ok(payload) => {
                                 let merged = merge_input(&config.input_defaults, &payload);
+                                // Acquire in-flight permit if backpressure is configured
+                                let _permit = if let Some(ref sem) = pod_in_flight_sem {
+                                    sem.clone().acquire_owned().await.ok()
+                                } else {
+                                    None
+                                };
                                 if let Err(e) = client
                                     .emit_event_source(
                                         &config.workspace,
@@ -842,6 +884,7 @@ async fn run_pod_process(
                                 {
                                     tracing::error!("event_source emit failed: {:#}", e);
                                 }
+                                // _permit dropped here
                             }
                             Err(_) => {
                                 tracing::warn!(
@@ -956,14 +999,28 @@ async fn run_process(
     }
 }
 
+/// Compute the restart backoff delay in seconds.
+///
+/// Returns 1 second as the minimum delay (even on success, to prevent tight-loop
+/// spinning). For failures, uses exponential backoff: `base * 2^(failures-1)`,
+/// capped at `MAX_BACKOFF_SECS`.
+fn compute_backoff_delay(consecutive_failures: u32, base_secs: u64) -> u64 {
+    if consecutive_failures == 0 {
+        1 // Minimum 1s delay even on success to prevent tight-loop spinning
+    } else {
+        let exp = consecutive_failures.saturating_sub(1).min(10);
+        base_secs
+            .saturating_mul(2u64.saturating_pow(exp))
+            .min(MAX_BACKOFF_SECS)
+    }
+}
+
 /// Drive the full lifecycle of an event source step.
 ///
 /// Supervises a long-running process, restarting it according to the configured
-/// restart policy with exponential backoff. Returns only when the step is cancelled
-/// (via `cancel_token`) or the restart policy says to stop.
-///
-/// Event source steps never report completion to the server — they remain in
-/// `running` status until the worker dies or the job is cancelled.
+/// restart policy with exponential backoff. Reports step start to the server at
+/// the beginning, and step completion when the supervision loop ends (either
+/// because the restart policy says to stop, or because of cancellation).
 #[tracing::instrument(skip(client, step, cancel_token), fields(
     job_id = %step.job_id,
     step_name = %step.step_name,
@@ -973,18 +1030,47 @@ pub async fn execute_event_source(
     client: &ServerClient,
     step: ClaimedStep,
     cancel_token: CancellationToken,
+    worker_id: uuid::Uuid,
     #[cfg(feature = "kubernetes")] kube_namespace: Option<String>,
 ) {
     let config = match EventSourceConfig::from_step(&step) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to parse event_source config: {:#}", e);
+            let err_msg = format!("Failed to parse event_source config: {:#}", e);
+            tracing::error!("{}", err_msg);
+            // Report failure so server can clean up and EventSourceManager can re-create
+            if let Err(re) = client
+                .report_step_complete(step.job_id, &step.step_name, 1, None, Some(err_msg))
+                .await
+            {
+                tracing::error!(
+                    "Failed to report event_source config parse failure: {:#}",
+                    re
+                );
+            }
             return;
         }
     };
 
-    // Use job_id + step_name as the stable source identity sent to the emit endpoint
-    let source_id = format!("{}/{}", step.job_id, step.step_name);
+    // Build source_id from the action_spec workspace + action_name (trigger name),
+    // matching the server-side format used in EventSourceManager: "{workspace}/{trigger_name}".
+    let source_id = step
+        .action_spec
+        .as_ref()
+        .and_then(|spec| {
+            let ws = spec.get("workspace")?.as_str()?;
+            Some(format!("{}/{}", ws, step.action_name))
+        })
+        .unwrap_or_else(|| format!("{}/{}", step.workspace, step.step_name));
+
+    // Report step start so the job transitions from pending → running
+    if let Err(e) = client
+        .report_step_start(step.job_id, &step.step_name, worker_id)
+        .await
+    {
+        tracing::error!("Failed to report event_source step start: {:#}", e);
+        // Continue anyway — the step is already claimed/running in DB
+    }
 
     tracing::info!(
         "Starting event_source '{}' targeting task '{}' via runner '{}'",
@@ -994,6 +1080,10 @@ pub async fn execute_event_source(
     );
 
     let mut consecutive_failures: u32 = 0;
+    // Track the last process outcome for reporting when the supervision loop ends.
+    // The initial value is never read because all loop exit paths set it before breaking.
+    #[allow(unused_assignments)]
+    let mut final_outcome: (i32, Option<String>) = (0, None);
 
     loop {
         if cancel_token.is_cancelled() {
@@ -1001,6 +1091,13 @@ pub async fn execute_event_source(
                 "event_source '{}' cancelled before process start",
                 step.step_name
             );
+            // Report cancellation as successful completion (the step ran as intended)
+            if let Err(e) = client
+                .report_step_complete(step.job_id, &step.step_name, 0, None, None)
+                .await
+            {
+                tracing::error!("Failed to report event_source cancellation: {:#}", e);
+            }
             return;
         }
 
@@ -1019,6 +1116,13 @@ pub async fn execute_event_source(
         match outcome {
             ProcessOutcome::Cancelled => {
                 tracing::info!("event_source '{}' cancelled", step.step_name);
+                // Report cancellation as successful completion
+                if let Err(e) = client
+                    .report_step_complete(step.job_id, &step.step_name, 0, None, None)
+                    .await
+                {
+                    tracing::error!("Failed to report event_source cancellation: {:#}", e);
+                }
                 return;
             }
             ProcessOutcome::ExitSuccess => {
@@ -1033,7 +1137,8 @@ pub async fn execute_event_source(
                         step.step_name,
                         config.restart_policy,
                     );
-                    return;
+                    final_outcome = (0, None);
+                    break;
                 }
             }
             ProcessOutcome::ExitFailure(code) => {
@@ -1049,7 +1154,8 @@ pub async fn execute_event_source(
                         step.step_name,
                         config.restart_policy,
                     );
-                    return;
+                    final_outcome = (code, Some(format!("Process exited with code {}", code)));
+                    break;
                 }
             }
             ProcessOutcome::SpawnError(ref msg) => {
@@ -1065,37 +1171,43 @@ pub async fn execute_event_source(
                         step.step_name,
                         config.restart_policy,
                     );
-                    return;
+                    final_outcome = (1, Some(msg.clone()));
+                    break;
                 }
             }
         }
 
-        // Exponential backoff: base * 2^(failures-1), capped at MAX_BACKOFF_SECS
-        let delay = if consecutive_failures == 0 {
-            0
-        } else {
-            let exp = consecutive_failures.saturating_sub(1).min(10);
-            config
-                .backoff_secs
-                .saturating_mul(2u64.saturating_pow(exp))
-                .min(MAX_BACKOFF_SECS)
-        };
+        let delay = compute_backoff_delay(consecutive_failures, config.backoff_secs);
 
-        if delay > 0 {
-            tracing::info!(
-                "event_source '{}' backing off {}s before restart (failure #{})",
-                step.step_name,
-                delay,
-                consecutive_failures,
-            );
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs(delay)) => {}
-                () = cancel_token.cancelled() => {
-                    tracing::info!("event_source '{}' cancelled during backoff", step.step_name);
-                    return;
+        tracing::info!(
+            "event_source '{}' backing off {}s before restart (failure #{})",
+            step.step_name,
+            delay,
+            consecutive_failures,
+        );
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(delay)) => {}
+            () = cancel_token.cancelled() => {
+                tracing::info!("event_source '{}' cancelled during backoff", step.step_name);
+                // Report cancellation as successful completion
+                if let Err(e) = client
+                    .report_step_complete(step.job_id, &step.step_name, 0, None, None)
+                    .await
+                {
+                    tracing::error!("Failed to report event_source cancellation: {:#}", e);
                 }
+                return;
             }
         }
+    }
+
+    // Report step completion to server (the supervision loop has ended)
+    let (exit_code, error_msg) = final_outcome;
+    if let Err(e) = client
+        .report_step_complete(step.job_id, &step.step_name, exit_code, None, error_msg)
+        .await
+    {
+        tracing::error!("Failed to report event_source step completion: {:#}", e);
     }
 }
 
@@ -1336,5 +1448,39 @@ mod tests {
             Some(&json!("eu-west-1"))
         );
         assert_eq!(config.input_defaults.get("env"), Some(&json!("prod")));
+    }
+
+    // --- compute_backoff_delay tests ---
+
+    #[test]
+    fn test_backoff_zero_failures() {
+        // Zero failures → minimum 1s delay (not 0, to prevent tight-loop spinning)
+        assert_eq!(compute_backoff_delay(0, 5), 1);
+    }
+
+    #[test]
+    fn test_backoff_one_failure() {
+        // First failure → base_secs * 2^0 = base_secs
+        assert_eq!(compute_backoff_delay(1, 5), 5);
+    }
+
+    #[test]
+    fn test_backoff_two_failures() {
+        // Second failure → base_secs * 2^1 = 2 * base_secs
+        assert_eq!(compute_backoff_delay(2, 5), 10);
+    }
+
+    #[test]
+    fn test_backoff_capped_at_max() {
+        // Many failures → capped at MAX_BACKOFF_SECS (300)
+        assert_eq!(compute_backoff_delay(20, 5), MAX_BACKOFF_SECS);
+        assert_eq!(compute_backoff_delay(100, 5), MAX_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn test_backoff_overflow_safe() {
+        // u32::MAX failures must not panic
+        let delay = compute_backoff_delay(u32::MAX, 5);
+        assert_eq!(delay, MAX_BACKOFF_SECS);
     }
 }

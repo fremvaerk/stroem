@@ -6,7 +6,7 @@ pub mod workspace;
 use crate::state::AppState;
 use crate::web::error::AppError;
 use axum::{
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::header,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -80,7 +80,10 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
             "/jobs/{id}/steps/{step}/agent-state",
             post(jobs::agent_save_state),
         )
-        .route("/event-source/emit", post(event_source::emit_event))
+        .route(
+            "/event-source/emit",
+            post(event_source::emit_event).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/workspace/{ws}", get(workspace::download_workspace))
         .layer(middleware::from_fn_with_state(
             state.clone(),

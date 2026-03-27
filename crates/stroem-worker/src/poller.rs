@@ -499,12 +499,28 @@ pub async fn run_worker(
                         Ok(p) => p,
                         Err(_) => {
                             tracing::warn!(
-                                "event_source semaphore full (max {}), skipping step '{}' — \
-                                 it will be re-claimed on the next poll",
+                                "event_source semaphore full (max {}), failing step '{}' so \
+                                 EventSourceManager can re-create the job",
                                 config.max_event_sources,
                                 step.step_name,
                             );
-                            // Sleep briefly to avoid a tight re-claim loop
+                            // Report the step as failed so the server's EventSourceManager
+                            // can detect the failure and re-create the job on the next cycle
+                            if let Err(e) = client
+                                .report_step_complete(
+                                    step.job_id,
+                                    &step.step_name,
+                                    1,
+                                    None,
+                                    Some("Worker event source capacity full".to_string()),
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    "Failed to report event source step failure: {:#}",
+                                    e
+                                );
+                            }
                             tokio::select! {
                                 () = tokio::time::sleep(poll_interval) => {}
                                 () = cancel_token.cancelled() => {
@@ -518,6 +534,7 @@ pub async fn run_worker(
 
                     let es_client = client.clone();
                     let es_cancel = cancel_token.clone();
+                    let es_worker_id = worker_id;
                     #[cfg(feature = "kubernetes")]
                     let es_kube_ns = kube_namespace_for_es.clone();
 
@@ -527,6 +544,7 @@ pub async fn run_worker(
                             &es_client,
                             step,
                             es_cancel,
+                            es_worker_id,
                             #[cfg(feature = "kubernetes")]
                             es_kube_ns,
                         )
@@ -614,6 +632,22 @@ pub async fn run_worker(
                 DRAIN_TIMEOUT_SECS
             );
         }
+    }
+
+    // Also drain event source permits so long-lived event source tasks can finish
+    let es_drain = tokio::time::timeout(
+        Duration::from_secs(DRAIN_TIMEOUT_SECS),
+        event_source_semaphore.acquire_many(
+            u32::try_from(config.max_event_sources).expect("validated at config load"),
+        ),
+    );
+    match es_drain.await {
+        Ok(Ok(_)) => tracing::info!("All event source tasks drained"),
+        Ok(Err(e)) => tracing::warn!("Event source semaphore error during drain: {:#}", e),
+        Err(_) => tracing::warn!(
+            "Event source drain timeout ({}s) exceeded",
+            DRAIN_TIMEOUT_SECS
+        ),
     }
 
     Ok(())

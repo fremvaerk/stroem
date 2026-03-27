@@ -72,11 +72,16 @@ async fn reconcile(state: &AppState) {
         }
     };
 
-    // Build a lookup: source_id -> (job_id, stored_fingerprint)
+    // Build a lookup: source_id -> Vec<(job_id, stored_fingerprint)>
     // source_id format: "{workspace}/{trigger_name}"
-    let mut active_by_source: HashMap<String, (Uuid, String)> = HashMap::new();
+    // Multiple active jobs for the same source_id can occur if a previous
+    // reconcile cycle created a job before the old one was fully cancelled.
+    let mut active_by_source: HashMap<String, Vec<(Uuid, String)>> = HashMap::new();
     for (job_id, source_id, fingerprint) in active {
-        active_by_source.insert(source_id, (job_id, fingerprint));
+        active_by_source
+            .entry(source_id)
+            .or_default()
+            .push((job_id, fingerprint));
     }
 
     // Build set of desired source_ids for the stale-detection pass
@@ -104,51 +109,82 @@ async fn reconcile(state: &AppState) {
                     );
                 }
             }
-            Some((job_id, stored_fp)) if stored_fp != &des.fingerprint => {
-                // Config changed — cancel old job, create a new one.
+            Some(jobs) => {
+                // Cancel any duplicate jobs beyond the first matching one.
+                // If there is a job with the current fingerprint, keep it and
+                // cancel all others; otherwise keep the first and cancel the rest.
+                let matching_pos = jobs.iter().position(|(_, fp)| fp == &des.fingerprint);
+
+                let keep_idx = matching_pos.unwrap_or(0);
+                let (keep_job_id, keep_fp) = &jobs[keep_idx];
+
+                // Cancel all duplicate jobs (all except the one we're keeping).
+                for (i, (dup_id, _)) in jobs.iter().enumerate() {
+                    if i == keep_idx {
+                        continue;
+                    }
+                    tracing::warn!(
+                        "EventSourceManager: cancelling duplicate job {} for '{}'",
+                        dup_id,
+                        source_id
+                    );
+                    if let Err(e) = crate::cancellation::cancel_job(state, *dup_id).await {
+                        tracing::warn!(
+                            "EventSourceManager: failed to cancel duplicate job {} for '{}': {:#}",
+                            dup_id,
+                            source_id,
+                            e
+                        );
+                    }
+                }
+
+                // Now handle the kept job.
+                if keep_fp != &des.fingerprint {
+                    // Config changed — cancel the kept job and create a new one.
+                    tracing::info!(
+                        "EventSourceManager: config changed for '{}', cancelling job {} and recreating",
+                        source_id,
+                        keep_job_id
+                    );
+                    if let Err(e) = crate::cancellation::cancel_job(state, *keep_job_id).await {
+                        tracing::warn!(
+                            "EventSourceManager: failed to cancel old job {} for '{}': {:#}",
+                            keep_job_id,
+                            source_id,
+                            e
+                        );
+                        // Continue to create the new job even if cancellation failed.
+                    }
+                    if let Err(e) = create_event_source_job(state, des).await {
+                        tracing::error!(
+                            "EventSourceManager: failed to create replacement job for '{}': {:#}",
+                            source_id,
+                            e
+                        );
+                    }
+                }
+                // else: job exists with matching fingerprint — nothing to do.
+            }
+        }
+    }
+
+    // --- Step 4: cancel ALL jobs for removed/disabled triggers ---
+    for (source_id, jobs) in &active_by_source {
+        if !desired_source_ids.contains(source_id) {
+            for (job_id, _) in jobs {
                 tracing::info!(
-                    "EventSourceManager: config changed for '{}', cancelling job {} and recreating",
+                    "EventSourceManager: trigger '{}' removed/disabled, cancelling job {}",
                     source_id,
                     job_id
                 );
                 if let Err(e) = crate::cancellation::cancel_job(state, *job_id).await {
                     tracing::warn!(
-                        "EventSourceManager: failed to cancel old job {} for '{}': {:#}",
+                        "EventSourceManager: failed to cancel stale job {} for '{}': {:#}",
                         job_id,
                         source_id,
                         e
                     );
-                    // Continue to create the new job even if cancellation failed.
                 }
-                if let Err(e) = create_event_source_job(state, des).await {
-                    tracing::error!(
-                        "EventSourceManager: failed to create replacement job for '{}': {:#}",
-                        source_id,
-                        e
-                    );
-                }
-            }
-            Some(_) => {
-                // Job exists with matching fingerprint — nothing to do.
-            }
-        }
-    }
-
-    // --- Step 4: cancel jobs for removed/disabled triggers ---
-    for (source_id, (job_id, _)) in &active_by_source {
-        if !desired_source_ids.contains(source_id) {
-            tracing::info!(
-                "EventSourceManager: trigger '{}' removed/disabled, cancelling job {}",
-                source_id,
-                job_id
-            );
-            if let Err(e) = crate::cancellation::cancel_job(state, *job_id).await {
-                tracing::warn!(
-                    "EventSourceManager: failed to cancel stale job {} for '{}': {:#}",
-                    job_id,
-                    source_id,
-                    e
-                );
             }
         }
     }
@@ -239,6 +275,11 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
                 interpreter.as_deref(),
                 &resolved_env,
                 manifest.as_ref(),
+                &task,
+                &input,
+                restart_policy,
+                backoff_secs,
+                max_in_flight,
             );
 
             let runner_str = runner.clone().unwrap_or_else(|| "local".to_string());
@@ -252,6 +293,10 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
                 "language": language,
                 "dependencies": dependencies,
                 "interpreter": interpreter,
+                // TODO: Resolved env values (which may contain rendered secrets) are stored in
+                // the job_step table. This is consistent with how regular steps store rendered
+                // input, but event source jobs are long-lived so the exposure window is larger.
+                // Consider resolving env at claim time instead of job creation time.
                 "env": resolved_env,
                 "input_defaults": input,
                 "restart_policy": restart_policy_str(restart_policy),
@@ -276,6 +321,10 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
 /// Compute a SHA-256 fingerprint of the significant config fields of an event
 /// source trigger. The fingerprint is used to detect config changes so that
 /// stale jobs can be replaced.
+///
+/// Every field that affects job behaviour is included so that changing any
+/// single field (including `task`, `input`, `restart_policy`, `backoff_secs`,
+/// and `max_in_flight`) causes the old job to be replaced.
 #[allow(clippy::too_many_arguments)]
 fn compute_fingerprint(
     script: Option<&str>,
@@ -286,6 +335,11 @@ fn compute_fingerprint(
     interpreter: Option<&str>,
     env: &HashMap<String, String>,
     manifest: Option<&serde_json::Value>,
+    task: &str,
+    input: &HashMap<String, serde_json::Value>,
+    restart_policy: RestartPolicy,
+    backoff_secs: u64,
+    max_in_flight: Option<u32>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(script.unwrap_or(""));
@@ -316,6 +370,29 @@ fn compute_fingerprint(
     if let Some(m) = manifest {
         hasher.update(m.to_string());
     }
+    hasher.update("|");
+    hasher.update(task);
+    hasher.update("|");
+    // Sort input keys for stability.
+    let mut input_pairs: Vec<(&String, &serde_json::Value)> = input.iter().collect();
+    input_pairs.sort_by_key(|(k, _)| *k);
+    for (k, v) in input_pairs {
+        hasher.update(k.as_bytes());
+        hasher.update("=");
+        hasher.update(v.to_string());
+        hasher.update(";");
+    }
+    hasher.update("|");
+    hasher.update(restart_policy_str(restart_policy));
+    hasher.update("|");
+    hasher.update(backoff_secs.to_string());
+    hasher.update("|");
+    hasher.update(
+        max_in_flight
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+            .as_str(),
+    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -446,4 +523,404 @@ async fn create_event_source_job(state: &AppState, des: &DesiredEventSource) -> 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stroem_common::models::workflow::RestartPolicy;
+
+    /// Helper that calls `compute_fingerprint` with a complete, sensible set of
+    /// defaults so individual tests only need to override the field they care about.
+    #[allow(clippy::too_many_arguments)]
+    fn fp(
+        script: Option<&str>,
+        image: Option<&str>,
+        runner: Option<&str>,
+        language: Option<&str>,
+        deps: &[String],
+        interpreter: Option<&str>,
+        env: &HashMap<String, String>,
+        manifest: Option<&serde_json::Value>,
+        task: &str,
+        input: &HashMap<String, serde_json::Value>,
+        restart_policy: RestartPolicy,
+        backoff_secs: u64,
+        max_in_flight: Option<u32>,
+    ) -> String {
+        compute_fingerprint(
+            script,
+            image,
+            runner,
+            language,
+            deps,
+            interpreter,
+            env,
+            manifest,
+            task,
+            input,
+            restart_policy,
+            backoff_secs,
+            max_in_flight,
+        )
+    }
+
+    fn default_fp() -> String {
+        fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_fingerprint_determinism() {
+        let a = default_fp();
+        let b = default_fp();
+        assert_eq!(a, b, "same inputs must produce the same fingerprint");
+    }
+
+    #[test]
+    fn test_fingerprint_order_independence_deps() {
+        let deps_ab = vec!["b".to_string(), "a".to_string()];
+        let deps_ba = vec!["a".to_string(), "b".to_string()];
+
+        let hash_ab = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &deps_ab,
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        let hash_ba = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &deps_ba,
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_eq!(
+            hash_ab, hash_ba,
+            "dependency order must not affect fingerprint"
+        );
+    }
+
+    #[test]
+    fn test_fingerprint_order_independence_env() {
+        let mut env1 = HashMap::new();
+        env1.insert("FOO".to_string(), "1".to_string());
+        env1.insert("BAR".to_string(), "2".to_string());
+
+        let mut env2 = HashMap::new();
+        env2.insert("BAR".to_string(), "2".to_string());
+        env2.insert("FOO".to_string(), "1".to_string());
+
+        let h1 = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &env1,
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        let h2 = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &env2,
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_eq!(h1, h2, "env insertion order must not affect fingerprint");
+    }
+
+    #[test]
+    fn test_fingerprint_sensitivity_to_each_field() {
+        let base = default_fp();
+
+        // Changing script
+        let changed_script = fp(
+            Some("echo bye"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(
+            base, changed_script,
+            "script change must change fingerprint"
+        );
+
+        // Changing task
+        let changed_task = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "other-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(base, changed_task, "task change must change fingerprint");
+
+        // Changing input
+        let mut input_map = HashMap::new();
+        input_map.insert("key".to_string(), serde_json::json!("value"));
+        let changed_input = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &input_map,
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(base, changed_input, "input change must change fingerprint");
+
+        // Changing restart_policy
+        let changed_policy = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Never,
+            5,
+            None,
+        );
+        assert_ne!(
+            base, changed_policy,
+            "restart_policy change must change fingerprint"
+        );
+
+        // Changing backoff_secs
+        let changed_backoff = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            10,
+            None,
+        );
+        assert_ne!(
+            base, changed_backoff,
+            "backoff_secs change must change fingerprint"
+        );
+
+        // Changing max_in_flight
+        let changed_max = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            Some(3),
+        );
+        assert_ne!(
+            base, changed_max,
+            "max_in_flight change must change fingerprint"
+        );
+
+        // Changing image
+        let changed_image = fp(
+            Some("echo hi"),
+            Some("ubuntu:22.04"),
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(base, changed_image, "image change must change fingerprint");
+
+        // Changing env
+        let mut env = HashMap::new();
+        env.insert("NEW_VAR".to_string(), "val".to_string());
+        let changed_env = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &env,
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(base, changed_env, "env change must change fingerprint");
+    }
+
+    #[test]
+    fn test_fingerprint_none_vs_empty() {
+        // `None` and `Some("")` for string fields produce different fingerprints
+        // because the hasher receives "" vs "" — actually they're the same for
+        // `unwrap_or("")`. Document this behaviour explicitly.
+        let with_none = fp(
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        let with_empty = fp(
+            Some(""),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        // Both collapse to "" via unwrap_or(""), so they are equal.
+        assert_eq!(
+            with_none, with_empty,
+            "None and Some(\"\") are treated identically (both hash as empty string)"
+        );
+
+        // max_in_flight: None vs Some(0) must differ.
+        let mif_none = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        let mif_zero = fp(
+            Some("echo hi"),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+            "my-task",
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            Some(0),
+        );
+        assert_ne!(
+            mif_none, mif_zero,
+            "max_in_flight None and Some(0) must produce different fingerprints"
+        );
+    }
+
+    #[test]
+    fn test_restart_policy_str() {
+        assert_eq!(restart_policy_str(RestartPolicy::Always), "always");
+        assert_eq!(restart_policy_str(RestartPolicy::OnFailure), "on_failure");
+        assert_eq!(restart_policy_str(RestartPolicy::Never), "never");
+    }
 }

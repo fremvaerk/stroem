@@ -4,6 +4,7 @@ use anyhow::Context;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use stroem_common::models::workflow::TriggerDef;
 
 /// Request body for the emit endpoint.
 ///
@@ -43,6 +44,47 @@ pub async fn emit_event(
         .get_workspace(&req.workspace)
         .await
         .ok_or_else(|| AppError::NotFound(format!("Workspace '{}' not found", req.workspace)))?;
+
+    // Validate that source_id matches an enabled EventSource trigger and
+    // targets the task named in the request.
+    let parts: Vec<&str> = req.source_id.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(AppError::BadRequest("Invalid source_id format".to_string()));
+    }
+    let (ws_name, trigger_name) = (parts[0], parts[1]);
+    if ws_name != req.workspace {
+        return Err(AppError::BadRequest(
+            "source_id workspace mismatch".to_string(),
+        ));
+    }
+    match workspace_config.triggers.get(trigger_name) {
+        Some(TriggerDef::EventSource { task, enabled, .. }) if *enabled && task == &req.task => {}
+        Some(TriggerDef::EventSource { task, enabled, .. }) if !*enabled => {
+            return Err(AppError::BadRequest(format!(
+                "No active event source trigger '{}' targeting task '{}'",
+                trigger_name, req.task
+            )));
+        }
+        Some(TriggerDef::EventSource { task, .. }) if task != &req.task => {
+            return Err(AppError::BadRequest(format!(
+                "No active event source trigger '{}' targeting task '{}'",
+                trigger_name, req.task
+            )));
+        }
+        Some(_) => {
+            // Trigger exists but is not an EventSource variant (scheduler/webhook).
+            return Err(AppError::BadRequest(format!(
+                "Trigger '{}' is not an event source trigger",
+                trigger_name
+            )));
+        }
+        None => {
+            return Err(AppError::BadRequest(format!(
+                "No active event source trigger '{}' targeting task '{}'",
+                trigger_name, req.task
+            )));
+        }
+    }
 
     let revision = state.workspaces.get_revision(&req.workspace);
 
