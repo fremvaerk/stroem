@@ -148,8 +148,15 @@ impl McpClientManager {
                     let args: Vec<String> = server_def.args.clone().unwrap_or_default();
 
                     // SECURITY: env_clear() prevents inheriting parent process secrets.
+                    // Preserve PATH so commands like `uvx` can be found.
                     let mut cmd = tokio::process::Command::new(command);
                     cmd.env_clear();
+                    if let Ok(path) = std::env::var("PATH") {
+                        cmd.env("PATH", path);
+                    }
+                    if let Ok(home) = std::env::var("HOME") {
+                        cmd.env("HOME", home);
+                    }
                     cmd.args(&args);
 
                     for (key, value) in &server_def.env {
