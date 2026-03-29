@@ -1,9 +1,7 @@
 import { test, expect } from "@playwright/test";
-import { login } from "./helpers";
 
 test.describe("Settings - API Key Management", () => {
   test.beforeEach(async ({ page }) => {
-    await login(page);
     await page.goto("/settings");
     await page.waitForLoadState("networkidle");
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();

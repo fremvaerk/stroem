@@ -1,10 +1,7 @@
 import { test, expect } from "@playwright/test";
-import { login, triggerJob, waitForJob, getAuthToken, apiFetch } from "./helpers";
+import { triggerJob, waitForJob, getAuthToken, apiFetch } from "./helpers";
 
 test.describe("Jobs", () => {
-  test.beforeEach(async ({ page }) => {
-    await login(page);
-  });
 
   test("jobs list shows status badges", async ({ page, baseURL }) => {
     // Trigger a job so there's at least one

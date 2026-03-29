@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { login, triggerJob, waitForJob } from "./helpers";
+import { triggerJob, waitForJob } from "./helpers";
 
 test.describe("Console and network errors audit", () => {
   test("no console errors or failed network requests across all pages", async ({
@@ -46,10 +46,7 @@ test.describe("Console and network errors audit", () => {
     // Wait for job to complete
     await waitForJob(baseURL!, jobId);
 
-    // 1. Login
-    await login(page);
-
-    // 2. Dashboard
+    // 1. Dashboard (auth via storageState)
     await page.goto("/");
     await page.waitForLoadState("networkidle");
 

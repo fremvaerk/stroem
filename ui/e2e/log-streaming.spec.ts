@@ -1,9 +1,8 @@
 import { test, expect } from "@playwright/test";
-import { login, triggerJob } from "./helpers";
+import { triggerJob } from "./helpers";
 
 test.describe("Log Streaming", () => {
   test("logs appear in job detail", async ({ page, baseURL }) => {
-    await login(page);
 
     // Trigger a job
     const jobId = await triggerJob(baseURL!, "hello-world", {
