@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("Tasks", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+  });
 
   test("tasks list renders", async ({ page }) => {
     await page.click("text=Tasks");
