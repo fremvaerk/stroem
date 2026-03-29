@@ -1,11 +1,30 @@
 import type { Page } from "@playwright/test";
 
 export async function login(page: Page) {
-  await page.goto("/login");
-  await page.fill('input[id="email"]', "admin@stroem.local");
-  await page.fill('input[id="password"]', "admin");
-  await page.click('button[type="submit"]');
-  await page.waitForURL("/");
+  // Retry login to handle 429 rate limiting from the auth rate limiter
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await page.goto("/login");
+    await page.fill('input[id="email"]', "admin@stroem.local");
+    await page.fill('input[id="password"]', "admin");
+
+    // Listen for the login response to detect rate limiting
+    const responsePromise = page.waitForResponse(
+      (r) => r.url().includes("/api/auth/login"),
+      { timeout: 10_000 },
+    );
+    await page.click('button[type="submit"]');
+
+    const response = await responsePromise.catch(() => null);
+    if (response && response.status() === 429) {
+      // Rate limited — wait and retry
+      await page.waitForTimeout(3000 * (attempt + 1));
+      continue;
+    }
+
+    await page.waitForURL("/", { timeout: 10_000 });
+    return;
+  }
+  throw new Error("Login failed after 5 rate-limit retries");
 }
 
 // Cached token to avoid rate limiting on /api/auth/login.

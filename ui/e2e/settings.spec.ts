@@ -99,17 +99,9 @@ test.describe("Settings - API Key Management", () => {
     await revealDialog.getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
 
-    // Wait for the key list to refresh, then check the table
-    await page.waitForTimeout(500);
+    // The new key should now appear in the table
     const row = page.locator("table tbody tr").filter({ hasText: keyName });
-    // If the row isn't visible after initial load, reload the page to force a fresh fetch
-    try {
-      await expect(row).toBeVisible({ timeout: 5_000 });
-    } catch {
-      await page.reload();
-      await page.waitForLoadState("networkidle");
-      await expect(row).toBeVisible({ timeout: 10_000 });
-    }
+    await expect(row).toBeVisible();
 
     // The key prefix cell should show "{prefix}..."
     const prefixCell = row.locator("td").nth(1);
