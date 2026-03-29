@@ -115,6 +115,8 @@ pub enum SourceType {
     Webhook,
     Hook,
     Task,
+    /// Job created by an event source trigger (long-running queue consumer).
+    EventSource,
 }
 
 impl fmt::Display for SourceType {
@@ -132,6 +134,7 @@ impl AsRef<str> for SourceType {
             Self::Webhook => "webhook",
             Self::Hook => "hook",
             Self::Task => "task",
+            Self::EventSource => "event_source",
         }
     }
 }
@@ -146,6 +149,7 @@ impl std::str::FromStr for SourceType {
             "webhook" => Ok(Self::Webhook),
             "hook" => Ok(Self::Hook),
             "task" => Ok(Self::Task),
+            "event_source" => Ok(Self::EventSource),
             other => anyhow::bail!("Unknown source type: {}", other),
         }
     }
@@ -373,6 +377,7 @@ mod tests {
         assert_eq!(SourceType::Webhook.to_string(), "webhook");
         assert_eq!(SourceType::Hook.to_string(), "hook");
         assert_eq!(SourceType::Task.to_string(), "task");
+        assert_eq!(SourceType::EventSource.to_string(), "event_source");
     }
 
     #[test]
@@ -389,7 +394,20 @@ mod tests {
         );
         assert_eq!("hook".parse::<SourceType>().unwrap(), SourceType::Hook);
         assert_eq!("task".parse::<SourceType>().unwrap(), SourceType::Task);
+        assert_eq!(
+            "event_source".parse::<SourceType>().unwrap(),
+            SourceType::EventSource
+        );
         assert!("invalid".parse::<SourceType>().is_err());
+    }
+
+    #[test]
+    fn test_source_type_event_source_roundtrip() {
+        let source = SourceType::EventSource;
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(json, r#""event_source""#);
+        let parsed: SourceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, source);
     }
 
     #[test]

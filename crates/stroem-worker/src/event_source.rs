@@ -186,13 +186,17 @@ fn merge_input(
     serde_json::Value::Object(merged)
 }
 
-/// Read stdout lines from a reader, parse each as JSON, and emit to the server.
+/// Read stdout lines from a reader using the `OUTPUT: ` prefix protocol.
 ///
-/// Non-JSON lines are logged as warnings and skipped. Returns when EOF is reached
-/// or the cancel token is triggered.
+/// Lines beginning with `OUTPUT: ` are parsed as JSON and emitted as jobs.
+/// All other non-empty lines are pushed as log entries (stream "stdout") to the
+/// server so they remain visible in the job's log view.
+///
+/// Returns when EOF is reached or the cancel token is triggered.
 ///
 /// When `in_flight_sem` is `Some`, a permit is acquired before each emit call and
 /// released immediately after, limiting concurrent HTTP emit requests.
+#[allow(clippy::too_many_arguments)]
 async fn process_stdout_lines(
     reader: impl tokio::io::AsyncRead + Unpin,
     client: &ServerClient,
@@ -200,6 +204,8 @@ async fn process_stdout_lines(
     cancel: &CancellationToken,
     source_id: &str,
     in_flight_sem: Option<Arc<Semaphore>>,
+    job_id: uuid::Uuid,
+    step_name: &str,
 ) {
     let mut lines = BufReader::new(reader).lines();
     loop {
@@ -217,46 +223,93 @@ async fn process_stdout_lines(
             _ = cancel.cancelled() => return,
         };
 
-        let line = line.trim().to_string();
-        if line.is_empty() {
+        let line = line.trim_end_matches('\n').to_string();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
 
-        let payload: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    "event_source malformed JSON on stdout (skipped): {}: {}",
-                    e,
-                    line
-                );
-                continue;
+        if let Some(json_str) = trimmed.strip_prefix("OUTPUT: ") {
+            // Structured event emission
+            let payload: serde_json::Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "event_source malformed OUTPUT JSON (skipped): {}: {}",
+                        e,
+                        json_str
+                    );
+                    let _ = client
+                        .push_logs(
+                            job_id,
+                            step_name,
+                            vec![serde_json::json!({
+                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                "stream": "stdout",
+                                "line": format!("[event_source] malformed OUTPUT JSON: {}", e),
+                            })],
+                        )
+                        .await;
+                    continue;
+                }
+            };
+
+            // Merge defaults with the emitted payload (stdout data wins)
+            let merged = merge_input(&config.input_defaults, &payload);
+
+            tracing::debug!(
+                source_id,
+                target_task = %config.target_task,
+                "event_source emitting job"
+            );
+
+            // Acquire in-flight permit if backpressure is configured
+            let _permit = if let Some(ref sem) = in_flight_sem {
+                sem.clone().acquire_owned().await.ok()
+            } else {
+                None
+            };
+
+            match client
+                .emit_event_source(&config.workspace, &config.target_task, merged, source_id)
+                .await
+            {
+                Ok(emitted_job_id) => {
+                    let _ = client
+                        .push_logs(
+                            job_id,
+                            step_name,
+                            vec![serde_json::json!({
+                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                "stream": "stdout",
+                                "line": format!(
+                                    "[event_source] emitted job {} for task '{}'",
+                                    emitted_job_id, config.target_task
+                                ),
+                            })],
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!("event_source emit failed: {:#}", e);
+                }
             }
-        };
-
-        // Merge defaults with the emitted payload (stdout data wins)
-        let merged = merge_input(&config.input_defaults, &payload);
-
-        tracing::debug!(
-            source_id,
-            target_task = %config.target_task,
-            "event_source emitting job"
-        );
-
-        // Acquire in-flight permit if backpressure is configured
-        let _permit = if let Some(ref sem) = in_flight_sem {
-            sem.clone().acquire_owned().await.ok()
+            // _permit is dropped here, releasing the semaphore slot
         } else {
-            None
-        };
-
-        if let Err(e) = client
-            .emit_event_source(&config.workspace, &config.target_task, merged, source_id)
-            .await
-        {
-            tracing::error!("event_source emit failed: {:#}", e);
+            // Regular stdout line — push as a log entry
+            tracing::debug!("event_source stdout: {}", trimmed);
+            let _ = client
+                .push_logs(
+                    job_id,
+                    step_name,
+                    vec![serde_json::json!({
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "stream": "stdout",
+                        "line": line,
+                    })],
+                )
+                .await;
         }
-        // _permit is dropped here, releasing the semaphore slot
     }
 }
 
@@ -266,6 +319,8 @@ async fn run_local_process(
     client: &ServerClient,
     cancel: &CancellationToken,
     source_id: &str,
+    job_id: uuid::Uuid,
+    step_name: &str,
 ) -> ProcessOutcome {
     use stroem_common::language::ScriptLanguage;
     use stroem_runner::script_exec;
@@ -350,10 +405,13 @@ async fn run_local_process(
     let stdout = child.stdout.take().expect("stdout must be piped");
     let stderr = child.stderr.take().expect("stderr must be piped");
 
-    // Stream stderr to tracing in the background
+    // Stream stderr to tracing and push to server logs
     let stderr_cancel = cancel.clone();
+    let stderr_client = client.clone();
+    let stderr_step = step_name.to_string();
     let stderr_handle = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
+        let mut batch: Vec<serde_json::Value> = Vec::new();
         loop {
             let line = tokio::select! {
                 result = lines.next_line() => match result {
@@ -363,14 +421,39 @@ async fn run_local_process(
                 _ = stderr_cancel.cancelled() => break,
             };
             tracing::debug!("event_source stderr: {}", line);
+            batch.push(serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "stream": "stderr",
+                "line": line,
+            }));
+            // Flush every 10 lines to keep logs visible without excessive requests
+            if batch.len() >= 10 {
+                let _ = stderr_client
+                    .push_logs(job_id, &stderr_step, std::mem::take(&mut batch))
+                    .await;
+            }
+        }
+        // Flush remaining lines
+        if !batch.is_empty() {
+            let _ = stderr_client.push_logs(job_id, &stderr_step, batch).await;
         }
     });
 
-    // Process stdout: parse JSON, emit events
+    // Process stdout: parse OUTPUT: prefix lines as events, push others as logs
     let in_flight_sem = config
         .max_in_flight
         .map(|n| Arc::new(Semaphore::new(n as usize)));
-    process_stdout_lines(stdout, client, config, cancel, source_id, in_flight_sem).await;
+    process_stdout_lines(
+        stdout,
+        client,
+        config,
+        cancel,
+        source_id,
+        in_flight_sem,
+        job_id,
+        step_name,
+    )
+    .await;
 
     // Wait for the child process to exit (or for cancellation)
     let outcome = tokio::select! {
@@ -403,6 +486,8 @@ async fn run_docker_process(
     client: &ServerClient,
     cancel: &CancellationToken,
     source_id: &str,
+    job_id: uuid::Uuid,
+    step_name: &str,
 ) -> ProcessOutcome {
     use bollard::container::LogOutput;
     use bollard::models::ContainerCreateBody;
@@ -536,21 +621,32 @@ async fn run_docker_process(
         }
     };
 
-    // Read container output. We process stdout JSON lines; stderr goes to tracing.
+    // Read container output. Stdout uses OUTPUT: prefix protocol; stderr goes to logs.
     let docker_in_flight_sem = config
         .max_in_flight
         .map(|n| Arc::new(Semaphore::new(n as usize)));
+    let mut stderr_batch: Vec<serde_json::Value> = Vec::new();
     loop {
         tokio::select! {
             biased;
 
             _ = cancel.cancelled() => {
+                // Flush any buffered stderr before cancelling
+                if !stderr_batch.is_empty() {
+                    let _ = client.push_logs(job_id, step_name, std::mem::take(&mut stderr_batch)).await;
+                }
                 stop_remove().await;
                 return ProcessOutcome::Cancelled;
             }
 
             chunk = output.output.next() => {
-                let Some(chunk) = chunk else { break };
+                let Some(chunk) = chunk else {
+                    // Flush remaining stderr on EOF
+                    if !stderr_batch.is_empty() {
+                        let _ = client.push_logs(job_id, step_name, std::mem::take(&mut stderr_batch)).await;
+                    }
+                    break;
+                };
                 match chunk {
                     Ok(log_output) => {
                         let line = log_output.to_string();
@@ -561,34 +657,70 @@ async fn run_docker_process(
                         match log_output {
                             LogOutput::StdErr { .. } => {
                                 tracing::debug!("event_source docker stderr: {}", line);
+                                stderr_batch.push(serde_json::json!({
+                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                    "stream": "stderr",
+                                    "line": line,
+                                }));
+                                if stderr_batch.len() >= 10 {
+                                    let _ = client.push_logs(job_id, step_name, std::mem::take(&mut stderr_batch)).await;
+                                }
                             }
                             _ => {
-                                // Stdout: attempt to parse and emit
-                                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(line) {
-                                    let merged = merge_input(&config.input_defaults, &payload);
-                                    // Acquire in-flight permit if backpressure is configured
-                                    let _permit = if let Some(ref sem) = docker_in_flight_sem {
-                                        sem.clone().acquire_owned().await.ok()
-                                    } else {
-                                        None
-                                    };
-                                    if let Err(e) = client
-                                        .emit_event_source(
-                                            &config.workspace,
-                                            &config.target_task,
-                                            merged,
-                                            source_id,
-                                        )
-                                        .await
-                                    {
-                                        tracing::error!("event_source emit failed: {:#}", e);
+                                // Stdout: use OUTPUT: prefix protocol
+                                let trimmed = line.trim();
+                                if let Some(json_str) = trimmed.strip_prefix("OUTPUT: ") {
+                                    match serde_json::from_str::<serde_json::Value>(json_str) {
+                                        Ok(payload) => {
+                                            let merged = merge_input(&config.input_defaults, &payload);
+                                            // Acquire in-flight permit if backpressure is configured
+                                            let _permit = if let Some(ref sem) = docker_in_flight_sem {
+                                                sem.clone().acquire_owned().await.ok()
+                                            } else {
+                                                None
+                                            };
+                                            match client
+                                                .emit_event_source(
+                                                    &config.workspace,
+                                                    &config.target_task,
+                                                    merged,
+                                                    source_id,
+                                                )
+                                                .await
+                                            {
+                                                Ok(emitted_job_id) => {
+                                                    let _ = client.push_logs(job_id, step_name, vec![serde_json::json!({
+                                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                        "stream": "stdout",
+                                                        "line": format!("[event_source] emitted job {} for task '{}'", emitted_job_id, config.target_task),
+                                                    })]).await;
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("event_source emit failed: {:#}", e);
+                                                }
+                                            }
+                                            // _permit dropped here
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "event_source malformed OUTPUT JSON (skipped): {}: {}",
+                                                e, json_str
+                                            );
+                                            let _ = client.push_logs(job_id, step_name, vec![serde_json::json!({
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                "stream": "stdout",
+                                                "line": format!("[event_source] malformed OUTPUT JSON: {}", e),
+                                            })]).await;
+                                        }
                                     }
-                                    // _permit dropped here
-                                } else if !line.trim().is_empty() {
-                                    tracing::warn!(
-                                        "event_source malformed JSON on stdout (skipped): {}",
-                                        line
-                                    );
+                                } else if !trimmed.is_empty() {
+                                    // Regular stdout log line
+                                    tracing::debug!("event_source docker stdout: {}", trimmed);
+                                    let _ = client.push_logs(job_id, step_name, vec![serde_json::json!({
+                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                        "stream": "stdout",
+                                        "line": line,
+                                    })]).await;
                                 }
                             }
                         }
@@ -647,6 +779,8 @@ async fn run_pod_process(
     cancel: &CancellationToken,
     source_id: &str,
     namespace: &str,
+    job_id: uuid::Uuid,
+    step_name: &str,
 ) -> ProcessOutcome {
     use futures_util::io::AsyncBufReadExt as _;
     use k8s_openapi::api::core::v1::Pod;
@@ -827,7 +961,7 @@ async fn run_pod_process(
         return ProcessOutcome::ExitFailure(exit_code);
     }
 
-    // Stream logs with follow=true. Process stdout lines and emit events.
+    // Stream logs with follow=true. Use OUTPUT: prefix protocol; other lines are logs.
     let log_params = LogParams {
         follow: true,
         container: Some("event-source".to_string()),
@@ -864,34 +998,66 @@ async fn run_pod_process(
 
                 match line_result {
                     Some(Ok(line)) if !line.trim().is_empty() => {
-                        match serde_json::from_str::<serde_json::Value>(&line) {
-                            Ok(payload) => {
-                                let merged = merge_input(&config.input_defaults, &payload);
-                                // Acquire in-flight permit if backpressure is configured
-                                let _permit = if let Some(ref sem) = pod_in_flight_sem {
-                                    sem.clone().acquire_owned().await.ok()
-                                } else {
-                                    None
-                                };
-                                if let Err(e) = client
-                                    .emit_event_source(
-                                        &config.workspace,
-                                        &config.target_task,
-                                        merged,
-                                        source_id,
-                                    )
-                                    .await
-                                {
-                                    tracing::error!("event_source emit failed: {:#}", e);
+                        let trimmed = line.trim();
+                        if let Some(json_str) = trimmed.strip_prefix("OUTPUT: ") {
+                            match serde_json::from_str::<serde_json::Value>(json_str) {
+                                Ok(payload) => {
+                                    let merged = merge_input(&config.input_defaults, &payload);
+                                    // Acquire in-flight permit if backpressure is configured
+                                    let _permit = if let Some(ref sem) = pod_in_flight_sem {
+                                        sem.clone().acquire_owned().await.ok()
+                                    } else {
+                                        None
+                                    };
+                                    match client
+                                        .emit_event_source(
+                                            &config.workspace,
+                                            &config.target_task,
+                                            merged,
+                                            source_id,
+                                        )
+                                        .await
+                                    {
+                                        Ok(emitted_job_id) => {
+                                            let _ = client.push_logs(job_id, step_name, vec![serde_json::json!({
+                                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                                                "stream": "stdout",
+                                                "line": format!("[event_source] emitted job {} for task '{}'", emitted_job_id, config.target_task),
+                                            })]).await;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("event_source emit failed: {:#}", e);
+                                        }
+                                    }
+                                    // _permit dropped here
                                 }
-                                // _permit dropped here
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "event_source pod malformed OUTPUT JSON (skipped): {}: {}",
+                                        e,
+                                        json_str
+                                    );
+                                    let _ = client.push_logs(job_id, step_name, vec![serde_json::json!({
+                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                        "stream": "stdout",
+                                        "line": format!("[event_source] malformed OUTPUT JSON: {}", e),
+                                    })]).await;
+                                }
                             }
-                            Err(_) => {
-                                tracing::warn!(
-                                    "event_source pod malformed JSON (skipped): {}",
-                                    line
-                                );
-                            }
+                        } else {
+                            // Regular log line — push to server
+                            tracing::debug!("event_source pod stdout: {}", trimmed);
+                            let _ = client
+                                .push_logs(
+                                    job_id,
+                                    step_name,
+                                    vec![serde_json::json!({
+                                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                                        "stream": "stdout",
+                                        "line": line,
+                                    })],
+                                )
+                                .await;
                         }
                     }
                     Some(Ok(_)) => {} // empty line
@@ -970,12 +1136,14 @@ async fn run_process(
     client: &ServerClient,
     cancel: &CancellationToken,
     source_id: &str,
+    job_id: uuid::Uuid,
+    step_name: &str,
     #[cfg(feature = "kubernetes")] kube_namespace: Option<&str>,
 ) -> ProcessOutcome {
     match config.runner.as_str() {
         "docker" => {
             #[cfg(feature = "docker")]
-            return run_docker_process(config, client, cancel, source_id).await;
+            return run_docker_process(config, client, cancel, source_id, job_id, step_name).await;
             #[cfg(not(feature = "docker"))]
             return ProcessOutcome::SpawnError(
                 "docker runner not available (feature not enabled)".to_string(),
@@ -985,7 +1153,8 @@ async fn run_process(
             #[cfg(feature = "kubernetes")]
             {
                 let ns = kube_namespace.unwrap_or("default");
-                return run_pod_process(config, client, cancel, source_id, ns).await;
+                return run_pod_process(config, client, cancel, source_id, ns, job_id, step_name)
+                    .await;
             }
             #[cfg(not(feature = "kubernetes"))]
             return ProcessOutcome::SpawnError(
@@ -994,7 +1163,7 @@ async fn run_process(
         }
         _ => {
             // "local" or any unrecognised runner defaults to local
-            run_local_process(config, client, cancel, source_id).await
+            run_local_process(config, client, cancel, source_id, job_id, step_name).await
         }
     }
 }
@@ -1108,6 +1277,8 @@ pub async fn execute_event_source(
             client,
             &cancel_token,
             &source_id,
+            step.job_id,
+            &step.step_name,
             #[cfg(feature = "kubernetes")]
             kube_namespace.as_deref(),
         )

@@ -47,7 +47,9 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
 
     let task = match workspace.tasks.get(&job.task_name) {
         Some(t) => t.clone(),
-        None if job.source_type == SourceType::Hook.as_ref() => {
+        None if job.source_type == SourceType::Hook.as_ref()
+            || job.source_type == SourceType::EventSource.as_ref() =>
+        {
             build_minimal_task_def(state, job_id).await?
         }
         None => {
@@ -337,7 +339,9 @@ async fn propagate_to_parent(
         if let Some(parent_ws) = state.get_workspace(&parent_job.workspace).await {
             let parent_task = match parent_ws.tasks.get(&parent_job.task_name) {
                 Some(t) => t.clone(),
-                None if parent_job.source_type == SourceType::Hook.as_ref() => {
+                None if parent_job.source_type == SourceType::Hook.as_ref()
+                    || parent_job.source_type == SourceType::EventSource.as_ref() =>
+                {
                     build_minimal_task_def(state, parent_job_id).await?
                 }
                 None => {
@@ -552,7 +556,9 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     if let Some(workspace) = state.get_workspace(&job.workspace).await {
         let task = match workspace.tasks.get(&job.task_name) {
             Some(t) => Some(t.clone()),
-            None if job.source_type == SourceType::Hook.as_ref() => {
+            None if job.source_type == SourceType::Hook.as_ref()
+                || job.source_type == SourceType::EventSource.as_ref() =>
+            {
                 Some(build_minimal_task_def(state, job_id).await?)
             }
             None => None,

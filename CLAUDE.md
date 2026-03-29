@@ -210,7 +210,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Event Source Triggers
 - `TriggerDef::EventSource` variant: long-running queue consumer processes. Workers claim and run indefinitely per `restart_policy`.
-- **Stdout protocol**: Each JSON line emitted to stdout (parsed as valid JSON) becomes a job input, merged with trigger `input` defaults. Non-JSON lines silently skipped.
+- **Stdout protocol**: Lines starting with `OUTPUT: ` followed by valid JSON become a job input, merged with trigger `input` defaults. All other stdout/stderr lines are pushed as log entries to the event source job's log view.
 - **Runner support**: `script` (local/docker/pod) or `image` + `runner` (docker/pod). Language, dependencies, interpreter, manifest fields supported like script actions.
 - **RestartPolicy enum**: `Always` (default), `OnFailure`, `Never` — controls behavior when process exits.
 - **Exponential backoff**: `backoff_secs` field (default 5) — doubled on consecutive failures, capped at 5 minutes. Resets on clean exit.

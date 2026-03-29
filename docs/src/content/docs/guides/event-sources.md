@@ -3,9 +3,9 @@ title: Event Source Triggers
 description: Long-running queue consumers that create jobs via stdout JSON-line protocol
 ---
 
-Event source triggers enable integration with external message queues and event streams. An event source is a long-running process that consumes messages from a queue (SQS, Kafka, RabbitMQ, Pub/Sub, etc.) and creates jobs by emitting JSON lines to stdout.
+Event source triggers enable integration with external message queues and event streams. An event source is a long-running process that consumes messages from a queue (SQS, Kafka, RabbitMQ, Pub/Sub, etc.) and creates jobs by emitting `OUTPUT: <json>` lines to stdout.
 
-Strøm is **queue-agnostic** — you bring your own consumer logic. The worker simply runs your script or container and reads JSON events from stdout, creating a job for each one.
+Strøm is **queue-agnostic** — you bring your own consumer logic. The worker simply runs your script or container and reads events from stdout (using the `OUTPUT: ` prefix protocol), creating a job for each one. Other stdout and stderr output is captured as log entries.
 
 ## Overview
 
@@ -13,7 +13,7 @@ Event sources differ from other trigger types:
 
 | Feature | Scheduler | Webhook | Event Source |
 |---------|-----------|---------|--------------|
-| Trigger method | Cron schedule | HTTP POST | Long-running process stdout |
+| Trigger method | Cron schedule | HTTP POST | Long-running process (OUTPUT: prefix) |
 | Execution | Periodic | On-demand | Continuous (with restart policy) |
 | Duration | Minutes to hours | On-demand | Hours/days (permanent fixture) |
 | Use case | Backups, reports, ETL | Deployments, CI/CD | Queue consumption, streaming |
@@ -45,24 +45,39 @@ triggers:
 
 ## Stdout protocol
 
-Each JSON line emitted to stdout triggers a job. Non-JSON lines are silently skipped and logged.
+Event source scripts communicate with the worker using a line-based protocol over stdout:
+
+- Lines beginning with `OUTPUT: ` (note the space after the colon) followed by a JSON object trigger a job.
+- All other stdout lines are treated as regular log output and appear in the event source job's logs.
+- Empty lines are ignored.
 
 **Example:** A consumer reading from an SQS queue might emit:
 
-```json
-{"orderId": "123", "amount": 99.99, "customer": "alice"}
-{"orderId": "124", "amount": 150.00, "customer": "bob"}
-{"orderId": "125", "amount": 45.50, "customer": "charlie"}
+```
+Starting consumer for queue: https://sqs.eu-west-1.amazonaws.com/123456789/orders
+Connected successfully. Waiting for messages...
+OUTPUT: {"orderId": "123", "amount": 99.99, "customer": "alice"}
+Received message, deleting from queue...
+OUTPUT: {"orderId": "124", "amount": 150.00, "customer": "bob"}
+OUTPUT: {"orderId": "125", "amount": 45.50, "customer": "charlie"}
 ```
 
-Each line becomes a separate job, with the JSON object merged into the task's input. Fields from the trigger's `input` section are defaults; JSON fields override them.
+Each `OUTPUT: ` line becomes a separate job, with the JSON object merged into the task's input. Fields from the trigger's `input` section are defaults; JSON fields override them. Regular text lines appear in the worker's job log so you can monitor consumer activity.
+
+### Why OUTPUT: prefix?
+
+This protocol is consistent with how regular script actions work in Strøm. It lets you:
+
+- Emit regular log output without it being misinterpreted as a job trigger
+- Mix diagnostic messages, status updates, and event emissions freely in a single script
+- Use `print()` / `echo` for debugging without side effects
 
 ### Parsing and errors
 
-- **Valid JSON lines**: Parsed and merged with default input to create a job
-- **Non-JSON lines**: Ignored (no error; logged at debug level in worker logs)
+- **`OUTPUT: <json>`**: JSON parsed and merged with default input to create a job
+- **Other non-empty lines**: Treated as log output; appear in job logs
 - **Empty lines**: Ignored
-- **Malformed JSON**: Logged as a warning; line skipped; event source continues
+- **Malformed JSON after `OUTPUT: `**: Logged as a warning; line skipped; event source continues
 
 This design ensures robust operation — a single malformed message doesn't crash the consumer.
 
@@ -94,9 +109,9 @@ triggers:
               MaxNumberOfMessages=1
           )
           for msg in resp.get("Messages", []):
-              # Parse and emit
+              # Parse and emit using OUTPUT: prefix
               body = json.loads(msg["Body"])
-              print(json.dumps(body))
+              print("OUTPUT: " + json.dumps(body))
               sys.stdout.flush()
               # Delete from queue
               sqs.delete_message(
@@ -190,7 +205,7 @@ func main() {
         var event map[string]interface{}
         json.Unmarshal(msg.Value, &event)
         output, _ := json.Marshal(event)
-        fmt.Println(string(output))
+        fmt.Println("OUTPUT: " + string(output))
     }
 }
 ```
@@ -305,8 +320,8 @@ Without `max_in_flight`, all events are immediately converted to jobs, potential
 ### Job creation flow
 
 1. **Event source process starts**: Worker claims the event source trigger (a special recurring step)
-2. **Event source emits JSON**: Consumer writes `{"field": "value"}` to stdout
-3. **Worker reads and parses**: Each JSON line is parsed and merged with trigger `input` defaults
+2. **Event source emits events**: Consumer writes `OUTPUT: {"field": "value"}` to stdout
+3. **Worker reads and parses**: Each `OUTPUT: ` line is parsed and merged with trigger `input` defaults
 4. **Job is created**: API call creates a new job with the merged input, `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"`
 5. **Existing jobs tracked**: Worker maintains `max_in_flight` counter to pause reading if limit reached
 
@@ -373,7 +388,7 @@ Secrets are injected at runtime; never logged or exposed in job configs.
 - **Structured input**: Emit consistent JSON schema; document expected fields
 - **Graceful shutdown**: Handle `SIGTERM` to finish in-flight work before exiting
 - **Health checks**: Include a heartbeat or status endpoint your alerting can monitor
-- **Error logging**: Write detailed errors to stderr; worker logs them
+- **Error logging**: Write errors and diagnostics to stderr; they appear in the event source job's log view
 - **Resource limits**: Set `resources:` in pod `manifest` to prevent runaway consumers
 - **Rate limiting**: Control burst via `max_in_flight`; use `sequential: true` in task flow for strict ordering
 
@@ -408,9 +423,9 @@ triggers:
           if not messages:
               continue
 
-          # Emit a single event with batch of messages
+          # Emit a single event with batch of messages using OUTPUT: prefix
           batch = [json.loads(msg["Body"]) for msg in messages]
-          print(json.dumps({"messages": batch, "count": len(batch)}))
+          print("OUTPUT: " + json.dumps({"messages": batch, "count": len(batch)}))
 
           # Clean up
           for msg in messages:
@@ -457,9 +472,9 @@ Choose event sources when:
 - Check server logs for EventSourceManager errors
 
 **Events not being processed?**
-- Verify consumer is emitting valid JSON lines
+- Verify consumer is emitting lines with the `OUTPUT: ` prefix followed by valid JSON
 - Check `max_in_flight` isn't pausing the reader
-- Look at worker logs for parsing errors
+- Look at the event source job's logs — regular stdout/stderr output now appears there
 
 **Consumer keeps restarting?**
 - Check exit codes and logs (stderr goes to worker logs)
