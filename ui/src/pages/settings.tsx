@@ -78,11 +78,11 @@ export function SettingsPage() {
     try {
       const days = newKeyExpiry ? parseInt(newKeyExpiry, 10) : undefined;
       const result = await createApiKey(newKeyName.trim(), days);
-      setCreatedKey(result);
       setCreateOpen(false);
       setNewKeyName("");
       setNewKeyExpiry("");
-      load();
+      await load();
+      setCreatedKey(result);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to create API key",

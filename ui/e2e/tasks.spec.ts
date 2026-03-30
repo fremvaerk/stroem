@@ -30,7 +30,7 @@ test.describe("Tasks", () => {
     // Navigate to data-pipeline task (multi-step: transform -> summarize)
     await page.goto("/workspaces/default/tasks/data-pipeline");
     await page.waitForLoadState("networkidle");
-    await expect(page.locator("h1")).toContainText("data-pipeline");
+    await expect(page.locator("main h1")).toContainText("data-pipeline");
 
     // Flow Steps section should be visible
     await expect(page.locator("main").getByText("Flow Steps").first()).toBeVisible();

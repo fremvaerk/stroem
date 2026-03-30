@@ -279,15 +279,15 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             require_auth,
         ));
 
-    // Strict login rate limit: 5 req/min per IP (one token every 12 s, burst 5).
+    // Login rate limit: 20 req/min per IP (one token every 3 s, burst 10).
     let login_routes = Router::new()
         .route("/auth/login", post(auth::login))
-        .layer(auth_rate_limit_layer!(12, 5));
+        .layer(auth_rate_limit_layer!(3, 10));
 
-    // Moderate refresh rate limit: 10 req/min per IP (one token every 6 s, burst 10).
+    // Refresh rate limit: 30 req/min per IP (one token every 2 s, burst 15).
     let refresh_routes = Router::new()
         .route("/auth/refresh", post(auth::refresh))
-        .layer(auth_rate_limit_layer!(6, 10));
+        .layer(auth_rate_limit_layer!(2, 15));
 
     // Relaxed limit for logout / me / OIDC: 20 req/min per IP (one token every 3 s, burst 20).
     let general_auth_routes = Router::new()
