@@ -17335,21 +17335,49 @@ fn event_source_workspace() -> WorkspaceConfig {
         },
     );
 
-    // EventSource trigger: "my-source" → "process-event"
+    // Consumer task: "consumer-task"
+    let mut consumer_flow = HashMap::new();
+    consumer_flow.insert(
+        "poll".to_string(),
+        FlowStep {
+            action: "process".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "consumer-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: consumer_flow,
+            timeout: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    // EventSource trigger: consumer-task → process-event
     workspace.triggers.insert(
         "my-source".to_string(),
         TriggerDef::EventSource {
-            task: "process-event".to_string(),
+            task: "consumer-task".to_string(),
+            target_task: "process-event".to_string(),
             enabled: true,
             input: HashMap::new(),
             env: HashMap::new(),
-            script: Some("echo test".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
             restart_policy: RestartPolicy::default(),
             backoff_secs: 5,
             max_in_flight: None,
@@ -17626,47 +17654,10 @@ async fn test_reconcile_creates_job_for_new_trigger() -> Result<()> {
     .await?;
 
     assert_eq!(job_rows.len(), 1, "reconcile must create exactly one job");
-    let (job_id, task_name, source_id) = &job_rows[0];
-    assert_eq!(task_name, "_event_source:my-source");
+    let (_job_id, task_name, source_id) = &job_rows[0];
+    // Job uses the real consumer task name (not synthetic _event_source:*)
+    assert_eq!(task_name, "consumer-task");
     assert_eq!(source_id.as_deref(), Some("default/my-source"));
-
-    // The job must have one step with action_type = 'event_source' and
-    // required_tags = ["event_source"].
-    let steps = JobStepRepo::get_steps_for_job(&pool, *job_id).await?;
-    assert_eq!(
-        steps.len(),
-        1,
-        "event source job must have exactly one step"
-    );
-    let step = &steps[0];
-    assert_eq!(step.action_type, "event_source");
-    assert_eq!(step.step_name, "event_source");
-
-    // required_tags must include "event_source"
-    let tags = step
-        .required_tags
-        .as_array()
-        .expect("required_tags must be a JSON array");
-    assert!(
-        tags.iter().any(|t| t.as_str() == Some("event_source")),
-        "step required_tags must include 'event_source'; got: {tags:?}"
-    );
-
-    // action_spec must carry the key fields from the trigger config
-    let spec = step
-        .action_spec
-        .as_ref()
-        .expect("action_spec must be present");
-    assert_eq!(
-        spec.get("workspace").and_then(|v| v.as_str()),
-        Some("default"),
-        "action_spec.workspace must be 'default'"
-    );
-    assert_eq!(
-        spec.get("target_task").and_then(|v| v.as_str()),
-        Some("process-event"),
-        "action_spec.target_task must be 'process-event'"
-    );
 
     Ok(())
 }
@@ -17726,20 +17717,17 @@ async fn test_reconcile_replaces_job_when_config_changes() -> Result<()> {
 
     // Build a new AppState with a *changed* script (different fingerprint)
     let mut changed_workspace = event_source_workspace();
+    // Change env to produce a different fingerprint
+    let mut changed_env = HashMap::new();
+    changed_env.insert("CHANGED".to_string(), "true".to_string());
     changed_workspace.triggers.insert(
         "my-source".to_string(),
         TriggerDef::EventSource {
-            task: "process-event".to_string(),
+            task: "consumer-task".to_string(),
+            target_task: "process-event".to_string(),
             enabled: true,
             input: HashMap::new(),
-            env: HashMap::new(),
-            script: Some("echo changed-script".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
+            env: changed_env,
             restart_policy: RestartPolicy::default(),
             backoff_secs: 5,
             max_in_flight: None,

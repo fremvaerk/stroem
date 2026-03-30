@@ -78,6 +78,17 @@ pub struct ClaimResponse {
     /// Task tool schemas — task name → {description, input schema}.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_tool_tasks: Option<serde_json::Value>,
+
+    // ── Event source step fields ───────────────────────────────────
+    /// Present when this step belongs to an event source consumer job.
+    /// Contains `target_task`, `source_id`, `input_defaults`, `max_in_flight`.
+    /// The worker uses this to activate stdout JSON-line interception.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_source_config: Option<serde_json::Value>,
+    /// Environment variable overrides from the event source trigger config.
+    /// The worker merges these into the step's environment at execution time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_overrides: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,6 +267,8 @@ pub async fn claim_job(
                 mcp_servers: None,
                 agent_state: None,
                 agent_tool_tasks: None,
+                event_source_config: None,
+                env_overrides: None,
             })
             .into_response());
         }
@@ -498,6 +511,25 @@ pub async fn claim_job(
         (None, None, None, None, None, None)
     };
 
+    // ── Event source metadata ────────────────────────────────────────────────
+    // When this step belongs to an event source consumer job, surface the
+    // `_event_source` metadata from the job input so the worker can activate
+    // stdout JSON-line interception.
+    let (event_source_config, env_overrides) = if job.source_type == "event_source" {
+        let es_meta = job
+            .input
+            .as_ref()
+            .and_then(|v| v.get("_event_source"))
+            .cloned();
+        let env_map: Option<std::collections::HashMap<String, String>> = es_meta
+            .as_ref()
+            .and_then(|v| v.get("env"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        (es_meta, env_map)
+    } else {
+        (None, None)
+    };
+
     Ok(Json(ClaimResponse {
         workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
@@ -517,6 +549,8 @@ pub async fn claim_job(
         mcp_servers: mcp_servers_val,
         agent_state: agent_state_val,
         agent_tool_tasks,
+        event_source_config,
+        env_overrides,
     })
     .into_response())
 }
@@ -816,6 +850,8 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
+            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -898,6 +934,8 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
+            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -925,6 +963,8 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
+            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -952,6 +992,8 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
+            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -959,5 +1001,79 @@ mod tests {
             "revision: None must not appear in serialized JSON, got: {}",
             json
         );
+    }
+
+    #[test]
+    fn test_claim_response_event_source_config_omitted_when_none() {
+        let resp = ClaimResponse {
+            workspace: None,
+            job_id: None,
+            task_name: None,
+            step_name: None,
+            action_name: None,
+            action_type: None,
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: None,
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
+            event_source_config: None,
+            env_overrides: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(
+            json.get("event_source_config").is_none(),
+            "event_source_config: None must be omitted from JSON, got: {json}"
+        );
+        assert!(
+            json.get("env_overrides").is_none(),
+            "env_overrides: None must be omitted from JSON, got: {json}"
+        );
+    }
+
+    #[test]
+    fn test_claim_response_event_source_config_serialized_when_present() {
+        let config = serde_json::json!({
+            "target_task": "process-event",
+            "source_id": "default/my-queue",
+            "input_defaults": {},
+            "max_in_flight": 5,
+            "env": {"QUEUE_URL": "https://example.com"},
+        });
+        let mut env_map = std::collections::HashMap::new();
+        env_map.insert("QUEUE_URL".to_string(), "https://example.com".to_string());
+
+        let resp = ClaimResponse {
+            workspace: Some("default".to_string()),
+            job_id: Some("abc-123".to_string()),
+            task_name: Some("my-consumer".to_string()),
+            step_name: Some("run".to_string()),
+            action_name: Some("consume".to_string()),
+            action_type: Some("script".to_string()),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: Some("local".to_string()),
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
+            event_source_config: Some(config),
+            env_overrides: Some(env_map),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["event_source_config"]["target_task"], "process-event");
+        assert_eq!(json["env_overrides"]["QUEUE_URL"], "https://example.com");
     }
 }

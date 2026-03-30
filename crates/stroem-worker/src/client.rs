@@ -47,6 +47,9 @@ pub struct ClaimedStep {
     /// Task tool metadata keyed by task name.
     #[serde(default)]
     pub agent_tool_tasks: Option<serde_json::Value>,
+    /// Event source configuration, present when this is an event source consumer job.
+    #[serde(default)]
+    pub event_source_config: Option<serde_json::Value>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -71,6 +74,7 @@ struct ClaimResponse {
         Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
     pub agent_state: Option<serde_json::Value>,
     pub agent_tool_tasks: Option<serde_json::Value>,
+    pub event_source_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -253,6 +257,7 @@ impl ServerClient {
             mcp_servers: resp.mcp_servers,
             agent_state: resp.agent_state,
             agent_tool_tasks: resp.agent_tool_tasks,
+            event_source_config: resp.event_source_config,
         };
 
         Ok(Some(step))
@@ -696,6 +701,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         };
         let json = serde_json::to_value(&step_with_revision).unwrap();
         assert_eq!(json["revision"], "deadbeef");

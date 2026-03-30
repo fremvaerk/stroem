@@ -269,7 +269,13 @@ fn validate_workflow_config_inner(
 
     // Validate triggers reference existing tasks
     for (trigger_name, trigger) in &config.triggers {
-        if !config.tasks.contains_key(trigger.task()) {
+        // EventSource validates both consumer and target tasks in its own match arm below;
+        // skip the generic check so those arms can emit more specific error messages.
+        if !matches!(
+            trigger,
+            crate::models::workflow::TriggerDef::EventSource { .. }
+        ) && !config.tasks.contains_key(trigger.task())
+        {
             bail!(
                 "Trigger '{}' references non-existent task '{}'",
                 trigger_name,
@@ -345,75 +351,62 @@ fn validate_workflow_config_inner(
                 }
             }
             crate::models::workflow::TriggerDef::EventSource {
-                script,
-                image,
-                runner,
-                language,
+                task,
+                target_task,
+                enabled: _,
+                input: _,
+                env: _,
+                restart_policy: _,
                 backoff_secs,
                 max_in_flight,
-                ..
             } => {
-                let runner_str = runner.as_deref().unwrap_or("local");
-                // Validate runner value
-                match runner_str {
-                    "local" | "docker" | "pod" => {}
-                    other => bail!(
-                        "Trigger '{}' has invalid runner '{}' (expected: local, docker, pod)",
-                        trigger_name,
-                        other
-                    ),
-                }
-                // Local runner requires an inline script
-                if runner_str == "local" {
-                    match script.as_deref() {
-                        None => bail!(
-                            "Trigger '{}' is an event_source with runner 'local' but missing 'script' field",
-                            trigger_name
-                        ),
-                        Some("") => bail!(
-                            "Trigger '{}' has empty 'script' field",
-                            trigger_name
-                        ),
-                        Some(_) => {}
-                    }
-                }
-                // Docker/pod runners require image or script
-                if runner_str == "docker" || runner_str == "pod" {
-                    if image.is_none() && script.as_deref().is_none_or(str::is_empty) {
-                        bail!(
-                            "Trigger '{}' is an event_source with runner '{}' but requires 'image' or 'script'",
-                            trigger_name,
-                            runner_str
-                        );
-                    }
-                    if let Some("") = script.as_deref() {
-                        bail!("Trigger '{}' has empty 'script' field", trigger_name);
-                    }
-                }
-                // Validate language if provided
-                if let Some(lang) = language {
-                    if !crate::language::VALID_LANGUAGE_NAMES.contains(&lang.as_str()) {
-                        bail!(
-                            "Trigger '{}' has invalid language '{}' (expected: {})",
-                            trigger_name,
-                            lang,
-                            crate::language::VALID_LANGUAGE_NAMES.join(", ")
-                        );
-                    }
-                }
-                // Validate backoff_secs >= 1
-                if *backoff_secs == 0 {
+                // Validate consumer task exists
+                if task.contains('.') {
+                    // Library reference — skip validation
+                } else if !config.tasks.contains_key(task) {
                     bail!(
-                        "Trigger '{}' has invalid backoff_secs 0 (must be >= 1)",
-                        trigger_name
+                        "Trigger '{}' references non-existent consumer task '{}'",
+                        trigger_name,
+                        task
                     );
                 }
-                // Validate max_in_flight >= 1 if set
+
+                // Validate target task exists
+                if target_task.contains('.') {
+                    // Library reference — skip validation
+                } else if !config.tasks.contains_key(target_task) {
+                    bail!(
+                        "Trigger '{}' references non-existent target task '{}'",
+                        trigger_name,
+                        target_task
+                    );
+                }
+
+                // Consumer and target must be different
+                if task == target_task {
+                    bail!(
+                        "Trigger '{}': consumer task and target_task cannot be the same ('{}')",
+                        trigger_name,
+                        task
+                    );
+                }
+
+                // Validate backoff
+                if *backoff_secs < 1 {
+                    bail!(
+                        "Trigger '{}' has backoff_secs < 1 (got {})",
+                        trigger_name,
+                        backoff_secs
+                    );
+                }
+
+                // Validate max_in_flight
                 if let Some(mif) = max_in_flight {
-                    if *mif == 0 {
+                    if *mif < 1 {
                         bail!(
-                            "Trigger '{}' has invalid max_in_flight 0 (must be >= 1)",
-                            trigger_name
+                            "Trigger '{}' has max_in_flight < 1 (got {})",
+                            trigger_name,
+                            mif
                         );
                     }
                 }
@@ -6433,162 +6426,187 @@ mcp_servers:
 
     // --- EventSource trigger validation tests ---
 
-    fn make_event_source_config(trigger_yaml: &str) -> String {
+    fn make_event_source_trigger_config(trigger_extra: &str) -> String {
         format!(
             r#"
-tasks:
-  process-event:
-    flow:
-      step1:
-        action: my-action
 actions:
-  my-action:
+  consumer-action:
     type: script
-    script: "echo hi"
+    script: "while true; do echo test; sleep 1; done"
+tasks:
+  consumer-task:
+    flow:
+      run:
+        action: consumer-action
+  target-task:
+    flow:
+      handle:
+        action: consumer-action
 triggers:
-  ingest:
+  my-source:
     type: event_source
-    task: process-event
+    task: consumer-task
+    target_task: target-task
 {}
 "#,
-            trigger_yaml
+            trigger_extra
         )
     }
 
     #[test]
-    fn test_event_source_local_runner_valid() {
-        let yaml = make_event_source_config("    script: \"echo '{\\\"value\\\": 1}'\"");
+    fn test_event_source_valid_basic() {
+        let yaml = make_event_source_trigger_config("");
         let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
     }
 
     #[test]
-    fn test_event_source_local_runner_missing_script() {
-        let yaml = make_event_source_config("    runner: local");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("missing 'script'"),
-            "Unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_event_source_local_runner_empty_script() {
-        let yaml = make_event_source_config("    script: \"\"");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("empty 'script'"), "Unexpected error: {}", err);
-    }
-
-    #[test]
-    fn test_event_source_docker_runner_with_image_valid() {
-        let yaml = make_event_source_config("    runner: docker\n    image: myorg/consumer:latest");
+    fn test_event_source_consumer_task_exists() {
+        let yaml = make_event_source_trigger_config("");
         let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
     }
 
     #[test]
-    fn test_event_source_docker_runner_with_script_valid() {
-        let yaml = make_event_source_config("    runner: docker\n    script: \"echo hi\"");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
+    fn test_event_source_consumer_task_nonexistent() {
+        let yaml = r#"
+actions:
+  consumer-action:
+    type: script
+    script: "echo hi"
+tasks:
+  target-task:
+    flow:
+      handle:
+        action: consumer-action
+triggers:
+  my-source:
+    type: event_source
+    task: ghost-consumer
+    target_task: target-task
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent consumer task"),
+            "Unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_event_source_target_task_nonexistent() {
+        let yaml = r#"
+actions:
+  consumer-action:
+    type: script
+    script: "echo hi"
+tasks:
+  consumer-task:
+    flow:
+      run:
+        action: consumer-action
+triggers:
+  my-source:
+    type: event_source
+    task: consumer-task
+    target_task: ghost-target
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent target task"),
+            "Unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_event_source_consumer_equals_target_fails() {
+        let yaml = r#"
+actions:
+  consumer-action:
+    type: script
+    script: "echo hi"
+tasks:
+  consumer-task:
+    flow:
+      run:
+        action: consumer-action
+triggers:
+  my-source:
+    type: event_source
+    task: consumer-task
+    target_task: consumer-task
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot be the same"),
+            "Unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_event_source_library_consumer_task_skipped() {
+        // A consumer task with a dot is a library reference — validation is skipped.
+        let yaml = r#"
+actions:
+  consumer-action:
+    type: script
+    script: "echo hi"
+tasks:
+  target-task:
+    flow:
+      handle:
+        action: consumer-action
+triggers:
+  my-source:
+    type: event_source
+    task: lib.consumer-task
+    target_task: target-task
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
     }
 
     #[test]
-    fn test_event_source_docker_runner_missing_image_and_script() {
-        let yaml = make_event_source_config("    runner: docker");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("requires 'image' or 'script'"),
-            "Unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_event_source_pod_runner_with_image_valid() {
-        let yaml = make_event_source_config("    runner: pod\n    image: myorg/consumer:latest");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
+    fn test_event_source_library_target_task_skipped() {
+        // A target task with a dot is a library reference — validation is skipped.
+        let yaml = r#"
+actions:
+  consumer-action:
+    type: script
+    script: "echo hi"
+tasks:
+  consumer-task:
+    flow:
+      run:
+        action: consumer-action
+triggers:
+  my-source:
+    type: event_source
+    task: consumer-task
+    target_task: lib.handle-event
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-    }
-
-    #[test]
-    fn test_event_source_pod_runner_missing_image_and_script() {
-        let yaml = make_event_source_config("    runner: pod");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("requires 'image' or 'script'"),
-            "Unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_event_source_invalid_runner() {
-        let yaml = make_event_source_config("    script: \"echo hi\"\n    runner: kubernetes");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("invalid runner"), "Unexpected error: {}", err);
-    }
-
-    #[test]
-    fn test_event_source_invalid_language() {
-        let yaml = make_event_source_config("    script: \"echo hi\"\n    language: ruby");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("invalid language"),
-            "Unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_event_source_valid_language() {
-        for lang in [
-            "shell",
-            "python",
-            "javascript",
-            "typescript",
-            "go",
-            "js",
-            "ts",
-        ] {
-            let yaml =
-                make_event_source_config(&format!("    script: \"echo hi\"\n    language: {lang}"));
-            let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-            let result = validate_workflow_config(&config);
-            assert!(
-                result.is_ok(),
-                "language '{lang}' should be valid, got: {:?}",
-                result
-            );
-        }
     }
 
     #[test]
     fn test_event_source_zero_backoff_secs() {
-        let yaml = make_event_source_config("    script: \"echo hi\"\n    backoff_secs: 0");
+        let yaml = make_event_source_trigger_config("    backoff_secs: 0");
         let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
@@ -6598,7 +6616,7 @@ triggers:
 
     #[test]
     fn test_event_source_zero_max_in_flight() {
-        let yaml = make_event_source_config("    script: \"echo hi\"\n    max_in_flight: 0");
+        let yaml = make_event_source_trigger_config("    max_in_flight: 0");
         let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_err());
@@ -6608,38 +6626,9 @@ triggers:
 
     #[test]
     fn test_event_source_nonzero_max_in_flight_valid() {
-        let yaml = make_event_source_config("    script: \"echo hi\"\n    max_in_flight: 10");
+        let yaml = make_event_source_trigger_config("    max_in_flight: 10");
         let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-    }
-
-    #[test]
-    fn test_event_source_references_nonexistent_task() {
-        let yaml = r#"
-tasks:
-  real-task:
-    flow:
-      step1:
-        action: my-action
-actions:
-  my-action:
-    type: script
-    script: "echo hi"
-triggers:
-  ingest:
-    type: event_source
-    task: ghost-task
-    script: "echo hi"
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("non-existent task"),
-            "Unexpected error: {}",
-            err
-        );
     }
 }

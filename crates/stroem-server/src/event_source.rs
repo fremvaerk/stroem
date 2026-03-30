@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use stroem_common::models::workflow::{RestartPolicy, TriggerDef};
 use stroem_common::template::render_env_map;
-use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -45,9 +44,20 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
 struct DesiredEventSource {
     workspace: String,
     trigger_name: String,
+    /// Consumer task name — the task whose steps run the long-lived queue process.
     task: String,
+    /// Target task — where emitted JSON-line events create new jobs.
+    target_task: String,
+    /// Resolved (Tera-rendered) environment variables for the consumer job.
+    env: HashMap<String, String>,
+    /// Default input values merged into every emitted job.
+    input_defaults: HashMap<String, serde_json::Value>,
+    restart_policy: RestartPolicy,
+    /// Initial restart delay in seconds. Stored here so `create_event_source_job`
+    /// can embed it in the job metadata for the worker.
+    backoff_secs: u64,
+    max_in_flight: Option<u32>,
     fingerprint: String,
-    action_spec: serde_json::Value,
 }
 
 /// Reconcile desired vs. active event source jobs.
@@ -58,6 +68,8 @@ struct DesiredEventSource {
 ///    - If no active job: create one.
 ///    - If active job exists but fingerprint changed: cancel old, create new.
 /// 4. For any active job whose trigger no longer exists: cancel it.
+/// 5. Restart recently completed/failed event source jobs according to their
+///    restart policy.
 #[tracing::instrument(skip(state))]
 async fn reconcile(state: &AppState) {
     // --- Step 1: collect desired event sources ---
@@ -101,7 +113,7 @@ async fn reconcile(state: &AppState) {
                     "EventSourceManager: creating job for event source '{}'",
                     source_id
                 );
-                if let Err(e) = create_event_source_job(state, des).await {
+                if let Err(e) = create_event_source_job(state, des, 0).await {
                     tracing::error!(
                         "EventSourceManager: failed to create job for '{}': {:#}",
                         source_id,
@@ -155,7 +167,7 @@ async fn reconcile(state: &AppState) {
                         );
                         // Continue to create the new job even if cancellation failed.
                     }
-                    if let Err(e) = create_event_source_job(state, des).await {
+                    if let Err(e) = create_event_source_job(state, des, 0).await {
                         tracing::error!(
                             "EventSourceManager: failed to create replacement job for '{}': {:#}",
                             source_id,
@@ -188,6 +200,76 @@ async fn reconcile(state: &AppState) {
             }
         }
     }
+
+    // --- Step 5: restart recently completed/failed event source jobs ---
+    let terminal_rows = match load_terminal_event_source_jobs(state).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(
+                "EventSourceManager: failed to load terminal event source jobs: {:#}",
+                e
+            );
+            return;
+        }
+    };
+
+    for row in terminal_rows {
+        let source_id = row.source_id.unwrap_or_default();
+        if !desired_source_ids.contains(&source_id) {
+            // Trigger removed or disabled — do not restart.
+            continue;
+        }
+
+        // Skip if there is already an active job for this source.
+        if active_by_source.contains_key(&source_id) {
+            continue;
+        }
+
+        let des = desired
+            .iter()
+            .find(|d| format!("{}/{}", d.workspace, d.trigger_name) == source_id);
+        let Some(des) = des else { continue };
+
+        let job_failed = row
+            .status
+            .as_deref()
+            .map(|s| s == "failed")
+            .unwrap_or(false);
+
+        let should_restart = match des.restart_policy {
+            RestartPolicy::Always => true,
+            RestartPolicy::OnFailure => job_failed,
+            RestartPolicy::Never => false,
+        };
+
+        if !should_restart {
+            continue;
+        }
+
+        let consecutive_failures = row
+            .input
+            .as_ref()
+            .and_then(|v| v.get("_event_source"))
+            .and_then(|v| v.get("consecutive_failures"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let next_failures = consecutive_failures + u64::from(job_failed);
+
+        tracing::info!(
+            "EventSourceManager: restarting event source '{}' (consecutive_failures={})",
+            source_id,
+            next_failures
+        );
+
+        if let Err(e) = create_event_source_job(state, des, next_failures).await {
+            tracing::error!(
+                "EventSourceManager: failed to restart job for '{}': {:#}",
+                source_id,
+                e
+            );
+        }
+    }
 }
 
 /// Collect all enabled EventSource triggers from all workspaces, building
@@ -204,53 +286,28 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
         let secrets_ctx = serde_json::json!({ "secret": config.secrets });
 
         for (trigger_name, trigger_def) in &config.triggers {
-            let (
-                task,
-                input,
-                env,
-                script,
-                image,
-                runner,
-                language,
-                dependencies,
-                interpreter,
-                manifest,
-                restart_policy,
-                backoff_secs,
-                max_in_flight,
-            ) = match trigger_def {
-                TriggerDef::EventSource {
-                    task,
-                    enabled,
-                    input,
-                    env,
-                    script,
-                    image,
-                    runner,
-                    language,
-                    dependencies,
-                    interpreter,
-                    manifest,
-                    restart_policy,
-                    backoff_secs,
-                    max_in_flight,
-                } if *enabled => (
-                    task.clone(),
-                    input.clone(),
-                    env.clone(),
-                    script.clone(),
-                    image.clone(),
-                    runner.clone(),
-                    language.clone(),
-                    dependencies.clone(),
-                    interpreter.clone(),
-                    manifest.clone(),
-                    *restart_policy,
-                    *backoff_secs,
-                    *max_in_flight,
-                ),
-                _ => continue,
-            };
+            let (task, target_task, input, env, restart_policy, backoff_secs, max_in_flight) =
+                match trigger_def {
+                    TriggerDef::EventSource {
+                        task,
+                        target_task,
+                        enabled,
+                        input,
+                        env,
+                        restart_policy,
+                        backoff_secs,
+                        max_in_flight,
+                    } if *enabled => (
+                        task.clone(),
+                        target_task.clone(),
+                        input.clone(),
+                        env.clone(),
+                        *restart_policy,
+                        *backoff_secs,
+                        *max_in_flight,
+                    ),
+                    _ => continue,
+                };
 
             // Resolve Tera templates in env values (workspace secrets available).
             let resolved_env = match render_env_map(&env, &secrets_ctx) {
@@ -267,50 +324,26 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
             };
 
             let fingerprint = compute_fingerprint(
-                script.as_deref(),
-                image.as_deref(),
-                runner.as_deref(),
-                language.as_deref(),
-                &dependencies,
-                interpreter.as_deref(),
-                &resolved_env,
-                manifest.as_ref(),
                 &task,
+                &target_task,
+                &resolved_env,
                 &input,
                 restart_policy,
                 backoff_secs,
                 max_in_flight,
             );
 
-            let runner_str = runner.clone().unwrap_or_else(|| "local".to_string());
-
-            let action_spec = serde_json::json!({
-                "workspace": ws_name,
-                "target_task": task,
-                "script": script,
-                "image": image,
-                "runner": runner_str,
-                "language": language,
-                "dependencies": dependencies,
-                "interpreter": interpreter,
-                // TODO: Resolved env values (which may contain rendered secrets) are stored in
-                // the job_step table. This is consistent with how regular steps store rendered
-                // input, but event source jobs are long-lived so the exposure window is larger.
-                // Consider resolving env at claim time instead of job creation time.
-                "env": resolved_env,
-                "input_defaults": input,
-                "restart_policy": restart_policy_str(restart_policy),
-                "backoff_secs": backoff_secs,
-                "max_in_flight": max_in_flight,
-                "manifest": manifest,
-            });
-
             desired.push(DesiredEventSource {
                 workspace: ws_name.to_string(),
                 trigger_name: trigger_name.clone(),
                 task,
+                target_task,
+                env: resolved_env,
+                input_defaults: input,
+                restart_policy,
+                backoff_secs,
+                max_in_flight,
                 fingerprint,
-                action_spec,
             });
         }
     }
@@ -323,39 +356,21 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
 /// stale jobs can be replaced.
 ///
 /// Every field that affects job behaviour is included so that changing any
-/// single field (including `task`, `input`, `restart_policy`, `backoff_secs`,
-/// and `max_in_flight`) causes the old job to be replaced.
-#[allow(clippy::too_many_arguments)]
+/// single field (including `task`, `target_task`, `input`, `restart_policy`,
+/// `backoff_secs`, and `max_in_flight`) causes the old job to be replaced.
 fn compute_fingerprint(
-    script: Option<&str>,
-    image: Option<&str>,
-    runner: Option<&str>,
-    language: Option<&str>,
-    dependencies: &[String],
-    interpreter: Option<&str>,
-    env: &HashMap<String, String>,
-    manifest: Option<&serde_json::Value>,
     task: &str,
+    target_task: &str,
+    env: &HashMap<String, String>,
     input: &HashMap<String, serde_json::Value>,
     restart_policy: RestartPolicy,
     backoff_secs: u64,
     max_in_flight: Option<u32>,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(script.unwrap_or(""));
+    hasher.update(task);
     hasher.update("|");
-    hasher.update(image.unwrap_or(""));
-    hasher.update("|");
-    hasher.update(runner.unwrap_or(""));
-    hasher.update("|");
-    hasher.update(language.unwrap_or(""));
-    hasher.update("|");
-    // Sort dependencies for stability.
-    let mut sorted_deps = dependencies.to_vec();
-    sorted_deps.sort_unstable();
-    hasher.update(sorted_deps.join(","));
-    hasher.update("|");
-    hasher.update(interpreter.unwrap_or(""));
+    hasher.update(target_task);
     hasher.update("|");
     // Sort env keys for stability.
     let mut env_pairs: Vec<(&String, &String)> = env.iter().collect();
@@ -366,12 +381,6 @@ fn compute_fingerprint(
         hasher.update(v.as_bytes());
         hasher.update(";");
     }
-    hasher.update("|");
-    if let Some(m) = manifest {
-        hasher.update(m.to_string());
-    }
-    hasher.update("|");
-    hasher.update(task);
     hasher.update("|");
     // Sort input keys for stability.
     let mut input_pairs: Vec<(&String, &serde_json::Value)> = input.iter().collect();
@@ -410,6 +419,7 @@ struct EventSourceJobRow {
     pub job_id: Uuid,
     pub source_id: Option<String>,
     pub input: Option<serde_json::Value>,
+    pub status: Option<String>,
 }
 
 /// Load all active (pending/running) event source jobs from the database.
@@ -419,7 +429,7 @@ struct EventSourceJobRow {
 /// `"_fingerprint"`.
 async fn load_active_event_source_jobs(state: &AppState) -> Result<Vec<(Uuid, String, String)>> {
     let rows = sqlx::query_as::<_, EventSourceJobRow>(
-        "SELECT job_id, source_id, input FROM job \
+        "SELECT job_id, source_id, input, status FROM job \
          WHERE source_type = 'event_source' \
            AND status NOT IN ('completed', 'failed', 'cancelled', 'skipped')",
     )
@@ -445,81 +455,85 @@ async fn load_active_event_source_jobs(state: &AppState) -> Result<Vec<(Uuid, St
     Ok(result)
 }
 
-/// Create an event source job and its single step in a transaction.
-async fn create_event_source_job(state: &AppState, des: &DesiredEventSource) -> Result<()> {
-    let source_id = format!("{}/{}", des.workspace, des.trigger_name);
-    let task_name = format!("_event_source:{}", des.trigger_name);
-    let job_id = Uuid::new_v4();
+/// Load recently completed or failed event source jobs from the database.
+///
+/// These are candidates for restart based on their trigger's restart policy.
+async fn load_terminal_event_source_jobs(state: &AppState) -> Result<Vec<EventSourceJobRow>> {
+    sqlx::query_as::<_, EventSourceJobRow>(
+        "SELECT job_id, source_id, input, status FROM job \
+         WHERE source_type = 'event_source' \
+           AND status IN ('completed', 'failed') \
+         ORDER BY created_at DESC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .context("Failed to load terminal event source jobs")
+}
 
-    let input = serde_json::json!({
+/// Create an event source consumer job via `create_job_for_task()`.
+///
+/// The job input carries event source metadata under `_event_source` so that
+/// the worker and emit endpoint can identify the source trigger and its config.
+/// `consecutive_failures` is threaded through restarts so callers can apply
+/// backoff logic based on the failure history.
+async fn create_event_source_job(
+    state: &AppState,
+    des: &DesiredEventSource,
+    consecutive_failures: u64,
+) -> Result<()> {
+    let source_id = format!("{}/{}", des.workspace, des.trigger_name);
+
+    let workspace_config = state
+        .workspaces
+        .get_config(&des.workspace)
+        .await
+        .with_context(|| {
+            format!(
+                "Workspace config not found for event source '{}'",
+                source_id
+            )
+        })?;
+
+    let revision = state.workspaces.get_revision(&des.workspace);
+
+    let job_input = serde_json::json!({
         "_fingerprint": des.fingerprint,
+        "_event_source": {
+            "target_task": des.target_task,
+            "source_id": source_id,
+            "input_defaults": des.input_defaults,
+            "max_in_flight": des.max_in_flight,
+            "env": des.env,
+            "backoff_secs": des.backoff_secs,
+            "consecutive_failures": consecutive_failures,
+        }
     });
 
-    let step = NewJobStep {
-        job_id,
-        step_name: "event_source".to_string(),
-        action_name: des.trigger_name.clone(),
-        action_type: "event_source".to_string(),
-        action_image: des
-            .action_spec
-            .get("image")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        action_spec: Some(des.action_spec.clone()),
-        input: None,
-        status: "ready".to_string(),
-        required_tags: vec!["event_source".to_string()],
-        runner: des
-            .action_spec
-            .get("runner")
-            .and_then(|v| v.as_str())
-            .unwrap_or("local")
-            .to_string(),
-        timeout_secs: None,
-        when_condition: None,
-        for_each_expr: None,
-        loop_source: None,
-        loop_index: None,
-        loop_total: None,
-        loop_item: None,
-    };
-
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .context("Failed to begin transaction for event source job")?;
-
-    JobRepo::create_with_parent_tx_id(
-        &mut *tx,
-        job_id,
+    let job_id = crate::job_creator::create_job_for_task(
+        &state.pool,
+        &workspace_config,
         &des.workspace,
-        &task_name,
-        "distributed",
-        Some(input),
+        &des.task,
+        job_input,
         "event_source",
         Some(&source_id),
-        None,
-        None,
-        None,
-        None,
+        revision.as_deref(),
+        state.config.agents.as_ref(),
     )
     .await
-    .context("Failed to create event source job")?;
-
-    JobStepRepo::create_steps_tx(&mut *tx, &[step])
-        .await
-        .context("Failed to create event source step")?;
-
-    tx.commit()
-        .await
-        .context("Failed to commit event source job creation")?;
+    .with_context(|| {
+        format!(
+            "Failed to create consumer job for event source '{}'",
+            source_id
+        )
+    })?;
 
     tracing::info!(
-        "EventSourceManager: created job {} for event source '{}' -> task '{}'",
+        "EventSourceManager: created job {} for event source '{}' (consumer task='{}', target_task='{}')",
         job_id,
         source_id,
-        des.task
+        des.task,
+        des.target_task,
     );
 
     Ok(())
@@ -532,32 +546,19 @@ mod tests {
 
     /// Helper that calls `compute_fingerprint` with a complete, sensible set of
     /// defaults so individual tests only need to override the field they care about.
-    #[allow(clippy::too_many_arguments)]
     fn fp(
-        script: Option<&str>,
-        image: Option<&str>,
-        runner: Option<&str>,
-        language: Option<&str>,
-        deps: &[String],
-        interpreter: Option<&str>,
-        env: &HashMap<String, String>,
-        manifest: Option<&serde_json::Value>,
         task: &str,
+        target_task: &str,
+        env: &HashMap<String, String>,
         input: &HashMap<String, serde_json::Value>,
         restart_policy: RestartPolicy,
         backoff_secs: u64,
         max_in_flight: Option<u32>,
     ) -> String {
         compute_fingerprint(
-            script,
-            image,
-            runner,
-            language,
-            deps,
-            interpreter,
-            env,
-            manifest,
             task,
+            target_task,
+            env,
             input,
             restart_policy,
             backoff_secs,
@@ -567,15 +568,9 @@ mod tests {
 
     fn default_fp() -> String {
         fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,
@@ -591,47 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprint_order_independence_deps() {
-        let deps_ab = vec!["b".to_string(), "a".to_string()];
-        let deps_ba = vec!["a".to_string(), "b".to_string()];
-
-        let hash_ab = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &deps_ab,
-            None,
-            &HashMap::new(),
-            None,
-            "my-task",
-            &HashMap::new(),
-            RestartPolicy::Always,
-            5,
-            None,
-        );
-        let hash_ba = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &deps_ba,
-            None,
-            &HashMap::new(),
-            None,
-            "my-task",
-            &HashMap::new(),
-            RestartPolicy::Always,
-            5,
-            None,
-        );
-        assert_eq!(
-            hash_ab, hash_ba,
-            "dependency order must not affect fingerprint"
-        );
-    }
-
-    #[test]
     fn test_fingerprint_order_independence_env() {
         let mut env1 = HashMap::new();
         env1.insert("FOO".to_string(), "1".to_string());
@@ -642,30 +596,18 @@ mod tests {
         env2.insert("FOO".to_string(), "1".to_string());
 
         let h1 = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &env1,
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,
             None,
         );
         let h2 = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &env2,
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,
@@ -675,41 +617,45 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprint_sensitivity_to_each_field() {
-        let base = default_fp();
+    fn test_fingerprint_order_independence_input() {
+        let mut input1 = HashMap::new();
+        input1.insert("key_a".to_string(), serde_json::json!("alpha"));
+        input1.insert("key_b".to_string(), serde_json::json!("beta"));
 
-        // Changing script
-        let changed_script = fp(
-            Some("echo bye"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+        let mut input2 = HashMap::new();
+        input2.insert("key_b".to_string(), serde_json::json!("beta"));
+        input2.insert("key_a".to_string(), serde_json::json!("alpha"));
+
+        let h1 = fp(
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
-            &HashMap::new(),
+            &input1,
             RestartPolicy::Always,
             5,
             None,
         );
-        assert_ne!(
-            base, changed_script,
-            "script change must change fingerprint"
+        let h2 = fp(
+            "my-consumer",
+            "my-target",
+            &HashMap::new(),
+            &input2,
+            RestartPolicy::Always,
+            5,
+            None,
         );
+        assert_eq!(h1, h2, "input insertion order must not affect fingerprint");
+    }
+
+    #[test]
+    fn test_fingerprint_sensitivity_to_each_field() {
+        let base = default_fp();
 
         // Changing task
         let changed_task = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "other-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "other-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,
@@ -717,19 +663,42 @@ mod tests {
         );
         assert_ne!(base, changed_task, "task change must change fingerprint");
 
+        // Changing target_task
+        let changed_target = fp(
+            "my-consumer",
+            "other-target",
+            &HashMap::new(),
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(
+            base, changed_target,
+            "target_task change must change fingerprint"
+        );
+
+        // Changing env
+        let mut env = HashMap::new();
+        env.insert("NEW_VAR".to_string(), "val".to_string());
+        let changed_env = fp(
+            "my-consumer",
+            "my-target",
+            &env,
+            &HashMap::new(),
+            RestartPolicy::Always,
+            5,
+            None,
+        );
+        assert_ne!(base, changed_env, "env change must change fingerprint");
+
         // Changing input
         let mut input_map = HashMap::new();
         input_map.insert("key".to_string(), serde_json::json!("value"));
         let changed_input = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &input_map,
             RestartPolicy::Always,
             5,
@@ -739,15 +708,9 @@ mod tests {
 
         // Changing restart_policy
         let changed_policy = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Never,
             5,
@@ -760,15 +723,9 @@ mod tests {
 
         // Changing backoff_secs
         let changed_backoff = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             10,
@@ -781,15 +738,9 @@ mod tests {
 
         // Changing max_in_flight
         let changed_max = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,
@@ -799,113 +750,24 @@ mod tests {
             base, changed_max,
             "max_in_flight change must change fingerprint"
         );
-
-        // Changing image
-        let changed_image = fp(
-            Some("echo hi"),
-            Some("ubuntu:22.04"),
-            None,
-            None,
-            &[],
-            None,
-            &HashMap::new(),
-            None,
-            "my-task",
-            &HashMap::new(),
-            RestartPolicy::Always,
-            5,
-            None,
-        );
-        assert_ne!(base, changed_image, "image change must change fingerprint");
-
-        // Changing env
-        let mut env = HashMap::new();
-        env.insert("NEW_VAR".to_string(), "val".to_string());
-        let changed_env = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
-            &env,
-            None,
-            "my-task",
-            &HashMap::new(),
-            RestartPolicy::Always,
-            5,
-            None,
-        );
-        assert_ne!(base, changed_env, "env change must change fingerprint");
     }
 
     #[test]
-    fn test_fingerprint_none_vs_empty() {
-        // `None` and `Some("")` for string fields produce different fingerprints
-        // because the hasher receives "" vs "" — actually they're the same for
-        // `unwrap_or("")`. Document this behaviour explicitly.
-        let with_none = fp(
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            &HashMap::new(),
-            None,
-            "my-task",
-            &HashMap::new(),
-            RestartPolicy::Always,
-            5,
-            None,
-        );
-        let with_empty = fp(
-            Some(""),
-            None,
-            None,
-            None,
-            &[],
-            None,
-            &HashMap::new(),
-            None,
-            "my-task",
-            &HashMap::new(),
-            RestartPolicy::Always,
-            5,
-            None,
-        );
-        // Both collapse to "" via unwrap_or(""), so they are equal.
-        assert_eq!(
-            with_none, with_empty,
-            "None and Some(\"\") are treated identically (both hash as empty string)"
-        );
-
+    fn test_fingerprint_none_vs_some_zero_max_in_flight() {
         // max_in_flight: None vs Some(0) must differ.
         let mif_none = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,
             None,
         );
         let mif_zero = fp(
-            Some("echo hi"),
-            None,
-            None,
-            None,
-            &[],
-            None,
+            "my-consumer",
+            "my-target",
             &HashMap::new(),
-            None,
-            "my-task",
             &HashMap::new(),
             RestartPolicy::Always,
             5,

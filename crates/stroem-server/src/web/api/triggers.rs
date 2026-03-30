@@ -212,17 +212,11 @@ mod tests {
     fn test_compute_next_runs_event_source_type() {
         // EventSource triggers always return no next_runs (no cron schedule).
         let trigger = TriggerDef::EventSource {
-            task: "process-events".to_string(),
+            task: "my-consumer".to_string(),
+            target_task: "process-events".to_string(),
             enabled: true,
             input: HashMap::new(),
             env: HashMap::new(),
-            script: Some("echo '{}'".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
             restart_policy: Default::default(),
             backoff_secs: 5,
             max_in_flight: None,
@@ -234,17 +228,11 @@ mod tests {
     #[test]
     fn test_trigger_info_event_source_has_no_cron_or_timezone() {
         let trigger = TriggerDef::EventSource {
-            task: "process-events".to_string(),
+            task: "my-consumer".to_string(),
+            target_task: "process-events".to_string(),
             enabled: true,
             input: HashMap::new(),
             env: HashMap::new(),
-            script: Some("echo '{}'".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
             restart_policy: Default::default(),
             backoff_secs: 5,
             max_in_flight: None,
@@ -253,7 +241,8 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
 
         assert_eq!(json["type"], "event_source");
-        assert_eq!(json["task"], "process-events");
+        // task() returns the consumer task name for EventSource
+        assert_eq!(json["task"], "my-consumer");
         assert_eq!(json["enabled"], true);
         assert!(json.get("cron").is_none(), "cron should be absent");
         assert!(json.get("timezone").is_none(), "timezone should be absent");

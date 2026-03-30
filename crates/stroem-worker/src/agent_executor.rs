@@ -459,6 +459,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         }
     }
 

@@ -14,7 +14,7 @@ use stroem_common::models::workflow::TriggerDef;
 pub struct EmitRequest {
     /// Workspace the event source trigger belongs to.
     pub workspace: String,
-    /// Target task to execute.
+    /// Target task to execute (the task that processes the emitted event).
     pub task: String,
     /// Input data for the new job (from the emitted JSON line).
     pub input: serde_json::Value,
@@ -45,8 +45,8 @@ pub async fn emit_event(
         .await
         .ok_or_else(|| AppError::NotFound(format!("Workspace '{}' not found", req.workspace)))?;
 
-    // Validate that source_id matches an enabled EventSource trigger and
-    // targets the task named in the request.
+    // Validate that source_id matches an enabled EventSource trigger and that
+    // the request targets the trigger's configured target_task.
     let parts: Vec<&str> = req.source_id.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(AppError::BadRequest("Invalid source_id format".to_string()));
@@ -58,14 +58,18 @@ pub async fn emit_event(
         ));
     }
     match workspace_config.triggers.get(trigger_name) {
-        Some(TriggerDef::EventSource { task, enabled, .. }) if *enabled && task == &req.task => {}
-        Some(TriggerDef::EventSource { task, enabled, .. }) if !*enabled => {
+        Some(TriggerDef::EventSource {
+            target_task,
+            enabled: true,
+            ..
+        }) if target_task == &req.task => {}
+        Some(TriggerDef::EventSource { enabled: false, .. }) => {
             return Err(AppError::BadRequest(format!(
                 "No active event source trigger '{}' targeting task '{}'",
                 trigger_name, req.task
             )));
         }
-        Some(TriggerDef::EventSource { task, .. }) if task != &req.task => {
+        Some(TriggerDef::EventSource { .. }) => {
             return Err(AppError::BadRequest(format!(
                 "No active event source trigger '{}' targeting task '{}'",
                 trigger_name, req.task
