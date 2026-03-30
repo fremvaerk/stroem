@@ -439,12 +439,45 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 }
             }
 
-            // `input` in inline context is step-level input values, not action input schema.
-            // The hoisted action gets an empty input schema.
-            // Remove `input` from action map if present (it was already put in step_map).
-            action_map.remove(serde_yaml::Value::String("input".into()));
+            // Split `input` entries: those that parse as InputFieldDef (with `type` key)
+            // go on the action schema (enabling connection resolution and defaults).
+            // Plain values stay as step-level input.
+            let raw_input: HashMap<String, serde_yaml::Value> = step_map
+                .get(serde_yaml::Value::String("input".into()))
+                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
+                .unwrap_or_default();
 
-            // Parse the action definition
+            let mut step_input = HashMap::<String, serde_json::Value>::new();
+            let mut action_input_schema = serde_yaml::Mapping::new();
+
+            for (key, val) in &raw_input {
+                // Try to parse as InputFieldDef — objects with a `type` key
+                if let serde_yaml::Value::Mapping(ref m) = val {
+                    if m.contains_key(serde_yaml::Value::String("type".into())) {
+                        // This is a schema definition (e.g. { type: postgresql, default: "..." })
+                        // Put on action schema for connection resolution + defaults
+                        action_input_schema
+                            .insert(serde_yaml::Value::String(key.clone()), val.clone());
+                        continue;
+                    }
+                }
+                // Plain value — keep as step-level input
+                if let Ok(yaml_json) = serde_yaml::from_value::<serde_json::Value>(val.clone()) {
+                    step_input.insert(key.clone(), yaml_json);
+                }
+            }
+
+            // Build action input schema if any entries were detected
+            if !action_input_schema.is_empty() {
+                action_map.insert(
+                    serde_yaml::Value::String("input".into()),
+                    serde_yaml::Value::Mapping(action_input_schema),
+                );
+            } else {
+                action_map.remove(serde_yaml::Value::String("input".into()));
+            }
+
+            // Parse the action definition (now may include input schema)
             let action_def: ActionDef =
                 serde_yaml::from_value(serde_yaml::Value::Mapping(action_map))
                     .map_err(D::Error::custom)?;
@@ -455,10 +488,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
                 .unwrap_or_default();
 
-            let input: HashMap<String, serde_json::Value> = step_map
-                .get(serde_yaml::Value::String("input".into()))
-                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
-                .unwrap_or_default();
+            let input = step_input;
 
             let continue_on_failure: bool = step_map
                 .get(serde_yaml::Value::String("continue_on_failure".into()))
@@ -2560,6 +2590,83 @@ tasks:
             .unwrap();
         assert_eq!(step.action, "_inline:hello:say-hi");
         assert!(step.inline_action.is_none());
+    }
+
+    #[test]
+    fn test_inline_step_connection_type_input_goes_to_action_schema() {
+        let yaml = r#"
+tasks:
+  consumer:
+    flow:
+      poll:
+        type: script
+        script: "echo {{ input.db.host }}"
+        input:
+          db: { type: postgresql, default: "my-db" }
+          name: "hello"
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // The hoisted action should have `db` in its input schema
+        let action = config.actions.get("_inline:consumer:poll").unwrap();
+        assert!(
+            action.input.contains_key("db"),
+            "action schema should contain 'db' InputFieldDef"
+        );
+        assert_eq!(action.input["db"].field_type, "postgresql");
+        assert_eq!(action.input["db"].default, Some(serde_json::json!("my-db")));
+
+        // The step input should only have the plain value, not the schema entry
+        let step = config
+            .tasks
+            .get("consumer")
+            .unwrap()
+            .flow
+            .get("poll")
+            .unwrap();
+        assert!(
+            !step.input.contains_key("db"),
+            "step input should NOT contain 'db' (it's on the action schema)"
+        );
+        assert_eq!(
+            step.input.get("name"),
+            Some(&serde_json::json!("hello")),
+            "plain value 'name' stays on step input"
+        );
+    }
+
+    #[test]
+    fn test_inline_step_plain_input_stays_on_step() {
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      greet:
+        type: script
+        script: "echo {{ input.name }}"
+        input:
+          name: "world"
+          count: 3
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // Action schema should be empty (no InputFieldDef entries)
+        let action = config.actions.get("_inline:hello:greet").unwrap();
+        assert!(
+            action.input.is_empty(),
+            "action schema should be empty for plain values"
+        );
+
+        // Step input should have both values
+        let step = config
+            .tasks
+            .get("hello")
+            .unwrap()
+            .flow
+            .get("greet")
+            .unwrap();
+        assert_eq!(step.input.get("name"), Some(&serde_json::json!("world")));
+        assert_eq!(step.input.get("count"), Some(&serde_json::json!(3)));
     }
 
     #[test]
