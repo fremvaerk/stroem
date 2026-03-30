@@ -5,7 +5,7 @@ description: Long-running queue consumers that create jobs via stdout JSON-line 
 
 Event source triggers enable integration with external message queues and event streams. An event source is a long-running process that consumes messages from a queue (SQS, Kafka, RabbitMQ, Pub/Sub, etc.) and creates jobs by emitting `OUTPUT: <json>` lines to stdout.
 
-Strøm is **queue-agnostic** — you bring your own consumer logic. The worker simply runs your script or container and reads events from stdout (using the `OUTPUT: ` prefix protocol), creating a job for each one. Other stdout and stderr output is captured as log entries.
+Strøm is **queue-agnostic** — you bring your own consumer logic. The event source trigger references a task that runs the consumer process. When the consumer emits lines to stdout using the `OUTPUT: ` prefix protocol, Strøm creates jobs for the target task. Other stdout and stderr output is captured as log entries in the consumer's logs.
 
 ## Overview
 
@@ -20,28 +20,46 @@ Event sources differ from other trigger types:
 
 ## Configuration
 
-Event sources are defined in the `triggers:` section of your workspace YAML:
+Event sources are defined in the `triggers:` section of your workspace YAML. The event source trigger references a **consumer task** (a regular task whose flow runs the long-lived consumer process) and specifies a **target task** where jobs are created from emitted events:
 
 ```yaml
-triggers:
-  my-queue-consumer:
-    type: event_source
-    task: process-message
-    # Choose a runner and provide your consumer logic
+actions:
+  sqs-poll:
+    type: script
+    language: python
+    dependencies: ["boto3"]
     script: |
       # Your queue consumer code here
-    runner: local          # "local" (default), "docker", or "pod"
-    language: shell        # For runner: local, specify language
-    dependencies: []       # For runner: local with dependencies
-    env:                   # Tera-templated environment variables
+      # Emit events via: print("OUTPUT: " + json.dumps(event))
+
+tasks:
+  sqs-consumer:
+    flow:
+      poll:
+        action: sqs-poll
+
+triggers:
+  sqs-events:
+    type: event_source
+    task: sqs-consumer              # Consumer task (runs the long-lived process)
+    target_task: process-order      # Target task for emitted jobs
+    env:                            # Tera-templated environment variables
       QUEUE_URL: "{{ secret.queue_url }}"
-    input:                 # Default input merged with each job
+    input:                          # Default input merged into each job
       priority: high
-    restart_policy: always # always, on_failure, never
-    backoff_secs: 5        # Initial restart delay (exponential backoff)
-    max_in_flight: 10      # Backpressure: pause reading when limit reached
+    restart_policy: always          # always, on_failure, never
+    backoff_secs: 5                 # Initial restart delay (exponential backoff)
+    max_in_flight: 10               # Backpressure: pause reading when limit reached
     enabled: true
 ```
+
+**Key differences from regular actions:**
+
+- **`task:`** specifies the consumer task (contains the flow with your consumer action)
+- **`target_task:`** specifies which task to create jobs for (receives the emitted JSON as input)
+- **No inline execution fields** on the trigger — the consumer's execution is defined in the referenced task
+- **`env:`** provides environment overrides for the consumer execution
+- **`input:`** provides defaults merged into each emitted job
 
 ## Stdout protocol
 
@@ -86,10 +104,9 @@ This design ensures robust operation — a single malformed message doesn't cras
 ### Local script with Python and SQS
 
 ```yaml
-triggers:
-  sqs-consumer:
-    type: event_source
-    task: process-order
+actions:
+  sqs-poll:
+    type: script
     language: python
     dependencies: ["boto3"]
     script: |
@@ -97,7 +114,6 @@ triggers:
       import json
       import sys
       import os
-      import time
 
       sqs = boto3.client("sqs")
       queue_url = os.environ["QUEUE_URL"]
@@ -118,14 +134,13 @@ triggers:
                   QueueUrl=queue_url,
                   ReceiptHandle=msg["ReceiptHandle"]
               )
-    env:
-      QUEUE_URL: "{{ secret.sqs_queue_url }}"
-      AWS_REGION: "eu-west-1"
-    restart_policy: always
-    backoff_secs: 5
-    max_in_flight: 10
 
 tasks:
+  sqs-consumer:
+    flow:
+      poll:
+        action: sqs-poll
+
   process-order:
     mode: distributed
     input:
@@ -142,17 +157,46 @@ tasks:
         input:
           order_id: "{{ input.orderId }}"
           amount: "{{ input.amount }}"
+
+triggers:
+  sqs-events:
+    type: event_source
+    task: sqs-consumer
+    target_task: process-order
+    env:
+      QUEUE_URL: "{{ secret.sqs_queue_url }}"
+      AWS_REGION: "eu-west-1"
+    restart_policy: always
+    backoff_secs: 5
+    max_in_flight: 10
 ```
 
 ### Docker container with Kafka
 
 ```yaml
-triggers:
-  kafka-consumer:
-    type: event_source
-    task: handle-event
+actions:
+  kafka-poll:
+    type: script
     runner: docker
     image: myorg/kafka-consumer:1.0
+    # No script field — the image runs as-is
+
+tasks:
+  kafka-consumer:
+    flow:
+      poll:
+        action: kafka-poll
+
+  handle-event:
+    flow:
+      process:
+        action: process-kafka-event
+
+triggers:
+  kafka-events:
+    type: event_source
+    task: kafka-consumer
+    target_task: handle-event
     env:
       KAFKA_BROKERS: "{{ secret.kafka_brokers }}"
       KAFKA_TOPIC: "events"
@@ -213,15 +257,11 @@ func main() {
 ### Kubernetes pod with RabbitMQ
 
 ```yaml
-triggers:
-  rabbitmq-consumer:
-    type: event_source
-    task: process-message
+actions:
+  rabbitmq-poll:
+    type: script
     runner: pod
     image: myorg/amqp-consumer:latest
-    env:
-      AMQP_URL: "{{ secret.amqp_url }}"
-      QUEUE_NAME: "orders"
     manifest:
       metadata:
         labels:
@@ -239,6 +279,26 @@ triggers:
               limits:
                 memory: "512Mi"
                 cpu: "500m"
+
+tasks:
+  rabbitmq-consumer:
+    flow:
+      poll:
+        action: rabbitmq-poll
+
+  process-message:
+    flow:
+      handle:
+        action: handle-message
+
+triggers:
+  rabbitmq-events:
+    type: event_source
+    task: rabbitmq-consumer
+    target_task: process-message
+    env:
+      AMQP_URL: "{{ secret.amqp_url }}"
+      QUEUE_NAME: "orders"
     restart_policy: always
     backoff_secs: 5
     max_in_flight: 15
@@ -246,19 +306,18 @@ triggers:
 
 ## Worker configuration
 
-Workers that claim event source steps must declare the `event_source` tag in their configuration:
+Event source consumer tasks run through normal runners (local, Docker, or Kubernetes), so no special worker configuration is required. Workers simply need to declare the appropriate runner tags for the actions used in their consumer task:
 
 ```yaml
 # worker-config.yaml
 worker_token: "wk_abc123..."
 tags:
-  - script
-  - docker
-  - event_source
-max_event_sources: 5  # How many concurrent event sources this worker can run
+  - script          # Required if consumer uses type: script with runner: local
+  - docker          # Required if consumer uses runner: docker
+  - pod             # Required if consumer uses runner: pod
 ```
 
-The `max_event_sources` setting limits how many long-running event source triggers the worker will claim simultaneously. Default is 1. Increase it if you have multiple independent queue consumers.
+The server-side `EventSourceManager` background task handles consumer lifecycle: creation, restart policy, exponential backoff, and monitoring. Consumers run indefinitely (or until failure, depending on `restart_policy`) as regular jobs executed through the normal claiming mechanism.
 
 ## Restart policies
 
@@ -319,24 +378,23 @@ Without `max_in_flight`, all events are immediately converted to jobs, potential
 
 ### Job creation flow
 
-1. **Event source process starts**: Worker claims the event source trigger (a special recurring step)
-2. **Event source emits events**: Consumer writes `OUTPUT: {"field": "value"}` to stdout
-3. **Worker reads and parses**: Each `OUTPUT: ` line is parsed and merged with trigger `input` defaults
-4. **Job is created**: API call creates a new job with the merged input, `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"`
-5. **Existing jobs tracked**: Worker maintains `max_in_flight` counter to pause reading if limit reached
+1. **Consumer task runs**: The server creates a job for the consumer task, which runs indefinitely
+2. **Consumer emits events**: The consumer process writes `OUTPUT: {"field": "value"}` to stdout
+3. **Events are captured**: The consumer's log streaming captures `OUTPUT: ` lines
+4. **Jobs created for target**: When events are emitted via `POST /worker/event-source/emit`, they are parsed and merged with trigger `input` defaults
+5. **Target task invoked**: A new job is created for the `target_task`, with the merged JSON as input, `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"`
+6. **Backpressure tracked**: The server maintains a count of pending/running jobs. When `max_in_flight` is reached, the worker pauses stdout reading, naturally slowing the consumer
 
 ### EventSourceManager
 
 The server runs an `EventSourceManager` background task that:
 
 - Periodically checks for event source triggers in workspace configs
-- Creates placeholder "event source controller" jobs that workers claim
-- Monitors controller job lifespan
-- Restarts controllers according to `restart_policy` and backoff
+- Creates and monitors consumer task jobs
+- Restarts consumer jobs according to `restart_policy` and exponential backoff
+- Handles consumer lifecycle (start, failure, restart with delay)
 
-Workers interact with this via:
-- `POST /worker/event-source/emit` — emit a JSON event (creates a job)
-- Claim lifecycle — when claiming an event source, worker gets configuration and backoff state
+Consumer jobs are regular jobs created via the normal task dispatch mechanism, so they respect timeouts, recovery sweeps, and all standard job features.
 
 ### Error handling
 
@@ -397,10 +455,9 @@ Secrets are injected at runtime; never logged or exposed in job configs.
 Process multiple messages per event source "tick":
 
 ```yaml
-triggers:
-  batch-processor:
-    type: event_source
-    task: process-batch
+actions:
+  sqs-batch-poll:
+    type: script
     language: python
     dependencies: ["boto3"]
     script: |
@@ -433,11 +490,13 @@ triggers:
                   QueueUrl=queue_url,
                   ReceiptHandle=msg["ReceiptHandle"]
               )
-    env:
-      QUEUE_URL: "{{ secret.sqs_queue_url }}"
-    max_in_flight: 5  # Limit concurrent batches
 
 tasks:
+  batch-consumer:
+    flow:
+      poll:
+        action: sqs-batch-poll
+
   process-batch:
     mode: distributed
     input:
@@ -448,6 +507,15 @@ tasks:
         action: process-one-batch
         input:
           batch: "{{ input.messages }}"
+
+triggers:
+  batch-processor:
+    type: event_source
+    task: batch-consumer
+    target_task: process-batch
+    env:
+      QUEUE_URL: "{{ secret.sqs_queue_url }}"
+    max_in_flight: 5  # Limit concurrent batches
 ```
 
 ## Comparison with other triggers
@@ -466,23 +534,31 @@ Choose event sources when:
 
 ## Troubleshooting
 
-**Event source not starting?**
-- Check worker has `event_source` tag in config
-- Verify trigger is `enabled: true`
-- Check server logs for EventSourceManager errors
+**Consumer task not starting?**
+- Check that the `task:` field references an existing task in the same workspace
+- Verify the task contains at least one flow step with a valid action
+- Check worker has the required tags for the runner used in the consumer action
+- Verify `enabled: true` on the trigger
 
 **Events not being processed?**
 - Verify consumer is emitting lines with the `OUTPUT: ` prefix followed by valid JSON
-- Check `max_in_flight` isn't pausing the reader
-- Look at the event source job's logs — regular stdout/stderr output now appears there
+- Check the consumer task's job logs — look for any errors or unexpected output
+- Verify `target_task:` references an existing task
+- Check `max_in_flight` — if the limit is reached, event emission will block
 
 **Consumer keeps restarting?**
-- Check exit codes and logs (stderr goes to worker logs)
-- Verify environment variables are set correctly
-- Consider increasing `backoff_secs`
-- Check resource limits aren't being hit
+- Check the consumer task job logs for error messages (exit code, exceptions, etc.)
+- Verify environment variables are set correctly (check with `env` debugging in consumer)
+- Consider increasing `backoff_secs` to allow recovery time between restarts
+- Check resource limits aren't being hit (memory, CPU, file descriptors)
+
+**Target jobs failing?**
+- Check the `input:` defaults on the trigger — verify required fields are present
+- Verify the emitted JSON contains all required input fields for the target task
+- Check the target task's action for validation or processing errors
 
 **High latency between event and job creation?**
 - Increase `max_in_flight` to allow more parallelism
-- Set `sequential: false` in task flow (default)
-- Consider batching events if appropriate
+- Set `sequential: false` in target task flow (default)
+- Consider batching events in the consumer if appropriate
+- Monitor `max_in_flight` — if consistently full, consumer is waiting for jobs to complete

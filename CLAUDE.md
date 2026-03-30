@@ -209,15 +209,16 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Sync/async mode**: `mode: "sync"` waits for completion (default: async). `timeout_secs` max wait (default 30, max 300).
 
 ### Event Source Triggers
-- `TriggerDef::EventSource` variant: long-running queue consumer processes. Workers claim and run indefinitely per `restart_policy`.
-- **Stdout protocol**: Lines starting with `OUTPUT: ` followed by valid JSON become a job input, merged with trigger `input` defaults. All other stdout/stderr lines are pushed as log entries to the event source job's log view.
-- **Runner support**: `script` (local/docker/pod) or `image` + `runner` (docker/pod). Language, dependencies, interpreter, manifest fields supported like script actions.
-- **RestartPolicy enum**: `Always` (default), `OnFailure`, `Never` — controls behavior when process exits.
+- `TriggerDef::EventSource` variant: long-running queue consumer processes that emit jobs via stdout `OUTPUT: ` protocol.
+- **Consumer task**: `task:` field references a regular task whose flow runs the long-lived consumer process.
+- **Target task**: `target_task:` field specifies which task to create jobs for (receives emitted JSON as input).
+- **Stdout protocol**: Lines starting with `OUTPUT: ` followed by valid JSON become job input for target task, merged with trigger `input` defaults. All other stdout/stderr lines are captured in consumer task's log view.
+- **Environment & input**: `env:` provides Tera-templated environment overrides for consumer execution. `input:` provides defaults merged into each emitted job.
+- **RestartPolicy enum**: `Always` (default), `OnFailure`, `Never` — controls behavior when consumer process exits.
 - **Exponential backoff**: `backoff_secs` field (default 5) — doubled on consecutive failures, capped at 5 minutes. Resets on clean exit.
-- **Backpressure**: `max_in_flight` field limits concurrent pending/running jobs. Worker pauses stdout reading when limit reached, creating natural Unix pipe backoff.
-- **Worker requirements**: Workers claiming event sources must declare `event_source` tag and set `max_event_sources` config (default 1, max concurrent event source triggers per worker).
-- **EventSourceManager**: Server-side background task creating/monitoring event source controller jobs. `POST /worker/event-source/emit` endpoint for workers to emit events.
-- **Job tracking**: Created jobs have `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"` for audit trail.
+- **Backpressure**: `max_in_flight` field limits concurrent pending/running jobs for target task. Server tracks count; stdout reading pauses when limit reached, creating natural Unix pipe backoff.
+- **EventSourceManager**: Server-side background task creating/monitoring consumer task jobs via normal task dispatch. Handles lifecycle (start, failure, restart per policy).
+- **Job tracking**: Emitted jobs have `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"` for audit trail.
 
 ### Hooks (on_success / on_error)
 - `HookDef`: `action` + `input` map. Task-level and workspace-level (fallback when task has none).
