@@ -81,14 +81,11 @@ pub struct ClaimResponse {
 
     // ── Event source step fields ───────────────────────────────────
     /// Present when this step belongs to an event source consumer job.
-    /// Contains `target_task`, `source_id`, `input_defaults`, `max_in_flight`.
-    /// The worker uses this to activate stdout JSON-line interception.
+    /// Contains `target_task`, `source_id`, `input_defaults`, `max_in_flight`,
+    /// and `env`. The worker uses this to activate stdout JSON-line interception
+    /// and reads env directly from `event_source_config.env`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_source_config: Option<serde_json::Value>,
-    /// Environment variable overrides from the event source trigger config.
-    /// The worker merges these into the step's environment at execution time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env_overrides: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,7 +265,6 @@ pub async fn claim_job(
                 agent_state: None,
                 agent_tool_tasks: None,
                 event_source_config: None,
-                env_overrides: None,
             })
             .into_response());
         }
@@ -514,20 +510,15 @@ pub async fn claim_job(
     // ── Event source metadata ────────────────────────────────────────────────
     // When this step belongs to an event source consumer job, surface the
     // `_event_source` metadata from the job input so the worker can activate
-    // stdout JSON-line interception.
-    let (event_source_config, env_overrides) = if job.source_type == "event_source" {
-        let es_meta = job
-            .input
+    // stdout JSON-line interception. The worker reads `event_source_config.env`
+    // directly — no separate `env_overrides` field is needed.
+    let event_source_config = if job.source_type == "event_source" {
+        job.input
             .as_ref()
             .and_then(|v| v.get("_event_source"))
-            .cloned();
-        let env_map: Option<std::collections::HashMap<String, String>> = es_meta
-            .as_ref()
-            .and_then(|v| v.get("env"))
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
-        (es_meta, env_map)
+            .cloned()
     } else {
-        (None, None)
+        None
     };
 
     Ok(Json(ClaimResponse {
@@ -550,7 +541,6 @@ pub async fn claim_job(
         agent_state: agent_state_val,
         agent_tool_tasks,
         event_source_config,
-        env_overrides,
     })
     .into_response())
 }
@@ -851,7 +841,6 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
-            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -935,7 +924,6 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
-            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -964,7 +952,6 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
-            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -993,7 +980,6 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
-            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -1025,16 +1011,17 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
-            env_overrides: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
             json.get("event_source_config").is_none(),
             "event_source_config: None must be omitted from JSON, got: {json}"
         );
+        // env_overrides no longer exists as a separate field; env is nested
+        // inside event_source_config.
         assert!(
             json.get("env_overrides").is_none(),
-            "env_overrides: None must be omitted from JSON, got: {json}"
+            "env_overrides must not appear in serialized JSON (field removed), got: {json}"
         );
     }
 
@@ -1047,8 +1034,6 @@ mod tests {
             "max_in_flight": 5,
             "env": {"QUEUE_URL": "https://example.com"},
         });
-        let mut env_map = std::collections::HashMap::new();
-        env_map.insert("QUEUE_URL".to_string(), "https://example.com".to_string());
 
         let resp = ClaimResponse {
             workspace: Some("default".to_string()),
@@ -1070,10 +1055,17 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: Some(config),
-            env_overrides: Some(env_map),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_source_config"]["target_task"], "process-event");
-        assert_eq!(json["env_overrides"]["QUEUE_URL"], "https://example.com");
+        // env is now nested inside event_source_config, not a top-level field.
+        assert_eq!(
+            json["event_source_config"]["env"]["QUEUE_URL"],
+            "https://example.com"
+        );
+        assert!(
+            json.get("env_overrides").is_none(),
+            "env_overrides must not be present as a top-level field"
+        );
     }
 }

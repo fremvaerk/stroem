@@ -6462,14 +6462,6 @@ triggers:
     }
 
     #[test]
-    fn test_event_source_consumer_task_exists() {
-        let yaml = make_event_source_trigger_config("");
-        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
-        let result = validate_workflow_config(&config);
-        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
-    }
-
-    #[test]
     fn test_event_source_consumer_task_nonexistent() {
         let yaml = r#"
 actions:

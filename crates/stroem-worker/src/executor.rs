@@ -119,7 +119,12 @@ impl StepExecutor {
             .context("Failed to resolve secrets in env vars")?;
 
         // Set up event source OUTPUT interception when configured
-        let (emit_tx_opt, emit_handle_opt) = if let Some(ref es) = step.event_source_config {
+        let (emit_tx_opt, emit_handle_opt) = 'emit_setup: {
+            let es = match step.event_source_config.as_ref() {
+                Some(es) => es,
+                None => break 'emit_setup (None, None),
+            };
+
             // Merge env overrides from event_source_config into the step's env
             if let Some(env_overrides) = es.get("env").and_then(|v| v.as_object()) {
                 for (k, v) in env_overrides {
@@ -129,17 +134,25 @@ impl StepExecutor {
                 }
             }
 
-            let target_task = es
-                .get("target_task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let target_task = match es.get("target_task").and_then(|v| v.as_str()) {
+                Some(t) => t.to_string(),
+                None => {
+                    tracing::warn!(
+                        "event_source_config missing target_task, skipping OUTPUT interception"
+                    );
+                    break 'emit_setup (None, None);
+                }
+            };
             let es_workspace = step.workspace.clone();
-            let source_id = es
-                .get("source_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let source_id = match es.get("source_id").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    tracing::warn!(
+                        "event_source_config missing source_id, skipping OUTPUT interception"
+                    );
+                    break 'emit_setup (None, None);
+                }
+            };
             let input_defaults: HashMap<String, serde_json::Value> = es
                 .get("input_defaults")
                 .and_then(|v| v.as_object())
@@ -168,6 +181,10 @@ impl StepExecutor {
                         for (k, v) in obj {
                             merged.insert(k.clone(), v.clone());
                         }
+                    } else {
+                        tracing::warn!(
+                            "event source OUTPUT payload is not a JSON object (expected {{...}}), ignoring payload"
+                        );
                     }
                     if let Err(e) = emit_client
                         .emit_event_source(
@@ -184,8 +201,6 @@ impl StepExecutor {
             });
 
             (Some(emit_tx), Some(handle))
-        } else {
-            (None, None)
         };
 
         // Create log callback that pushes to log buffer, intercepting OUTPUT lines for
@@ -205,8 +220,22 @@ impl StepExecutor {
                         .strip_prefix("OUTPUT: ")
                         .or_else(|| trimmed.strip_prefix("OUTPUT:"))
                     {
-                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(json_str) {
-                            let _ = tx.try_send(payload);
+                        match serde_json::from_str::<serde_json::Value>(json_str) {
+                            Ok(payload) => {
+                                if let Err(e) = tx.try_send(payload) {
+                                    tracing::warn!(
+                                        "event source OUTPUT dropped (channel full): {}",
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "event source malformed OUTPUT JSON (skipped): {}: {}",
+                                    e,
+                                    json_str
+                                );
+                            }
                         }
                     }
                 }

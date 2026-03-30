@@ -17815,3 +17815,447 @@ async fn test_reconcile_cancels_job_for_removed_trigger() -> Result<()> {
 
     Ok(())
 }
+
+// ─── emit endpoint: workspace/source_id mismatch → 400 ────────────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_source_id_workspace_mismatch() -> Result<()> {
+    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+
+    // source_id belongs to "other-ws" but the workspace field says "default"
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "default",
+                "task": "process-event",
+                "input": {},
+                "source_id": "other-ws/my-source"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "source_id workspace mismatch must return 400"
+    );
+
+    Ok(())
+}
+
+// ─── emit endpoint: wrong target_task → 400 ───────────────────────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_wrong_target_task() -> Result<()> {
+    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+
+    // The trigger "my-source" targets "process-event"; "wrong-task" is not the
+    // configured target_task so the emit endpoint must reject it.
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "default",
+                "task": "wrong-task",
+                "input": {},
+                "source_id": "default/my-source"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "emit with wrong target_task must return 400"
+    );
+
+    Ok(())
+}
+
+// ─── emit endpoint: disabled trigger → 400 ────────────────────────────────
+
+/// Build a workspace identical to `event_source_workspace` but with the
+/// EventSource trigger disabled (`enabled: false`).
+fn disabled_event_source_workspace() -> WorkspaceConfig {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let mut workspace = event_source_workspace();
+    workspace.triggers.insert(
+        "my-source".to_string(),
+        TriggerDef::EventSource {
+            task: "consumer-task".to_string(),
+            target_task: "process-event".to_string(),
+            enabled: false,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            restart_policy: RestartPolicy::default(),
+            backoff_secs: 5,
+            max_in_flight: None,
+        },
+    );
+    workspace
+}
+
+#[tokio::test]
+async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        agents: None,
+    };
+
+    let workspace = disabled_event_source_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let router = build_router(state, tokio_util::sync::CancellationToken::new());
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "default",
+                "task": "process-event",
+                "input": {},
+                "source_id": "default/my-source"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "emit to a disabled trigger must return 400"
+    );
+
+    Ok(())
+}
+
+// ─── emit endpoint: malformed source_id (no separator) → 400 ──────────────
+
+#[tokio::test]
+async fn test_emit_endpoint_malformed_source_id() -> Result<()> {
+    let (router, _state, _pool, _tmp, _container) = setup_event_source().await?;
+
+    // "noseparator" has no '/' so parsing into (workspace, trigger_name) fails.
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/event-source/emit",
+            json!({
+                "workspace": "default",
+                "task": "process-event",
+                "input": {},
+                "source_id": "noseparator"
+            }),
+        ))
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed source_id without '/' separator must return 400"
+    );
+
+    Ok(())
+}
+
+// ─── reconcile: restart tests ──────────────────────────────────────────────
+
+/// Build a workspace with the given restart policy.
+fn event_source_workspace_with_policy(
+    restart_policy: stroem_common::models::workflow::RestartPolicy,
+) -> WorkspaceConfig {
+    let mut workspace = event_source_workspace();
+    workspace.triggers.insert(
+        "my-source".to_string(),
+        TriggerDef::EventSource {
+            task: "consumer-task".to_string(),
+            target_task: "process-event".to_string(),
+            enabled: true,
+            input: HashMap::new(),
+            env: HashMap::new(),
+            restart_policy,
+            backoff_secs: 5,
+            max_in_flight: None,
+        },
+    );
+    workspace
+}
+
+/// Set up state and pool with a given workspace config.
+async fn setup_event_source_with_workspace(
+    workspace: WorkspaceConfig,
+) -> Result<(
+    AppState,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: format!(
+                "postgres://postgres:postgres@localhost:{}/postgres",
+                container.get_host_port_ipv4(5432).await?
+            ),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        agents: None,
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+
+    Ok((state, pool, temp_dir, container))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_restarts_completed_job_with_always_policy() -> Result<()> {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let workspace = event_source_workspace_with_policy(RestartPolicy::Always);
+    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+
+    // First reconcile — creates the initial consumer job.
+    run_one_reconcile(state.clone()).await;
+
+    let initial: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'event_source'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(initial.len(), 1, "one job after initial reconcile");
+    let first_job_id = initial[0].0;
+
+    // Mark the job as completed with a timestamp far enough in the past to
+    // satisfy the 1-second minimum backoff on a successful exit.
+    sqlx::query(
+        "UPDATE job SET status = 'completed', completed_at = NOW() - INTERVAL '1 minute' \
+         WHERE job_id = $1",
+    )
+    .bind(first_job_id)
+    .execute(&pool)
+    .await?;
+
+    // Second reconcile — AlwaysPolicy: completed job should trigger a restart.
+    run_one_reconcile(state).await;
+
+    let all_jobs: Vec<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT job_id, status FROM job WHERE source_type = 'event_source'")
+            .fetch_all(&pool)
+            .await?;
+
+    assert_eq!(
+        all_jobs.len(),
+        2,
+        "second reconcile must create a new job (2 total: 1 completed + 1 new)"
+    );
+
+    let completed_count = all_jobs.iter().filter(|(_, s)| s == "completed").count();
+    let pending_or_running = all_jobs
+        .iter()
+        .filter(|(_, s)| !["completed", "failed", "cancelled", "skipped"].contains(&s.as_str()))
+        .count();
+
+    assert_eq!(completed_count, 1, "original job must remain completed");
+    assert_eq!(
+        pending_or_running, 1,
+        "a new active job must have been created"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_restarts_failed_job_with_on_failure_policy() -> Result<()> {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let workspace = event_source_workspace_with_policy(RestartPolicy::OnFailure);
+    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+
+    // First reconcile.
+    run_one_reconcile(state.clone()).await;
+
+    let initial: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'event_source'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(initial.len(), 1);
+    let first_job_id = initial[0].0;
+
+    // Mark the job as failed far enough in the past to pass the backoff check.
+    sqlx::query(
+        "UPDATE job SET status = 'failed', completed_at = NOW() - INTERVAL '1 minute' \
+         WHERE job_id = $1",
+    )
+    .bind(first_job_id)
+    .execute(&pool)
+    .await?;
+
+    // Second reconcile — OnFailure + failed → should restart.
+    run_one_reconcile(state).await;
+
+    let all_jobs: Vec<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT job_id, status FROM job WHERE source_type = 'event_source'")
+            .fetch_all(&pool)
+            .await?;
+
+    assert_eq!(
+        all_jobs.len(),
+        2,
+        "OnFailure policy must restart a failed job (2 total expected)"
+    );
+
+    let failed_count = all_jobs.iter().filter(|(_, s)| s == "failed").count();
+    let new_active = all_jobs
+        .iter()
+        .filter(|(_, s)| !["completed", "failed", "cancelled", "skipped"].contains(&s.as_str()))
+        .count();
+
+    assert_eq!(failed_count, 1, "original job must remain failed");
+    assert_eq!(new_active, 1, "a new active job must have been created");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_does_not_restart_completed_job_with_on_failure_policy() -> Result<()> {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let workspace = event_source_workspace_with_policy(RestartPolicy::OnFailure);
+    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+
+    run_one_reconcile(state.clone()).await;
+
+    let initial: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'event_source'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(initial.len(), 1);
+    let first_job_id = initial[0].0;
+
+    // Mark as *completed* (not failed) — OnFailure should NOT restart this.
+    sqlx::query(
+        "UPDATE job SET status = 'completed', completed_at = NOW() - INTERVAL '1 minute' \
+         WHERE job_id = $1",
+    )
+    .bind(first_job_id)
+    .execute(&pool)
+    .await?;
+
+    run_one_reconcile(state).await;
+
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM job WHERE source_type = 'event_source'")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        count.0, 1,
+        "OnFailure policy must NOT restart a successfully completed job"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reconcile_does_not_restart_with_never_policy() -> Result<()> {
+    use stroem_common::models::workflow::RestartPolicy;
+
+    let workspace = event_source_workspace_with_policy(RestartPolicy::Never);
+    let (state, pool, _tmp, _container) = setup_event_source_with_workspace(workspace).await?;
+
+    run_one_reconcile(state.clone()).await;
+
+    let initial: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'event_source'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(initial.len(), 1);
+    let first_job_id = initial[0].0;
+
+    // Mark as failed — Never policy should not restart regardless.
+    sqlx::query(
+        "UPDATE job SET status = 'failed', completed_at = NOW() - INTERVAL '1 minute' \
+         WHERE job_id = $1",
+    )
+    .bind(first_job_id)
+    .execute(&pool)
+    .await?;
+
+    run_one_reconcile(state).await;
+
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM job WHERE source_type = 'event_source'")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        count.0, 1,
+        "Never restart policy must not create a new job after failure"
+    );
+
+    Ok(())
+}

@@ -102,13 +102,49 @@ async fn reconcile(state: &AppState) {
         .map(|d| format!("{}/{}", d.workspace, d.trigger_name))
         .collect();
 
+    // --- Pre-load terminal jobs (used in both step 3 and step 5) ---
+    //
+    // We load terminal rows up front so that step 3 can consult them before
+    // deciding whether to create a new job. Without this check, step 3 would
+    // unconditionally create a job whenever there is no active one, bypassing
+    // the restart policy for sources whose jobs recently terminated.
+    let terminal_rows = match load_terminal_event_source_jobs(state).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(
+                "EventSourceManager: failed to load terminal event source jobs: {:#}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Build a lookup: source_id → most-recent terminal job row. We keep only
+    // the first (most-recent) row per source because the query is ORDER BY
+    // created_at DESC.
+    let mut terminal_by_source: HashMap<String, &EventSourceJobRow> = HashMap::new();
+    for row in &terminal_rows {
+        let sid = row.source_id.as_deref().unwrap_or("");
+        terminal_by_source.entry(sid.to_string()).or_insert(row);
+    }
+
     // --- Step 3: ensure each desired trigger has a current job ---
     for des in &desired {
         let source_id = format!("{}/{}", des.workspace, des.trigger_name);
 
         match active_by_source.get(&source_id) {
             None => {
-                // No active job — create one.
+                // No active job. Only create a new one if there is no recent
+                // terminal job for this source — that means this is a
+                // brand-new trigger with no history. Triggers that have
+                // recently terminated are handled exclusively by step 5 (the
+                // restart loop), which applies backoff and policy checks.
+                if terminal_by_source.contains_key(&source_id) {
+                    // A recent terminal job exists — let step 5 decide whether
+                    // and when to restart according to the restart policy.
+                    continue;
+                }
+                // No terminal job in the recent window: fresh trigger. Create.
                 tracing::info!(
                     "EventSourceManager: creating job for event source '{}'",
                     source_id
@@ -202,17 +238,7 @@ async fn reconcile(state: &AppState) {
     }
 
     // --- Step 5: restart recently completed/failed event source jobs ---
-    let terminal_rows = match load_terminal_event_source_jobs(state).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(
-                "EventSourceManager: failed to load terminal event source jobs: {:#}",
-                e
-            );
-            return;
-        }
-    };
-
+    // `terminal_rows` was already loaded before step 3.
     for row in terminal_rows {
         let source_id = row.source_id.unwrap_or_default();
         if !desired_source_ids.contains(&source_id) {
@@ -254,7 +280,38 @@ async fn reconcile(state: &AppState) {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let next_failures = consecutive_failures + u64::from(job_failed);
+        // Reset the failure counter on a successful exit; increment on failure.
+        let next_failures = if job_failed {
+            consecutive_failures + 1
+        } else {
+            0
+        };
+
+        // Compute the required backoff delay before restarting.
+        // Successful exits use a minimal 1-second delay; failures use
+        // exponential backoff capped at 300 seconds (5 minutes).
+        let delay_secs: u64 = if next_failures == 0 {
+            1
+        } else {
+            let exp = (next_failures - 1).min(10);
+            des.backoff_secs
+                .saturating_mul(2u64.saturating_pow(exp as u32))
+                .min(300)
+        };
+
+        // Skip this cycle if not enough time has elapsed since the job ended.
+        if let Some(completed_at) = row.completed_at {
+            let elapsed = chrono::Utc::now() - completed_at;
+            if elapsed.num_seconds() < delay_secs as i64 {
+                tracing::debug!(
+                    "EventSourceManager: backoff for '{}' — waiting {}s (elapsed {}s)",
+                    source_id,
+                    delay_secs,
+                    elapsed.num_seconds(),
+                );
+                continue;
+            }
+        }
 
         tracing::info!(
             "EventSourceManager: restarting event source '{}' (consecutive_failures={})",
@@ -420,6 +477,9 @@ struct EventSourceJobRow {
     pub source_id: Option<String>,
     pub input: Option<serde_json::Value>,
     pub status: Option<String>,
+    /// Best-effort timestamp of when the job reached a terminal state.
+    /// Used to enforce backoff delay before restarting.
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Load all active (pending/running) event source jobs from the database.
@@ -429,7 +489,8 @@ struct EventSourceJobRow {
 /// `"_fingerprint"`.
 async fn load_active_event_source_jobs(state: &AppState) -> Result<Vec<(Uuid, String, String)>> {
     let rows = sqlx::query_as::<_, EventSourceJobRow>(
-        "SELECT job_id, source_id, input, status FROM job \
+        "SELECT job_id, source_id, input, status, NULL::timestamptz as completed_at \
+         FROM job \
          WHERE source_type = 'event_source' \
            AND status NOT IN ('completed', 'failed', 'cancelled', 'skipped')",
     )
@@ -457,12 +518,16 @@ async fn load_active_event_source_jobs(state: &AppState) -> Result<Vec<(Uuid, St
 
 /// Load recently completed or failed event source jobs from the database.
 ///
-/// These are candidates for restart based on their trigger's restart policy.
+/// Only jobs that terminated within the last 10 minutes are returned, which
+/// bounds the result set and avoids rescanning old history on every cycle.
 async fn load_terminal_event_source_jobs(state: &AppState) -> Result<Vec<EventSourceJobRow>> {
     sqlx::query_as::<_, EventSourceJobRow>(
-        "SELECT job_id, source_id, input, status FROM job \
+        "SELECT job_id, source_id, input, status, \
+                COALESCE(completed_at, created_at) as completed_at \
+         FROM job \
          WHERE source_type = 'event_source' \
            AND status IN ('completed', 'failed') \
+           AND COALESCE(completed_at, created_at) > NOW() - INTERVAL '10 minutes' \
          ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
@@ -496,6 +561,14 @@ async fn create_event_source_job(
 
     let revision = state.workspaces.get_revision(&des.workspace);
 
+    // TODO: The `_event_source` and `_fingerprint` metadata keys are stored in
+    // the job input so that the claim handler and reconciler can read them back.
+    // This means they are also visible in Tera template context for downstream
+    // steps. A future improvement is to resolve env at claim time (rather than
+    // embedding it here) and store metadata out-of-band so it never leaks into
+    // template rendering. For now the env values reflect the Tera-rendered
+    // trigger env (with secrets substituted on the server side), which is
+    // equivalent to how regular step inputs can carry rendered secret values.
     let job_input = serde_json::json!({
         "_fingerprint": des.fingerprint,
         "_event_source": {
