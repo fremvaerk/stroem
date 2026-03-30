@@ -16,6 +16,7 @@ services:
       retries: 10
 
   server:
+    image: stroem-server:ci
     build:
       context: .
       dockerfile: Dockerfile.server
@@ -40,6 +41,7 @@ services:
       start_period: 30s
 
   worker:
+    image: stroem-worker:ci
     build:
       context: .
       dockerfile: Dockerfile.worker
