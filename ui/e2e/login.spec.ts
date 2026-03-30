@@ -1,9 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { login } from "./helpers";
 
-// Login tests need a clean session — clear the stored auth state
-test.use({ storageState: { cookies: [], origins: [] } });
-
 test.describe("Login", () => {
   test("successful login redirects to dashboard", async ({ page }) => {
     await login(page);

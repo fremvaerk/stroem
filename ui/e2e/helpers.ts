@@ -1,13 +1,22 @@
 import type { Page } from "@playwright/test";
 
 export async function login(page: Page) {
-  // Retry login to handle 429 rate limiting from the auth rate limiter
+  // Navigate to root — if we're already authenticated (cookie present),
+  // the app won't redirect to /login and we can skip the login flow.
+  await page.goto("/");
+  const url = page.url();
+  if (!url.includes("/login")) {
+    // Already authenticated
+    await page.waitForLoadState("networkidle");
+    return;
+  }
+
+  // Not authenticated — perform login with rate-limit retry
   for (let attempt = 0; attempt < 5; attempt++) {
     await page.goto("/login");
     await page.fill('input[id="email"]', "admin@stroem.local");
     await page.fill('input[id="password"]', "admin");
 
-    // Listen for the login response to detect rate limiting
     const responsePromise = page.waitForResponse(
       (r) => r.url().includes("/api/auth/login"),
       { timeout: 10_000 },
@@ -16,7 +25,6 @@ export async function login(page: Page) {
 
     const response = await responsePromise.catch(() => null);
     if (response && response.status() === 429) {
-      // Rate limited — wait and retry
       await page.waitForTimeout(3000 * (attempt + 1));
       continue;
     }

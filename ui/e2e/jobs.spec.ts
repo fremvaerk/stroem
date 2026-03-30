@@ -1,9 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { triggerJob, waitForJob, getAuthToken, apiFetch } from "./helpers";
+import { login, triggerJob, waitForJob, getAuthToken, apiFetch } from "./helpers";
 
 test.describe("Jobs", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto("/");
+    await login(page);
   });
 
   test("jobs list shows status badges", async ({ page, baseURL }) => {
