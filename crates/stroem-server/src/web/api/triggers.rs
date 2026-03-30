@@ -26,6 +26,8 @@ pub struct TriggerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
     pub task: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_task: Option<String>,
     pub enabled: bool,
     pub input: HashMap<String, serde_json::Value>,
     pub next_runs: Vec<String>,
@@ -39,12 +41,17 @@ impl TriggerInfo {
             TriggerDef::Scheduler { cron, timezone, .. } => (Some(cron.clone()), timezone.clone()),
             TriggerDef::Webhook { .. } | TriggerDef::EventSource { .. } => (None, None),
         };
+        let target_task = match trigger {
+            TriggerDef::EventSource { target_task, .. } => Some(target_task.clone()),
+            TriggerDef::Scheduler { .. } | TriggerDef::Webhook { .. } => None,
+        };
         Self {
             name: name.to_string(),
             trigger_type: trigger.trigger_type_str().to_string(),
             cron,
             timezone,
             task: trigger.task().to_string(),
+            target_task,
             enabled: trigger.enabled(),
             input: trigger.input().clone(),
             next_runs: next_runs.iter().map(|dt| dt.to_rfc3339()).collect(),
@@ -212,17 +219,11 @@ mod tests {
     fn test_compute_next_runs_event_source_type() {
         // EventSource triggers always return no next_runs (no cron schedule).
         let trigger = TriggerDef::EventSource {
-            task: "process-events".to_string(),
+            task: "my-consumer".to_string(),
+            target_task: "process-events".to_string(),
             enabled: true,
             input: HashMap::new(),
             env: HashMap::new(),
-            script: Some("echo '{}'".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
             restart_policy: Default::default(),
             backoff_secs: 5,
             max_in_flight: None,
@@ -234,17 +235,11 @@ mod tests {
     #[test]
     fn test_trigger_info_event_source_has_no_cron_or_timezone() {
         let trigger = TriggerDef::EventSource {
-            task: "process-events".to_string(),
+            task: "my-consumer".to_string(),
+            target_task: "process-events".to_string(),
             enabled: true,
             input: HashMap::new(),
             env: HashMap::new(),
-            script: Some("echo '{}'".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
             restart_policy: Default::default(),
             backoff_secs: 5,
             max_in_flight: None,
@@ -253,11 +248,35 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
 
         assert_eq!(json["type"], "event_source");
-        assert_eq!(json["task"], "process-events");
+        // task() returns the consumer task name for EventSource
+        assert_eq!(json["task"], "my-consumer");
+        assert_eq!(json["target_task"], "process-events");
         assert_eq!(json["enabled"], true);
         assert!(json.get("cron").is_none(), "cron should be absent");
         assert!(json.get("timezone").is_none(), "timezone should be absent");
         assert_eq!(json["next_runs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_trigger_info_scheduler_has_no_target_task() {
+        let trigger = make_trigger("scheduler", Some("0 0 * * *"), true);
+        let info = TriggerInfo::from_def("my-sched", &trigger, 0);
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("target_task").is_none(),
+            "target_task should be absent for scheduler triggers"
+        );
+    }
+
+    #[test]
+    fn test_trigger_info_webhook_has_no_target_task() {
+        let trigger = make_trigger("webhook", None, true);
+        let info = TriggerInfo::from_def("my-hook", &trigger, 0);
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(
+            json.get("target_task").is_none(),
+            "target_task should be absent for webhook triggers"
+        );
     }
 
     #[test]

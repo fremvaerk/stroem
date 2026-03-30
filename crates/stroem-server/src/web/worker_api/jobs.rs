@@ -78,6 +78,14 @@ pub struct ClaimResponse {
     /// Task tool schemas — task name → {description, input schema}.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_tool_tasks: Option<serde_json::Value>,
+
+    // ── Event source step fields ───────────────────────────────────
+    /// Present when this step belongs to an event source consumer job.
+    /// Contains `target_task`, `source_id`, `input_defaults`, `max_in_flight`,
+    /// and `env`. The worker uses this to activate stdout JSON-line interception
+    /// and reads env directly from `event_source_config.env`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_source_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,6 +264,7 @@ pub async fn claim_job(
                 mcp_servers: None,
                 agent_state: None,
                 agent_tool_tasks: None,
+                event_source_config: None,
             })
             .into_response());
         }
@@ -498,6 +507,20 @@ pub async fn claim_job(
         (None, None, None, None, None, None)
     };
 
+    // ── Event source metadata ────────────────────────────────────────────────
+    // When this step belongs to an event source consumer job, surface the
+    // `_event_source` metadata from the job input so the worker can activate
+    // stdout JSON-line interception. The worker reads `event_source_config.env`
+    // directly — no separate `env_overrides` field is needed.
+    let event_source_config = if job.source_type == "event_source" {
+        job.input
+            .as_ref()
+            .and_then(|v| v.get("_event_source"))
+            .cloned()
+    } else {
+        None
+    };
+
     Ok(Json(ClaimResponse {
         workspace: Some(job.workspace),
         job_id: Some(step.job_id.to_string()),
@@ -517,6 +540,7 @@ pub async fn claim_job(
         mcp_servers: mcp_servers_val,
         agent_state: agent_state_val,
         agent_tool_tasks,
+        event_source_config,
     })
     .into_response())
 }
@@ -816,6 +840,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -898,6 +923,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -925,6 +951,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -952,12 +979,93 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
             json.get("revision").is_none(),
             "revision: None must not appear in serialized JSON, got: {}",
             json
+        );
+    }
+
+    #[test]
+    fn test_claim_response_event_source_config_omitted_when_none() {
+        let resp = ClaimResponse {
+            workspace: None,
+            job_id: None,
+            task_name: None,
+            step_name: None,
+            action_name: None,
+            action_type: None,
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: None,
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
+            event_source_config: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(
+            json.get("event_source_config").is_none(),
+            "event_source_config: None must be omitted from JSON, got: {json}"
+        );
+        // env_overrides no longer exists as a separate field; env is nested
+        // inside event_source_config.
+        assert!(
+            json.get("env_overrides").is_none(),
+            "env_overrides must not appear in serialized JSON (field removed), got: {json}"
+        );
+    }
+
+    #[test]
+    fn test_claim_response_event_source_config_serialized_when_present() {
+        let config = serde_json::json!({
+            "target_task": "process-event",
+            "source_id": "default/my-queue",
+            "input_defaults": {},
+            "max_in_flight": 5,
+            "env": {"QUEUE_URL": "https://example.com"},
+        });
+
+        let resp = ClaimResponse {
+            workspace: Some("default".to_string()),
+            job_id: Some("abc-123".to_string()),
+            task_name: Some("my-consumer".to_string()),
+            step_name: Some("run".to_string()),
+            action_name: Some("consume".to_string()),
+            action_type: Some("script".to_string()),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            runner: Some("local".to_string()),
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: None,
+            agent_system_prompt: None,
+            mcp_servers: None,
+            agent_state: None,
+            agent_tool_tasks: None,
+            event_source_config: Some(config),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["event_source_config"]["target_task"], "process-event");
+        // env is now nested inside event_source_config, not a top-level field.
+        assert_eq!(
+            json["event_source_config"]["env"]["QUEUE_URL"],
+            "https://example.com"
+        );
+        assert!(
+            json.get("env_overrides").is_none(),
+            "env_overrides must not be present as a top-level field"
         );
     }
 }

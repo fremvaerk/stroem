@@ -21,9 +21,10 @@ pub fn cmd_triggers(config: &WorkspaceConfig) -> Result<()> {
                     let mode_str = mode.as_deref().unwrap_or("async");
                     format!("{} ({})", wh_name, mode_str)
                 }
-                TriggerDef::EventSource { runner, .. } => {
-                    let runner_str = runner.as_deref().unwrap_or("local");
-                    format!("runner: {}", runner_str)
+                TriggerDef::EventSource {
+                    task, target_task, ..
+                } => {
+                    format!("{} → {}", task, target_task)
                 }
             };
             let display_name = if trigger.enabled() {
@@ -141,6 +142,26 @@ mod tests {
                 enabled: false,
                 concurrency: ConcurrencyPolicy::Allow,
                 timezone: None,
+            },
+        );
+        assert!(cmd_triggers(&config).is_ok());
+    }
+
+    #[test]
+    fn triggers_event_source_shows_consumer_and_target() {
+        use stroem_common::models::workflow::RestartPolicy;
+        let mut config = WorkspaceConfig::new();
+        config.triggers.insert(
+            "queue-listener".to_string(),
+            TriggerDef::EventSource {
+                task: "consumer-task".to_string(),
+                target_task: "process-event".to_string(),
+                enabled: true,
+                input: HashMap::new(),
+                env: HashMap::new(),
+                restart_policy: RestartPolicy::Always,
+                backoff_secs: 5,
+                max_in_flight: None,
             },
         );
         assert!(cmd_triggers(&config).is_ok());

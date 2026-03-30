@@ -58,7 +58,7 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`type: webhook\` — \`name\` must match \`^[a-zA-Z0-9_-]+$\` (URL-safe).
 - \`mode\` must be \`"sync"\` or \`"async"\` (default: \`"async"\`).
 - \`timeout_secs\` must be 1–300 (default: 30). Only meaningful in sync mode.
-- \`type: event_source\` — long-running queue consumer. Requires \`task\` field. Supports \`script\` (inline), \`image\` + \`runner\` (docker/pod), \`language\`, \`dependencies\`, \`interpreter\` like script actions. JSON lines on stdout create jobs. \`restart_policy\`: \`always\` (default), \`on_failure\`, \`never\`. \`backoff_secs\` for exponential backoff. \`max_in_flight\` for backpressure.
+- \`type: event_source\` — long-running queue consumer. Requires \`task\` (consumer task) and \`target_task\` (target for emitted jobs). Consumer's execution defined in referenced task. Emitted JSON on stdout creates jobs for target task. \`env:\` provides environment overrides. \`restart_policy\`: \`always\` (default), \`on_failure\`, \`never\`. \`backoff_secs\` for exponential backoff. \`max_in_flight\` for backpressure.
 
 **Hooks:**
 - \`on_success\` / \`on_error\` hook action references must exist.

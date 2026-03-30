@@ -284,7 +284,6 @@ impl TestEnv {
             request_timeout_secs: None,
             connect_timeout_secs: None,
             max_retained_revisions: None,
-            max_event_sources: 5,
             agents: None,
         };
 

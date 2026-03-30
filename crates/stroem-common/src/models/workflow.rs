@@ -613,7 +613,10 @@ pub enum TriggerDef {
     },
     #[serde(rename = "event_source")]
     EventSource {
+        /// Consumer task — the task whose steps run the long-lived queue process.
         task: String,
+        /// Target task — where emitted JSON-line events create new jobs.
+        target_task: String,
         #[serde(default = "default_true")]
         enabled: bool,
         #[serde(default)]
@@ -621,27 +624,6 @@ pub enum TriggerDef {
         /// Tera-templated environment variables. Secrets available via {{ secret.X }}.
         #[serde(default)]
         env: HashMap<String, String>,
-        /// Inline script content (required for runner=local).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        script: Option<String>,
-        /// Container image (required for runner=docker/pod without script).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        image: Option<String>,
-        /// Runner: "local" (default), "docker", "pod".
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        runner: Option<String>,
-        /// Script language: "shell", "python", "javascript", "typescript", "go".
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        language: Option<String>,
-        /// Dependencies to install before running.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        dependencies: Vec<String>,
-        /// Override auto-detected interpreter binary.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        interpreter: Option<String>,
-        /// Pod spec overrides (pod runner only).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        manifest: Option<serde_json::Value>,
         /// What to do when the process exits.
         #[serde(default)]
         restart_policy: RestartPolicy,
@@ -704,6 +686,14 @@ impl TriggerDef {
         match self {
             TriggerDef::Scheduler { timezone, .. } => timezone.as_deref(),
             TriggerDef::Webhook { .. } | TriggerDef::EventSource { .. } => None,
+        }
+    }
+
+    /// Get the target task name (only meaningful for EventSource triggers).
+    pub fn target_task(&self) -> Option<&str> {
+        match self {
+            TriggerDef::EventSource { target_task, .. } => Some(target_task.as_str()),
+            _ => None,
         }
     }
 }
@@ -3400,34 +3390,27 @@ tasks:
     // --- TriggerDef::EventSource tests ---
 
     #[test]
-    fn test_parse_event_source_local_runner() {
+    fn test_parse_event_source_basic() {
         let yaml = r#"
 triggers:
   ingest:
     type: event_source
-    task: process-event
-    script: |
-      while true; do
-        echo '{"value": 42}'
-        sleep 1
-      done
+    task: consumer-task
+    target_task: process-event
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("ingest").unwrap();
         assert_eq!(trigger.trigger_type_str(), "event_source");
-        assert_eq!(trigger.task(), "process-event");
+        assert_eq!(trigger.task(), "consumer-task");
+        assert_eq!(trigger.target_task(), Some("process-event"));
         assert!(trigger.enabled());
         match trigger {
             TriggerDef::EventSource {
-                script,
-                runner,
                 restart_policy,
                 backoff_secs,
                 max_in_flight,
                 ..
             } => {
-                assert!(script.is_some());
-                assert!(runner.is_none()); // defaults to local
                 assert_eq!(*restart_policy, RestartPolicy::Always);
                 assert_eq!(*backoff_secs, 5); // default
                 assert!(max_in_flight.is_none());
@@ -3437,14 +3420,13 @@ triggers:
     }
 
     #[test]
-    fn test_parse_event_source_docker_runner() {
+    fn test_parse_event_source_with_env_and_policy() {
         let yaml = r#"
 triggers:
   kafka-consumer:
     type: event_source
-    task: handle-message
-    runner: docker
-    image: myorg/kafka-consumer:latest
+    task: consumer-task
+    target_task: handle-message
     env:
       KAFKA_BROKERS: "kafka:9092"
     restart_policy: on_failure
@@ -3454,53 +3436,19 @@ triggers:
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("kafka-consumer").unwrap();
         assert_eq!(trigger.trigger_type_str(), "event_source");
+        assert_eq!(trigger.target_task(), Some("handle-message"));
         match trigger {
             TriggerDef::EventSource {
-                image,
-                runner,
                 env,
                 restart_policy,
                 backoff_secs,
                 max_in_flight,
                 ..
             } => {
-                assert_eq!(image.as_deref(), Some("myorg/kafka-consumer:latest"));
-                assert_eq!(runner.as_deref(), Some("docker"));
                 assert!(env.contains_key("KAFKA_BROKERS"));
                 assert_eq!(*restart_policy, RestartPolicy::OnFailure);
                 assert_eq!(*backoff_secs, 10);
                 assert_eq!(*max_in_flight, Some(5));
-            }
-            _ => panic!("Expected EventSource variant"),
-        }
-    }
-
-    #[test]
-    fn test_parse_event_source_pod_runner() {
-        let yaml = r#"
-triggers:
-  stream:
-    type: event_source
-    task: handle-stream
-    runner: pod
-    image: myorg/streamer:v1
-    manifest:
-      spec:
-        serviceAccountName: my-sa
-    restart_policy: never
-"#;
-        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let trigger = config.triggers.get("stream").unwrap();
-        match trigger {
-            TriggerDef::EventSource {
-                runner,
-                manifest,
-                restart_policy,
-                ..
-            } => {
-                assert_eq!(runner.as_deref(), Some("pod"));
-                assert!(manifest.is_some());
-                assert_eq!(*restart_policy, RestartPolicy::Never);
             }
             _ => panic!("Expected EventSource variant"),
         }
@@ -3513,11 +3461,8 @@ triggers:
 triggers:
   ingest:
     type: event_source
-    task: process-event
-    script: "echo hello"
-    language: python
-    dependencies:
-      - requests
+    task: consumer-task
+    target_task: process-event
     backoff_secs: 30
     max_in_flight: 3
 "#;
@@ -3526,17 +3471,14 @@ triggers:
         let json_str = serde_json::to_string(trigger).unwrap();
         let parsed_back: TriggerDef = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed_back.trigger_type_str(), "event_source");
-        assert_eq!(parsed_back.task(), "process-event");
+        assert_eq!(parsed_back.task(), "consumer-task");
+        assert_eq!(parsed_back.target_task(), Some("process-event"));
         match parsed_back {
             TriggerDef::EventSource {
-                language,
-                dependencies,
                 backoff_secs,
                 max_in_flight,
                 ..
             } => {
-                assert_eq!(language.as_deref(), Some("python"));
-                assert_eq!(dependencies, vec!["requests"]);
                 assert_eq!(backoff_secs, 30);
                 assert_eq!(max_in_flight, Some(3));
             }
@@ -3550,8 +3492,8 @@ triggers:
 triggers:
   ingest:
     type: event_source
-    task: some-task
-    script: "echo hi"
+    task: consumer-task
+    target_task: process-event
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let trigger = config.triggers.get("ingest").unwrap();
@@ -3564,8 +3506,8 @@ triggers:
 triggers:
   ingest:
     type: event_source
-    task: some-task
-    script: "echo hi"
+    task: consumer-task
+    target_task: process-event
     enabled: false
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
@@ -3577,22 +3519,17 @@ triggers:
     fn test_event_source_trigger_type_str() {
         let trigger = TriggerDef::EventSource {
             task: "t".to_string(),
+            target_task: "u".to_string(),
             enabled: true,
             input: HashMap::new(),
             env: HashMap::new(),
-            script: Some("echo hi".to_string()),
-            image: None,
-            runner: None,
-            language: None,
-            dependencies: vec![],
-            interpreter: None,
-            manifest: None,
             restart_policy: RestartPolicy::Always,
             backoff_secs: 5,
             max_in_flight: None,
         };
         assert_eq!(trigger.trigger_type_str(), "event_source");
         assert_eq!(trigger.task(), "t");
+        assert_eq!(trigger.target_task(), Some("u"));
         assert!(trigger.enabled());
         assert!(trigger.timezone().is_none());
         assert_eq!(trigger.concurrency(), ConcurrencyPolicy::Allow);

@@ -5,7 +5,7 @@ use stroem_common::models::job::ActionType;
 use stroem_runner::{LogCallback, LogLine, RunConfig, RunResult, Runner, RunnerMode, ShellRunner};
 use tokio_util::sync::CancellationToken;
 
-use crate::client::ClaimedStep;
+use crate::client::{ClaimedStep, ServerClient};
 
 /// Executes workflow steps using the appropriate runner
 pub struct StepExecutor {
@@ -93,13 +93,14 @@ impl StepExecutor {
 
     /// Execute a claimed step and return the result.
     /// `workspace_dir` is the path to the extracted workspace for this step's workspace.
-    #[tracing::instrument(skip(self, log_buffer, cancel_token))]
+    #[tracing::instrument(skip(self, client, log_buffer, cancel_token))]
     pub async fn execute_step(
         &self,
         step: &ClaimedStep,
         workspace_dir: &str,
         log_buffer: Arc<Mutex<Vec<serde_json::Value>>>,
         cancel_token: CancellationToken,
+        client: &ServerClient,
     ) -> Result<RunResult> {
         tracing::info!(
             "Executing step '{}' for job {}",
@@ -117,7 +118,93 @@ impl StepExecutor {
             .await
             .context("Failed to resolve secrets in env vars")?;
 
-        // Create log callback that pushes to log buffer
+        // Set up event source OUTPUT interception when configured
+        let (emit_tx_opt, emit_handle_opt) = 'emit_setup: {
+            let es = match step.event_source_config.as_ref() {
+                Some(es) => es,
+                None => break 'emit_setup (None, None),
+            };
+
+            // Merge env overrides from event_source_config into the step's env
+            if let Some(env_overrides) = es.get("env").and_then(|v| v.as_object()) {
+                for (k, v) in env_overrides {
+                    if let Some(val) = v.as_str() {
+                        config.env.insert(k.clone(), val.to_string());
+                    }
+                }
+            }
+
+            let target_task = match es.get("target_task").and_then(|v| v.as_str()) {
+                Some(t) => t.to_string(),
+                None => {
+                    tracing::warn!(
+                        "event_source_config missing target_task, skipping OUTPUT interception"
+                    );
+                    break 'emit_setup (None, None);
+                }
+            };
+            let es_workspace = step.workspace.clone();
+            let source_id = match es.get("source_id").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    tracing::warn!(
+                        "event_source_config missing source_id, skipping OUTPUT interception"
+                    );
+                    break 'emit_setup (None, None);
+                }
+            };
+            let input_defaults: HashMap<String, serde_json::Value> = es
+                .get("input_defaults")
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default();
+            let max_in_flight = es
+                .get("max_in_flight")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+
+            let (emit_tx, mut emit_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(100);
+            let in_flight_sem =
+                max_in_flight.map(|n| std::sync::Arc::new(tokio::sync::Semaphore::new(n as usize)));
+            let emit_client = client.clone();
+            let handle = tokio::spawn(async move {
+                while let Some(payload) = emit_rx.recv().await {
+                    let _permit = match &in_flight_sem {
+                        Some(sem) => sem.acquire().await.ok(),
+                        None => None,
+                    };
+                    let mut merged = serde_json::Map::new();
+                    for (k, v) in &input_defaults {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                    if let Some(obj) = payload.as_object() {
+                        for (k, v) in obj {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    } else {
+                        tracing::warn!(
+                            "event source OUTPUT payload is not a JSON object (expected {{...}}), ignoring payload"
+                        );
+                    }
+                    if let Err(e) = emit_client
+                        .emit_event_source(
+                            &es_workspace,
+                            &target_task,
+                            serde_json::Value::Object(merged),
+                            &source_id,
+                        )
+                        .await
+                    {
+                        tracing::error!("event source emit failed: {:#}", e);
+                    }
+                }
+            });
+
+            (Some(emit_tx), Some(handle))
+        };
+
+        // Create log callback that pushes to log buffer, intercepting OUTPUT lines for
+        // event source steps.
         let log_callback: LogCallback = Box::new(move |line: LogLine| {
             if let Ok(mut buffer) = log_buffer.lock() {
                 buffer.push(serde_json::json!({
@@ -125,6 +212,33 @@ impl StepExecutor {
                     "line": line.line,
                     "timestamp": line.timestamp,
                 }));
+            }
+            if let Some(ref tx) = emit_tx_opt {
+                if matches!(line.stream, stroem_runner::LogStream::Stdout) {
+                    let trimmed = line.line.trim();
+                    if let Some(json_str) = trimmed
+                        .strip_prefix("OUTPUT: ")
+                        .or_else(|| trimmed.strip_prefix("OUTPUT:"))
+                    {
+                        match serde_json::from_str::<serde_json::Value>(json_str) {
+                            Ok(payload) => {
+                                if let Err(e) = tx.try_send(payload) {
+                                    tracing::warn!(
+                                        "event source OUTPUT dropped (channel full): {}",
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "event source malformed OUTPUT JSON (skipped): {}: {}",
+                                    e,
+                                    json_str
+                                );
+                            }
+                        }
+                    }
+                }
             }
         });
 
@@ -136,6 +250,15 @@ impl StepExecutor {
             .execute(config, Some(log_callback), cancel_token)
             .await
             .context("Failed to execute step")?;
+
+        // Flush remaining emit events before returning
+        if let Some(handle) = emit_handle_opt {
+            // Dropping emit_tx_opt signals the channel is closed; the callback closure
+            // already moved it, so the sender is dropped when the closure is dropped
+            // (which happens when the runner returns and log_callback is freed).
+            // We just await the handle to ensure all queued events are sent.
+            let _ = handle.await;
+        }
 
         tracing::info!(
             "Step '{}' completed with exit code {}",
@@ -331,6 +454,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
+            event_source_config: None,
         }
     }
 
@@ -603,13 +727,20 @@ mod tests {
     async fn test_execute_step_simple_echo() {
         let executor = StepExecutor::new();
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let client = ServerClient::new("http://localhost:8080", "token", None, None);
 
         let step = test_step(Some(serde_json::json!({
             "script": "echo hello-from-test"
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer.clone(), CancellationToken::new())
+            .execute_step(
+                &step,
+                "/tmp",
+                log_buffer.clone(),
+                CancellationToken::new(),
+                &client,
+            )
             .await
             .unwrap();
 
@@ -630,13 +761,14 @@ mod tests {
     async fn test_execute_step_nonzero_exit() {
         let executor = StepExecutor::new();
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let client = ServerClient::new("http://localhost:8080", "token", None, None);
 
         let step = test_step(Some(serde_json::json!({
             "script": "exit 42"
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer, CancellationToken::new())
+            .execute_step(&step, "/tmp", log_buffer, CancellationToken::new(), &client)
             .await
             .unwrap();
 
@@ -647,6 +779,7 @@ mod tests {
     async fn test_execute_step_env_vars_passed() {
         let executor = StepExecutor::new();
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let client = ServerClient::new("http://localhost:8080", "token", None, None);
 
         let step = test_step(Some(serde_json::json!({
             "script": "echo $TEST_VAR_XYZ",
@@ -656,7 +789,13 @@ mod tests {
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer.clone(), CancellationToken::new())
+            .execute_step(
+                &step,
+                "/tmp",
+                log_buffer.clone(),
+                CancellationToken::new(),
+                &client,
+            )
             .await
             .unwrap();
 
@@ -676,13 +815,20 @@ mod tests {
     async fn test_execute_step_stderr_captured() {
         let executor = StepExecutor::new();
         let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let client = ServerClient::new("http://localhost:8080", "token", None, None);
 
         let step = test_step(Some(serde_json::json!({
             "script": "echo error-output >&2"
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer.clone(), CancellationToken::new())
+            .execute_step(
+                &step,
+                "/tmp",
+                log_buffer.clone(),
+                CancellationToken::new(),
+                &client,
+            )
             .await
             .unwrap();
 
