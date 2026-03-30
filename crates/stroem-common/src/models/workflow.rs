@@ -439,11 +439,12 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 }
             }
 
-            // Split `input` entries: those that parse as InputFieldDef (with `type` key)
+            // Split `input` entries: those that successfully parse as InputFieldDef
             // go on the action schema (enabling connection resolution and defaults).
             // Plain values stay as step-level input.
+            let input_key = serde_yaml::Value::String("input".into());
             let raw_input: HashMap<String, serde_yaml::Value> = step_map
-                .get(serde_yaml::Value::String("input".into()))
+                .get(&input_key)
                 .map(|v| serde_yaml::from_value(v.clone()).unwrap_or_default())
                 .unwrap_or_default();
 
@@ -451,30 +452,31 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
             let mut action_input_schema = serde_yaml::Mapping::new();
 
             for (key, val) in &raw_input {
-                // Try to parse as InputFieldDef — objects with a `type` key
-                if let serde_yaml::Value::Mapping(ref m) = val {
-                    if m.contains_key(serde_yaml::Value::String("type".into())) {
-                        // This is a schema definition (e.g. { type: postgresql, default: "..." })
-                        // Put on action schema for connection resolution + defaults
-                        action_input_schema
-                            .insert(serde_yaml::Value::String(key.clone()), val.clone());
-                        continue;
-                    }
+                // Try to fully parse as InputFieldDef — this avoids false positives
+                // from user objects that happen to have a `type` key.
+                if let Ok(_field_def) = serde_yaml::from_value::<InputFieldDef>(val.clone()) {
+                    // Valid schema definition (e.g. { type: postgresql, default: "..." })
+                    // Put on action schema for connection resolution + defaults
+                    action_input_schema.insert(serde_yaml::Value::String(key.clone()), val.clone());
+                    continue;
                 }
-                // Plain value — keep as step-level input
-                if let Ok(yaml_json) = serde_yaml::from_value::<serde_json::Value>(val.clone()) {
-                    step_input.insert(key.clone(), yaml_json);
+                // Not a valid InputFieldDef — keep as step-level input value
+                match serde_yaml::from_value::<serde_json::Value>(val.clone()) {
+                    Ok(yaml_json) => {
+                        step_input.insert(key.clone(), yaml_json);
+                    }
+                    Err(e) => {
+                        return Err(D::Error::custom(format!(
+                            "failed to convert input field '{}' to JSON: {}",
+                            key, e
+                        )));
+                    }
                 }
             }
 
             // Build action input schema if any entries were detected
             if !action_input_schema.is_empty() {
-                action_map.insert(
-                    serde_yaml::Value::String("input".into()),
-                    serde_yaml::Value::Mapping(action_input_schema),
-                );
-            } else {
-                action_map.remove(serde_yaml::Value::String("input".into()));
+                action_map.insert(input_key, serde_yaml::Value::Mapping(action_input_schema));
             }
 
             // Parse the action definition (now may include input schema)
@@ -2667,6 +2669,111 @@ tasks:
             .unwrap();
         assert_eq!(step.input.get("name"), Some(&serde_json::json!("world")));
         assert_eq!(step.input.get("count"), Some(&serde_json::json!(3)));
+    }
+
+    #[test]
+    fn test_inline_step_object_with_type_key_not_valid_schema_stays_on_step() {
+        // An object like { type: "production", retries: 3 } has a `type` key but
+        // `retries` is not a valid InputFieldDef field. Since InputFieldDef uses
+        // #[serde(default)] for all optional fields, this would parse as a valid
+        // InputFieldDef with field_type="production". This is the expected behavior —
+        // the `type` key signals an input schema definition.
+        // However, if the type value is not a string, it should stay as a plain value.
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      run:
+        type: script
+        script: "echo test"
+        input:
+          config: { type: 123 }
+"#;
+        // type: 123 (not a string) fails InputFieldDef parse → stays as step input
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("_inline:hello:run").unwrap();
+        assert!(
+            action.input.is_empty(),
+            "non-string type should not become schema"
+        );
+        let step = config.tasks.get("hello").unwrap().flow.get("run").unwrap();
+        assert!(
+            step.input.contains_key("config"),
+            "should stay as step input"
+        );
+    }
+
+    #[test]
+    fn test_inline_step_empty_input() {
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      run:
+        type: script
+        script: "echo test"
+        input: {}
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("_inline:hello:run").unwrap();
+        assert!(action.input.is_empty());
+        let step = config.tasks.get("hello").unwrap().flow.get("run").unwrap();
+        assert!(step.input.is_empty());
+    }
+
+    #[test]
+    fn test_inline_step_only_schema_entries() {
+        let yaml = r#"
+tasks:
+  consumer:
+    flow:
+      run:
+        type: script
+        script: "echo test"
+        input:
+          db: { type: postgresql, default: "prod-db" }
+          cache: { type: redis }
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("_inline:consumer:run").unwrap();
+        assert_eq!(action.input.len(), 2);
+        assert!(action.input.contains_key("db"));
+        assert!(action.input.contains_key("cache"));
+        let step = config
+            .tasks
+            .get("consumer")
+            .unwrap()
+            .flow
+            .get("run")
+            .unwrap();
+        assert!(step.input.is_empty(), "no plain values → empty step input");
+    }
+
+    #[test]
+    fn test_inline_step_nested_object_with_type_key_stays_on_step() {
+        // A nested object { config: { nested: { type: "foo" } } } — only the
+        // top-level value is checked, so the outer `config` object does NOT have
+        // a `type` key and stays as a step input value.
+        let yaml = r#"
+tasks:
+  hello:
+    flow:
+      run:
+        type: script
+        script: "echo test"
+        input:
+          config:
+            nested:
+              type: "foo"
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let action = config.actions.get("_inline:hello:run").unwrap();
+        assert!(
+            action.input.is_empty(),
+            "nested type key should not trigger schema"
+        );
+        let step = config.tasks.get("hello").unwrap().flow.get("run").unwrap();
+        assert!(step.input.contains_key("config"));
     }
 
     #[test]
