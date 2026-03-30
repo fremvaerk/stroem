@@ -1,38 +1,11 @@
 import type { Page } from "@playwright/test";
 
 export async function login(page: Page) {
-  // Navigate to root — if we're already authenticated (cookie present),
-  // the app won't redirect to /login and we can skip the login flow.
-  await page.goto("/");
-  const url = page.url();
-  if (!url.includes("/login")) {
-    // Already authenticated
-    await page.waitForLoadState("networkidle");
-    return;
-  }
-
-  // Not authenticated — perform login with rate-limit retry
-  for (let attempt = 0; attempt < 5; attempt++) {
-    await page.goto("/login");
-    await page.fill('input[id="email"]', "admin@stroem.local");
-    await page.fill('input[id="password"]', "admin");
-
-    const responsePromise = page.waitForResponse(
-      (r) => r.url().includes("/api/auth/login"),
-      { timeout: 10_000 },
-    );
-    await page.click('button[type="submit"]');
-
-    const response = await responsePromise.catch(() => null);
-    if (response && response.status() === 429) {
-      await page.waitForTimeout(3000 * (attempt + 1));
-      continue;
-    }
-
-    await page.waitForURL("/", { timeout: 10_000 });
-    return;
-  }
-  throw new Error("Login failed after 5 rate-limit retries");
+  await page.goto("/login");
+  await page.fill('input[id="email"]', "admin@stroem.local");
+  await page.fill('input[id="password"]', "admin");
+  await page.click('button[type="submit"]');
+  await page.waitForURL("/");
 }
 
 // Cached token to avoid rate limiting on /api/auth/login.
