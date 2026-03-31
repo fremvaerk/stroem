@@ -94,6 +94,12 @@ pub async fn list_jobs(
         ));
     }
 
+    if query.task_name.is_some() && query.search.is_some() {
+        return Err(AppError::BadRequest(
+            "Cannot use both task_name and search filters".into(),
+        ));
+    }
+
     if let Some(ref s) = query.status {
         if !VALID_STATUSES.contains(&s.as_str()) {
             return Err(AppError::BadRequest(format!(
@@ -104,11 +110,24 @@ pub async fn list_jobs(
         }
     }
 
+    // Trim and validate search parameter
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(s) = search {
+        if s.len() > 200 {
+            return Err(AppError::BadRequest(
+                "Search term must be 200 characters or fewer".into(),
+            ));
+        }
+    }
+
     // Resolve ACL scope
     let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
 
     let status = query.status.as_deref();
-    let search = query.search.as_deref();
 
     let (result, total) = match acl_pairs {
         // ACL filtering is active — use ACL-aware queries

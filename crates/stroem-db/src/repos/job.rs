@@ -7,6 +7,14 @@ use uuid::Uuid;
 
 const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs";
 
+/// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
+fn escape_like(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Job row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct JobRow {
@@ -283,7 +291,7 @@ impl JobRepo {
             query = query.bind(s);
         }
         if let Some(s) = search {
-            query = query.bind(format!("%{s}%"));
+            query = query.bind(format!("%{}%", escape_like(s)));
         }
         query = query.bind(limit).bind(offset);
 
@@ -444,7 +452,7 @@ impl JobRepo {
             query = query.bind(s);
         }
         if let Some(s) = search {
-            query = query.bind(format!("%{s}%"));
+            query = query.bind(format!("%{}%", escape_like(s)));
         }
 
         let count = query
@@ -737,7 +745,7 @@ impl JobRepo {
             query = query.bind(s);
         }
         if let Some(s) = search {
-            query = query.bind(format!("%{s}%"));
+            query = query.bind(format!("%{}%", escape_like(s)));
         }
         query = query.bind(limit).bind(offset);
         let jobs = query
@@ -787,7 +795,7 @@ impl JobRepo {
             query = query.bind(s);
         }
         if let Some(s) = search {
-            query = query.bind(format!("%{s}%"));
+            query = query.bind(format!("%{}%", escape_like(s)));
         }
         let count = query
             .fetch_one(pool)
