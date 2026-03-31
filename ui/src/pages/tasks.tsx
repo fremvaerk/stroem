@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
-import { ChevronRight, Clock, Folder } from "lucide-react";
+import { ChevronRight, Clock, Folder, Search, X } from "lucide-react";
 import { LoadingSpinner } from "@/components/loading-spinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -131,6 +132,7 @@ export function TasksPage() {
   useTitle("Tasks");
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem("stroem_tasks_expanded_folders");
@@ -165,10 +167,32 @@ export function TasksPage() {
     return <LoadingSpinner />;
   }
 
+  const filteredTasks = search
+    ? tasks.filter((t) =>
+        (t.name ?? t.id).toLowerCase().includes(search.toLowerCase()),
+      )
+    : tasks;
+
   const workspaces = new Set(tasks.map((t) => t.workspace));
   const showWorkspace = workspaces.size > 1;
-  const { rootTasks, folders } = buildFolderTree(tasks);
-  const rows = flattenTree(folders, rootTasks, expanded);
+  const { rootTasks, folders } = buildFolderTree(filteredTasks);
+
+  // When searching, collect all folder paths that contain matching tasks so
+  // they are automatically expanded regardless of the persisted toggle state.
+  const searchExpanded: Set<string> = new Set();
+  if (search) {
+    for (const task of filteredTasks) {
+      if (task.folder) {
+        const segments = task.folder.split("/");
+        for (let i = 1; i <= segments.length; i++) {
+          searchExpanded.add(segments.slice(0, i).join("/"));
+        }
+      }
+    }
+  }
+  const effectiveExpanded = search ? searchExpanded : expanded;
+
+  const rows = flattenTree(folders, rootTasks, effectiveExpanded);
 
   function toggleFolder(path: string) {
     setExpanded((prev) => {
@@ -188,11 +212,31 @@ export function TasksPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Tasks</h1>
-        <p className="text-sm text-muted-foreground">
-          Available workflow tasks
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Tasks</h1>
+          <p className="text-sm text-muted-foreground">
+            Available workflow tasks
+          </p>
+        </div>
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search tasks..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-9 max-w-sm"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       <Card>
@@ -203,6 +247,10 @@ export function TasksPage() {
           {tasks.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No tasks found.
+            </p>
+          ) : filteredTasks.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No tasks match &ldquo;{search}&rdquo;.
             </p>
           ) : (
             <Table>
