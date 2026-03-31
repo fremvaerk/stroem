@@ -106,7 +106,7 @@ function flattenTree(
         walkFolder(child, depth + 1);
       }
       const sortedTasks = [...node.tasks].sort((a, b) =>
-        a.name.localeCompare(b.name),
+        (a.name ?? a.id).localeCompare(b.name ?? b.id),
       );
       for (const task of sortedTasks) {
         rows.push({ kind: "task", task, depth: depth + 1 });
@@ -118,7 +118,7 @@ function flattenTree(
     walkFolder(folder, 0);
   }
   const sortedRootTasks = [...rootTasks].sort((a, b) =>
-    a.name.localeCompare(b.name),
+    (a.name ?? a.id).localeCompare(b.name ?? b.id),
   );
   for (const task of sortedRootTasks) {
     rows.push({ kind: "task", task, depth: 0 });
