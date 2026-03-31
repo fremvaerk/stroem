@@ -265,7 +265,7 @@ impl JobRepo {
             param_idx += 1;
         }
         if search.is_some() {
-            conditions.push(format!("task_name ILIKE ${param_idx}"));
+            conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
             param_idx += 1;
         }
 
@@ -433,7 +433,7 @@ impl JobRepo {
             param_idx += 1;
         }
         if search.is_some() {
-            conditions.push(format!("task_name ILIKE ${param_idx}"));
+            conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
         }
 
         let where_clause = if conditions.is_empty() {
@@ -727,7 +727,7 @@ impl JobRepo {
             param_idx += 1;
         }
         if search.is_some() {
-            conditions.push(format!("task_name ILIKE ${param_idx}"));
+            conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
             param_idx += 1;
         }
         let where_clause = format!(" WHERE {}", conditions.join(" AND "));
@@ -783,7 +783,7 @@ impl JobRepo {
             param_idx += 1;
         }
         if search.is_some() {
-            conditions.push(format!("task_name ILIKE ${param_idx}"));
+            conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
         }
         let where_clause = format!(" WHERE {}", conditions.join(" AND "));
         let sql = format!("SELECT COUNT(*) FROM job{where_clause}");
