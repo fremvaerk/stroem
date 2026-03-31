@@ -25,6 +25,7 @@ pub struct ListJobsQuery {
     pub workspace: Option<String>,
     pub task_name: Option<String>,
     pub status: Option<String>,
+    pub search: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default)]
@@ -107,6 +108,7 @@ pub async fn list_jobs(
     let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
 
     let status = query.status.as_deref();
+    let search = query.search.as_deref();
 
     let (result, total) = match acl_pairs {
         // ACL filtering is active — use ACL-aware queries
@@ -130,11 +132,13 @@ pub async fn list_jobs(
                 &state.pool,
                 &effective_pairs,
                 status,
+                search,
                 query.limit,
                 query.offset,
             )
             .await;
-            let count = JobRepo::count_with_acl(&state.pool, &effective_pairs, status).await;
+            let count =
+                JobRepo::count_with_acl(&state.pool, &effective_pairs, status, search).await;
             (jobs, count)
         }
         // No ACL filtering — use existing queries
@@ -148,8 +152,9 @@ pub async fn list_jobs(
             }
             _ => {
                 let ws = query.workspace.as_deref();
-                let jobs = JobRepo::list(&state.pool, ws, status, query.limit, query.offset).await;
-                let count = JobRepo::count(&state.pool, ws, status).await;
+                let jobs =
+                    JobRepo::list(&state.pool, ws, status, search, query.limit, query.offset).await;
+                let count = JobRepo::count(&state.pool, ws, status, search).await;
                 (jobs, count)
             }
         },

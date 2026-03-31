@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { ChevronRight, Clock, Folder, Search, X } from "lucide-react";
 import { LoadingSpinner } from "@/components/loading-spinner";
@@ -163,36 +163,47 @@ export function TasksPage() {
     };
   }, []);
 
-  if (loading) {
-    return <LoadingSpinner />;
-  }
+  const filteredTasks = useMemo(
+    () =>
+      search
+        ? tasks.filter((t) =>
+            (t.name ?? t.id).toLowerCase().includes(search.toLowerCase()),
+          )
+        : tasks,
+    [tasks, search],
+  );
 
-  const filteredTasks = search
-    ? tasks.filter((t) =>
-        (t.name ?? t.id).toLowerCase().includes(search.toLowerCase()),
-      )
-    : tasks;
-
-  const workspaces = new Set(tasks.map((t) => t.workspace));
-  const showWorkspace = workspaces.size > 1;
-  const { rootTasks, folders } = buildFolderTree(filteredTasks);
-
-  // When searching, collect all folder paths that contain matching tasks so
-  // they are automatically expanded regardless of the persisted toggle state.
-  const searchExpanded: Set<string> = new Set();
-  if (search) {
-    for (const task of filteredTasks) {
-      if (task.folder) {
-        const segments = task.folder.split("/");
-        for (let i = 1; i <= segments.length; i++) {
-          searchExpanded.add(segments.slice(0, i).join("/"));
+  const { rootTasks, folders, searchExpanded } = useMemo(() => {
+    const { rootTasks, folders } = buildFolderTree(filteredTasks);
+    const searchExp = new Set<string>();
+    if (search) {
+      for (const task of filteredTasks) {
+        if (task.folder) {
+          const segments = task.folder.split("/");
+          for (let i = 1; i <= segments.length; i++) {
+            searchExp.add(segments.slice(0, i).join("/"));
+          }
         }
       }
     }
-  }
+    return { rootTasks, folders, searchExpanded: searchExp };
+  }, [filteredTasks, search]);
+
   const effectiveExpanded = search ? searchExpanded : expanded;
 
-  const rows = flattenTree(folders, rootTasks, effectiveExpanded);
+  const rows = useMemo(
+    () => flattenTree(folders, rootTasks, effectiveExpanded),
+    [folders, rootTasks, effectiveExpanded],
+  );
+
+  const showWorkspace = useMemo(() => {
+    const workspaces = new Set(tasks.map((t) => t.workspace));
+    return workspaces.size > 1;
+  }, [tasks]);
+
+  if (loading) {
+    return <LoadingSpinner />;
+  }
 
   function toggleFolder(path: string) {
     setExpanded((prev) => {

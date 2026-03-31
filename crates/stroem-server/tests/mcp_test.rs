@@ -1151,7 +1151,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // Verify hook job was created
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 2, "expected original job + hook job");
 
     let hook_job = all_jobs

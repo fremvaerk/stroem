@@ -576,7 +576,7 @@ impl StromMcpHandler {
             }
             _ => {
                 let ws = params.workspace.as_deref();
-                JobRepo::list(&self.state.pool, ws, status, limit, 0)
+                JobRepo::list(&self.state.pool, ws, status, None, limit, 0)
                     .await
                     .map_err(|e| internal_err(format!("DB error: {e}")))?
             }

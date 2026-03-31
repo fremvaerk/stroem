@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { Search, X } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,30 +30,29 @@ export function JobsPage() {
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const fetcher = useCallback(
     () =>
       listJobs(PAGE_SIZE, offset, {
         status: statusFilter === "all" ? undefined : statusFilter,
+        search: debouncedSearch || undefined,
       }),
-    [offset, statusFilter],
+    [offset, statusFilter, debouncedSearch],
   );
   const { data, loading } = useAsyncData(fetcher, {
     pollInterval: 5000,
   });
   const jobs = data?.items ?? [];
   const total = data?.total ?? 0;
-  const filtered = search
-    ? jobs.filter((j) => {
-        const q = search.toLowerCase();
-        return (
-          j.task_name.toLowerCase().includes(q) ||
-          j.status.toLowerCase().includes(q) ||
-          j.workspace.toLowerCase().includes(q) ||
-          j.job_id.toLowerCase().includes(q)
-        );
-      })
-    : jobs;
 
   return (
     <div className="space-y-6">
@@ -106,7 +105,7 @@ export function JobsPage() {
         <CardContent>
           {loading ? (
             <LoadingSpinner />
-          ) : filtered.length === 0 ? (
+          ) : jobs.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               {search ? `No jobs match "${search}".` : "No jobs found."}
             </p>
@@ -123,7 +122,7 @@ export function JobsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((job: JobListItem) => (
+                {jobs.map((job: JobListItem) => (
                   <TableRow key={job.job_id}>
                     <TableCell>
                       <Link

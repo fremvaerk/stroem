@@ -4354,7 +4354,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
     );
 
     // An on_error hook job should have been created
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -4583,7 +4583,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
 
     // The parent "delegate" step is a task-action, so it is dispatched server-side
     // immediately on job creation. Verify the child job exists.
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let child_job = all_jobs
         .iter()
         .find(|j| j.source_type == "task")
@@ -8946,7 +8946,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // Verify hook job was created
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 2); // original + hook
 
     let hook_job = all_jobs
@@ -9054,7 +9054,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // Verify hook job was created
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -9143,7 +9143,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
     stroem_server::hooks::fire_hooks(&state, &workspace, &hook_job, task).await;
 
     // Verify no additional hook jobs were created
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 1); // Only the original hook job
 
     Ok(())
@@ -9226,7 +9226,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
     let state = hook_test_state(pool.clone(), &workspace);
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -9345,7 +9345,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     let state = hook_test_state(pool.clone(), &workspace);
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -9484,7 +9484,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     let state = hook_test_state(pool.clone(), &workspace);
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -9595,7 +9595,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     let state = hook_test_state(pool.clone(), &workspace);
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -9715,7 +9715,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     let state = hook_test_state(pool.clone(), &workspace);
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_job = all_jobs
         .iter()
         .find(|j| j.source_type == "hook")
@@ -9806,7 +9806,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     );
 
     // Verify no recursive hook job was created (recursion guard)
-    let all_jobs_after = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs_after = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_jobs: Vec<_> = all_jobs_after
         .iter()
         .filter(|j| j.source_type == "hook")
@@ -10061,7 +10061,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
     assert_eq!(parent_steps[0].status, "running");
 
     // A child job should have been created
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 2);
 
     let child_job = all_jobs
@@ -10120,7 +10120,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
     assert_eq!(cleanup_step.status, "pending");
 
     // Only 1 job so far (no child yet because cleanup is pending)
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 1);
 
     // Simulate worker completing the build step
@@ -10152,7 +10152,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
     assert_eq!(cleanup_after.status, "running");
 
     // A child job should exist
-    let all_jobs_2 = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs_2 = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs_2.len(), 2);
 
     let child_job = all_jobs_2
@@ -10375,7 +10375,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
     .await?;
 
     // Child job should exist and its input should contain the rendered value
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 2);
 
     let child_job = all_jobs
@@ -10469,7 +10469,7 @@ async fn test_task_action_in_hook() -> Result<()> {
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // A hook job should have been created with task_name = "cleanup" (not "_hook:run-cleanup")
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let hook_jobs: Vec<_> = all_jobs
         .iter()
         .filter(|j| j.source_type == "hook")
@@ -10653,7 +10653,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     .await?;
 
     // Child job should exist
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let child_job = all_jobs
         .iter()
         .find(|j| j.source_type == "task")
@@ -12251,7 +12251,7 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
     assert_eq!(body["total"].as_i64().unwrap(), 3);
 
     // Complete one job
-    let jobs = JobRepo::list(&pool, None, None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, None, None, None, 10, 0).await?;
     let job_id = jobs[0].job_id;
     JobRepo::mark_completed(&pool, job_id, None).await?;
 
@@ -12322,7 +12322,7 @@ async fn test_list_jobs_status_with_workspace_filter() -> Result<()> {
     assert_eq!(response.status(), 200);
 
     // Complete the ops job
-    let ops_jobs = JobRepo::list(&pool, Some("ops"), None, 10, 0).await?;
+    let ops_jobs = JobRepo::list(&pool, Some("ops"), None, None, 10, 0).await?;
     JobRepo::mark_completed(&pool, ops_jobs[0].job_id, None).await?;
 
     // workspace=default&status=pending → 1
@@ -15155,7 +15155,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
         "type:task step with when:false must be skipped at job creation"
     );
 
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     let child_jobs: Vec<_> = all_jobs
         .iter()
         .filter(|j| j.source_type == "task")
@@ -16074,7 +16074,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
 
     // There must now be exactly two jobs: the original and the hook job.
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 2, "expected original job + hook job");
 
     let hook_job = all_jobs
@@ -16167,7 +16167,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
 
     // `create_job_for_task` handles task-type steps synchronously: by the
     // time it returns the child job already exists.
-    let all_jobs = JobRepo::list(&pool, Some("default"), None, 100, 0).await?;
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
     assert_eq!(all_jobs.len(), 2, "expected parent job + child job");
 
     let child_job = all_jobs
