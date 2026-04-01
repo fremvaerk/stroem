@@ -46,6 +46,7 @@ export default defineConfig({
               slug: "guides/secrets",
             },
             { label: "Libraries", slug: "guides/libraries" },
+            { label: "Event Sources", slug: "guides/event-sources" },
             { label: "Multi-Workspace", slug: "guides/multi-workspace" },
             { label: "MCP Integration", slug: "guides/mcp" },
           ],
@@ -82,6 +83,11 @@ export default defineConfig({
             { label: "Webhook API", slug: "reference/webhook-api" },
             { label: "Auth API", slug: "reference/auth-api" },
             { label: "Worker API", slug: "reference/worker-api" },
+            {
+              label: "LLM Reference (llms.txt)",
+              link: "/stroem/llms.txt",
+              attrs: { target: "_blank" },
+            },
           ],
         },
         {
