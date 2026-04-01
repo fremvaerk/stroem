@@ -343,11 +343,22 @@ The counter resets on a successful run (exit code 0).
 Example with 10-second base backoff:
 
 ```yaml
+actions:
+  my-consumer:
+    type: script
+    script: "./my_consumer.sh"
+
+tasks:
+  my-task:
+    flow:
+      consume:
+        action: my-consumer
+
 triggers:
   flaky-consumer:
     type: event_source
     task: my-task
-    script: "./my_consumer.sh"
+    target_task: process-event
     restart_policy: on_failure
     backoff_secs: 10
 ```
@@ -364,11 +375,23 @@ The `max_in_flight` setting provides **natural Unix pipe backpressure**. When th
 This prevents job queues from exploding when downstream tasks slow down.
 
 ```yaml
+actions:
+  consume:
+    type: script
+    runner: docker
+    image: myorg/consumer:latest
+
+tasks:
+  high-volume-consumer:
+    flow:
+      consume:
+        action: consume
+
 triggers:
   high-volume-stream:
     type: event_source
-    task: process-event
-    script: "./consume.sh"
+    task: high-volume-consumer
+    target_task: process-event
     max_in_flight: 50  # Never create more than 50 pending/running jobs at once
 ```
 
@@ -413,7 +436,7 @@ triggers:
   my-consumer:
     type: event_source
     task: my-task
-    script: "./consumer.sh"
+    target_task: process-event
     enabled: false  # Process won't start
 ```
 
@@ -517,6 +540,69 @@ triggers:
       QUEUE_URL: "{{ secret.sqs_queue_url }}"
     max_in_flight: 5  # Limit concurrent batches
 ```
+
+## Example: Multi-step consumer
+
+A consumer task can have multiple steps — setup actions, cleanup tasks, or complex flows. The consumer keeps running as long as one step in the flow remains active:
+
+```yaml
+actions:
+  create-consumer-group:
+    type: script
+    language: bash
+    script: |
+      #!/bin/bash
+      set -e
+      export KAFKA_BROKERS="${KAFKA_BROKERS}"
+      kafka-consumer-groups --bootstrap-server "$KAFKA_BROKERS" \
+        --create --group "$CONSUMER_GROUP" || true  # Ignore if exists
+
+  poll-kafka:
+    type: docker
+    image: myorg/kafka-poller:latest
+
+  cleanup-on-exit:
+    type: script
+    language: bash
+    script: |
+      #!/bin/bash
+      echo "Consumer shutdown, cleaning up resources..."
+
+tasks:
+  kafka-consumer:
+    flow:
+      setup:
+        action: create-consumer-group
+      consume:
+        action: poll-kafka
+        depends_on: [setup]
+      cleanup:
+        action: cleanup-on-exit
+        depends_on: [consume]
+        continue_on_failure: true
+
+  process-kafka-event:
+    flow:
+      process:
+        action: handle-kafka-message
+        input:
+          message: "{{ input }}"
+
+triggers:
+  kafka-stream:
+    type: event_source
+    task: kafka-consumer
+    target_task: process-kafka-event
+    env:
+      KAFKA_BROKERS: "{{ secret.kafka_brokers }}"
+      KAFKA_TOPIC: "events"
+      CONSUMER_GROUP: "stroem-worker-1"
+    restart_policy: always
+    backoff_secs: 5
+    max_in_flight: 20
+```
+
+The `poll-kafka` step runs indefinitely while emitting `OUTPUT: ` lines. When the consumer process exits, the `cleanup` step runs (with `continue_on_failure: true` to ensure it always executes), and the restart policy determines whether the entire consumer task restarts.
 
 ## Comparison with other triggers
 

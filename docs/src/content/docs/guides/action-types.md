@@ -472,3 +472,112 @@ echo "OUTPUT: {\"status\": \"deployed\", \"version\": \"1.2.3\"}"
 ```
 
 Only the **last** `OUTPUT: {json}` line is captured. The JSON is parsed and made available to downstream steps via [templating](/guides/templating/).
+
+## Approval gates
+
+Actions of `type: approval` pause job execution and request human approval before continuing. The approver can approve or reject the step, optionally providing a rejection reason.
+
+:::note
+Approval gates are dispatched server-side — workers never see them and no worker tags are required.
+:::
+
+### Approval lifecycle
+
+1. **Pending**: Step is ready to execute but waiting for approval.
+2. **Suspended**: Step is paused and awaiting human decision. Triggers `on_suspended` hooks (see [Hooks](/guides/hooks/#on_suspended)).
+3. **Completed** or **Failed**: Approver has made a decision; the step transitions to the final state and the job continues.
+
+### Basic approval
+
+```yaml
+actions:
+  deploy-approval:
+    type: approval
+    message: "Approve deployment to production?"
+
+tasks:
+  deploy:
+    flow:
+      approve:
+        action: deploy-approval
+      execute:
+        action: deploy-script
+        depends_on: [approve]
+```
+
+### Dynamic message with templating
+
+The `message` field is a Tera template with access to job input and completed step outputs. Use it to show approvers relevant context:
+
+```yaml
+actions:
+  deploy-approval:
+    type: approval
+    message: |
+      Approve deployment of **{{ input.version }}** to **{{ input.environment }}**?
+
+      Current version: {{ input.current_version }}
+      Deployer: {{ input.deployer_email }}
+
+tasks:
+  deploy:
+    input:
+      version: { type: string, required: true }
+      environment: { type: string, required: true }
+      current_version: { type: string, required: true }
+      deployer_email: { type: string, required: true }
+    flow:
+      approve:
+        action: deploy-approval
+        input:
+          version: "{{ input.version }}"
+          environment: "{{ input.environment }}"
+          current_version: "{{ input.current_version }}"
+          deployer_email: "{{ input.deployer_email }}"
+      execute:
+        action: deploy-script
+        depends_on: [approve]
+        input:
+          version: "{{ input.version }}"
+          environment: "{{ input.environment }}"
+```
+
+### Approve or reject via API
+
+After a step enters `suspended` state, approvers use the API to make a decision:
+
+**Approve:**
+```bash
+curl -X POST "http://localhost:8080/api/jobs/{job_id}/steps/{step_name}/approve" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approved": true}'
+```
+
+**Reject:**
+```bash
+curl -X POST "http://localhost:8080/api/jobs/{job_id}/steps/{step_name}/approve" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approved": false, "rejection_reason": "Version mismatch — need to use 2.0 instead"}'
+```
+
+The `rejection_reason` is optional but recommended for audit trails. When rejected, the step fails and the job stops unless the step has `continue_on_failure: true`.
+
+### Timeout behavior
+
+Suspended steps are subject to a timeout. If not approved or rejected within the timeout period, the recovery sweep automatically fails the step:
+
+```yaml
+actions:
+  deploy-approval:
+    type: approval
+    message: "Approve deployment?"
+    timeout: 24h  # Max 24 hours — default is no timeout
+```
+
+Timed-out steps fail with a message like `"Approval step timed out after 24h"`. The job stops unless the step has `continue_on_failure: true`.
+
+### Using on_suspended hooks
+
+When a step enters `suspended` state, `on_suspended` hooks fire to notify approvers. See [Hooks](/guides/hooks/#on_suspended) for full documentation and examples.

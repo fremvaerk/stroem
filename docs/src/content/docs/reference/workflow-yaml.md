@@ -586,6 +586,39 @@ triggers:
     timeout_secs: 120
 ```
 
+### Event Source (`type: event_source`)
+
+Long-running queue consumer processes that create jobs via `OUTPUT: ` prefix protocol.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | **required** | `event_source` |
+| `task` | string | **required** | Consumer task that runs continuously |
+| `target_task` | string | **required** | Task to create jobs for from emitted events |
+| `env` | map | `{}` | Tera-templated environment variables for consumer execution |
+| `input` | map | `{}` | Default input merged into each emitted job |
+| `restart_policy` | string | `always` | `always`, `on_failure`, or `never` |
+| `backoff_secs` | integer | `5` | Initial restart delay with exponential backoff |
+| `max_in_flight` | integer | — | Max concurrent pending/running target jobs (optional, unlimited if omitted) |
+| `enabled` | bool | `true` | Whether the consumer is active |
+
+```yaml
+triggers:
+  sqs-events:
+    type: event_source
+    task: sqs-consumer
+    target_task: process-order
+    env:
+      QUEUE_URL: "{{ secret.sqs_url }}"
+    input:
+      priority: high
+    restart_policy: always
+    backoff_secs: 5
+    max_in_flight: 10
+```
+
+The consumer task runs as a normal job. Any step's `OUTPUT: ` lines (followed by valid JSON) create jobs for `target_task`. The `input` defaults are merged with the emitted JSON (emitted data wins on conflict).
+
 ---
 
 ## Connection Types

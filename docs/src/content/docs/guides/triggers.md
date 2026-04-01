@@ -244,3 +244,21 @@ See [Webhook API](/reference/webhook-api/) for the full endpoint reference.
 ### Webhook name uniqueness
 
 Webhook names should be unique across all workspaces. If the same name appears in multiple workspaces, the first match wins at dispatch time.
+
+## Event source triggers
+
+For long-running queue consumers that create jobs from external events, see the dedicated [Event Sources](/stroem/guides/event-sources/) guide.
+
+Event sources reference a consumer task and a target task:
+
+```yaml
+triggers:
+  sqs-events:
+    type: event_source
+    task: sqs-consumer         # consumer task (runs continuously)
+    target_task: process-order # where OUTPUT: lines create jobs
+    restart_policy: always
+    max_in_flight: 10
+```
+
+The consumer task runs as a regular job. Each `OUTPUT: ` line emitted by the consumer is parsed as JSON and creates a new job for the target task. This pattern is ideal for queue-driven architectures where you need continuous consumption with backpressure support.

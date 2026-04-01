@@ -56,6 +56,111 @@ Each entry in `hook.failed_steps` contains:
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether the step had `continue_on_failure` set |
 
+## on_suspended hooks
+
+Tasks can define `on_suspended` hooks that fire when any step in the task enters `suspended` state, typically from an approval gate. Use this to notify approvers or escalate when human action is required.
+
+### Syntax
+
+```yaml
+tasks:
+  deploy-production:
+    on_suspended:
+      - action: notify-approvers
+        input:
+          channel: "#deploy-approvals"
+          message: "{{ hook.task_name }} in {{ hook.workspace }} is awaiting approval"
+    flow:
+      approve:
+        type: approval
+        message: "Approve production deployment?"
+      deploy:
+        action: deploy-script
+        depends_on: [approve]
+```
+
+### Available variables
+
+`on_suspended` hooks use the same template context as `on_success` and `on_error`:
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `hook.workspace` | string | Workspace name |
+| `hook.task_name` | string | Task containing the suspended step |
+| `hook.job_id` | string | UUID of the job |
+| `hook.status` | string | Always `"suspended"` |
+| `hook.source_type` | string | Original job source (`"api"`, `"trigger"`, etc.) |
+| `hook.source_id` | string/null | Original job source ID |
+| `hook.started_at` | string/null | ISO 8601 timestamp |
+
+### Practical examples
+
+**Slack notification with actionable message:**
+
+```yaml
+actions:
+  notify-slack-approval:
+    type: script
+    script: |
+      curl -X POST "$WEBHOOK_URL" \
+        -H 'Content-Type: application/json' \
+        -d '{
+          "text": "{{ input.message }}",
+          "blocks": [
+            {
+              "type": "section",
+              "text": {"type": "mrkdwn", "text": "{{ input.message }}"}
+            },
+            {
+              "type": "context",
+              "elements": [{"type": "mrkdwn", "text": "Job ID: {{ input.job_id }}"}]
+            }
+          ]
+        }'
+    input:
+      message: { type: string }
+      job_id: { type: string }
+
+tasks:
+  deploy:
+    on_suspended:
+      - action: notify-slack-approval
+        input:
+          message: |
+            *Approval needed for {{ hook.task_name }}*
+            Workspace: {{ hook.workspace }}
+            Job: {{ hook.job_id }}
+          job_id: "{{ hook.job_id }}"
+    flow:
+      approve:
+        type: approval
+        message: "Deploy {{ input.service }} to production?"
+      deploy:
+        action: deploy-app
+        depends_on: [approve]
+```
+
+**PagerDuty escalation:**
+
+```yaml
+tasks:
+  critical-maintenance:
+    on_suspended:
+      - action: create-pagerduty-incident
+        input:
+          title: "{{ hook.task_name }} awaiting approval in {{ hook.workspace }}"
+          service_id: "{{ secret.pagerduty_service_id }}"
+          job_id: "{{ hook.job_id }}"
+    flow:
+      approve:
+        type: approval
+        message: "Proceed with critical maintenance?"
+        timeout: 1h
+      execute:
+        action: maintenance-script
+        depends_on: [approve]
+```
+
 ## Behavior
 
 - **Fire-and-forget**: Hook job creation is best-effort. Failures are logged but never affect the original job.
