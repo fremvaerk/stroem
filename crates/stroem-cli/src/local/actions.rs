@@ -94,6 +94,7 @@ mod tests {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         }
     }
 

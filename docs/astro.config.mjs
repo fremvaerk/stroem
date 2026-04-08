@@ -37,6 +37,7 @@ export default defineConfig({
             { label: "Templating", slug: "guides/templating" },
             { label: "Conditional Flow Steps", slug: "guides/conditionals" },
             { label: "Loops", slug: "guides/loops" },
+            { label: "Retry Mechanisms", slug: "guides/retry" },
             { label: "Input & Output", slug: "guides/input-and-output" },
             { label: "Triggers", slug: "guides/triggers" },
             { label: "Hooks", slug: "guides/hooks" },

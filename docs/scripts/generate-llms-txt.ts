@@ -88,6 +88,7 @@ const sections: { file: string; title: string }[] = [
   { file: "guides/templating.md", title: "Templating" },
   { file: "guides/conditionals.md", title: "Conditional Flow Steps" },
   { file: "guides/loops.md", title: "For-Each Loops" },
+  { file: "guides/retry.md", title: "Retry Mechanisms" },
   { file: "guides/triggers.md", title: "Triggers" },
   { file: "guides/event-sources.md", title: "Event Source Triggers" },
   { file: "guides/hooks.md", title: "Hooks" },

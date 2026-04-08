@@ -111,6 +111,7 @@ mod tests {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         }
     }

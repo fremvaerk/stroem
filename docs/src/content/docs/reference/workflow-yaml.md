@@ -55,6 +55,7 @@ Actions are the smallest execution unit. Each action defines what runs on a work
 | `tags` | list | `[]` | Worker routing tags for step claiming |
 | `workdir` | string | — | Working directory override |
 | `resources` | object | — | CPU/memory requests (see [Resources](#resources)) |
+| `retry` | object | — | Default retry config. Step-level `retry` overrides action-level (see [Retry](#retry)) |
 
 ### `type: script`
 
@@ -361,6 +362,7 @@ Tasks compose actions into a DAG of steps.
 | `input` | map | `{}` | Input parameter schema (see [Input fields](#input-fields)) |
 | `flow` | map | **required** | Steps — map of step name to [flow step](#flow-steps) |
 | `timeout` | duration | — | Job-level timeout. Max `7d` (604800s). Cancels entire job when exceeded |
+| `retry` | object | — | Retry entire task on failure, creating a new job (see [Retry](#retry)) |
 | `on_success` | list | `[]` | [Hooks](#hooks) to run when the job succeeds |
 | `on_error` | list | `[]` | [Hooks](#hooks) to run when the job fails |
 
@@ -405,6 +407,7 @@ Each entry in a task's `flow` map defines a step. Steps can reference a named ac
 | `when` | string | — | Tera condition. Falsy values: empty string, `"false"`, `"0"`, `"null"`, `"none"` (case-insensitive) |
 | `for_each` | string or list | — | Tera expression or literal JSON array. Creates one instance per item |
 | `sequential` | bool | `false` | Run `for_each` instances one at a time instead of in parallel |
+| `retry` | object | — | Retry configuration for this step (see [Retry](#retry)) |
 
 ### Inline actions
 
@@ -481,6 +484,274 @@ flow:
 ```
 
 Enforced both server-side (recovery sweeper) and worker-side (process cancellation).
+
+---
+
+## Retry
+
+Strøm supports two layers of retry: **step-level retry** (retries the step in-place with backoff) and **task-level retry** (retries the entire task by creating a new job).
+
+### Retry configuration fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_attempts` | integer | `3` | Maximum number of attempts (including first attempt). Range: 1–10 |
+| `delay` | duration | `"30s"` | Delay before first retry. Max `1h` (3600s). Accepts `30s`, `5m`, `1h`, or integer seconds |
+| `backoff` | string | `"fixed"` | Strategy: `"fixed"` (constant delay) or `"exponential"` (delay doubles each attempt, capped at 64x) |
+| `jitter` | bool | `false` | Add 0–25% random jitter to delay (reduces thundering herd on mass retries) |
+
+### Step-level retry
+
+Retries a single step in-place. When a step fails, the server waits for the configured delay, then resets the step and allows a worker to claim and re-execute it.
+
+```yaml
+actions:
+  fetch-data:
+    type: script
+    script: |
+      curl https://api.example.com/data || exit 1
+      echo 'OUTPUT: {"result": "ok"}'
+
+tasks:
+  main:
+    flow:
+      get-data:
+        action: fetch-data
+        retry:
+          max_attempts: 3
+          delay: "10s"
+          backoff: exponential
+```
+
+**How it works:**
+- Attempt 1 fails
+- Wait 10s, then retry (Attempt 2)
+- If Attempt 2 fails, wait 20s, then retry (Attempt 3)
+- If Attempt 3 fails, the step fails and downstream steps are skipped (unless `continue_on_failure: true`)
+- All data from previous attempts is discarded; output is only captured from the final attempt
+
+**Step-level vs. action-level:** If both action and step define retry, the step's configuration takes precedence:
+
+```yaml
+actions:
+  api-call:
+    type: script
+    script: "curl https://api.example.com"
+    retry:
+      max_attempts: 2     # Action default
+      delay: "5s"
+
+tasks:
+  main:
+    flow:
+      call:
+        action: api-call
+        retry:
+          max_attempts: 4 # Step overrides action's max_attempts
+          delay: "10s"
+```
+
+### Action-level retry defaults
+
+Actions can define default retry behavior that applies to all steps using that action, unless the step overrides it:
+
+```yaml
+actions:
+  unstable-task:
+    type: script
+    script: "some-flaky-operation"
+    retry:
+      max_attempts: 3
+      delay: "30s"
+      backoff: exponential
+
+tasks:
+  main:
+    flow:
+      step1:
+        action: unstable-task
+        # Uses action's retry config: 3 max_attempts, 30s delay, exponential backoff
+
+      step2:
+        action: unstable-task
+        retry:
+          max_attempts: 5 # Overrides action default
+```
+
+### Task-level retry
+
+Retries the entire task by creating a new job when the original job fails. This is useful when you want to retry all steps from the beginning on failure.
+
+```yaml
+tasks:
+  deploy:
+    retry:
+      max_attempts: 2
+      delay: "60s"
+    flow:
+      build:
+        action: build-app
+      test:
+        action: run-tests
+      deploy:
+        action: deploy-app
+```
+
+**How it works:**
+- Original job fails at `deploy` step
+- Server waits 60s, then creates a **new job** with the same task and input
+- New job starts from `build` step
+- If the new job also fails, no further retries (max_attempts: 2 exhausted)
+- On final failure, `on_error` hooks fire only once (not after each retry attempt)
+
+**Retry chain:** Each retry job links to the previous via `retry_of_job_id` for audit trail:
+
+```
+Job 1 (failed)
+  └─ Job 2 (failed) [retry of Job 1]
+      └─ Job 3 (success) [retry of Job 2]
+```
+
+**Task retry vs. step retry:**
+- **Step retry**: Faster, smaller scope, good for transient failures (network timeouts, temporary service degradation)
+- **Task retry**: Slower, full job restart, good for cascading failures (dependency issues, state cleanup needed)
+
+### Backoff strategies
+
+#### Fixed backoff
+
+Constant delay between retries. Simple and predictable.
+
+```yaml
+retry:
+  delay: "30s"
+  backoff: fixed      # or omit (default)
+```
+
+Delays: 30s, 30s, 30s, ...
+
+#### Exponential backoff
+
+Delay doubles with each attempt (up to a maximum of 64x the initial delay).
+
+```yaml
+retry:
+  delay: "10s"
+  backoff: exponential
+  jitter: true        # Recommended for high concurrency
+```
+
+Delays without jitter: 10s, 20s, 40s, 80s (capped at 640s), 640s, ...
+
+With jitter, each delay gets ±0–25% random variance:
+- 10s → 7.5s–12.5s
+- 20s → 15s–25s
+- 40s → 30s–50s
+
+Jitter reduces synchronized retries across many workers (thundering herd problem).
+
+### Limits and constraints
+
+| Constraint | Limit | Example |
+|-----------|-------|---------|
+| `max_attempts` | 1–10 | `max_attempts: 5` (5 total attempts) |
+| `delay` | 0–3600s (1h) | `delay: "30s"` or `delay: "1h"` |
+| Exponential cap | 64x initial delay | With `delay: 10s`, max is 640s |
+| Step timeout vs. retry | Step timeout applies per attempt | Step with `timeout: 5m` and retry will try up to 5m per attempt |
+
+### Interactions
+
+#### Retry with `continue_on_failure`
+
+Step retry exhausts first, then `continue_on_failure` takes effect:
+
+```yaml
+flow:
+  unstable:
+    action: flaky-operation
+    retry:
+      max_attempts: 3
+    continue_on_failure: true
+
+  next:
+    action: next-step
+    depends_on: [unstable]
+    # Runs even if all 3 retry attempts fail
+```
+
+#### Retry with `for_each` (loop instances)
+
+Loop instances inherit the step's retry config:
+
+```yaml
+flow:
+  process:
+    action: process-item
+    for_each: [a, b, c]
+    retry:
+      max_attempts: 2
+    # Each instance (process[0], process[1], process[2]) gets max 2 attempts
+```
+
+#### Retry with `when` (conditional steps)
+
+Retry applies only if the step actually runs:
+
+```yaml
+flow:
+  deploy:
+    action: deploy-app
+    when: "{{ input.env == 'prod' }}"
+    retry:
+      max_attempts: 3
+    # Retries only if condition is true; skipped if condition is false
+```
+
+#### Retry with timeouts
+
+Step timeout applies per attempt. Task timeout applies to the entire retry chain:
+
+```yaml
+tasks:
+  main:
+    timeout: 10m    # Total time across all retry attempts
+    flow:
+      fetch:
+        action: fetch-data
+        timeout: 2m  # 2m per attempt
+        retry:
+          max_attempts: 3
+          delay: "30s"
+```
+
+If attempts are 2m, 2m, 2m (6m) plus delays (30s, 30s = 1m), total is 7m — well under the 10m task timeout.
+
+#### Retry with hooks
+
+Hooks fire after all retry attempts are exhausted:
+
+```yaml
+tasks:
+  main:
+    flow:
+      unstable:
+        action: flaky-operation
+        retry:
+          max_attempts: 3
+    on_error:
+      - action: notify-ops
+        # Fires only after all 3 attempts fail, not after each attempt
+```
+
+### Viewing retry history
+
+Retried steps are visible in the job detail UI with:
+- Retry badge showing attempt number (e.g., "Attempt 2 of 3")
+- Timestamp of each attempt
+- Previous attempt's output (if available)
+- Backoff delay until next retry
+
+Task-level retries create new jobs that appear in the job list, linked by `retry_of_job_id`.
 
 ---
 

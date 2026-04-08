@@ -223,6 +223,23 @@ fn validate_workflow_config_inner(
                     );
                 }
             }
+
+            // Validate step retry config
+            if let Some(ref retry) = step.retry {
+                validate_retry_config(
+                    retry,
+                    &format!("Task '{}' step '{}'", task_name, step_name),
+                )?;
+                // Warn if the referenced action type doesn't benefit from retry
+                if let Some(action_def) = config.actions.get(&step.action) {
+                    if matches!(action_def.action_type.as_str(), "approval" | "task") {
+                        warnings.push(format!(
+                            "Task '{}' step '{}' has retry on action type '{}' — retry is not meaningful for this type",
+                            task_name, step_name, action_def.action_type
+                        ));
+                    }
+                }
+            }
         }
 
         // Validate task/job timeout (max 7d = 604800s)
@@ -234,6 +251,11 @@ fn validate_workflow_config_inner(
                     timeout.as_secs()
                 );
             }
+        }
+
+        // Validate task retry config
+        if let Some(ref retry) = task.retry {
+            validate_retry_config(retry, &format!("Task '{}'", task_name))?;
         }
 
         // Validate DAG (no cycles)
@@ -1704,6 +1726,28 @@ pub fn derive_runner(action: &ActionDef) -> String {
     }
 }
 
+/// Validate a retry configuration.
+fn validate_retry_config(
+    retry: &crate::models::workflow::RetryConfig,
+    context: &str,
+) -> Result<()> {
+    if retry.max_attempts == 0 || retry.max_attempts > 10 {
+        bail!(
+            "{} retry max_attempts {} out of range (1..=10)",
+            context,
+            retry.max_attempts
+        );
+    }
+    if retry.delay.as_secs() > 3600 {
+        bail!(
+            "{} retry delay {}s exceeds maximum of 3600s (1h)",
+            context,
+            retry.delay.as_secs()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2077,6 +2121,7 @@ triggers:
                 input: HashMap::new(),
                 flow: HashMap::new(),
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
@@ -2115,6 +2160,7 @@ triggers:
                 input: HashMap::new(),
                 flow: HashMap::new(),
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
@@ -2149,6 +2195,7 @@ triggers:
                 input: HashMap::new(),
                 flow: HashMap::new(),
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
@@ -2183,6 +2230,7 @@ triggers:
                 input: HashMap::new(),
                 flow: HashMap::new(),
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
@@ -2217,6 +2265,7 @@ triggers:
                 input: HashMap::new(),
                 flow: HashMap::new(),
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
@@ -2253,6 +2302,7 @@ triggers:
                 input: HashMap::new(),
                 flow: HashMap::new(),
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],

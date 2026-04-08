@@ -88,6 +88,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -127,6 +128,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -170,6 +172,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -190,6 +193,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -218,6 +222,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: task_input,
             flow: hello_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -242,6 +247,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -260,6 +266,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -288,6 +295,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: gs_task_input,
             flow: gs_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -310,6 +318,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -326,6 +335,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -342,6 +352,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -355,6 +366,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: l3_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -377,6 +389,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -393,6 +406,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -409,6 +423,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -425,6 +440,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -438,6 +454,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: d_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -460,6 +477,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -473,6 +491,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: dbt_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -497,6 +516,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -517,6 +537,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -545,6 +566,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: mi_task_input,
             flow: mi_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -567,6 +589,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -583,6 +606,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -599,6 +623,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -619,6 +644,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -632,6 +658,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: wfi_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -702,6 +729,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -722,6 +750,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -750,6 +779,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: bt_task_input,
             flow: bt_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -823,6 +853,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -880,6 +911,7 @@ fn test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -900,6 +932,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -918,6 +951,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -946,6 +980,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: dp_task_input,
             flow: dp_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -968,6 +1003,7 @@ fn test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -981,6 +1017,7 @@ fn test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: ds_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -1275,6 +1312,10 @@ async fn test_worker_register_and_claim() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1860,6 +1901,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -1872,6 +1914,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
 
         on_success: vec![],
         on_error: vec![],
@@ -1908,6 +1951,10 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1940,6 +1987,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -1956,6 +2004,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -1972,6 +2021,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -1984,6 +2034,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
 
         on_success: vec![],
         on_error: vec![],
@@ -2021,6 +2072,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2040,6 +2095,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2059,6 +2118,10 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2252,6 +2315,7 @@ async fn test_task_detail_connections() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -2327,6 +2391,7 @@ async fn test_task_detail_connections() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -2340,6 +2405,7 @@ async fn test_task_detail_connections() -> Result<()> {
             input: conn_task_input,
             flow: conn_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -2377,6 +2443,7 @@ async fn test_task_detail_connections() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -2390,6 +2457,7 @@ async fn test_task_detail_connections() -> Result<()> {
             input: prim_task_input,
             flow: prim_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -3674,6 +3742,10 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -3765,6 +3837,10 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -3847,6 +3923,10 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -3936,6 +4016,10 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -4019,6 +4103,10 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -4199,6 +4287,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -4238,6 +4327,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -4258,6 +4348,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -4272,6 +4363,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
             input: HashMap::new(),
             flow: task_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![HookDef {
@@ -4426,6 +4518,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -4444,6 +4537,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -4457,6 +4551,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             input: HashMap::new(),
             flow: child_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -4500,6 +4595,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -4518,6 +4614,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -4531,6 +4628,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             input: HashMap::new(),
             flow: parent_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -5290,6 +5388,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5306,6 +5405,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5318,6 +5418,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
 
         on_success: vec![],
         on_error: vec![],
@@ -5355,6 +5456,10 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -5374,6 +5479,10 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5415,6 +5524,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5431,6 +5541,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5443,6 +5554,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
 
         on_success: vec![],
         on_error: vec![],
@@ -5480,6 +5592,10 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -5499,6 +5615,10 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5541,6 +5661,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5557,6 +5678,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5573,6 +5695,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -5585,6 +5708,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
 
         on_success: vec![],
         on_error: vec![],
@@ -5622,6 +5746,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -5641,6 +5769,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -5660,6 +5792,10 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5798,6 +5934,10 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -5878,6 +6018,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -5894,6 +6035,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -5905,6 +6047,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -5943,6 +6086,10 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -5962,6 +6109,10 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6026,6 +6177,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6042,6 +6194,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6053,6 +6206,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -6091,6 +6245,10 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -6110,6 +6268,10 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6153,6 +6315,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6169,6 +6332,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6180,6 +6344,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -6218,6 +6383,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -6237,6 +6406,10 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6287,6 +6460,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6303,6 +6477,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6314,6 +6489,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -6352,6 +6528,10 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -6371,6 +6551,10 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6420,6 +6604,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6436,6 +6621,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6447,6 +6633,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -6485,6 +6672,10 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -6504,6 +6695,10 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6547,6 +6742,7 @@ async fn test_cascading_skip() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6563,6 +6759,7 @@ async fn test_cascading_skip() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6579,6 +6776,7 @@ async fn test_cascading_skip() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -6590,6 +6788,7 @@ async fn test_cascading_skip() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -6628,6 +6827,10 @@ async fn test_cascading_skip() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -6647,6 +6850,10 @@ async fn test_cascading_skip() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -6666,6 +6873,10 @@ async fn test_cascading_skip() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6730,6 +6941,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -6747,6 +6959,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -6760,6 +6973,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -7082,6 +7296,10 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -7915,6 +8133,10 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -7952,6 +8174,10 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -8252,6 +8478,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -8265,6 +8492,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -8722,6 +8950,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -8761,6 +8990,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -8815,6 +9045,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -8879,6 +9110,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -8897,6 +9129,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![HookDef {
                 action: "notify".to_string(),
@@ -8995,6 +9228,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9013,6 +9247,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![HookDef {
@@ -9094,6 +9329,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9107,6 +9343,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![HookDef {
                 action: "notify".to_string(),
@@ -9173,6 +9410,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9191,6 +9429,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![HookDef {
                 action: "notify".to_string(),
@@ -9269,6 +9508,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9285,6 +9525,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9300,6 +9541,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![HookDef {
@@ -9406,6 +9648,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9422,6 +9665,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9439,6 +9683,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![HookDef {
                 action: "notify".to_string(),
@@ -9539,6 +9784,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9555,6 +9801,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![HookDef {
@@ -9658,6 +9905,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9673,6 +9921,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![HookDef {
@@ -9771,6 +10020,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -9783,6 +10033,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         input: HashMap::new(),
         flow: hook_flow,
         timeout: None,
+        retry: None,
 
         on_success: vec![],
         on_error: vec![],
@@ -9862,6 +10113,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -9901,6 +10153,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -9919,6 +10172,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9932,6 +10186,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: cleanup_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -9954,6 +10209,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9970,6 +10226,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -9983,6 +10240,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: deploy_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -10020,6 +10278,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -10033,6 +10292,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -10247,6 +10507,10 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     };
     JobStepRepo::create_steps(&pool, &[step]).await?;
 
@@ -10306,6 +10570,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -10326,6 +10591,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -10354,6 +10620,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             input: task_input,
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -10413,6 +10680,7 @@ async fn test_task_action_in_hook() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -10426,6 +10694,7 @@ async fn test_task_action_in_hook() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![HookDef {
@@ -10545,6 +10814,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -10558,6 +10828,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             input: HashMap::new(),
             flow: fail_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -10601,6 +10872,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -10619,6 +10891,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -10632,6 +10905,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             input: HashMap::new(),
             flow: parent_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -11454,6 +11728,10 @@ async fn test_get_worker_with_steps() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
     JobStepRepo::mark_running(&pool, job_id, "say-hello", worker_id).await?;
@@ -12828,6 +13106,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -12878,6 +13157,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -12892,6 +13172,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             input: task_input,
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -13014,6 +13295,7 @@ async fn setup_sync_webhook() -> Result<(
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -13031,6 +13313,7 @@ async fn setup_sync_webhook() -> Result<(
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -13044,6 +13327,7 @@ async fn setup_sync_webhook() -> Result<(
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -13549,6 +13833,7 @@ async fn setup_scheduler_workspace(
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -13566,6 +13851,7 @@ async fn setup_scheduler_workspace(
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -13579,6 +13865,7 @@ async fn setup_scheduler_workspace(
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -13656,7 +13943,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -13806,7 +14093,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs FROM job WHERE source_type = $1 LIMIT 1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries FROM job WHERE source_type = $1 LIMIT 1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -13981,6 +14268,10 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -14017,6 +14308,10 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -14834,6 +15129,7 @@ fn when_test_workspace_with_flow(
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
     workspace.tasks.insert(
@@ -14846,6 +15142,7 @@ fn when_test_workspace_with_flow(
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -14876,6 +15173,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
             when: Some("false".to_string()),
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -14892,6 +15190,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -14952,6 +15251,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
             when: Some("true".to_string()),
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -15024,6 +15324,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -15062,6 +15363,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -15079,6 +15381,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -15092,6 +15395,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             input: HashMap::new(),
             flow: child_flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -15112,6 +15416,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             when: Some("false".to_string()),
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -15125,6 +15430,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             input: HashMap::new(),
             flow: parent_flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -15194,6 +15500,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -15210,6 +15517,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
             when: Some("{{ input.should_deploy }}".to_string()),
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -15791,7 +16099,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -16017,6 +16325,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -16030,6 +16339,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
             on_success: vec![HookDef {
                 action: "notify".to_string(),
                 input: HashMap::new(),
@@ -16128,6 +16438,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -16141,6 +16452,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -16349,6 +16661,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -16390,6 +16703,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             message: Some(
                 "Please approve the deployment. Greet output: {{ greet.output }}".to_string(),
             ),
+            retry: None,
         },
     );
 
@@ -16408,6 +16722,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -16424,6 +16739,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -16440,6 +16756,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -16454,6 +16771,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -16504,6 +16822,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: Some("Gate approval required before continuing.".to_string()),
+            retry: None,
         },
     );
 
@@ -16521,6 +16840,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -16535,6 +16855,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -17298,6 +17619,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -17316,6 +17638,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -17329,6 +17652,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -17350,6 +17674,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -17363,6 +17688,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: consumer_flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -18256,6 +18582,1389 @@ async fn test_reconcile_does_not_restart_with_never_policy() -> Result<()> {
         count.0, 1,
         "Never restart policy must not create a new job after failure"
     );
+
+    Ok(())
+}
+
+// ─── Step-level retry integration tests ───────────────────────────────────
+
+/// Build a minimal `WorkspaceConfig` with a single "flaky" action (type: script)
+/// and a "retry-task" whose sole step carries the given `RetryConfig`.
+fn retry_workspace(retry: stroem_common::models::workflow::RetryConfig) -> WorkspaceConfig {
+    use stroem_common::models::workflow::{ActionDef, FlowStep, TaskDef};
+
+    let mut workspace = WorkspaceConfig::default();
+
+    workspace.actions.insert(
+        "flaky".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("exit 1".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "flaky".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: Some(retry),
+            inline_action: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "retry-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    workspace
+}
+
+/// Test 1: failing a step with retries remaining resets it to "ready"
+/// and increments retry_attempt; the job is not yet failed.
+#[tokio::test]
+async fn test_step_retry_resets_failed_step() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 2,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Register worker and claim the step
+    let worker_id = register_test_worker(&pool).await;
+
+    let claim_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim_resp.status(), StatusCode::OK);
+    let claim_body = body_json(claim_resp).await;
+    assert_eq!(claim_body["job_id"].as_str().unwrap(), job_id.to_string());
+
+    // Fail the step
+    let complete_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "flaky error"}),
+        ))
+        .await?;
+    assert_eq!(complete_resp.status(), StatusCode::OK);
+
+    // After orchestration: step should be reset to "ready" (not failed) for retry
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "step should be reset to ready for retry"
+    );
+    assert_eq!(step.retry_attempt, 1, "retry_attempt should be incremented");
+
+    // retry_history should have one entry recording the first failure
+    let history = step.retry_history.as_array().unwrap();
+    assert_eq!(history.len(), 1, "retry_history should have 1 entry");
+    assert_eq!(
+        history[0]["error"].as_str().unwrap(),
+        "flaky error",
+        "retry_history should contain the error message"
+    );
+
+    // Job must NOT be failed yet
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_ne!(
+        job.status, "failed",
+        "job should not be failed while retries remain"
+    );
+
+    Ok(())
+}
+
+/// Test 2: exhausting all retries causes the step and the job to be marked failed.
+#[tokio::test]
+async fn test_step_retry_exhausted_fails_job() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 1, // only 1 retry allowed
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // ── First failure: step should reset to ready ──────────────────────
+    let claim_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim_resp.status(), StatusCode::OK);
+
+    let complete_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "first failure"}),
+        ))
+        .await?;
+    assert_eq!(complete_resp.status(), StatusCode::OK);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "step should retry after first failure"
+    );
+    assert_eq!(step.retry_attempt, 1);
+
+    // retry_at is in the past (delay=0), so we can claim immediately.
+    // ── Second failure: retries exhausted ─────────────────────────────
+    let claim_resp2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim_resp2.status(), StatusCode::OK);
+
+    let complete_resp2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "second failure"}),
+        ))
+        .await?;
+    assert_eq!(complete_resp2.status(), StatusCode::OK);
+
+    // Step must now be permanently failed
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(
+        step.status, "failed",
+        "step should be failed after exhausting retries"
+    );
+
+    // retry_history should have exactly 1 entry (from attempt 0→1; attempt 1 is the final)
+    let history = step.retry_history.as_array().unwrap();
+    assert_eq!(
+        history.len(),
+        1,
+        "retry_history has 1 entry (only the reset attempt is recorded)"
+    );
+
+    // Job must be failed now
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "job should be failed when retries exhausted"
+    );
+
+    Ok(())
+}
+
+/// Test 3: a step with a future retry_at is not claimable; once retry_at is in the past
+/// the step becomes claimable again.
+#[tokio::test]
+async fn test_step_retry_claim_respects_retry_at() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    // Use a 5-second delay so retry_at is guaranteed to be in the future initially.
+    let retry_cfg = RetryConfig {
+        max_attempts: 2,
+        delay: HumanDuration(5),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // Claim and fail the step to trigger the retry with a future retry_at.
+    let _claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+
+    let _complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "transient error"}),
+        ))
+        .await?;
+
+    // Step is now ready but retry_at is ~5s in the future.
+    // Attempting to claim should yield nothing.
+    let claim_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim_resp.status(), StatusCode::OK);
+    let claim_body = body_json(claim_resp).await;
+    assert!(
+        claim_body.get("job_id").is_none() || claim_body["job_id"].is_null(),
+        "step with future retry_at must not be claimable"
+    );
+
+    // Manually push retry_at into the past so the step becomes eligible.
+    sqlx::query(
+        "UPDATE job_step SET retry_at = NOW() - INTERVAL '1 second' \
+         WHERE job_id = $1 AND step_name = 'step1'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    // Now the step should be claimable.
+    let claim_resp2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim_resp2.status(), StatusCode::OK);
+    let claim_body2 = body_json(claim_resp2).await;
+    assert_eq!(
+        claim_body2["job_id"].as_str().unwrap(),
+        job_id.to_string(),
+        "step should be claimable after retry_at passes"
+    );
+    assert_eq!(claim_body2["step_name"].as_str().unwrap(), "step1");
+
+    Ok(())
+}
+
+/// Test 4: a downstream step with `continue_on_failure: true` is only promoted
+/// after the retried upstream step reaches a terminal state.
+#[tokio::test]
+async fn test_step_retry_with_continue_on_failure() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{
+        ActionDef, BackoffStrategy, FlowStep, RetryConfig, TaskDef,
+    };
+
+    // Build a workspace: step-a (flaky, 1 retry) → step-b (continue_on_failure)
+    let mut workspace = WorkspaceConfig::default();
+
+    workspace.actions.insert(
+        "flaky".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("exit 1".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+    workspace.actions.insert(
+        "noop".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo ok".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step-a".to_string(),
+        FlowStep {
+            action: "flaky".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: Some(RetryConfig {
+                max_attempts: 1,
+                delay: HumanDuration(0),
+                backoff: BackoffStrategy::Fixed,
+                jitter: false,
+            }),
+            inline_action: None,
+        },
+    );
+    flow.insert(
+        "step-b".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["step-a".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: true,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "two-step".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "two-step",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // ── First failure of step-a: should retry ─────────────────────────
+    let _claim1 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+
+    let _complete1 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step-a/complete", job_id),
+            json!({"exit_code": 1, "error": "attempt 1 failed"}),
+        ))
+        .await?;
+
+    // step-a retrying → step-b must still be pending (upstream not terminal)
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step_b = steps.iter().find(|s| s.step_name == "step-b").unwrap();
+    assert_eq!(
+        step_b.status, "pending",
+        "step-b should remain pending while step-a is retrying"
+    );
+    let step_a = steps.iter().find(|s| s.step_name == "step-a").unwrap();
+    assert_eq!(step_a.status, "ready", "step-a should be reset for retry");
+
+    // ── Second failure of step-a: retries exhausted ───────────────────
+    let _claim2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+
+    let _complete2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step-a/complete", job_id),
+            json!({"exit_code": 1, "error": "attempt 2 failed"}),
+        ))
+        .await?;
+
+    // step-a is now permanently failed; step-b should be promoted to ready
+    // because continue_on_failure = true.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step_a = steps.iter().find(|s| s.step_name == "step-a").unwrap();
+    assert_eq!(
+        step_a.status, "failed",
+        "step-a should be failed after exhausting retries"
+    );
+    let step_b = steps.iter().find(|s| s.step_name == "step-b").unwrap();
+    assert_eq!(
+        step_b.status, "ready",
+        "step-b should be promoted to ready via continue_on_failure"
+    );
+
+    Ok(())
+}
+
+// ─── Task-level retry integration tests ───────────────────────────────────
+
+/// Build a minimal `WorkspaceConfig` for task-level retry tests.
+///
+/// Contains one "flaky" script action and a "task-retry-task" whose task definition
+/// carries a `RetryConfig`. An optional `on_error` hook action named "notify" is
+/// included so hook-firing tests can verify hook behaviour.
+fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceConfig {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{
+        ActionDef, BackoffStrategy, FlowStep, RetryConfig, TaskDef,
+    };
+
+    let mut workspace = WorkspaceConfig::default();
+
+    // Shared "flaky" action — always fails in tests; workers complete it manually.
+    workspace.actions.insert(
+        "flaky".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("exit 1".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    // "notify" action used as an on_error hook target.
+    if with_error_hook {
+        workspace.actions.insert(
+            "notify".to_string(),
+            ActionDef {
+                action_type: "script".to_string(),
+                name: None,
+                description: None,
+                task: None,
+                cmd: None,
+                script: Some("echo notified".to_string()),
+                source: None,
+                runner: None,
+                language: None,
+                dependencies: vec![],
+                interpreter: None,
+                args: vec![],
+                tags: vec![],
+                image: None,
+                command: None,
+                entrypoint: None,
+                env: None,
+                workdir: None,
+                resources: None,
+                input: HashMap::new(),
+                output: None,
+                manifest: None,
+                provider: None,
+                model: None,
+                system_prompt: None,
+                prompt: None,
+                temperature: None,
+                max_tokens: None,
+                tools: vec![],
+                max_turns: None,
+                interactive: false,
+                message: None,
+                retry: None,
+            },
+        );
+    }
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "flaky".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            // No step-level retry — only task-level retry matters here.
+            retry: None,
+            inline_action: None,
+        },
+    );
+
+    let on_error = if with_error_hook {
+        vec![HookDef {
+            action: "notify".to_string(),
+            input: HashMap::new(),
+        }]
+    } else {
+        vec![]
+    };
+
+    workspace.tasks.insert(
+        "task-retry-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: Some(RetryConfig {
+                max_attempts,
+                delay: HumanDuration(0),
+                backoff: BackoffStrategy::Fixed,
+                jitter: false,
+            }),
+            on_success: vec![],
+            on_error,
+            on_suspended: vec![],
+        },
+    );
+
+    workspace
+}
+
+/// Test 1 (task-level): failing a step with task retry remaining creates a new
+/// retry job linked back to the original, which is then marked "failed".
+/// The retry job gets `source_type = "retry"`, `retry_attempt = 1`, and its
+/// step starts in "ready" state.
+#[tokio::test]
+async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
+    let workspace = task_retry_workspace(1, false);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    // Create the original job.
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "task-retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Task-level retry requires max_retries to be set on the job row.
+    // create_job_for_task sets max_retries on steps but not on the job itself;
+    // the orchestrator reads job.max_retries to decide whether to create a retry job.
+    sqlx::query("UPDATE job SET max_retries = 1 WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+    let _worker_id = register_test_worker(&pool).await;
+
+    // Fail the step via the HTTP API — this triggers orchestrate_after_step which
+    // calls try_retry_job when it sees a failed top-level job with retries remaining.
+    let complete_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "task-level retry trigger"}),
+        ))
+        .await?;
+    assert_eq!(complete_resp.status(), StatusCode::OK);
+
+    // Original job must be "failed".
+    let orig_job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(orig_job.status, "failed", "original job must be failed");
+
+    // Original job must have retry_job_id pointing to the retry job.
+    let retry_job_id = orig_job
+        .retry_job_id
+        .expect("original job must have retry_job_id set");
+
+    // The retry job must exist with correct metadata.
+    let retry_job = JobRepo::get(&pool, retry_job_id).await?.unwrap();
+    assert_eq!(
+        retry_job.source_type, "retry",
+        "retry job source_type must be 'retry'"
+    );
+    assert_eq!(
+        retry_job.retry_of_job_id,
+        Some(job_id),
+        "retry job must point back to the original job via retry_of_job_id"
+    );
+    assert_eq!(
+        retry_job.retry_attempt, 1,
+        "retry job must have retry_attempt = 1"
+    );
+    assert_eq!(
+        retry_job.max_retries,
+        Some(1),
+        "retry job must carry max_retries forward"
+    );
+
+    // The retry job must have at least one step in "ready" state.
+    let retry_steps = JobStepRepo::get_steps_for_job(&pool, retry_job_id).await?;
+    assert!(!retry_steps.is_empty(), "retry job must have steps created");
+    let ready_steps: Vec<_> = retry_steps.iter().filter(|s| s.status == "ready").collect();
+    assert!(
+        !ready_steps.is_empty(),
+        "retry job must have at least one step in 'ready' status"
+    );
+
+    Ok(())
+}
+
+/// Test 2 (task-level): after exhausting all task-level retries the final
+/// retry job is marked "failed" with no further retry_job_id, and the
+/// on_error hook fires on that final failure (not on intermediate attempts).
+#[tokio::test]
+async fn test_task_retry_exhausted_fires_hooks() -> Result<()> {
+    // One retry allowed, on_error hook configured.
+    let workspace = task_retry_workspace(1, true);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    // Create the original job.
+    let orig_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "task-retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Set max_retries on the original job so the orchestrator triggers a retry.
+    sqlx::query("UPDATE job SET max_retries = 1 WHERE job_id = $1")
+        .bind(orig_job_id)
+        .execute(&pool)
+        .await?;
+
+    let _worker_id = register_test_worker(&pool).await;
+
+    // ── Fail the original job's step → creates the first (and only) retry job ──
+    let resp1 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", orig_job_id),
+            json!({"exit_code": 1, "error": "attempt 1 failed"}),
+        ))
+        .await?;
+    assert_eq!(resp1.status(), StatusCode::OK);
+
+    // Locate the retry job.
+    let orig_job_after = JobRepo::get(&pool, orig_job_id).await?.unwrap();
+    assert_eq!(orig_job_after.status, "failed");
+    let retry_job_id = orig_job_after
+        .retry_job_id
+        .expect("original job must have retry_job_id after first failure");
+
+    // The retry job starts with max_retries = 1 and retry_attempt = 1.
+    // Failing its step must exhaust retries (attempt 1 >= max 1).
+    let resp2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", retry_job_id),
+            json!({"exit_code": 1, "error": "attempt 2 failed"}),
+        ))
+        .await?;
+    assert_eq!(resp2.status(), StatusCode::OK);
+
+    // The retry job must be failed with no further retry_job_id.
+    let retry_job_after = JobRepo::get(&pool, retry_job_id).await?.unwrap();
+    assert_eq!(
+        retry_job_after.status, "failed",
+        "retry job must be failed when retries are exhausted"
+    );
+    assert!(
+        retry_job_after.retry_job_id.is_none(),
+        "exhausted retry job must not have a further retry_job_id"
+    );
+
+    // A hook job must have been created for the FINAL failure (the retry job).
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = all_jobs
+        .iter()
+        .filter(|j| j.source_type == "hook")
+        .collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "exactly one hook job must fire — on the final failure"
+    );
+
+    // The hook source_id encodes the job that triggered it; it must reference
+    // the retry job (the terminal failure), not the original job.
+    let hook_source_id = hook_jobs[0].source_id.as_deref().unwrap_or("");
+    assert!(
+        hook_source_id.contains(&retry_job_id.to_string()),
+        "hook source_id must reference the final retry job ({retry_job_id}), got: {hook_source_id}"
+    );
+
+    // The original job must NOT have a hook job referencing it.
+    let orig_hook = all_jobs.iter().find(|j| {
+        j.source_type == "hook"
+            && j.source_id
+                .as_deref()
+                .unwrap_or("")
+                .contains(&orig_job_id.to_string())
+    });
+    assert!(
+        orig_hook.is_none(),
+        "no hook should fire for the original (non-final) retry attempt"
+    );
+
+    Ok(())
+}
+
+/// Test 3 (task-level): a child job created by a `type: task` step does NOT
+/// trigger a task-level retry even when the child task has `retry` configured,
+/// because the orchestrator skips retry for jobs with a parent.
+#[tokio::test]
+async fn test_task_retry_child_job_no_retry() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{
+        ActionDef, BackoffStrategy, FlowStep, RetryConfig, TaskDef,
+    };
+
+    let mut workspace = WorkspaceConfig::default();
+
+    // Child action — always fails.
+    workspace.actions.insert(
+        "child-action".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("exit 1".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    // "run-child" action — type:task referencing the child task.
+    workspace.actions.insert(
+        "run-child".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            name: None,
+            description: None,
+            task: Some("child-task".to_string()),
+            cmd: None,
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    // Child task: has task-level retry configured.
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "child-step".to_string(),
+        FlowStep {
+            action: "child-action".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "child-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: child_flow,
+            timeout: None,
+            retry: Some(RetryConfig {
+                max_attempts: 1,
+                delay: HumanDuration(0),
+                backoff: BackoffStrategy::Fixed,
+                jitter: false,
+            }),
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    // Parent task: single step that dispatches "child-task".
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "run-child-step".to_string(),
+        FlowStep {
+            action: "run-child".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "parent-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: parent_flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+        },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    // Create the parent job — handle_task_steps will immediately create the child job.
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "parent-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Set max_retries on child-task jobs in advance is not needed here —
+    // the point is that child jobs are skipped by the retry logic regardless.
+    // Find the child job by its parent linkage.
+    let all_jobs_before = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
+    let child_job = all_jobs_before
+        .iter()
+        .find(|j| j.parent_job_id == Some(parent_job_id))
+        .expect("child job must have been created by handle_task_steps");
+    let child_job_id = child_job.job_id;
+
+    // Give the child job max_retries so we can verify the retry guard fires.
+    sqlx::query("UPDATE job SET max_retries = 1 WHERE job_id = $1")
+        .bind(child_job_id)
+        .execute(&pool)
+        .await?;
+
+    let _worker_id = register_test_worker(&pool).await;
+
+    // Fail the child job's step — orchestrate_after_step must NOT create a retry
+    // job because child_job.parent_job_id is non-None.
+    let fail_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/child-step/complete", child_job_id),
+            json!({"exit_code": 1, "error": "child step failed"}),
+        ))
+        .await?;
+    assert_eq!(fail_resp.status(), StatusCode::OK);
+
+    // Child job must be failed.
+    let child_after = JobRepo::get(&pool, child_job_id).await?.unwrap();
+    assert_eq!(child_after.status, "failed", "child job must be failed");
+
+    // Child job must NOT have a retry_job_id (retry skipped for child jobs).
+    assert!(
+        child_after.retry_job_id.is_none(),
+        "child job must not have a retry_job_id — task retry is suppressed for child jobs"
+    );
+
+    // Total jobs: parent + child. No additional retry job should exist.
+    let all_jobs_after = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
+    let retry_jobs: Vec<_> = all_jobs_after
+        .iter()
+        .filter(|j| j.source_type == "retry")
+        .collect();
+    assert!(
+        retry_jobs.is_empty(),
+        "no retry job must be created for a failed child job"
+    );
+
+    // Parent step must have been marked failed via propagation.
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
+    let parent_step = parent_steps
+        .iter()
+        .find(|s| s.step_name == "run-child-step")
+        .unwrap();
+    assert_eq!(
+        parent_step.status, "failed",
+        "parent step must be failed after child job failure propagates"
+    );
+
+    Ok(())
+}
+
+/// Test 4 (edge case): when `max_retries` is zero on a job, no retry is created
+/// even though the retry config technically exists; the job fails immediately
+/// and the on_error hook fires right away (no intermediate "retry" phase).
+#[tokio::test]
+async fn test_retry_edge_zero_max_retries_no_retry_job() -> Result<()> {
+    // Workspace with on_error hook but max_retries = 0 on the job.
+    let workspace = task_retry_workspace(1, true);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "task-retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Set max_retries = 0 on the job — zero means "no task-level retry allowed".
+    // The check in try_retry_job is `retry_attempt (0) < max (0)` → false → no retry.
+    sqlx::query("UPDATE job SET max_retries = 0 WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+    let _worker_id = register_test_worker(&pool).await;
+
+    let fail_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "instant fail"}),
+        ))
+        .await?;
+    assert_eq!(fail_resp.status(), StatusCode::OK);
+
+    // Job must be failed immediately with no retry_job_id.
+    let job_after = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job_after.status, "failed");
+    assert!(
+        job_after.retry_job_id.is_none(),
+        "max_retries = 0 must not produce a retry job"
+    );
+
+    // No retry jobs must exist.
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, 100, 0).await?;
+    let retry_jobs: Vec<_> = all_jobs
+        .iter()
+        .filter(|j| j.source_type == "retry")
+        .collect();
+    assert!(
+        retry_jobs.is_empty(),
+        "no retry job must be created when max_retries = 0"
+    );
+
+    // The on_error hook must fire immediately since there is no retry.
+    let hook_jobs: Vec<_> = all_jobs
+        .iter()
+        .filter(|j| j.source_type == "hook")
+        .collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "on_error hook must fire immediately when max_retries = 0"
+    );
+
+    Ok(())
+}
+
+/// Test 5: a step that fails then succeeds on the retry attempt completes the job.
+#[tokio::test]
+async fn test_step_retry_success_on_second_attempt() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 2,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let worker_id = register_test_worker(&pool).await;
+
+    // ── First attempt: fail ───────────────────────────────────────────
+    let _claim1 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+
+    let _complete1 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "transient failure"}),
+        ))
+        .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(step.status, "ready", "step should be reset for retry");
+    assert_eq!(step.retry_attempt, 1);
+
+    // delay=0 so retry_at is already in the past; push it explicitly to be safe.
+    sqlx::query(
+        "UPDATE job_step SET retry_at = NOW() - INTERVAL '1 second' \
+         WHERE job_id = $1 AND step_name = 'step1'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    // ── Second attempt: succeed ───────────────────────────────────────
+    let claim2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "tags": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim2.status(), StatusCode::OK);
+    let claim2_body = body_json(claim2).await;
+    assert_eq!(
+        claim2_body["job_id"].as_str().unwrap(),
+        job_id.to_string(),
+        "step should be claimable on retry"
+    );
+
+    let complete2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"output": {"result": "ok"}}),
+        ))
+        .await?;
+    assert_eq!(complete2.status(), StatusCode::OK);
+
+    // Step should be completed with retry_attempt still reflecting the attempt index.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(
+        step.status, "completed",
+        "step should be completed after successful retry"
+    );
+    assert_eq!(
+        step.retry_attempt, 1,
+        "retry_attempt should reflect the attempt that succeeded"
+    );
+
+    // Job should be completed now.
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed", "job should be completed");
 
     Ok(())
 }

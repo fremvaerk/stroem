@@ -54,6 +54,10 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }
 }
 
@@ -527,6 +531,7 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -543,6 +548,7 @@ async fn test_skip_unreachable_steps_skips_blocked_pending() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -588,6 +594,7 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -605,6 +612,7 @@ async fn test_skip_unreachable_steps_respects_continue_on_failure() -> Result<()
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -838,6 +846,7 @@ async fn test_skip_unreachable_steps_does_not_block_on_skipped_dep() -> Result<(
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -854,6 +863,7 @@ async fn test_skip_unreachable_steps_does_not_block_on_skipped_dep() -> Result<(
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );

@@ -197,6 +197,10 @@ pub async fn list_jobs(
                 "created_at": job.created_at,
                 "started_at": job.started_at,
                 "completed_at": job.completed_at,
+                "retry_of_job_id": job.retry_of_job_id,
+                "retry_job_id": job.retry_job_id,
+                "retry_attempt": job.retry_attempt,
+                "max_retries": job.max_retries,
             })
         })
         .collect();
@@ -221,6 +225,10 @@ pub struct JobDetailResponse {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub steps: Vec<serde_json::Value>,
+    pub retry_of_job_id: Option<Uuid>,
+    pub retry_job_id: Option<Uuid>,
+    pub retry_attempt: i32,
+    pub max_retries: Option<i32>,
 }
 
 /// GET /api/jobs/:id - Get job detail with steps
@@ -272,6 +280,10 @@ pub async fn get_job(
                 "loop_index": step.loop_index,
                 "loop_total": step.loop_total,
                 "depends_on": serde_json::Value::Array(vec![]),
+                "retry_attempt": step.retry_attempt,
+                "max_retries": step.max_retries,
+                "retry_history": step.retry_history,
+                "retry_at": step.retry_at,
             });
             // For approval and agent steps, always surface approval-specific fields so
             // the UI can show the message and input schema after the step leaves the
@@ -389,6 +401,10 @@ pub async fn get_job(
         started_at: job.started_at.map(|dt| dt.to_rfc3339()),
         completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
         steps: steps_json,
+        retry_of_job_id: job.retry_of_job_id,
+        retry_job_id: job.retry_job_id,
+        retry_attempt: job.retry_attempt,
+        max_retries: job.max_retries,
     };
 
     // Redact workspace secrets and ref+ patterns from response
@@ -1091,6 +1107,10 @@ mod tests {
                 "output": {"status": "done"},
                 "error_message": "failed to connect: my-secret-token rejected"
             })],
+            retry_of_job_id: None,
+            retry_job_id: None,
+            retry_attempt: 0,
+            max_retries: None,
         };
         redact_response(&mut response, &secrets);
         assert_eq!(response.input.unwrap()["token"], json!(REDACTED));
@@ -1124,6 +1144,7 @@ mod tests {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -1140,6 +1161,7 @@ mod tests {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -1156,6 +1178,7 @@ mod tests {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );

@@ -947,3 +947,42 @@ Last updated: 2026-03-13.
 - [x] Worker `push_logs` sent wrong format → logs never stored
 - [x] Tera hyphen bug: step names with hyphens → sanitize to underscores in template context
 - [x] Relative script paths don't resolve via `current_dir`
+
+## Retry Mechanism Review (Phase 5f, 2026-04-08)
+
+### Critical (must fix)
+- [x] `agent_state` not cleared on step retry — added `agent_state = NULL, suspended_at = NULL` to `reset_for_retry` SET clause
+- [x] Task-level retry fires on child jobs — added `parent_job_id.is_none()` guard before `try_retry_job`
+- [x] Claim query index regression — updated NOT IN list to `('task', 'agent', 'approval', 'event_source')` matching GIN index predicate
+- [x] FK `retry_of_job_id` without `ON DELETE SET NULL` — changed to `ON DELETE SET NULL` in migration
+
+### Important (should fix)
+- [x] Loop instance retry vs placeholder state — moved retry intercept before `check_loop_completion` so failed instances with retries get reset before placeholder aggregation
+- [x] Deterministic jitter — replaced with `rand::random::<u64>() % jitter_max`
+- [x] `try_retry_job` not transactional — wrapped set_retry_fields + set_retry_job_id + retry_at UPDATE in `pool.begin()` / `tx.commit()` transaction
+- [x] Missing index on `retry_of_job_id` — added `CREATE INDEX idx_job_retry_of ON job(retry_of_job_id) WHERE retry_of_job_id IS NOT NULL`
+- [x] "waiting for retry" badge frozen in UI — extended polling guard with `hasRetryPending` check
+
+### Minor
+- [ ] TOCTOU between `get_step` and `reset_for_retry` — log message/delay based on stale data (DB state is correct, low practical risk). (`crates/stroem-server/src/job_recovery.rs`)
+- [x] `ready_at` set to future timestamp on retry — changed to `ready_at = NOW()` (retry_at still controls claimability)
+- [x] No unit tests for `compute_retry_delay` — added 5 tests: fixed, exponential, capped, default strategy, jitter bounds
+- [x] Retry badge accessibility — extended step row `aria-label` with attempt/retry info
+- [x] Retry history React key not scoped to parent step — changed to `retry-${attempt.attempt}`
+
+### Missing Tests
+- [x] `compute_retry_delay` unit tests: fixed delay, exponential delay, min(6) cap, jitter output
+- [x] Step retry integration test: `test_step_retry_resets_failed_step` — fail → reset → retry_attempt incremented → retry_history populated
+- [x] Retries exhausted integration test: `test_step_retry_exhausted_fails_job` — step stays failed, job fails
+- [x] Claim respects `retry_at`: `test_step_retry_claim_respects_retry_at` — step not claimable before backoff expires
+- [x] Task retry integration test: `test_task_retry_creates_new_job_on_failure` — job fails → new retry job created → linked properly
+- [x] Task retry exhausted: `test_task_retry_exhausted_fires_hooks` — `on_error` hooks fire only on final failure
+- [x] `continue_on_failure` + step retry: `test_step_retry_with_continue_on_failure` — retry first, `continue_on_failure` after exhaustion
+- [x] Step retry success on second attempt: `test_step_retry_success_on_second_attempt`
+- [x] Child job retry blocked: `test_task_retry_child_job_no_retry` — `type: task` child jobs do not trigger task-level retry
+- [x] Edge case: `test_retry_edge_zero_max_retries_no_retry_job` — max_retries=0 means no retry
+
+### Documentation
+- [x] Update `docs/src/content/docs/reference/workflow-yaml.md` with retry fields for step, action, and task
+- [x] Add retry guide/section to `docs/src/content/docs/guides/retry.md`
+- [x] Regenerate `docs/public/llms.txt` (via generate-llms-txt.ts update + docs build)

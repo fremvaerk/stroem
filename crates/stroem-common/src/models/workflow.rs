@@ -297,6 +297,11 @@ pub struct ActionDef {
     /// Approval prompt message (for type: approval). Tera template rendered at suspension time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+
+    /// Default retry configuration for steps using this action.
+    /// Overridden by step-level retry config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
 }
 
 /// Hook definition — an action to run when a job completes or fails
@@ -345,6 +350,9 @@ pub struct FlowStep {
     /// Default: false (all instances run in parallel).
     #[serde(default)]
     pub sequential: bool,
+    /// Retry configuration for this step. Overrides action-level retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
     /// Temporary storage for inline action definitions during deserialization.
     /// Automatically moved to `config.actions` during `WorkspaceConfig` deserialization.
     #[serde(skip)]
@@ -396,6 +404,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 for_each: Option<serde_json::Value>,
                 #[serde(default)]
                 sequential: bool,
+                #[serde(default)]
+                retry: Option<RetryConfig>,
             }
             let ref_step: RefStep =
                 serde_yaml::from_value(serde_yaml::Value::Mapping(mapping.clone()))
@@ -411,6 +421,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 when: ref_step.when,
                 for_each: ref_step.for_each,
                 sequential: ref_step.sequential,
+                retry: ref_step.retry,
                 inline_action: None,
             })
         } else if has_type {
@@ -425,6 +436,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 "when",
                 "for_each",
                 "sequential",
+                "retry",
             ];
 
             let mut step_map = serde_yaml::Mapping::new();
@@ -528,6 +540,10 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
                 .unwrap_or(false);
 
+            let retry: Option<RetryConfig> = step_map
+                .get(serde_yaml::Value::String("retry".into()))
+                .and_then(|v| serde_yaml::from_value(v.clone()).ok());
+
             Ok(FlowStep {
                 action: String::new(), // placeholder — set by hoist_inline_actions()
                 name,
@@ -539,6 +555,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 when,
                 for_each,
                 sequential,
+                retry,
                 inline_action: Some(action_def),
             })
         } else {
@@ -568,6 +585,9 @@ pub struct TaskDef {
     /// Job-level timeout: cancel the entire job after the specified duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<HumanDuration>,
+    /// Retry the entire task (new job) when it fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_success: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -592,6 +612,47 @@ pub enum ConcurrencyPolicy {
     Skip,
     /// Cancel the previous run(s) before starting the new one.
     CancelPrevious,
+}
+
+/// Retry configuration for failed steps (step/action level) or failed jobs (task level).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts (not counting the initial attempt).
+    /// E.g. `max_attempts: 3` means up to 4 total executions.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Delay before the first retry. For exponential backoff, this is the base delay.
+    #[serde(default = "default_retry_delay")]
+    pub delay: HumanDuration,
+    /// Backoff strategy: "fixed" or "exponential". Default: "fixed".
+    #[serde(default)]
+    pub backoff: BackoffStrategy,
+    /// Add random jitter (up to 25% of computed delay) to prevent thundering herd.
+    #[serde(default)]
+    pub jitter: bool,
+}
+
+fn default_max_attempts() -> u32 {
+    3
+}
+fn default_retry_delay() -> HumanDuration {
+    HumanDuration(30)
+}
+
+/// Backoff strategy for retry delays.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackoffStrategy {
+    /// Constant delay between retries.
+    #[default]
+    Fixed,
+    /// Delay doubles each attempt: base * 2^attempt.
+    Exponential,
+}
+
+/// Resolve the effective step retry config: step overrides action.
+pub fn resolve_step_retry_config(step: &FlowStep, action: &ActionDef) -> Option<RetryConfig> {
+    step.retry.clone().or_else(|| action.retry.clone())
 }
 
 /// Restart policy for event source triggers — controls what happens when the
@@ -3747,5 +3808,360 @@ triggers:
         assert!(trigger.enabled());
         assert!(trigger.timezone().is_none());
         assert_eq!(trigger.concurrency(), ConcurrencyPolicy::Allow);
+    }
+
+    // --- RetryConfig tests ---
+
+    #[test]
+    fn test_retry_config_all_defaults() {
+        // retry: {} should apply all defaults
+        let yaml = "retry: {}";
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            retry: RetryConfig,
+        }
+        let w: Wrapper = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(w.retry.max_attempts, 3);
+        assert_eq!(w.retry.delay, crate::duration::HumanDuration(30));
+        assert_eq!(w.retry.backoff, BackoffStrategy::Fixed);
+        assert!(!w.retry.jitter);
+    }
+
+    #[test]
+    fn test_retry_config_all_fields_explicit() {
+        let yaml = r#"
+retry:
+  max_attempts: 5
+  delay: "10s"
+  backoff: exponential
+  jitter: true
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            retry: RetryConfig,
+        }
+        let w: Wrapper = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(w.retry.max_attempts, 5);
+        assert_eq!(w.retry.delay, crate::duration::HumanDuration(10));
+        assert_eq!(w.retry.backoff, BackoffStrategy::Exponential);
+        assert!(w.retry.jitter);
+    }
+
+    #[test]
+    fn test_retry_config_shorthand_only_max_attempts() {
+        // Provide only max_attempts; other fields take their defaults.
+        let yaml = r#"
+retry:
+  max_attempts: 2
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            retry: RetryConfig,
+        }
+        let w: Wrapper = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(w.retry.max_attempts, 2);
+        assert_eq!(w.retry.delay, crate::duration::HumanDuration(30));
+        assert_eq!(w.retry.backoff, BackoffStrategy::Fixed);
+        assert!(!w.retry.jitter);
+    }
+
+    #[test]
+    fn test_backoff_strategy_serde_round_trip() {
+        // Fixed
+        let json = serde_json::to_string(&BackoffStrategy::Fixed).unwrap();
+        assert_eq!(json, "\"fixed\"");
+        let parsed: BackoffStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, BackoffStrategy::Fixed);
+
+        // Exponential
+        let json = serde_json::to_string(&BackoffStrategy::Exponential).unwrap();
+        assert_eq!(json, "\"exponential\"");
+        let parsed: BackoffStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, BackoffStrategy::Exponential);
+    }
+
+    #[test]
+    fn test_backoff_strategy_default_is_fixed() {
+        assert_eq!(BackoffStrategy::default(), BackoffStrategy::Fixed);
+    }
+
+    #[test]
+    fn test_resolve_step_retry_config_step_overrides_action() {
+        let step_retry = RetryConfig {
+            max_attempts: 2,
+            delay: crate::duration::HumanDuration(5),
+            backoff: BackoffStrategy::Exponential,
+            jitter: true,
+        };
+        let action_retry = RetryConfig {
+            max_attempts: 10,
+            delay: crate::duration::HumanDuration(60),
+            backoff: BackoffStrategy::Fixed,
+            jitter: false,
+        };
+
+        // Build a minimal FlowStep with a retry override.
+        let step = FlowStep {
+            action: "test".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: Some(step_retry),
+            inline_action: None,
+        };
+
+        // Build a minimal ActionDef with its own retry.
+        let action = ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo test".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            prompt: None,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: Some(action_retry),
+        };
+
+        let resolved = resolve_step_retry_config(&step, &action).unwrap();
+        // Step-level retry wins.
+        assert_eq!(resolved.max_attempts, 2);
+        assert_eq!(resolved.delay, crate::duration::HumanDuration(5));
+        assert_eq!(resolved.backoff, BackoffStrategy::Exponential);
+        assert!(resolved.jitter);
+    }
+
+    #[test]
+    fn test_resolve_step_retry_config_action_fallback() {
+        let action_retry = RetryConfig {
+            max_attempts: 4,
+            delay: crate::duration::HumanDuration(15),
+            backoff: BackoffStrategy::Fixed,
+            jitter: false,
+        };
+
+        let step = FlowStep {
+            action: "test".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None, // no step-level retry
+            inline_action: None,
+        };
+
+        let action = ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo test".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            prompt: None,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: Some(action_retry),
+        };
+
+        let resolved = resolve_step_retry_config(&step, &action).unwrap();
+        assert_eq!(resolved.max_attempts, 4);
+        assert_eq!(resolved.delay, crate::duration::HumanDuration(15));
+    }
+
+    #[test]
+    fn test_resolve_step_retry_config_both_none() {
+        let step = FlowStep {
+            action: "test".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        };
+
+        let action = ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo test".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            prompt: None,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        };
+
+        let resolved = resolve_step_retry_config(&step, &action);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn test_flow_step_with_retry_yaml_parsing() {
+        let yaml = r#"
+actions:
+  work:
+    type: script
+    script: "echo working"
+tasks:
+  main:
+    flow:
+      step1:
+        action: work
+        retry:
+          max_attempts: 2
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("step1").unwrap();
+        let retry = step.retry.as_ref().unwrap();
+        assert_eq!(retry.max_attempts, 2);
+        // Other fields take defaults.
+        assert_eq!(retry.delay, crate::duration::HumanDuration(30));
+        assert_eq!(retry.backoff, BackoffStrategy::Fixed);
+        assert!(!retry.jitter);
+    }
+
+    #[test]
+    fn test_task_def_with_retry_yaml_parsing() {
+        let yaml = r#"
+tasks:
+  data-pipeline:
+    retry:
+      max_attempts: 5
+      delay: "2m"
+      backoff: exponential
+      jitter: true
+    flow:
+      step1:
+        action: process
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("data-pipeline").unwrap();
+        let retry = task.retry.as_ref().unwrap();
+        assert_eq!(retry.max_attempts, 5);
+        assert_eq!(retry.delay, crate::duration::HumanDuration(120));
+        assert_eq!(retry.backoff, BackoffStrategy::Exponential);
+        assert!(retry.jitter);
+    }
+
+    #[test]
+    fn test_flow_step_retry_absent_is_none() {
+        let yaml = r#"
+actions:
+  work:
+    type: script
+    script: "echo working"
+tasks:
+  main:
+    flow:
+      step1:
+        action: work
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("main").unwrap();
+        let step = task.flow.get("step1").unwrap();
+        assert!(step.retry.is_none());
+    }
+
+    #[test]
+    fn test_task_def_retry_absent_is_none() {
+        let yaml = r#"
+tasks:
+  simple:
+    flow:
+      step1:
+        action: work
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = config.tasks.get("simple").unwrap();
+        assert!(task.retry.is_none());
     }
 }

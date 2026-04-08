@@ -184,6 +184,10 @@ async fn test_create_steps_and_claim() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -203,6 +207,10 @@ async fn test_create_steps_and_claim() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
 
@@ -287,6 +295,10 @@ async fn test_claim_concurrency() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         });
     }
 
@@ -381,6 +393,10 @@ async fn test_step_lifecycle() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
 
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -451,6 +467,10 @@ async fn test_update_input() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -506,6 +526,10 @@ async fn test_promote_ready_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -525,6 +549,10 @@ async fn test_promote_ready_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -544,6 +572,10 @@ async fn test_promote_ready_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -563,6 +595,10 @@ async fn test_promote_ready_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
 
@@ -583,6 +619,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -599,6 +636,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -615,6 +653,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -631,6 +670,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -738,6 +778,10 @@ async fn test_all_steps_terminal() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -757,6 +801,10 @@ async fn test_all_steps_terminal() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
 
@@ -812,6 +860,10 @@ async fn test_any_step_failed() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -831,6 +883,10 @@ async fn test_any_step_failed() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
 
@@ -884,6 +940,10 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1008,6 +1068,10 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -1027,6 +1091,10 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -1127,6 +1195,10 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -1192,6 +1264,10 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -1254,6 +1330,10 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -1304,6 +1384,10 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -1385,6 +1469,10 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 loop_index: None,
                 loop_total: None,
                 loop_item: None,
+                max_retries: None,
+                retry_backoff_secs: None,
+                retry_strategy: None,
+                retry_jitter: false,
             },
             NewJobStep {
                 job_id,
@@ -1404,6 +1492,10 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 loop_index: None,
                 loop_total: None,
                 loop_item: None,
+                max_retries: None,
+                retry_backoff_secs: None,
+                retry_strategy: None,
+                retry_jitter: false,
             },
         ],
     )
@@ -1468,6 +1560,10 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -2233,6 +2329,10 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
 
     JobStepRepo::create_steps_tx(&mut *tx, &steps).await?;
@@ -2513,6 +2613,10 @@ async fn test_cancel_pending_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2532,6 +2636,10 @@ async fn test_cancel_pending_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2551,6 +2659,10 @@ async fn test_cancel_pending_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2625,6 +2737,10 @@ async fn test_get_running_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2644,6 +2760,10 @@ async fn test_get_running_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2663,6 +2783,10 @@ async fn test_get_running_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2682,6 +2806,10 @@ async fn test_get_running_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2701,6 +2829,10 @@ async fn test_get_running_steps() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2777,6 +2909,10 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2796,6 +2932,10 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -2888,6 +3028,10 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
         NewJobStep {
             job_id,
@@ -2907,6 +3051,10 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3093,6 +3241,10 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         })
         .collect();
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3379,6 +3531,10 @@ async fn test_event_source_step_action_type() -> Result<()> {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }];
 
     JobStepRepo::create_steps(&pool, &steps)

@@ -46,8 +46,12 @@ export function JobDetailPage() {
 
   // Auto-refresh while pending or running (adaptive interval)
   // A job with suspended steps has status "running", so this covers approval gates too.
+  // Also keep polling when any step has a future retry_at so the badge doesn't freeze.
   useEffect(() => {
-    if (!job || (job.status !== "pending" && job.status !== "running")) return;
+    const hasRetryPending = job?.steps?.some(
+      (s) => s.retry_at != null && new Date(s.retry_at) > new Date(),
+    );
+    if (!job || (job.status !== "pending" && job.status !== "running" && !hasRetryPending)) return;
     const hasActiveSteps = job.steps.some(
       (s) => s.status === "running" || s.status === "suspended",
     );
@@ -169,6 +173,36 @@ export function JobDetailPage() {
             label: "Duration",
             value: formatDuration(job.started_at, job.completed_at),
           },
+          ...(job.retry_of_job_id
+            ? [
+                {
+                  label: "Retry of",
+                  value: (
+                    <Link
+                      to={`/jobs/${job.retry_of_job_id}`}
+                      className="font-mono text-xs text-primary hover:underline"
+                    >
+                      {job.retry_of_job_id.substring(0, 8)}
+                    </Link>
+                  ),
+                },
+              ]
+            : []),
+          ...(job.retry_job_id
+            ? [
+                {
+                  label: "Retried",
+                  value: (
+                    <Link
+                      to={`/jobs/${job.retry_job_id}`}
+                      className="font-mono text-xs text-primary hover:underline"
+                    >
+                      {job.retry_job_id.substring(0, 8)}
+                    </Link>
+                  ),
+                },
+              ]
+            : []),
         ]}
       />
 

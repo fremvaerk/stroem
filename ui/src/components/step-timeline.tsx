@@ -49,7 +49,15 @@ function StepRow({
       <div
         role="button"
         tabIndex={0}
-        aria-label={`${step.step_name}, status: ${step.status}`}
+        aria-label={[
+          `${step.step_name}, status: ${step.status}`,
+          step.retry_attempt > 0 && step.max_retries != null
+            ? `attempt ${step.retry_attempt + 1} of ${step.max_retries + 1}`
+            : null,
+          step.status === "ready" && step.retry_at && new Date(step.retry_at) > new Date()
+            ? "waiting for retry"
+            : null,
+        ].filter(Boolean).join(", ")}
         aria-expanded={isExpanded}
         className={cn(
           "flex w-full gap-3 text-left hover:bg-muted/50 rounded-md px-1 -mx-1 transition-colors cursor-pointer",
@@ -99,6 +107,21 @@ function StepRow({
             {step.when_condition && step.status !== "skipped" && (
               <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                 when
+              </span>
+            )}
+            {step.max_retries != null && step.max_retries > 0 && step.retry_attempt > 0 && (
+              <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">
+                attempt {step.retry_attempt + 1}/{step.max_retries + 1}
+              </span>
+            )}
+            {step.max_retries != null && step.max_retries > 0 && step.retry_attempt === 0 && (
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                retry: {step.max_retries}
+              </span>
+            )}
+            {step.status === "ready" && step.retry_at && new Date(step.retry_at) > new Date() && (
+              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                waiting for retry
               </span>
             )}
             {step.worker_id && workerNames && (

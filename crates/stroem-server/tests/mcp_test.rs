@@ -90,6 +90,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -144,6 +145,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -164,6 +166,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -192,6 +195,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             input: task_input,
             flow: hello_flow,
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -213,6 +217,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -228,6 +233,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: hook_flow,
             timeout: None,
+            retry: None,
             on_success: vec![HookDef {
                 action: "notify".to_string(),
                 input: hook_input,

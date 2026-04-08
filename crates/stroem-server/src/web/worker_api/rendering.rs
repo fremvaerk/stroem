@@ -408,6 +408,7 @@ mod tests {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         }
     }
 
@@ -423,6 +424,7 @@ mod tests {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         }
     }
@@ -453,6 +455,13 @@ mod tests {
             loop_item: None,
             agent_state: None,
             suspended_at: None,
+            retry_attempt: 0,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            retry_history: serde_json::json!([]),
+            retry_at: None,
         }
     }
 
@@ -486,6 +495,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -521,6 +531,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -557,6 +568,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -592,6 +604,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -631,6 +644,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -669,6 +683,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -1064,6 +1079,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
@@ -1109,6 +1125,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],

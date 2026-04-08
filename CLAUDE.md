@@ -13,6 +13,7 @@ Phase 5b complete: For-each loops (`for_each` + `sequential`).
 Phase 5c: While loops.
 Phase 5d complete: Approval gates (`type: approval`, `suspended` status, approve/reject API).
 Phase 5e complete: Event source triggers (long-running queue consumers via stdout JSON-line protocol).
+Phase 5f complete: Retry mechanism (step/action in-place retry + task-level job retry).
 Phase 6: Shared storage & worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -196,6 +197,19 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - `when` + `for_each`: `when` evaluated first; if falsy, step skipped without expansion
 - Empty array → skipped; non-array → fails; instance failure → placeholder fails (unless `continue_on_failure`)
 
+### Retry Mechanism
+- **Two layers**: step/action retry (in-place) and task retry (new job).
+- **Step retry**: `FlowStep.retry: Option<RetryConfig>` — retries the individual step on failure. In-place: same `job_step` row reset to `ready` with `retry_at` backoff timestamp. Previous attempt errors stored in `retry_history` JSONB array.
+- **Action retry**: `ActionDef.retry: Option<RetryConfig>` — default retry for all steps using this action, overridden by step-level.
+- **Task retry**: `TaskDef.retry: Option<RetryConfig>` — retries the entire task as a new job on failure. Creates new job with `source_type = "retry"`, linked via `retry_of_job_id`/`retry_job_id`.
+- **Resolution**: step.retry > action.retry (most specific wins). Task retry is independent.
+- **RetryConfig**: `max_attempts` (1-10), `delay` (HumanDuration, max 1h), `backoff` (fixed/exponential), `jitter` (bool).
+- **BackoffStrategy**: `Fixed` (constant delay) or `Exponential` (base * 2^attempt, capped at 2^6).
+- **Server-side**: retry check in `orchestrate_after_step()` before failure cascade. `claim_ready_step` respects `retry_at`.
+- **Hooks**: `on_error` hooks fire only after all retries exhausted (step and task). `source_type = "retry"` is top-level for hook fallback.
+- **Interactions**: retry runs before `continue_on_failure`; for-each instances inherit retry config; each retry attempt gets full timeout; agent_state cleared on retry.
+- DB: `retry_attempt`, `max_retries`, `retry_backoff_secs`, `retry_strategy`, `retry_jitter`, `retry_history`, `retry_at` on `job_step`. `retry_of_job_id`, `retry_job_id`, `retry_attempt`, `max_retries` on `job`.
+
 ### MCP Server (Model Context Protocol)
 - Feature-gated: `mcp` cargo feature (enabled by default). Config: `mcp: { enabled: true }` (disabled by default)
 - Endpoint: `/mcp` via Streamable HTTP. Crate: `rmcp` with `#[tool_router]` / `#[tool]` macros
@@ -222,7 +236,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### Hooks (on_success / on_error)
 - `HookDef`: `action` + `input` map. Task-level and workspace-level (fallback when task has none).
-- Workspace-level hooks only fire for top-level jobs (`source_type`: api, user, trigger, webhook)
+- Workspace-level hooks only fire for top-level jobs (`source_type`: api, user, trigger, webhook, retry)
 - Recursion guard: `source_type = "hook"` → no further hooks
 - Hook actions can be `type: task` — creates full child job instead of single-step hook job
 

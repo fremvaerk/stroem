@@ -490,6 +490,7 @@ mod tests {
                 max_turns: None,
                 interactive: false,
                 message: None,
+                retry: None,
             },
         );
 
@@ -507,6 +508,7 @@ mod tests {
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -520,6 +522,7 @@ mod tests {
                 input: HashMap::new(),
                 flow,
                 timeout: None,
+                retry: None,
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],

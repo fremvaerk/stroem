@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at";
 
 /// Job step row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -36,6 +36,13 @@ pub struct JobStepRow {
     pub loop_item: Option<JsonValue>,
     pub agent_state: Option<JsonValue>,
     pub suspended_at: Option<DateTime<Utc>>,
+    pub retry_attempt: i32,
+    pub max_retries: Option<i32>,
+    pub retry_backoff_secs: Option<i32>,
+    pub retry_strategy: Option<String>,
+    pub retry_jitter: bool,
+    pub retry_history: JsonValue,
+    pub retry_at: Option<DateTime<Utc>>,
 }
 
 /// New job step for creation
@@ -58,6 +65,10 @@ pub struct NewJobStep {
     pub loop_index: Option<i32>,
     pub loop_total: Option<i32>,
     pub loop_item: Option<JsonValue>,
+    pub max_retries: Option<i32>,
+    pub retry_backoff_secs: Option<i32>,
+    pub retry_strategy: Option<String>,
+    pub retry_jitter: bool,
 }
 
 /// Bind parameters for a single row in the batch INSERT inside [`JobStepRepo::create_steps_tx`].
@@ -83,6 +94,10 @@ struct StepInsertRow {
     loop_index: Option<i32>,
     loop_total: Option<i32>,
     loop_item: Option<JsonValue>,
+    max_retries: Option<i32>,
+    retry_backoff_secs: Option<i32>,
+    retry_strategy: Option<String>,
+    retry_jitter: bool,
 }
 
 /// A stale running step with its job info for recovery.
@@ -132,38 +147,26 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter)
             VALUES
             "#,
         );
 
         let mut rows: Vec<StepInsertRow> = Vec::new();
+        let cols_per_row = 22;
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
             }
-            let base = i * 18;
-            query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-                base + 11,
-                base + 12,
-                base + 13,
-                base + 14,
-                base + 15,
-                base + 16,
-                base + 17,
-                base + 18
-            ));
+            let base = i * cols_per_row;
+            query.push('(');
+            for c in 0..cols_per_row {
+                if c > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!("${}", base + c + 1));
+            }
+            query.push(')');
             let required_tags = serde_json::to_value(&step.required_tags).unwrap_or_default();
             let ready_at = if step.status == "ready" {
                 Some(Utc::now())
@@ -189,6 +192,10 @@ impl JobStepRepo {
                 loop_index: step.loop_index,
                 loop_total: step.loop_total,
                 loop_item: step.loop_item.clone(),
+                max_retries: step.max_retries,
+                retry_backoff_secs: step.retry_backoff_secs,
+                retry_strategy: step.retry_strategy.clone(),
+                retry_jitter: step.retry_jitter,
             });
         }
 
@@ -212,7 +219,11 @@ impl JobStepRepo {
                 .bind(row.loop_source)
                 .bind(row.loop_index)
                 .bind(row.loop_total)
-                .bind(row.loop_item);
+                .bind(row.loop_item)
+                .bind(row.max_retries)
+                .bind(row.retry_backoff_secs)
+                .bind(row.retry_strategy)
+                .bind(row.retry_jitter);
         }
 
         q.execute(executor)
@@ -236,7 +247,7 @@ impl JobStepRepo {
             UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'approval')
+                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'agent', 'approval', 'event_source') AND (retry_at IS NULL OR retry_at <= NOW())
                 ORDER BY random()
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -373,6 +384,68 @@ impl JobStepRepo {
         .context("Failed to mark step as failed")?;
 
         Ok(())
+    }
+
+    /// Reset a failed step for retry: push current error to retry_history,
+    /// increment retry_attempt, clear runtime fields, set status back to 'ready'
+    /// with a future retry_at for backoff.
+    pub async fn reset_for_retry(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        retry_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET
+                retry_history = retry_history || jsonb_build_array(jsonb_build_object(
+                    'attempt', retry_attempt,
+                    'error', error_message,
+                    'started_at', started_at,
+                    'failed_at', completed_at
+                )),
+                retry_attempt = retry_attempt + 1,
+                status = 'ready',
+                ready_at = NOW(),
+                retry_at = $3,
+                worker_id = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                error_message = NULL,
+                output = NULL,
+                agent_state = NULL,
+                suspended_at = NULL
+            WHERE job_id = $1 AND step_name = $2 AND status = 'failed'
+            "#,
+        )
+        .bind(job_id)
+        .bind(step_name)
+        .bind(retry_at)
+        .execute(pool)
+        .await
+        .context("Failed to reset step for retry")?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Get a single step by job_id and step_name.
+    pub async fn get_step(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+    ) -> Result<Option<JobStepRow>> {
+        let step = sqlx::query_as::<_, JobStepRow>(&format!(
+            "SELECT {} FROM job_step WHERE job_id = $1 AND step_name = $2",
+            STEP_COLUMNS,
+        ))
+        .bind(job_id)
+        .bind(step_name)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get step")?;
+
+        Ok(step)
     }
 
     /// Get ready steps for a job (for orchestrator to check)

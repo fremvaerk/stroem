@@ -62,6 +62,51 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
         }
     };
 
+    // Check if the just-completed step failed and should be retried.
+    // This must run BEFORE check_loop_completion so that a failed for-each
+    // instance gets reset to 'ready' before the loop-completion logic sees it
+    // as a permanent failure and marks the placeholder step failed.
+    if let Some(step_row) = JobStepRepo::get_step(&state.pool, job_id, step_name).await? {
+        if step_row.status == StepStatus::Failed.as_ref() {
+            if let Some(max) = step_row.max_retries {
+                if step_row.retry_attempt < max {
+                    let delay_secs = compute_retry_delay(&step_row);
+                    let retry_at =
+                        chrono::Utc::now() + chrono::Duration::seconds(delay_secs as i64);
+
+                    if JobStepRepo::reset_for_retry(&state.pool, job_id, step_name, retry_at)
+                        .await?
+                    {
+                        state
+                            .append_server_log(
+                                job_id,
+                                &format!(
+                                    "[retry] Step '{}' attempt {}/{} failed, retrying in {}s",
+                                    step_name,
+                                    step_row.retry_attempt + 1,
+                                    max,
+                                    delay_secs,
+                                ),
+                            )
+                            .await;
+                        // Step is back to 'ready' — do NOT cascade failure
+                        return Ok(());
+                    }
+                } else {
+                    state
+                        .append_server_log(
+                            job_id,
+                            &format!(
+                                "[retry] Step '{}' retries exhausted ({}/{})",
+                                step_name, step_row.retry_attempt, max,
+                            ),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
     // Check if this is a loop instance completing — handle sequential promotion
     // and loop completion before running the orchestrator
     if let Err(e) =
@@ -217,6 +262,47 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                             ),
                         )
                         .await;
+                }
+            }
+
+            // Task-level retry: if the job failed and has retries remaining,
+            // create a new retry job instead of running terminal actions (hooks etc.).
+            // Skip child jobs (type: task sub-jobs) to avoid orphan retry jobs —
+            // their parent is responsible for handling retry logic at the job level.
+            if job_after.status == JobStatus::Failed.as_ref() && job_after.parent_job_id.is_none() {
+                if let Some(max) = job_after.max_retries {
+                    if job_after.retry_attempt < max {
+                        match try_retry_job(state, &job_after, &workspace, &task).await {
+                            Ok(true) => {
+                                // Retry job created. Still upload logs for this failed attempt,
+                                // but skip hooks — they fire only on the final failure.
+                                upload_logs_for_job(state, &job_after).await;
+                                state
+                                    .job_completion
+                                    .notify(JobCompletionEvent {
+                                        job_id,
+                                        status: job_after.status.clone(),
+                                        output: job_after.output.clone(),
+                                    })
+                                    .await;
+                                return Ok(());
+                            }
+                            Ok(false) => {} // retry failed to create — fall through
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to create retry job for {}: {:#}",
+                                    job_id,
+                                    e
+                                );
+                                state
+                                    .append_server_log(
+                                        job_id,
+                                        &format!("[retry] Failed to create retry job: {:#}", e),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -656,6 +742,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
                 when: None,
                 for_each: None,
                 sequential: false,
+                retry: None,
                 inline_action: None,
             },
         );
@@ -668,6 +755,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
@@ -692,6 +780,148 @@ fn extract_first_failure(steps: &[JobStepRow]) -> String {
         }
     }
     "unknown error".to_string()
+}
+
+/// Compute the retry delay in seconds for a step based on its retry config.
+fn compute_retry_delay(step: &JobStepRow) -> u64 {
+    let base_secs = step.retry_backoff_secs.unwrap_or(30) as u64;
+    let strategy = step.retry_strategy.as_deref().unwrap_or("fixed");
+    let attempt = step.retry_attempt.max(0) as u32;
+
+    let delay = match strategy {
+        "exponential" => base_secs.saturating_mul(1u64 << attempt.min(6)),
+        _ => base_secs, // fixed
+    };
+
+    if step.retry_jitter {
+        // Add 0-25% random jitter to spread out concurrent retries
+        let jitter_max = delay / 4 + 1;
+        let jitter = rand::random::<u64>() % jitter_max;
+        delay.saturating_add(jitter)
+    } else {
+        delay
+    }
+}
+
+/// Try to create a retry job for a failed job. Returns true if the retry job was created.
+async fn try_retry_job(
+    state: &AppState,
+    failed_job: &JobRow,
+    workspace: &WorkspaceConfig,
+    task: &TaskDef,
+) -> Result<bool> {
+    let max = match failed_job.max_retries {
+        Some(m) => m,
+        None => return Ok(false),
+    };
+    if failed_job.retry_attempt >= max {
+        return Ok(false);
+    }
+
+    // Determine the root job ID (first in the retry chain)
+    let root_job_id = failed_job.retry_of_job_id.unwrap_or(failed_job.job_id);
+
+    // Compute delay for the task retry
+    let delay_secs = if let Some(ref retry) = task.retry {
+        let base = retry.delay.as_secs();
+        let attempt = failed_job.retry_attempt.max(0) as u32;
+        match retry.backoff {
+            stroem_common::models::workflow::BackoffStrategy::Exponential => {
+                base.saturating_mul(1u64 << attempt.min(6))
+            }
+            stroem_common::models::workflow::BackoffStrategy::Fixed => base,
+        }
+    } else {
+        30
+    };
+
+    let input = failed_job.input.clone().unwrap_or_default();
+    let retry_job_id = crate::job_creator::create_job_for_task(
+        &state.pool,
+        workspace,
+        &failed_job.workspace,
+        &failed_job.task_name,
+        input,
+        "retry",
+        Some(&failed_job.job_id.to_string()),
+        failed_job.revision.as_deref(),
+        None,
+    )
+    .await
+    .context("Failed to create retry job")?;
+
+    // Set retry tracking fields, link original → retry, and optionally set retry_at
+    // in a single transaction so the retry job is never visible in a partial state.
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .context("Failed to begin retry transaction")?;
+
+    sqlx::query(
+        "UPDATE job SET retry_of_job_id = $1, retry_attempt = $2, max_retries = $3 WHERE job_id = $4",
+    )
+    .bind(root_job_id)
+    .bind(failed_job.retry_attempt + 1)
+    .bind(max)
+    .bind(retry_job_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to set retry fields on new job")?;
+
+    sqlx::query("UPDATE job SET retry_job_id = $1 WHERE job_id = $2")
+        .bind(retry_job_id)
+        .bind(failed_job.job_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to link original to retry job")?;
+
+    if delay_secs > 0 {
+        let retry_at = chrono::Utc::now() + chrono::Duration::seconds(delay_secs as i64);
+        sqlx::query("UPDATE job_step SET retry_at = $1 WHERE job_id = $2 AND status = 'ready'")
+            .bind(retry_at)
+            .bind(retry_job_id)
+            .execute(&mut *tx)
+            .await
+            .context("Failed to set retry_at on retry job steps")?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit retry transaction")?;
+
+    state
+        .append_server_log(
+            failed_job.job_id,
+            &format!(
+                "[retry] Task retry {}/{}: new job {} (in {}s)",
+                failed_job.retry_attempt + 1,
+                max,
+                retry_job_id,
+                delay_secs,
+            ),
+        )
+        .await;
+
+    Ok(true)
+}
+
+/// Upload logs for a job without running hooks or notifying waiters.
+/// Used when a job is retried — we want to preserve its logs but skip hooks.
+async fn upload_logs_for_job(state: &AppState, job: &JobRow) {
+    state.log_storage.close_log(job.job_id).await;
+    let log_storage = state.log_storage.clone();
+    let meta = meta_from_job(job);
+    let job_id = job.job_id;
+    tokio::spawn(async move {
+        if let Err(e) = log_storage.upload_to_archive(job_id, &meta).await {
+            tracing::warn!(
+                "Failed to upload logs to archive for retry job {}: {:#}",
+                job_id,
+                e
+            );
+        }
+    });
 }
 
 #[cfg(test)]
@@ -726,6 +956,13 @@ mod tests {
             loop_item: None,
             agent_state: None,
             suspended_at: None,
+            retry_attempt: 0,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            retry_history: serde_json::json!([]),
+            retry_at: None,
         }
     }
 
@@ -757,5 +994,72 @@ mod tests {
     fn test_extract_first_failure_no_failed_steps() {
         let steps = vec![make_step("completed", None), make_step("completed", None)];
         assert_eq!(extract_first_failure(&steps), "unknown error");
+    }
+
+    #[test]
+    fn test_compute_retry_delay_fixed() {
+        let mut step = make_step("failed", None);
+        step.retry_backoff_secs = Some(10);
+        step.retry_strategy = Some("fixed".to_string());
+        step.retry_jitter = false;
+        step.retry_attempt = 0;
+        assert_eq!(compute_retry_delay(&step), 10);
+        step.retry_attempt = 3;
+        assert_eq!(compute_retry_delay(&step), 10); // fixed stays constant
+    }
+
+    #[test]
+    fn test_compute_retry_delay_exponential() {
+        let mut step = make_step("failed", None);
+        step.retry_backoff_secs = Some(5);
+        step.retry_strategy = Some("exponential".to_string());
+        step.retry_jitter = false;
+        step.retry_attempt = 0;
+        assert_eq!(compute_retry_delay(&step), 5); // 5 * 2^0 = 5
+        step.retry_attempt = 1;
+        assert_eq!(compute_retry_delay(&step), 10); // 5 * 2^1 = 10
+        step.retry_attempt = 2;
+        assert_eq!(compute_retry_delay(&step), 20); // 5 * 2^2 = 20
+        step.retry_attempt = 6;
+        assert_eq!(compute_retry_delay(&step), 320); // 5 * 2^6 = 320
+    }
+
+    #[test]
+    fn test_compute_retry_delay_exponential_capped() {
+        let mut step = make_step("failed", None);
+        step.retry_backoff_secs = Some(5);
+        step.retry_strategy = Some("exponential".to_string());
+        step.retry_jitter = false;
+        step.retry_attempt = 6;
+        assert_eq!(compute_retry_delay(&step), 320); // 5 * 2^6 = 320
+        step.retry_attempt = 7;
+        assert_eq!(compute_retry_delay(&step), 320); // capped at exponent 6
+        step.retry_attempt = 10;
+        assert_eq!(compute_retry_delay(&step), 320); // still capped
+    }
+
+    #[test]
+    fn test_compute_retry_delay_default_strategy() {
+        let mut step = make_step("failed", None);
+        step.retry_backoff_secs = Some(15);
+        step.retry_strategy = None; // defaults to fixed
+        step.retry_jitter = false;
+        step.retry_attempt = 3;
+        assert_eq!(compute_retry_delay(&step), 15);
+    }
+
+    #[test]
+    fn test_compute_retry_delay_jitter_adds_bounded_noise() {
+        let mut step = make_step("failed", None);
+        step.retry_backoff_secs = Some(100);
+        step.retry_strategy = Some("fixed".to_string());
+        step.retry_jitter = true;
+        step.retry_attempt = 0;
+        // Run several times to account for randomness
+        for _ in 0..20 {
+            let delay = compute_retry_delay(&step);
+            assert!(delay >= 100, "delay should be at least base ({delay})");
+            assert!(delay <= 125, "jitter should add at most 25% ({delay})");
+        }
     }
 }

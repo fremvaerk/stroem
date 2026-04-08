@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs";
+const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries";
 
 /// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
 fn escape_like(input: &str) -> String {
@@ -36,6 +36,10 @@ pub struct JobRow {
     pub parent_job_id: Option<Uuid>,
     pub parent_step_name: Option<String>,
     pub timeout_secs: Option<i32>,
+    pub retry_of_job_id: Option<Uuid>,
+    pub retry_job_id: Option<Uuid>,
+    pub retry_attempt: i32,
+    pub max_retries: Option<i32>,
 }
 
 /// Lightweight projection returned by [`JobRepo::get_old_terminal_jobs`].
@@ -411,6 +415,38 @@ impl JobRepo {
         .await
         .context("Failed to mark job as failed")?;
 
+        Ok(())
+    }
+
+    /// Set the retry_job_id on a job (linking original → retry).
+    pub async fn set_retry_job_id(pool: &PgPool, job_id: Uuid, retry_job_id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE job SET retry_job_id = $1 WHERE job_id = $2")
+            .bind(retry_job_id)
+            .bind(job_id)
+            .execute(pool)
+            .await
+            .context("Failed to set retry_job_id")?;
+        Ok(())
+    }
+
+    /// Set retry tracking fields on a new retry job.
+    pub async fn set_retry_fields(
+        pool: &PgPool,
+        job_id: Uuid,
+        retry_of_job_id: Uuid,
+        retry_attempt: i32,
+        max_retries: i32,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE job SET retry_of_job_id = $1, retry_attempt = $2, max_retries = $3 WHERE job_id = $4",
+        )
+        .bind(retry_of_job_id)
+        .bind(retry_attempt)
+        .bind(max_retries)
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .context("Failed to set retry fields")?;
         Ok(())
     }
 

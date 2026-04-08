@@ -351,6 +351,7 @@ fn test_dag_fan_out_fan_in() {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -367,6 +368,7 @@ fn test_dag_fan_out_fan_in() {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -383,6 +385,7 @@ fn test_dag_fan_out_fan_in() {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -399,6 +402,7 @@ fn test_dag_fan_out_fan_in() {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );

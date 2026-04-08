@@ -100,6 +100,15 @@ export interface JobStep {
   loop_source: string | null;
   loop_index: number | null;
   loop_total: number | null;
+  retry_attempt: number;
+  max_retries: number | null;
+  retry_history: Array<{
+    attempt: number;
+    error: string | null;
+    started_at: string | null;
+    failed_at: string | null;
+  }>;
+  retry_at: string | null;
   approval_message: string | null;
   approval_fields: Record<string, unknown> | null;
 }
@@ -119,6 +128,10 @@ export interface JobDetail {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  retry_of_job_id: string | null;
+  retry_job_id: string | null;
+  retry_attempt: number;
+  max_retries: number | null;
   steps: JobStep[];
 }
 

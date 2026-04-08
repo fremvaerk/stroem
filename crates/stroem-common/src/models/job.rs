@@ -117,6 +117,8 @@ pub enum SourceType {
     Task,
     /// Job created by an event source trigger (long-running queue consumer).
     EventSource,
+    /// Job created as a retry of a failed job (task-level retry).
+    Retry,
 }
 
 impl fmt::Display for SourceType {
@@ -135,6 +137,7 @@ impl AsRef<str> for SourceType {
             Self::Hook => "hook",
             Self::Task => "task",
             Self::EventSource => "event_source",
+            Self::Retry => "retry",
         }
     }
 }
@@ -150,6 +153,7 @@ impl std::str::FromStr for SourceType {
             "hook" => Ok(Self::Hook),
             "task" => Ok(Self::Task),
             "event_source" => Ok(Self::EventSource),
+            "retry" => Ok(Self::Retry),
             other => anyhow::bail!("Unknown source type: {}", other),
         }
     }
@@ -378,6 +382,7 @@ mod tests {
         assert_eq!(SourceType::Hook.to_string(), "hook");
         assert_eq!(SourceType::Task.to_string(), "task");
         assert_eq!(SourceType::EventSource.to_string(), "event_source");
+        assert_eq!(SourceType::Retry.to_string(), "retry");
     }
 
     #[test]
@@ -398,6 +403,7 @@ mod tests {
             "event_source".parse::<SourceType>().unwrap(),
             SourceType::EventSource
         );
+        assert_eq!("retry".parse::<SourceType>().unwrap(), SourceType::Retry);
         assert!("invalid".parse::<SourceType>().is_err());
     }
 

@@ -13,7 +13,7 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     Ok(pool)
 }
 
-/// Run database migrations
+/// Run database migrations (includes migration 027_step_retry)
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())

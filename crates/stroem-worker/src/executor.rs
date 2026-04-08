@@ -1251,6 +1251,7 @@ mod tests {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         };
         let action_spec = serde_json::to_value(&action).unwrap();
 
@@ -1301,6 +1302,7 @@ mod tests {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         };
         let action_spec = serde_json::to_value(&action).unwrap();
 

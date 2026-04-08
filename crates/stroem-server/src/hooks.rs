@@ -78,7 +78,7 @@ pub async fn fire_hooks(
     // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.
     let is_top_level = matches!(
         job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook" | "mcp"
+        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
     );
     let hooks: &[HookDef] = if !task_hooks.is_empty() {
         task_hooks
@@ -188,7 +188,7 @@ pub async fn fire_suspended_hooks(
     // Select task-level then workspace-level on_suspended hooks
     let is_top_level = matches!(
         job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook" | "mcp"
+        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
     );
     let hooks: &[HookDef] = if !task.on_suspended.is_empty() {
         &task.on_suspended
@@ -432,6 +432,10 @@ async fn fire_single_hook(
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     };
 
     JobStepRepo::create_steps(pool, &[step])
@@ -474,7 +478,7 @@ mod tests {
 
         let is_top_level = matches!(
             job_source_type,
-            "api" | "user" | "trigger" | "webhook" | "mcp"
+            "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
         );
         let hooks: &[HookDef] = if !task_hooks.is_empty() {
             task_hooks
@@ -687,6 +691,7 @@ mod tests {
             input: HashMap::new(),
             flow: HashMap::new(),
             timeout: None,
+            retry: None,
             on_success,
             on_error,
             on_suspended: vec![],

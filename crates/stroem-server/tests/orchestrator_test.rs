@@ -75,6 +75,10 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }
 }
 
@@ -88,6 +92,7 @@ fn make_task(flow: HashMap<String, FlowStep>) -> TaskDef {
         input: HashMap::new(),
         flow,
         timeout: None,
+        retry: None,
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
@@ -107,6 +112,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         when: None,
         for_each: None,
         sequential: false,
+        retry: None,
         inline_action: None,
     }
 }

@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 use sqlx::{self, PgPool};
 use std::collections::HashMap;
 use stroem_common::models::job::StepStatus;
-use stroem_common::models::workflow::WorkspaceConfig;
+use stroem_common::models::workflow::resolve_step_retry_config;
+use stroem_common::models::workflow::{BackoffStrategy, WorkspaceConfig};
 use stroem_common::template::{
     merge_defaults, prepare_action_input, render_input_map, resolve_connection_inputs,
 };
@@ -147,6 +148,7 @@ fn create_job_for_task_inner<'a>(
             let action_spec = serde_json::to_value(action).ok();
             let required_tags = compute_required_tags(action);
             let runner = derive_runner(action);
+            let retry = resolve_step_retry_config(flow_step, action);
 
             new_steps.push(NewJobStep {
                 job_id,
@@ -174,6 +176,20 @@ fn create_job_for_task_inner<'a>(
                 loop_index: None,
                 loop_total: None,
                 loop_item: None,
+                max_retries: retry
+                    .as_ref()
+                    .map(|r| i32::try_from(r.max_attempts).expect("max_attempts fits i32")),
+                retry_backoff_secs: retry
+                    .as_ref()
+                    .map(|r| i32::try_from(r.delay.as_secs()).expect("retry delay fits i32")),
+                retry_strategy: retry.as_ref().map(|r| {
+                    if r.backoff == BackoffStrategy::Exponential {
+                        "exponential".to_string()
+                    } else {
+                        "fixed".to_string()
+                    }
+                }),
+                retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
             });
         }
 
@@ -595,6 +611,11 @@ pub async fn expand_for_each_steps(
                 loop_index: Some(i as i32),
                 loop_total: Some(total),
                 loop_item: Some(item.clone()),
+                // Instances inherit retry config from the placeholder step row
+                max_retries: step.max_retries,
+                retry_backoff_secs: step.retry_backoff_secs,
+                retry_strategy: step.retry_strategy.clone(),
+                retry_jitter: step.retry_jitter,
             });
         }
 
@@ -1194,6 +1215,10 @@ mod tests {
             parent_job_id: None,
             parent_step_name: None,
             timeout_secs: None,
+            retry_of_job_id: None,
+            retry_job_id: None,
+            retry_attempt: 0,
+            max_retries: None,
         }
     }
 
@@ -1228,6 +1253,13 @@ mod tests {
             loop_item: None,
             agent_state: None,
             suspended_at: None,
+            retry_attempt: 0,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            retry_history: serde_json::json!([]),
+            retry_at: None,
         }
     }
 

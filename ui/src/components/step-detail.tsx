@@ -9,6 +9,7 @@ import { LogViewer } from "@/components/log-viewer";
 import { JsonViewer } from "@/components/json-viewer";
 import { ApprovalCard } from "@/components/approval-card";
 import { getStepLogs } from "@/lib/api";
+import { formatTime } from "@/lib/formatting";
 import type { JobStep } from "@/lib/types";
 
 interface StepDetailProps {
@@ -62,6 +63,34 @@ export function StepDetail({ jobId, step, onRefresh }: StepDetailProps) {
           step={step}
           onAction={onRefresh ?? (() => {})}
         />
+      )}
+      {step.retry_history && step.retry_history.length > 0 && (
+        <div className="rounded-md border px-3 py-2 space-y-1.5">
+          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+            Retry History
+          </p>
+          {step.retry_history.map((attempt) => (
+            <div
+              key={`retry-${attempt.attempt}`}
+              className="flex items-start gap-2 text-xs"
+            >
+              <span className="shrink-0 font-medium text-muted-foreground">
+                #{attempt.attempt + 1}
+              </span>
+              <span className="shrink-0 text-muted-foreground">
+                {formatTime(attempt.started_at)}
+                {attempt.failed_at && (
+                  <> &ndash; {formatTime(attempt.failed_at)}</>
+                )}
+              </span>
+              {attempt.error && (
+                <span className="text-red-600 dark:text-red-400 break-all">
+                  {attempt.error}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
       )}
       <Tabs defaultValue="logs" className="w-full">
         <TabsList>

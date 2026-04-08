@@ -110,6 +110,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
     actions.insert(
@@ -147,6 +148,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -164,6 +166,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -182,6 +185,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -197,6 +201,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: parent_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -213,6 +218,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             input: HashMap::new(),
             flow: child_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -255,6 +261,10 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }
 }
 
@@ -278,6 +288,10 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         loop_index: None,
         loop_total: None,
         loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
     }
 }
 
@@ -538,6 +552,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
     for (action_name, task_name) in &[
@@ -579,6 +594,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
                 max_turns: None,
                 interactive: false,
                 message: None,
+                retry: None,
             },
         );
     }
@@ -599,6 +615,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -612,6 +629,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             flow: gp_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -633,6 +651,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -646,6 +665,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             flow: p_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -667,6 +687,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -680,6 +701,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             input: HashMap::new(),
             flow: c_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -770,6 +792,10 @@ async fn deep_nesting_three_levels() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -795,6 +821,10 @@ async fn deep_nesting_three_levels() -> Result<()> {
             loop_index: None,
             loop_total: None,
             loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
         }],
     )
     .await?;
@@ -882,6 +912,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
     actions.insert(
@@ -919,6 +950,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             max_turns: None,
             interactive: false,
             message: None,
+            retry: None,
         },
     );
 
@@ -936,6 +968,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -952,6 +985,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -970,6 +1004,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             when: None,
             for_each: None,
             sequential: false,
+            retry: None,
             inline_action: None,
         },
     );
@@ -985,6 +1020,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             flow: parent_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -1001,6 +1037,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             input: HashMap::new(),
             flow: child_flow,
             timeout: None,
+            retry: None,
 
             on_success: vec![],
             on_error: vec![],
@@ -1060,6 +1097,10 @@ async fn parent_with_mixed_steps() -> Result<()> {
                 loop_index: None,
                 loop_total: None,
                 loop_item: None,
+                max_retries: None,
+                retry_backoff_secs: None,
+                retry_strategy: None,
+                retry_jitter: false,
             },
         ],
     )
