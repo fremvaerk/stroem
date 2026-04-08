@@ -318,6 +318,16 @@ fn prefix_library(lib_name: &str, raw: WorkspaceConfig) -> WorkspaceConfig {
                 hook.action = format!("{}{}", prefix, hook.action);
             }
         }
+        for hook in &mut task.on_suspended {
+            if original_action_names.contains(&hook.action) {
+                hook.action = format!("{}{}", prefix, hook.action);
+            }
+        }
+        for hook in &mut task.on_cancel {
+            if original_action_names.contains(&hook.action) {
+                hook.action = format!("{}{}", prefix, hook.action);
+            }
+        }
 
         // Rewrite connection-type input field references in task inputs
         for input_field in task.input.values_mut() {
@@ -524,6 +534,7 @@ mod tests {
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 
@@ -593,7 +604,14 @@ mod tests {
                     action: "slack-notify".to_string(),
                     input: HashMap::new(),
                 }],
-                on_suspended: vec![],
+                on_suspended: vec![HookDef {
+                    action: "slack-notify".to_string(),
+                    input: HashMap::new(),
+                }],
+                on_cancel: vec![HookDef {
+                    action: "slack-notify".to_string(),
+                    input: HashMap::new(),
+                }],
             },
         );
 
@@ -602,6 +620,8 @@ mod tests {
         let task = &prefixed.tasks["lib.my-task"];
         assert_eq!(task.on_success[0].action, "lib.slack-notify");
         assert_eq!(task.on_error[0].action, "lib.slack-notify");
+        assert_eq!(task.on_suspended[0].action, "lib.slack-notify");
+        assert_eq!(task.on_cancel[0].action, "lib.slack-notify");
     }
 
     #[test]
@@ -628,6 +648,7 @@ mod tests {
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 
@@ -710,6 +731,7 @@ mod tests {
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 
@@ -781,6 +803,7 @@ mod tests {
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 

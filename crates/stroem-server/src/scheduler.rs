@@ -526,6 +526,7 @@ mod tests {
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(

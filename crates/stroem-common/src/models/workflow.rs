@@ -594,6 +594,8 @@ pub struct TaskDef {
     pub on_error: Vec<HookDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_suspended: Vec<HookDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_cancel: Vec<HookDef>,
 }
 
 fn default_mode() -> String {
@@ -814,6 +816,7 @@ pub struct WorkspaceConfig {
     pub on_success: Vec<HookDef>,
     pub on_error: Vec<HookDef>,
     pub on_suspended: Vec<HookDef>,
+    pub on_cancel: Vec<HookDef>,
     /// MCP server definitions available to agent actions in this workspace.
     pub mcp_servers: HashMap<String, McpServerDef>,
 }
@@ -841,6 +844,8 @@ struct WorkspaceConfigRaw {
     #[serde(default)]
     on_suspended: Vec<HookDef>,
     #[serde(default)]
+    on_cancel: Vec<HookDef>,
+    #[serde(default)]
     mcp_servers: HashMap<String, McpServerDef>,
 }
 
@@ -856,6 +861,7 @@ impl From<WorkspaceConfigRaw> for WorkspaceConfig {
             on_success: raw.on_success,
             on_error: raw.on_error,
             on_suspended: raw.on_suspended,
+            on_cancel: raw.on_cancel,
             mcp_servers: raw.mcp_servers,
         };
         config.hoist_inline_actions();
@@ -909,6 +915,7 @@ impl WorkspaceConfig {
         self.on_success.extend(config.on_success);
         self.on_error.extend(config.on_error);
         self.on_suspended.extend(config.on_suspended);
+        self.on_cancel.extend(config.on_cancel);
         self.mcp_servers.extend(config.mcp_servers);
     }
 

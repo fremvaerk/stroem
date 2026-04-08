@@ -1,9 +1,9 @@
 ---
 title: Hooks
-description: Task-level and workspace-level on_success / on_error hooks for automated job responses
+description: Task-level and workspace-level on_success / on_error / on_cancel hooks for automated job responses
 ---
 
-Tasks can define `on_success` and `on_error` hooks that fire automatically when a job reaches a terminal state. Each hook references an existing action and can pass input rendered with job context.
+Tasks can define `on_success`, `on_error`, and `on_cancel` hooks that fire automatically when a job reaches a terminal state. Each hook references an existing action and can pass input rendered with job context.
 
 ## Syntax
 
@@ -37,7 +37,7 @@ Hook input values are Tera templates with access to a `hook` object containing j
 | `hook.workspace` | string | Workspace name |
 | `hook.task_name` | string | Task that completed/failed |
 | `hook.job_id` | string | UUID of the original job |
-| `hook.status` | string | `"completed"` or `"failed"` |
+| `hook.status` | string | `"completed"`, `"failed"`, or `"cancelled"` |
 | `hook.is_success` | bool | true if completed |
 | `hook.error_message` | string/null | All failed step errors combined |
 | `hook.source_type` | string | Original job source (`"api"`, `"trigger"`, etc.) |
@@ -55,6 +55,34 @@ Each entry in `hook.failed_steps` contains:
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether the step had `continue_on_failure` set |
+
+## on_cancel hooks
+
+Tasks can define `on_cancel` hooks that fire when a job is cancelled — whether manually via the API, by a timeout, or by a scheduler concurrency policy (`cancel_previous`).
+
+:::caution[Breaking change]
+Previously, cancelled jobs fired `on_error` hooks. Now they fire `on_cancel` only. If you relied on `on_error` to catch cancellations, add an `on_cancel` hook with the same action.
+:::
+
+### Syntax
+
+```yaml
+tasks:
+  deploy:
+    flow:
+      build:
+        action: build-app
+      deploy:
+        action: deploy-app
+        depends_on: [build]
+    on_cancel:
+      - action: notify-slack
+        input:
+          webhook_url: "{{ secret.SLACK_WEBHOOK_URL }}"
+          message: "Deploy {{ hook.task_name }} was cancelled"
+```
+
+`on_cancel` hooks use the same `hook.*` template context as `on_success` / `on_error`, with `hook.status` set to `"cancelled"` and `hook.is_success` set to `false`. If no `on_cancel` hooks are defined, nothing fires for cancelled jobs.
 
 ## on_suspended hooks
 
@@ -173,7 +201,7 @@ tasks:
 
 ## Workspace-level hooks
 
-You can define `on_success` and `on_error` hooks at the top level of your workflow YAML. These act as **fallback defaults**: they fire only when the specific task has no hooks defined for that event type.
+You can define `on_success`, `on_error`, and `on_cancel` hooks at the top level of your workflow YAML. These act as **fallback defaults**: they fire only when the specific task has no hooks defined for that event type.
 
 ```yaml
 actions:
@@ -215,7 +243,7 @@ tasks:
 
 ### Rules
 
-- `on_success` and `on_error` are evaluated independently. A task can override one while inheriting the other.
+- `on_success`, `on_error`, and `on_cancel` are evaluated independently. A task can override one while inheriting the others.
 - Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, or `mcp` — MCP tool invocations). Child jobs from `type: task` actions do not trigger workspace hooks.
 - If multiple YAML files define workspace-level hooks, they are merged (extended, not replaced).
 - The same `hook.*` template context and `secret.*` variables are available as in task-level hooks.

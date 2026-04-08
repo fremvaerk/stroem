@@ -78,6 +78,9 @@ fn validate_workflow_config_inner(
                 &format!("on_suspended[{i}]"),
             )?;
         }
+        for (i, hook) in task.on_cancel.iter().enumerate() {
+            check_task_self_reference(config, task_name, &hook.action, &format!("on_cancel[{i}]"))?;
+        }
     }
 
     // Validate each task
@@ -287,6 +290,14 @@ fn validate_workflow_config_inner(
                 libraries_resolved,
             )?;
         }
+        for (i, hook) in task.on_cancel.iter().enumerate() {
+            validate_hook_action_exists(
+                &format!("Task '{task_name}' on_cancel[{i}]"),
+                &hook.action,
+                config,
+                libraries_resolved,
+            )?;
+        }
     }
 
     // Validate triggers reference existing tasks
@@ -456,6 +467,14 @@ fn validate_workflow_config_inner(
     for (i, hook) in config.on_suspended.iter().enumerate() {
         validate_hook_action_exists(
             &format!("Workspace on_suspended[{i}]"),
+            &hook.action,
+            config,
+            libraries_resolved,
+        )?;
+    }
+    for (i, hook) in config.on_cancel.iter().enumerate() {
+        validate_hook_action_exists(
+            &format!("Workspace on_cancel[{i}]"),
             &hook.action,
             config,
             libraries_resolved,
@@ -2125,6 +2144,7 @@ triggers:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(
@@ -2164,6 +2184,7 @@ triggers:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(
@@ -2199,6 +2220,7 @@ triggers:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(
@@ -2234,6 +2256,7 @@ triggers:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(
@@ -2269,6 +2292,7 @@ triggers:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(
@@ -2306,6 +2330,7 @@ triggers:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
         config.triggers.insert(
@@ -3154,6 +3179,30 @@ tasks:
     }
 
     #[test]
+    fn test_validate_task_action_self_reference_in_on_cancel_hook() {
+        let yaml = r#"
+actions:
+  greet:
+    type: script
+    script: "echo hello"
+  run-self:
+    type: task
+    task: loopy
+tasks:
+  loopy:
+    flow:
+      step1:
+        action: greet
+    on_cancel:
+      - action: run-self
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("self-reference"));
+    }
+
+    #[test]
     fn test_compute_required_tags_task() {
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
@@ -3671,6 +3720,49 @@ on_success:
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_task_on_cancel_hook_missing_action() {
+        let yaml = r#"
+actions:
+  greet:
+    type: script
+    script: "echo hello"
+
+tasks:
+  deploy:
+    flow:
+      step1:
+        action: greet
+    on_cancel:
+      - action: nonexistent
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("on_cancel[0]"));
+        assert!(err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_validate_workspace_on_cancel_hook_missing_action() {
+        let yaml = r#"
+actions:
+  greet:
+    type: script
+    script: "echo hello"
+
+on_cancel:
+  - action: missing-action
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Workspace on_cancel[0]"));
+        assert!(err.contains("missing-action"));
     }
 
     // --- connection validation tests ---

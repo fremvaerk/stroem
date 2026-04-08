@@ -759,6 +759,7 @@ async fn build_minimal_task_def(state: &AppState, job_id: Uuid) -> Result<TaskDe
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     })
 }
 

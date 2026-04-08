@@ -206,7 +206,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **RetryConfig**: `max_attempts` (1-10), `delay` (HumanDuration, max 1h), `backoff` (fixed/exponential), `jitter` (bool).
 - **BackoffStrategy**: `Fixed` (constant delay) or `Exponential` (base * 2^attempt, capped at 2^6).
 - **Server-side**: retry check in `orchestrate_after_step()` before failure cascade. `claim_ready_step` respects `retry_at`.
-- **Hooks**: `on_error` hooks fire only after all retries exhausted (step and task). `source_type = "retry"` is top-level for hook fallback.
+- **Hooks**: `on_error`/`on_cancel` hooks fire only after all retries exhausted (step and task). `source_type = "retry"` is top-level for hook fallback.
 - **Interactions**: retry runs before `continue_on_failure`; for-each instances inherit retry config; each retry attempt gets full timeout; agent_state cleared on retry.
 - DB: `retry_attempt`, `max_retries`, `retry_backoff_secs`, `retry_strategy`, `retry_jitter`, `retry_history`, `retry_at` on `job_step`. `retry_of_job_id`, `retry_job_id`, `retry_attempt`, `max_retries` on `job`.
 
@@ -234,8 +234,9 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **EventSourceManager**: Server-side background task creating/monitoring consumer task jobs via normal task dispatch. Handles lifecycle (start, failure, restart per policy).
 - **Job tracking**: Emitted jobs have `source_type: "event_source"`, `source_id: "{workspace}/{trigger_name}"` for audit trail.
 
-### Hooks (on_success / on_error)
+### Hooks (on_success / on_error / on_cancel)
 - `HookDef`: `action` + `input` map. Task-level and workspace-level (fallback when task has none).
+- `on_success` fires on completed, `on_error` fires on failed, `on_cancel` fires on cancelled. Each is independent.
 - Workspace-level hooks only fire for top-level jobs (`source_type`: api, user, trigger, webhook, retry)
 - Recursion guard: `source_type = "hook"` → no further hooks
 - Hook actions can be `type: task` — creates full child job instead of single-step hook job

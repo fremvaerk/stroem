@@ -199,6 +199,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -240,6 +241,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             }],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 

@@ -499,6 +499,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         task.flow.insert(
             "other-step".to_string(),
@@ -535,6 +536,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         // flow step has no input mapping
         task.flow.insert(
@@ -572,6 +574,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         task.flow
             .insert("step1".to_string(), make_flow_step("my-action", flow_input));
@@ -608,6 +611,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         task.flow
             .insert("step1".to_string(), make_flow_step("my-action", flow_input));
@@ -648,6 +652,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         task.flow
             .insert("step2".to_string(), make_flow_step("my-action", flow_input));
@@ -687,6 +692,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         task.flow
             .insert("step1".to_string(), make_flow_step("my-action", flow_input));
@@ -1083,6 +1089,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         task.flow.insert(
             "step1".to_string(),
@@ -1129,6 +1136,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         // flow step only maps "sql", not "extra"
         let flow_input = HashMap::from([("sql".to_string(), json!("SELECT 1"))]);

@@ -206,6 +206,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
     tasks.insert(
@@ -223,6 +224,7 @@ fn make_workspace_config() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -238,6 +240,7 @@ fn make_workspace_config() -> WorkspaceConfig {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     }
 }
 
@@ -634,6 +637,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -670,6 +674,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -706,6 +711,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -721,6 +727,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let state = setup_state(pool.clone(), ws_config, temp_dir.path());
@@ -1025,6 +1032,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
     tasks.insert(
@@ -1042,6 +1050,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -1057,6 +1066,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let state = setup_state(pool.clone(), ws_config, temp_dir.path());

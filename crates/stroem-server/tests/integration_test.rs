@@ -227,6 +227,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -300,6 +301,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -371,6 +373,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -459,6 +462,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -496,6 +500,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -571,6 +576,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -663,6 +669,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -784,6 +791,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -985,6 +993,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -1022,6 +1031,7 @@ fn test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -1919,6 +1929,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -2039,6 +2050,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -2410,6 +2422,7 @@ async fn test_task_detail_connections() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -2462,6 +2475,7 @@ async fn test_task_detail_connections() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -4371,6 +4385,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
                 input: hook_input,
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -4556,6 +4571,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -4633,6 +4649,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -5423,6 +5440,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -5559,6 +5577,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -5713,6 +5732,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     let job_id = JobRepo::create(
@@ -6052,6 +6072,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         }
     };
 
@@ -6211,6 +6232,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         }
     };
 
@@ -6349,6 +6371,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         }
     };
 
@@ -6494,6 +6517,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         }
     };
 
@@ -6638,6 +6662,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         }
     };
 
@@ -6793,6 +6818,7 @@ async fn test_cascading_skip() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         }
     };
 
@@ -6978,6 +7004,7 @@ fn test_workspace_ops() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -8497,6 +8524,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9137,6 +9165,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
             }],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9255,6 +9284,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
                 input: hook_input,
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9351,6 +9381,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
             }],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9437,6 +9468,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
             }],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9549,6 +9581,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
                 input: hook_input,
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9691,6 +9724,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
             }],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9809,6 +9843,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
                 input: hook_input,
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -9929,6 +9964,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
                 input: hook_input,
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10038,6 +10074,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     };
 
     // Orchestrator should mark the hook job as completed
@@ -10191,6 +10228,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10245,6 +10283,7 @@ fn task_action_test_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10297,6 +10336,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10625,6 +10665,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10702,6 +10743,7 @@ async fn test_task_action_in_hook() -> Result<()> {
                 input: HashMap::new(),
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10833,6 +10875,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -10910,6 +10953,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -13177,6 +13221,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -13332,6 +13377,7 @@ async fn setup_sync_webhook() -> Result<(
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -13870,6 +13916,7 @@ async fn setup_scheduler_workspace(
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -15146,6 +15193,7 @@ fn when_test_workspace_with_flow(
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
     workspace
@@ -15399,6 +15447,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -15434,6 +15483,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -16346,6 +16396,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
             }],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -16456,6 +16507,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -16775,6 +16827,7 @@ fn test_workspace_with_approval() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -16859,6 +16912,7 @@ fn test_workspace_with_root_approval() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -17656,6 +17710,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -17692,6 +17747,7 @@ fn event_source_workspace() -> WorkspaceConfig {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -18667,6 +18723,7 @@ fn retry_workspace(retry: stroem_common::models::workflow::RetryConfig) -> Works
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -19105,6 +19162,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -19335,6 +19393,7 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
             on_success: vec![],
             on_error,
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -19666,6 +19725,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 
@@ -19702,6 +19762,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         },
     );
 

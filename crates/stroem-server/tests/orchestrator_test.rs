@@ -96,6 +96,7 @@ fn make_task(flow: HashMap<String, FlowStep>) -> TaskDef {
         on_success: vec![],
         on_error: vec![],
         on_suspended: vec![],
+        on_cancel: vec![],
     }
 }
 

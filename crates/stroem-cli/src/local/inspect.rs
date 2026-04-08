@@ -161,6 +161,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -207,6 +208,7 @@ mod tests {
                 input: HashMap::new(),
             }],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -233,6 +235,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -259,6 +262,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -286,6 +290,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -314,6 +319,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -340,6 +346,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -366,6 +373,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -393,6 +401,7 @@ mod tests {
                 action: "notify".to_string(),
                 input: HashMap::new(),
             }],
+            on_cancel: vec![],
         };
         config.tasks.insert("deploy".to_string(), task);
 
@@ -415,6 +424,7 @@ mod tests {
             on_success: vec![],
             on_error: vec![],
             on_suspended: vec![],
+            on_cancel: vec![],
         };
         config.tasks.insert("empty".to_string(), task);
 

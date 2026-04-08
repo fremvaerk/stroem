@@ -777,6 +777,7 @@ tasks:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 
@@ -867,6 +868,7 @@ tasks:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 
@@ -942,6 +944,7 @@ tasks:
                 on_success: vec![],
                 on_error: vec![],
                 on_suspended: vec![],
+                on_cancel: vec![],
             },
         );
 
