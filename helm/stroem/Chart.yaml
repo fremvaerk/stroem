@@ -2,5 +2,5 @@ apiVersion: v2
 name: stroem
 description: A Helm chart for Strøm workflow orchestration platform
 type: application
-version: 0.14.4
-appVersion: "0.14.4"
+version: 0.14.5
+appVersion: "0.14.5"
