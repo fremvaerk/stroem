@@ -4,8 +4,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{
-    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, UserAuthLinkRepo, UserRepo,
-    WorkerRepo,
+    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, TaskStateRepo,
+    UserAuthLinkRepo, UserRepo, WorkerRepo,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -3485,6 +3485,232 @@ async fn test_event_source_job_source_type() -> Result<()> {
     assert_eq!(job.source_type, "event_source");
     assert_eq!(job.task_name, "_event_source:my-trigger");
     assert_eq!(job.status, "pending");
+
+    Ok(())
+}
+
+// ─── TaskStateRepo tests ──────────────────────────────────────────────
+
+/// Helper: create a minimal job for FK purposes.
+async fn create_test_job(pool: &PgPool, workspace: &str, task_name: &str) -> Result<uuid::Uuid> {
+    let id = JobRepo::create(
+        pool,
+        workspace,
+        task_name,
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+    )
+    .await?;
+    Ok(id)
+}
+
+#[tokio::test]
+async fn test_task_state_insert_and_get_latest() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_test_job(&pool, "prod", "deploy").await?;
+
+    // No snapshot yet
+    let none = TaskStateRepo::get_latest(&pool, "prod", "deploy").await?;
+    assert!(none.is_none());
+
+    // Insert first snapshot
+    let key1 = "state/prod/deploy/snap1.tar.gz";
+    let _id1 = TaskStateRepo::insert(&pool, "prod", "deploy", job_id, key1, 100, false).await?;
+
+    let latest = TaskStateRepo::get_latest(&pool, "prod", "deploy")
+        .await?
+        .expect("should find latest");
+    assert_eq!(latest.storage_key, key1);
+    assert_eq!(latest.workspace, "prod");
+    assert_eq!(latest.task_name, "deploy");
+    assert_eq!(latest.job_id, Some(job_id));
+    assert_eq!(latest.size_bytes, 100);
+    assert!(!latest.has_json);
+
+    // Insert second snapshot — must become the latest
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let key2 = "state/prod/deploy/snap2.tar.gz";
+    let _id2 = TaskStateRepo::insert(&pool, "prod", "deploy", job_id, key2, 200, true).await?;
+
+    let latest = TaskStateRepo::get_latest(&pool, "prod", "deploy")
+        .await?
+        .expect("should find latest after second insert");
+    assert_eq!(latest.storage_key, key2);
+    assert_eq!(latest.size_bytes, 200);
+    assert!(latest.has_json);
+
+    // Different workspace/task returns None
+    let none = TaskStateRepo::get_latest(&pool, "staging", "deploy").await?;
+    assert!(none.is_none());
+    let none = TaskStateRepo::get_latest(&pool, "prod", "other-task").await?;
+    assert!(none.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_state_get_by_id() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_test_job(&pool, "ws", "my-task").await?;
+    let key = "state/ws/my-task/abc.tar.gz";
+    let snap_id = TaskStateRepo::insert(&pool, "ws", "my-task", job_id, key, 512, true).await?;
+
+    // Get by known ID
+    let row = TaskStateRepo::get(&pool, snap_id)
+        .await?
+        .expect("snapshot should exist");
+    assert_eq!(row.id, snap_id);
+    assert_eq!(row.workspace, "ws");
+    assert_eq!(row.task_name, "my-task");
+    assert_eq!(row.storage_key, key);
+    assert_eq!(row.size_bytes, 512);
+    assert!(row.has_json);
+    assert_eq!(row.job_id, Some(job_id));
+
+    // Get by random UUID returns None
+    let missing = TaskStateRepo::get(&pool, Uuid::new_v4()).await?;
+    assert!(missing.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_state_list() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_test_job(&pool, "ws", "batch").await?;
+
+    // Insert 3 snapshots with distinct timestamps
+    for i in 0..3 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let key = format!("state/ws/batch/snap{}.tar.gz", i);
+        TaskStateRepo::insert(&pool, "ws", "batch", job_id, &key, i as i64 * 10, false).await?;
+    }
+
+    // List returns all 3 ordered newest-first
+    let rows = TaskStateRepo::list(&pool, "ws", "batch").await?;
+    assert_eq!(rows.len(), 3);
+    // Verify descending created_at ordering
+    for pair in rows.windows(2) {
+        assert!(pair[0].created_at >= pair[1].created_at);
+    }
+
+    // Listing a different workspace returns empty
+    let other = TaskStateRepo::list(&pool, "other-ws", "batch").await?;
+    assert!(other.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_state_prune() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_test_job(&pool, "ws", "prune-task").await?;
+
+    // Insert 5 snapshots
+    let mut keys = Vec::new();
+    for i in 0..5 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let key = format!("state/ws/prune-task/snap{}.tar.gz", i);
+        TaskStateRepo::insert(&pool, "ws", "prune-task", job_id, &key, 10, false).await?;
+        keys.push(key);
+    }
+
+    // Prune keeping 2 — should delete 3 oldest
+    let deleted = TaskStateRepo::prune(&pool, "ws", "prune-task", 2).await?;
+    assert_eq!(deleted.len(), 3, "prune(keep=2) should delete 3 of 5");
+
+    // Only 2 rows remain
+    let remaining = TaskStateRepo::list(&pool, "ws", "prune-task").await?;
+    assert_eq!(remaining.len(), 2);
+
+    // The 2 newest must remain; the 3 oldest must be in deleted keys
+    let remaining_keys: std::collections::HashSet<&str> =
+        remaining.iter().map(|r| r.storage_key.as_str()).collect();
+    for key in &deleted {
+        assert!(!remaining_keys.contains(key.as_str()));
+    }
+
+    // Prune with keep > total returns empty vec (nothing to delete)
+    let deleted2 = TaskStateRepo::prune(&pool, "ws", "prune-task", 10).await?;
+    assert!(deleted2.is_empty());
+
+    // Still 2 rows
+    let remaining2 = TaskStateRepo::list(&pool, "ws", "prune-task").await?;
+    assert_eq!(remaining2.len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_state_delete_all() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_test_job(&pool, "ws", "task-a").await?;
+    let job_id_b = create_test_job(&pool, "ws", "task-b").await?;
+
+    // Insert 3 snapshots for task-a
+    for i in 0..3 {
+        let key = format!("state/ws/task-a/snap{}.tar.gz", i);
+        TaskStateRepo::insert(&pool, "ws", "task-a", job_id, &key, 10, false).await?;
+    }
+
+    // Insert 2 snapshots for task-b
+    for i in 0..2 {
+        let key = format!("state/ws/task-b/snap{}.tar.gz", i);
+        TaskStateRepo::insert(&pool, "ws", "task-b", job_id_b, &key, 10, false).await?;
+    }
+
+    // delete_all for task-a returns 3 keys
+    let deleted = TaskStateRepo::delete_all(&pool, "ws", "task-a").await?;
+    assert_eq!(deleted.len(), 3);
+
+    // task-a is gone
+    let task_a_rows = TaskStateRepo::list(&pool, "ws", "task-a").await?;
+    assert!(task_a_rows.is_empty());
+
+    // task-b still has 2 rows
+    let task_b_rows = TaskStateRepo::list(&pool, "ws", "task-b").await?;
+    assert_eq!(task_b_rows.len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_state_job_fk_on_delete_set_null() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_test_job(&pool, "ws", "fk-task").await?;
+    let key = "state/ws/fk-task/snap.tar.gz";
+    let snap_id = TaskStateRepo::insert(&pool, "ws", "fk-task", job_id, key, 100, false).await?;
+
+    // Verify FK is set
+    let row = TaskStateRepo::get(&pool, snap_id)
+        .await?
+        .expect("snapshot must exist before deletion");
+    assert_eq!(row.job_id, Some(job_id));
+
+    // Delete the job — cascade behavior is ON DELETE SET NULL
+    sqlx::query("DELETE FROM job WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+    // Snapshot must still exist with job_id = NULL
+    let row = TaskStateRepo::get(&pool, snap_id)
+        .await?
+        .expect("snapshot must survive job deletion");
+    assert!(
+        row.job_id.is_none(),
+        "job_id must be NULL after referenced job is deleted"
+    );
+    assert_eq!(row.storage_key, key);
 
     Ok(())
 }

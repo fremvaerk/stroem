@@ -62,6 +62,10 @@ pub struct RunConfig {
     pub interpreter: Option<String>,
     /// CLI arguments to pass to the script (already Tera-rendered).
     pub args: Vec<String>,
+    /// Path to previous state directory (mounted read-only at /state).
+    pub state_dir: Option<String>,
+    /// Path to new state output directory (mounted read-write at /state-out).
+    pub state_out_dir: Option<String>,
 }
 
 /// A callback for receiving log lines as they're produced
@@ -104,6 +108,14 @@ pub fn parse_output_line(line: &str) -> Option<serde_json::Value> {
     serde_json::from_str(json_str).ok()
 }
 
+/// Parse a "STATE:{json}" or "STATE: {json}" line into a JSON value.
+pub fn parse_state_line(line: &str) -> Option<serde_json::Value> {
+    let json_str = line
+        .strip_prefix("STATE: ")
+        .or_else(|| line.strip_prefix("STATE:"))?;
+    serde_json::from_str(json_str).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +142,28 @@ mod tests {
     fn test_parse_output_line_invalid_json() {
         assert_eq!(parse_output_line("OUTPUT: not json"), None);
         assert_eq!(parse_output_line("OUTPUT:not json"), None);
+    }
+
+    #[test]
+    fn test_parse_state_line_with_space() {
+        let result = parse_state_line(r#"STATE: {"cursor": "abc123"}"#);
+        assert_eq!(result, Some(json!({"cursor": "abc123"})));
+    }
+
+    #[test]
+    fn test_parse_state_line_without_space() {
+        let result = parse_state_line(r#"STATE:{"count": 42}"#);
+        assert_eq!(result, Some(json!({"count": 42})));
+    }
+
+    #[test]
+    fn test_parse_state_line_no_match() {
+        assert_eq!(parse_state_line("some random log line"), None);
+        assert_eq!(parse_state_line("OUTPUT: {\"key\": 1}"), None);
+    }
+
+    #[test]
+    fn test_parse_state_line_invalid_json() {
+        assert_eq!(parse_state_line("STATE: not json"), None);
     }
 }

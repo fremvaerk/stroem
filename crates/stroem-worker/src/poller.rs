@@ -51,6 +51,42 @@ fn drain_log_buffer(buffer: &Mutex<Vec<serde_json::Value>>) -> Vec<serde_json::V
     buf.drain(..).collect()
 }
 
+/// Extract a gzipped tarball into a destination directory.
+fn extract_state_tarball(data: &[u8], dest: &std::path::Path) -> anyhow::Result<()> {
+    use flate2::read::GzDecoder;
+    use std::io::Cursor;
+    let decoder = GzDecoder::new(Cursor::new(data));
+    let mut archive = tar::Archive::new(decoder);
+    archive
+        .unpack(dest)
+        .context("Failed to unpack state tarball")?;
+    Ok(())
+}
+
+/// Build a gzipped tarball from a directory's contents.
+fn build_state_tarball(dir: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    {
+        let mut archive = tar::Builder::new(&mut encoder);
+        archive
+            .append_dir_all(".", dir)
+            .context("Failed to create state tarball")?;
+        archive.finish().context("Failed to finish state tarball")?;
+    }
+    encoder
+        .finish()
+        .context("Failed to finish gzip compression")
+}
+
+/// Returns true if the directory contains at least one entry (file or subdirectory).
+fn dir_has_content(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut rd| rd.next().is_some())
+        .unwrap_or(false)
+}
+
 /// Execute a claimed step: download workspace, report start, run with log buffering, report result.
 ///
 /// This function owns the claimed step and drives the full execution lifecycle. It is spawned as
@@ -211,6 +247,65 @@ pub(crate) async fn execute_claimed_step(
         }
     });
 
+    // ── Task state snapshot: create temp dirs and download previous state ────
+    let state_temp = match tempfile::TempDir::new() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to create state temp dir, state will be unavailable: {:#}",
+                e
+            );
+            None
+        }
+    };
+    let (state_dir_path, state_out_dir_path) = if let Some(ref temp) = state_temp {
+        let sd = temp.path().join("state");
+        let sod = temp.path().join("state-out");
+        let _ = std::fs::create_dir_all(&sd);
+        let _ = std::fs::create_dir_all(&sod);
+        (Some(sd), Some(sod))
+    } else {
+        (None, None)
+    };
+
+    // Download previous state snapshot if the server indicates one exists
+    if step.state_storage_key.is_some() {
+        if let Some(ref sd) = state_dir_path {
+            match client
+                .download_state_tarball(&step.workspace, &step.task_name)
+                .await
+            {
+                Ok(Some(bytes)) => {
+                    if let Err(e) = extract_state_tarball(&bytes, sd) {
+                        tracing::warn!("Failed to extract state tarball: {:#}", e);
+                    } else {
+                        tracing::debug!(
+                            "Extracted state snapshot for {}/{}",
+                            step.workspace,
+                            step.task_name
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to download state for {}/{}, continuing with empty: {:#}",
+                        step.workspace,
+                        step.task_name,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    let state_dir_str = state_dir_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let state_out_dir_str = state_out_dir_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+
     // Execute the step inside an inner spawn to catch panics
     let inner_executor = executor.clone();
     let inner_step = step.clone();
@@ -218,11 +313,15 @@ pub(crate) async fn execute_claimed_step(
     let inner_buffer = log_buffer.clone();
     let inner_cancel = step_cancel.clone();
     let inner_client = client.clone();
+    let inner_state_dir = state_dir_str.clone();
+    let inner_state_out_dir = state_out_dir_str.clone();
     let exec_handle = tokio::spawn(async move {
         inner_executor
             .execute_step(
                 &inner_step,
                 &inner_ws,
+                inner_state_dir.as_deref(),
+                inner_state_out_dir.as_deref(),
                 inner_buffer,
                 inner_cancel,
                 &inner_client,
@@ -285,6 +384,25 @@ pub(crate) async fn execute_claimed_step(
     log_cancel.cancel();
     // Wait for log pusher to finish (timeout prevents hanging if something goes wrong)
     let _ = tokio::time::timeout(Duration::from_secs(5), log_handle).await;
+
+    // ── Collect STATE: lines BEFORE draining the log buffer ─────────────────
+    // The drain below empties the buffer, so we must extract STATE: entries first.
+    let state_entries: Vec<serde_json::Value> = {
+        match log_buffer.lock() {
+            Ok(buffer) => buffer
+                .iter()
+                .filter(|entry| entry.get("stream").and_then(|s| s.as_str()) == Some("stdout"))
+                .filter_map(|entry| {
+                    entry
+                        .get("line")
+                        .and_then(|l| l.as_str())
+                        .and_then(stroem_runner::parse_state_line)
+                })
+                .collect(),
+            Err(_) => vec![],
+        }
+    };
+
     // Push any lines that accumulated between the last flush and shutdown
     let remaining = drain_log_buffer(&log_buffer);
     if !remaining.is_empty() {
@@ -293,6 +411,60 @@ pub(crate) async fn execute_claimed_step(
             .await
         {
             tracing::warn!("Failed to push final logs: {:#}", e);
+        }
+    }
+
+    // ── Upload new state if /state-out has content ───────────────────────────
+    if result.is_ok() {
+        if let Some(ref sod) = state_out_dir_path {
+            if !state_entries.is_empty() {
+                // Deep-merge STATE: lines — later entries overwrite earlier ones for the same key
+                let mut merged = serde_json::Map::new();
+                for val in &state_entries {
+                    if let Some(obj) = val.as_object() {
+                        for (k, v) in obj {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                let state_json_path = sod.join("state.json");
+                match serde_json::to_vec_pretty(&serde_json::Value::Object(merged)) {
+                    Ok(json_bytes) => {
+                        if let Err(e) = std::fs::write(&state_json_path, json_bytes) {
+                            tracing::warn!("Failed to write state.json: {:#}", e);
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to serialize state.json: {:#}", e),
+                }
+            }
+
+            if dir_has_content(sod) {
+                match build_state_tarball(sod) {
+                    Ok(tarball_bytes) => {
+                        let has_json = sod.join("state.json").exists();
+                        if let Err(e) = client
+                            .upload_state_tarball(
+                                &step.workspace,
+                                &step.task_name,
+                                step.job_id,
+                                tarball_bytes,
+                                has_json,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to upload state snapshot: {:#}", e);
+                        } else {
+                            tracing::info!(
+                                "Uploaded state snapshot for {}/{} (job {})",
+                                step.workspace,
+                                step.task_name,
+                                step.job_id
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to build state tarball: {:#}", e),
+                }
+            }
         }
     }
 
@@ -707,6 +879,56 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "connection refused");
     }
 
+    // ─── State tarball tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_dir_has_content_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(!super::dir_has_content(dir.path()));
+    }
+
+    #[test]
+    fn test_dir_has_content_with_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "hello").unwrap();
+        assert!(super::dir_has_content(dir.path()));
+    }
+
+    #[test]
+    fn test_state_tarball_roundtrip() {
+        let src = tempfile::TempDir::new().unwrap();
+        std::fs::write(src.path().join("state.json"), r#"{"key":"val"}"#).unwrap();
+        std::fs::write(src.path().join("cert.pem"), "cert-data").unwrap();
+
+        let tarball = super::build_state_tarball(src.path()).unwrap();
+
+        let dst = tempfile::TempDir::new().unwrap();
+        super::extract_state_tarball(&tarball, dst.path()).unwrap();
+
+        let json = std::fs::read_to_string(dst.path().join("state.json")).unwrap();
+        assert_eq!(json, r#"{"key":"val"}"#);
+        let cert = std::fs::read_to_string(dst.path().join("cert.pem")).unwrap();
+        assert_eq!(cert, "cert-data");
+    }
+
+    #[test]
+    fn test_extract_state_tarball_malformed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = super::extract_state_tarball(&[0x00, 0x01, 0x02], dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_state_tarball_empty_dir() {
+        // An empty directory should still produce a valid (empty) tarball.
+        let src = tempfile::TempDir::new().unwrap();
+        let tarball = super::build_state_tarball(src.path()).unwrap();
+        // A valid gzip stream starts with the magic bytes 0x1f 0x8b.
+        assert!(tarball.len() >= 2);
+        assert_eq!(tarball[0], 0x1f);
+        assert_eq!(tarball[1], 0x8b);
+    }
+
     // --- compute_poll_backoff tests ---
 
     #[test]
@@ -922,6 +1144,8 @@ mod tests {
                 agent_state: None,
                 agent_tool_tasks: None,
                 event_source_config: None,
+                state_storage_key: None,
+                state_has_json: None,
             }
         }
 

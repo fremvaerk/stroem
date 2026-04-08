@@ -187,11 +187,12 @@ mod tests {
             acl: None,
             mcp: None,
             agents: None,
+            state_storage: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
         let log_storage = LogStorage::new(log_dir);
         let pool = PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
-        AppState::new(pool, mgr, config, log_storage, HashMap::new())
+        AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
     }
 
     #[test]

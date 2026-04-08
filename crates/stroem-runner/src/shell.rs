@@ -329,6 +329,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         }
     }
 
@@ -505,6 +507,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         // spawn will fail because the working directory doesn't exist, or return non-zero
         let result = runner.execute(config, None, CancellationToken::new()).await;

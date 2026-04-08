@@ -50,6 +50,12 @@ pub struct ClaimedStep {
     /// Event source configuration, present when this is an event source consumer job.
     #[serde(default)]
     pub event_source_config: Option<serde_json::Value>,
+    /// Storage key for the previous state snapshot (worker downloads to populate /state).
+    #[serde(default)]
+    pub state_storage_key: Option<String>,
+    /// Whether the previous state snapshot contains a structured state.json file.
+    #[serde(default)]
+    pub state_has_json: Option<bool>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -75,6 +81,8 @@ struct ClaimResponse {
     pub agent_state: Option<serde_json::Value>,
     pub agent_tool_tasks: Option<serde_json::Value>,
     pub event_source_config: Option<serde_json::Value>,
+    pub state_storage_key: Option<String>,
+    pub state_has_json: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -258,6 +266,8 @@ impl ServerClient {
             agent_state: resp.agent_state,
             agent_tool_tasks: resp.agent_tool_tasks,
             event_source_config: resp.event_source_config,
+            state_storage_key: resp.state_storage_key,
+            state_has_json: resp.state_has_json,
         };
 
         Ok(Some(step))
@@ -549,6 +559,65 @@ impl ServerClient {
         Ok(resp.job_id)
     }
 
+    /// Download the latest state tarball for a task.
+    /// Returns `None` if no state exists (server returns 204 No Content).
+    #[tracing::instrument(skip(self))]
+    pub async fn download_state_tarball(
+        &self,
+        workspace: &str,
+        task_name: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}/worker/state/{}/{}", self.base_url, workspace, task_name);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .timeout(self.download_timeout)
+            .send()
+            .await
+            .context("Failed to download state tarball")?;
+
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+
+        let response = Self::check_response(response, "Download state").await?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read state tarball body")?;
+        Ok(Some(bytes.to_vec()))
+    }
+
+    /// Upload a new state tarball after step completion.
+    /// `has_json` indicates whether the tarball contains a structured `state.json` file.
+    #[tracing::instrument(skip(self, data))]
+    pub async fn upload_state_tarball(
+        &self,
+        workspace: &str,
+        task_name: &str,
+        job_id: Uuid,
+        data: Vec<u8>,
+        has_json: bool,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/worker/state/{}/{}/{}?has_json={}",
+            self.base_url, workspace, task_name, job_id, has_json
+        );
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/gzip")
+            .body(data)
+            .send()
+            .await
+            .context("Failed to upload state tarball")?;
+
+        Self::check_response(response, "Upload state").await?;
+        Ok(())
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(
@@ -702,6 +771,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&step_with_revision).unwrap();
         assert_eq!(json["revision"], "deadbeef");

@@ -93,11 +93,16 @@ impl StepExecutor {
 
     /// Execute a claimed step and return the result.
     /// `workspace_dir` is the path to the extracted workspace for this step's workspace.
+    /// `state_dir` is the path to the previous state snapshot directory (mounted read-only at /state).
+    /// `state_out_dir` is the path to the new state output directory (mounted read-write at /state-out).
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, client, log_buffer, cancel_token))]
     pub async fn execute_step(
         &self,
         step: &ClaimedStep,
         workspace_dir: &str,
+        state_dir: Option<&str>,
+        state_out_dir: Option<&str>,
         log_buffer: Arc<Mutex<Vec<serde_json::Value>>>,
         cancel_token: CancellationToken,
         client: &ServerClient,
@@ -112,6 +117,21 @@ impl StepExecutor {
         let mut config = self
             .build_run_config(step, workspace_dir)
             .context("Failed to build run config")?;
+
+        // Populate state paths in the config for runners that support them
+        config.state_dir = state_dir.map(|s| s.to_string());
+        config.state_out_dir = state_out_dir.map(|s| s.to_string());
+
+        // Only set state env vars for WithWorkspace mode — NoWorkspace (container actions)
+        // don't have the state directories bind-mounted.
+        if config.runner_mode == stroem_runner::RunnerMode::WithWorkspace {
+            if let Some(ref sd) = config.state_dir {
+                config.env.insert("STATE_DIR".to_string(), sd.clone());
+            }
+            if let Some(ref sod) = config.state_out_dir {
+                config.env.insert("STATE_OUT_DIR".to_string(), sod.clone());
+            }
+        }
 
         // Resolve ref+ secret references in env vars via vals CLI
         crate::secrets::resolve_secrets(&mut config.env)
@@ -425,6 +445,8 @@ impl StepExecutor {
             dependencies,
             interpreter,
             args,
+            state_dir: None,
+            state_out_dir: None,
         })
     }
 }
@@ -455,6 +477,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         }
     }
 
@@ -737,6 +761,8 @@ mod tests {
             .execute_step(
                 &step,
                 "/tmp",
+                None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,
@@ -768,7 +794,15 @@ mod tests {
         })));
 
         let result = executor
-            .execute_step(&step, "/tmp", log_buffer, CancellationToken::new(), &client)
+            .execute_step(
+                &step,
+                "/tmp",
+                None,
+                None,
+                log_buffer,
+                CancellationToken::new(),
+                &client,
+            )
             .await
             .unwrap();
 
@@ -792,6 +826,8 @@ mod tests {
             .execute_step(
                 &step,
                 "/tmp",
+                None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,
@@ -825,6 +861,8 @@ mod tests {
             .execute_step(
                 &step,
                 "/tmp",
+                None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,

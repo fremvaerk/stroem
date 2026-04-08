@@ -14,7 +14,8 @@ Phase 5c: While loops.
 Phase 5d complete: Approval gates (`type: approval`, `suspended` status, approve/reject API).
 Phase 5e complete: Event source triggers (long-running queue consumers via stdout JSON-line protocol).
 Phase 5f complete: Retry mechanism (step/action in-place retry + task-level job retry).
-Phase 6: Shared storage & worker affinity.
+Phase 6a complete: Task state snapshots (immutable state persistence across runs via `STATE:` protocol + `/state` mount).
+Phase 6b: Worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
 ## Architecture
@@ -196,6 +197,20 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Sequential: `[i+1]` promoted after `[i]` completes. Output aggregated as ordered array on placeholder.
 - `when` + `for_each`: `when` evaluated first; if falsy, step skipped without expansion
 - Empty array → skipped; non-array → fails; instance failure → placeholder fails (unless `continue_on_failure`)
+
+### Task State Snapshots
+- Immutable state snapshots persisted across job runs per workspace+task
+- `STATE:` stdout protocol: `STATE: {"key": "value"}` — structured state saved as `state.json` in snapshot tarball
+- `/state` directory: previous snapshot mounted read-only, `/state-out`: writable directory for new state
+- `StateArchive` trait with S3 and Local implementations, separate from `LogArchive`
+- DB: `task_state` table tracks snapshots (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, created_at)
+- State resolved at **claim time** (not job creation) — enables intra-job state propagation for sequential steps
+- Worker API: `GET /worker/state/{ws}/{task}` (download), `POST /worker/state/{ws}/{task}/{job_id}` (upload)
+- Tera templates: `{{ state.key }}` and `when: "not state or state.days_remaining < 30"`
+- Config: optional `state_storage` section (prefix, max_snapshots, optional archive override). Defaults to log archive backend.
+- Retention: `max_snapshots` per task (default 5), pruned on upload
+- Runners: Shell (env vars), Docker (bind mounts `/state:ro` + `/state-out:rw`), Kube (emptyDir volumes)
+- Always available, no opt-in. Upload only triggered if `/state-out` has content or `STATE:` lines emitted.
 
 ### Retry Mechanism
 - **Two layers**: step/action retry (in-place) and task retry (new job).

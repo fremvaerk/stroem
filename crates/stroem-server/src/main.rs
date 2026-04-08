@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         config.clone(),
         log_storage,
         oidc_providers,
+        None,
     );
 
     // Start background tasks

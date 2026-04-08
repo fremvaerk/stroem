@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
-use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, TaskStateRepo, WorkerRepo};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +86,18 @@ pub struct ClaimResponse {
     /// and reads env directly from `event_source_config.env`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_source_config: Option<serde_json::Value>,
+
+    // ── Task state fields ──────────────────────────────────────────
+    /// Storage key for the most recent task state snapshot (if any).
+    /// Workers download this via `GET /worker/state/{ws}/{task}` to restore
+    /// the `/state` directory before running the step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_storage_key: Option<String>,
+    /// Whether the previous state snapshot contains a structured `state.json`
+    /// sidecar. When `true`, the contents are also available as `{{ state.* }}`
+    /// in Tera templates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_has_json: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +277,8 @@ pub async fn claim_job(
                 agent_state: None,
                 agent_tool_tasks: None,
                 event_source_config: None,
+                state_storage_key: None,
+                state_has_json: None,
             })
             .into_response());
         }
@@ -306,6 +320,49 @@ pub async fn claim_job(
         .map(|s| (s.step_name.clone(), s.output.clone()))
         .collect();
 
+    // ── Task state snapshot lookup ─────────────────────────────────────────
+    // Resolve the latest snapshot so the worker knows to download it and so
+    // the Tera render context can expose `{{ state.* }}` variables.
+    let (state_storage_key, state_has_json, state_json_value) = if state.state_storage.is_some() {
+        match TaskStateRepo::get_latest(&state.pool, &job.workspace, &job.task_name).await {
+            Ok(Some(snapshot)) => {
+                // If the snapshot carries a structured JSON sidecar, retrieve and
+                // parse it now so it can be injected into the Tera context.
+                let json_value = if snapshot.has_json {
+                    if let Some(ref storage) = state.state_storage {
+                        match storage.retrieve(&snapshot.storage_key).await {
+                            Ok(Some(data)) => super::state::extract_state_json(&data),
+                            Ok(None) => None,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to retrieve state snapshot for Tera context: {:#}",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                (
+                    Some(snapshot.storage_key),
+                    Some(snapshot.has_json),
+                    json_value,
+                )
+            }
+            Ok(None) => (None, None, None),
+            Err(e) => {
+                tracing::warn!("Failed to look up task state snapshot: {:#}", e);
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
+
     // Render step input and apply action defaults
     let rendered_input = if let Some(ref workspace) = ws_config {
         let ctx = rendering::RenderContext {
@@ -314,6 +371,7 @@ pub async fn claim_job(
             step: &step,
             job_input: job.input.as_ref(),
             completed_steps: &completed_steps,
+            state_json: state_json_value.as_ref(),
         };
 
         let raw_input = match rendering::render_step_input(&ctx) {
@@ -541,6 +599,8 @@ pub async fn claim_job(
         agent_state: agent_state_val,
         agent_tool_tasks,
         event_source_config,
+        state_storage_key,
+        state_has_json,
     })
     .into_response())
 }
@@ -841,6 +901,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -924,6 +986,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -952,6 +1016,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -980,6 +1046,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -1011,6 +1079,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -1055,6 +1125,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: Some(config),
+            state_storage_key: None,
+            state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_source_config"]["target_task"], "process-event");

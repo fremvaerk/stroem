@@ -227,6 +227,7 @@ impl TestEnv {
             acl: None,
             mcp: None,
             agents: None,
+            state_storage: None,
         };
 
         // 4. Load workspaces using real FolderSource
@@ -245,6 +246,7 @@ impl TestEnv {
             server_config.clone(),
             log_storage,
             HashMap::new(),
+            None,
         );
 
         // 6. Start background tasks

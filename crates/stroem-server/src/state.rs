@@ -4,6 +4,7 @@ use crate::job_completion::JobCompletionNotifier;
 use crate::log_broadcast::LogBroadcast;
 use crate::log_storage::LogStorage;
 use crate::oidc::OidcProvider;
+use crate::state_storage::StateStorage;
 use crate::tarball_cache::TarballCache;
 use crate::workspace::WorkspaceManager;
 use sqlx::PgPool;
@@ -76,6 +77,8 @@ pub struct AppState {
     /// Unix timestamp (seconds) of the last retention cleanup run.
     /// Initialized to 0 so the first sweep always triggers a cleanup.
     pub last_retention_run: Arc<AtomicI64>,
+    /// Optional task state snapshot storage (None when feature is not configured).
+    pub state_storage: Option<Arc<StateStorage>>,
 }
 
 impl AppState {
@@ -86,6 +89,7 @@ impl AppState {
         config: ServerConfig,
         log_storage: LogStorage,
         oidc_providers: HashMap<String, OidcProvider>,
+        state_storage: Option<StateStorage>,
     ) -> Self {
         let acl = AclEvaluator::new(config.acl.clone());
         // Place tarball cache alongside log storage directory
@@ -107,6 +111,7 @@ impl AppState {
             cancelled_jobs: Arc::new(std::sync::RwLock::new(HashSet::new())),
             background_tasks: BackgroundTasks::new(),
             last_retention_run: Arc::new(AtomicI64::new(0)),
+            state_storage: state_storage.map(Arc::new),
         }
     }
 
@@ -169,11 +174,12 @@ mod tests {
             acl: None,
             mcp: None,
             agents: None,
+            state_storage: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
         let log_storage = LogStorage::new(log_dir);
         let pool = PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
-        AppState::new(pool, mgr, config, log_storage, HashMap::new())
+        AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
     }
 
     #[tokio::test]

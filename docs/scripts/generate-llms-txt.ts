@@ -99,6 +99,7 @@ const sections: { file: string; title: string }[] = [
   { file: "examples/hello-world.md", title: "Example: Hello World" },
   { file: "examples/deploy-pipeline.md", title: "Example: Deploy Pipeline" },
   { file: "examples/ci-pipeline.md", title: "Example: CI Pipeline" },
+  { file: "guides/task-state.md", title: "Task State Snapshots" },
   { file: "guides/mcp.md", title: "MCP Integration" },
 ];
 

@@ -13,6 +13,9 @@ pub struct RenderContext<'a> {
     pub job_input: Option<&'a serde_json::Value>,
     /// Completed steps as (step_name, output) pairs
     pub completed_steps: &'a [(String, Option<serde_json::Value>)],
+    /// Structured state from the previous task state snapshot (state.json contents).
+    /// Available in Tera templates as `{{ state.some_key }}`.
+    pub state_json: Option<&'a serde_json::Value>,
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -59,6 +62,12 @@ pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value
         if let Ok(secrets_value) = serde_json::to_value(&ctx.workspace.secrets) {
             context.insert("secret".to_string(), secrets_value);
         }
+    }
+
+    // Inject the previous task state into the template context so step inputs
+    // can reference `{{ state.some_key }}`.
+    if let Some(state_json) = ctx.state_json {
+        context.insert("state".to_string(), state_json.clone());
     }
 
     // Add completed step outputs to context.
@@ -479,6 +488,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &[],
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -515,6 +525,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &[],
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -553,6 +564,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &[],
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -589,6 +601,7 @@ mod tests {
             step: &step,
             job_input: Some(&job_input),
             completed_steps: &[],
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -629,6 +642,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &completed_steps,
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -671,6 +685,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &completed_steps,
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -709,6 +724,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &[],
+            state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -1068,6 +1084,7 @@ mod tests {
             step: &step,
             job_input: Some(&job_input),
             completed_steps: &[],
+            state_json: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1105,6 +1122,7 @@ mod tests {
             step: &step,
             job_input: None,
             completed_steps: &[],
+            state_json: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1156,6 +1174,7 @@ mod tests {
             step: &step,
             job_input: Some(&job_input),
             completed_steps: &[],
+            state_json: None,
         };
         // rendered_input only contains "sql"
         let rendered_input = Some(json!({"sql": "SELECT 1"}));
@@ -1352,5 +1371,92 @@ mod tests {
         let env = result["env"].as_object().unwrap();
         assert_eq!(env["ITEM"], "batch-42");
         assert_eq!(env["INDEX"], "3");
+    }
+
+    // -------------------------------------------------------------------------
+    // state_json injection
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_render_step_input_with_state_json() {
+        // Flow step input template references {{ state.cursor }}
+        let flow_input = HashMap::from([
+            ("cursor".to_string(), json!("{{ state.cursor }}")),
+            ("count".to_string(), json!("{{ state.count }}")),
+        ]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow.insert(
+            "consume".to_string(),
+            make_flow_step("my-action", flow_input),
+        );
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("consume", None);
+        let state_json = json!({"cursor": "abc123", "count": 42});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: Some(&state_json),
+        };
+
+        let result = render_step_input(&ctx).unwrap().unwrap();
+        // Tera renders numbers as strings in template context
+        assert_eq!(result["cursor"], "abc123");
+    }
+
+    #[test]
+    fn test_render_step_input_state_json_none_does_not_inject() {
+        // When state_json is None, "state" key is absent; a step NOT referencing
+        // state should still render normally.
+        let flow_input = HashMap::from([("greeting".to_string(), json!("Hello {{ input.name }}"))]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow
+            .insert("greet".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("greet", None);
+        let job_input = json!({"name": "World"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: Some(&job_input),
+            completed_steps: &[],
+            state_json: None,
+        };
+
+        let result = render_step_input(&ctx).unwrap().unwrap();
+        assert_eq!(result["greeting"], "Hello World");
     }
 }

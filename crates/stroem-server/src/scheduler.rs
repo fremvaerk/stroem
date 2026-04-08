@@ -840,10 +840,11 @@ mod tests {
             acl: None,
             mcp: None,
             agents: None,
+            state_storage: None,
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
-        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
+        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new(), None);
 
         let handle = start(state, cancel.clone());
 

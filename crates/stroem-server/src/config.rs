@@ -75,6 +75,28 @@ impl LogStorageConfig {
     }
 }
 
+/// Task state snapshot storage configuration (optional)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateStorageConfig {
+    /// Key prefix for state objects
+    #[serde(default = "default_state_prefix")]
+    pub prefix: String,
+    /// Max snapshots to retain per workspace + task
+    #[serde(default = "default_max_snapshots")]
+    pub max_snapshots: usize,
+    /// Optional dedicated archive backend (defaults to log_storage archive when absent)
+    pub archive: Option<ArchiveConfig>,
+}
+
+fn default_state_prefix() -> String {
+    "state/".to_string()
+}
+
+fn default_max_snapshots() -> usize {
+    5
+}
+
 /// Git auth configuration for workspace sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -323,6 +345,8 @@ pub struct ServerConfig {
     pub mcp: Option<McpConfig>,
     /// Agent provider configuration (optional)
     pub agents: Option<AgentsConfig>,
+    /// Task state snapshot configuration (optional — defaults to log archive backend)
+    pub state_storage: Option<StateStorageConfig>,
 }
 
 /// Agent provider configuration types — defined in `stroem-agent` and re-exported here.

@@ -289,12 +289,13 @@ async fn setup_with_mcp() -> Result<(
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
+        state_storage: None,
     };
 
     let workspace = mcp_test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
@@ -339,12 +340,13 @@ async fn setup_mcp_disabled() -> Result<(
         acl: None,
         mcp: None, // MCP disabled
         agents: None,
+        state_storage: None,
     };
 
     let workspace = mcp_test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
@@ -398,6 +400,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
+        state_storage: None,
     };
 
     // Seed initial user
@@ -414,7 +417,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
     let workspace = mcp_test_workspace();
     let mgr = WorkspaceManager::from_config("default", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
@@ -1150,10 +1153,11 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
+        state_storage: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new());
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
 
     // Fire hooks
     stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;

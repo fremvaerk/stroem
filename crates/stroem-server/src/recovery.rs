@@ -454,13 +454,14 @@ mod tests {
             acl: None,
             mcp: None,
             agents: None,
+            state_storage: None,
         };
 
         let ws_config = WorkspaceConfig::new();
         let mgr = WorkspaceManager::from_config("default", ws_config);
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
-        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new());
+        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new(), None);
 
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();

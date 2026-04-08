@@ -460,6 +460,8 @@ mod tests {
             agent_state: None,
             agent_tool_tasks: None,
             event_source_config: None,
+            state_storage_key: None,
+            state_has_json: None,
         }
     }
 

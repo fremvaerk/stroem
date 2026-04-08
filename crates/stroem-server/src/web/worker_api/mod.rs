@@ -1,6 +1,7 @@
 pub mod event_source;
 pub mod jobs;
 pub mod rendering;
+pub mod state;
 pub mod workspace;
 
 use crate::state::AppState;
@@ -85,6 +86,11 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
             post(event_source::emit_event).layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route("/workspace/{ws}", get(workspace::download_workspace))
+        .route("/state/{ws}/{task}", get(state::download_state))
+        .route(
+            "/state/{ws}/{task}/{job_id}",
+            post(state::upload_state).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

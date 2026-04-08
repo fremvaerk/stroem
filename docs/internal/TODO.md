@@ -986,3 +986,40 @@ Last updated: 2026-03-13.
 - [x] Update `docs/src/content/docs/reference/workflow-yaml.md` with retry fields for step, action, and task
 - [x] Add retry guide/section to `docs/src/content/docs/guides/retry.md`
 - [x] Regenerate `docs/public/llms.txt` (via generate-llms-txt.ts update + docs build)
+
+## Task State Snapshots Review (Phase 6a, 2026-04-08)
+
+### Critical (must fix)
+- [x] `STATE:` lines read from already-drained log buffer — always empty. Fixed: collect STATE: lines before the final drain.
+
+### Important (should fix)
+- [x] Kubernetes state volumes are emptyDir but never populated — documented as known limitation with comment in kubernetes.rs
+- [x] Orphaned archive blobs on DB insert failure — added compensating delete on insert failure
+- [x] `extract_state_json` aborts scan on any tarball entry error — changed to `continue` on entry errors
+- [x] S3 `retrieve` swallows all errors as "not found" — now returns `Err` for non-NoSuchKey errors
+- [x] `insert` + `prune` not atomic — added `insert_and_prune` method with transaction wrapping
+- [x] Docker NoWorkspace mode sets `STATE_DIR` env var but doesn't mount state dirs — guarded env var injection with `WithWorkspace` check
+
+### Minor
+- [x] Non-deterministic ordering on timestamp ties — added `id DESC` tiebreaker to all ORDER BY clauses
+- [x] TempDir creation failure silently disables state — added `warn` log on failure
+- [ ] Blocking tar/gzip I/O in async context — acceptable for small snapshots, consider `spawn_blocking` for large ones. (`crates/stroem-worker/src/poller.rs:55-81`)
+- [ ] No decompressed size limit — acceptable given 50MB upload limit. Low risk.
+- [x] `InMemoryStateArchive` uses `.unwrap()` on poisoned RwLock — changed to `unwrap_or_else(|e| e.into_inner())`
+- [x] `storage_key` function does not sanitize workspace/task_name — added `..` → `__` sanitization
+
+### Missing Tests
+- [x] `TaskStateRepo` integration tests — 6 tests: insert+get_latest, get_by_id, list, prune, delete_all, FK ON DELETE SET NULL
+- [ ] Worker API state endpoint tests — upload happy path, download 204/200, job ownership validation, pruning, storage-not-configured 404, stale DB reference → 204
+- [x] Tera state injection test — 2 tests: with state_json Some and None
+- [x] `extract_state_json` unit tests — 7 tests: valid, missing, invalid JSON, empty bytes, corrupt gzip, multiple files, nested path
+- [x] `build_state_tarball` / `extract_state_tarball` roundtrip test — 5 tests: dir_has_content, tarball roundtrip, malformed, empty dir
+- [x] `LocalStateArchive` unit tests — 8 tests: store/retrieve, missing key, delete, path traversal, InMemoryArchive, key format
+- [x] Docker runner state mount test — 2 tests: with state dirs, without state dirs
+- [x] Kube runner state volume test — 2 tests: with state dirs, without state dirs
+- [ ] STATE: line merge logic test — extract merge logic into testable function
+- [ ] Concurrent upload race condition test — two uploads for same task, verify invariant after both prune calls
+
+### Documentation
+- [x] Add user-facing docs in `docs/src/content/docs/guides/task-state.md` — usage, STATE: protocol, /state mount, examples
+- [x] Regenerate `docs/public/llms.txt` (added task-state.md to generate-llms-txt.ts sections)

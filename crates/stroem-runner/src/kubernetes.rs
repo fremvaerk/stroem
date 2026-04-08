@@ -143,15 +143,29 @@ impl KubeRunner {
                     "command": cmd,
                     "env": env,
                     "workingDir": "/workspace",
-                    "volumeMounts": [{
-                        "name": "workspace",
-                        "mountPath": "/workspace",
-                    }],
+                    "volumeMounts": if config.state_dir.is_some() {
+                        serde_json::json!([
+                            {"name": "workspace", "mountPath": "/workspace"},
+                            {"name": "state-vol", "mountPath": "/state", "readOnly": true},
+                            {"name": "state-out-vol", "mountPath": "/state-out"},
+                        ])
+                    } else {
+                        serde_json::json!([{"name": "workspace", "mountPath": "/workspace"}])
+                    },
                 }],
-                "volumes": [{
-                    "name": "workspace",
-                    "emptyDir": {},
-                }],
+                // NOTE: State volumes are mounted as emptyDir. For Kubernetes runners, the worker
+                // cannot populate /state with the previous snapshot because pods run on remote nodes.
+                // Structured state via the STATE: stdout protocol works (carried in logs), but
+                // file-based /state content requires a future init container implementation.
+                "volumes": if config.state_dir.is_some() {
+                    serde_json::json!([
+                        {"name": "workspace", "emptyDir": {}},
+                        {"name": "state-vol", "emptyDir": {}},
+                        {"name": "state-out-vol", "emptyDir": {}},
+                    ])
+                } else {
+                    serde_json::json!([{"name": "workspace", "emptyDir": {}}])
+                },
             },
         })
     }
@@ -1508,6 +1522,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1581,6 +1597,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1631,6 +1649,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1678,6 +1698,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1744,6 +1766,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1788,6 +1812,151 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_state_volumes_present_when_state_dir_set() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: Some("/tmp/state".to_string()),
+            state_out_dir: Some("/tmp/state-out".to_string()),
+        };
+
+        let labels = HashMap::new();
+        let pod = runner
+            .build_pod_spec("test-state-pod", &config, "default", labels)
+            .unwrap();
+
+        let spec = pod.spec.unwrap();
+
+        // Must have state-vol and state-out-vol in volumes
+        let volumes = spec.volumes.unwrap();
+        let vol_names: Vec<&str> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(
+            vol_names.contains(&"state-vol"),
+            "state-vol must be in volumes, got: {:?}",
+            vol_names
+        );
+        assert!(
+            vol_names.contains(&"state-out-vol"),
+            "state-out-vol must be in volumes, got: {:?}",
+            vol_names
+        );
+
+        // Step container must have /state (readOnly) and /state-out mounts
+        let step_container = spec
+            .containers
+            .iter()
+            .find(|c| c.name == "step")
+            .expect("step container must exist");
+        let mounts = step_container
+            .volume_mounts
+            .as_ref()
+            .expect("step container must have volume mounts");
+        let mount_paths: Vec<(&str, bool)> = mounts
+            .iter()
+            .map(|m| (m.mount_path.as_str(), m.read_only.unwrap_or(false)))
+            .collect();
+        assert!(
+            mount_paths.iter().any(|(p, ro)| *p == "/state" && *ro),
+            "/state must be mounted read-only, mounts: {:?}",
+            mount_paths
+        );
+        assert!(
+            mount_paths.iter().any(|(p, ro)| *p == "/state-out" && !*ro),
+            "/state-out must be mounted read-write, mounts: {:?}",
+            mount_paths
+        );
+    }
+
+    #[test]
+    fn test_no_state_volumes_when_state_dir_none() {
+        let runner = KubeRunner::new(
+            "stroem".to_string(),
+            "http://stroem-server:8080".to_string(),
+            "test-token".to_string(),
+        );
+
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "pod".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+        };
+
+        let labels = HashMap::new();
+        let pod = runner
+            .build_pod_spec("test-nostate-pod", &config, "default", labels)
+            .unwrap();
+
+        let spec = pod.spec.unwrap();
+
+        // Only the workspace volume should be present — no state volumes
+        let volumes = spec.volumes.unwrap_or_default();
+        let vol_names: Vec<&str> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(
+            !vol_names.contains(&"state-vol"),
+            "state-vol must NOT be present when state_dir is None, got: {:?}",
+            vol_names
+        );
+        assert!(
+            !vol_names.contains(&"state-out-vol"),
+            "state-out-vol must NOT be present when state_dir is None, got: {:?}",
+            vol_names
+        );
+
+        // Step container mounts must not include /state or /state-out
+        let step_container = spec
+            .containers
+            .iter()
+            .find(|c| c.name == "step")
+            .expect("step container must exist");
+        let mounts = step_container
+            .volume_mounts
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        let mount_paths: Vec<&str> = mounts.iter().map(|m| m.mount_path.as_str()).collect();
+        assert!(
+            !mount_paths
+                .iter()
+                .any(|p| *p == "/state" || *p == "/state-out"),
+            "No state mounts expected when state_dir is None, got: {:?}",
+            mount_paths
+        );
+    }
+
     /// Integration test: requires a Kubernetes cluster.
     /// Run with: cargo test -p stroem-runner --features kubernetes -- --ignored test_kube_echo
     #[tokio::test]
@@ -1820,6 +1989,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let result = runner
@@ -1854,6 +2025,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -1918,6 +2091,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -1978,6 +2153,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2019,6 +2196,8 @@ mod tests {
             dependencies: vec!["requests".to_string()],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2113,6 +2292,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         }
     }
 
@@ -2257,6 +2438,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2387,6 +2570,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2442,6 +2627,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2509,6 +2696,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2552,6 +2741,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2594,6 +2785,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3443,6 +3636,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec!["hello".to_string()],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let pod = runner.build_pod_json_with_workspace(
@@ -3489,6 +3684,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let token = CancellationToken::new();

@@ -97,6 +97,13 @@ impl DockerRunner {
                 }
                 // Mount startup scripts (if present on Docker host, otherwise empty dir)
                 binds.push("/etc/stroem/startup.d:/etc/stroem/startup.d:ro".to_string());
+                // Mount state directories when provided
+                if let Some(ref state_dir) = config.state_dir {
+                    binds.push(format!("{}:/state:ro", state_dir));
+                }
+                if let Some(ref state_out_dir) = config.state_out_dir {
+                    binds.push(format!("{}:/state-out:rw", state_out_dir));
+                }
 
                 ContainerCreateBody {
                     image: Some(image),
@@ -406,6 +413,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -450,6 +459,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -477,6 +488,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -510,6 +523,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -552,6 +567,8 @@ mod tests {
             dependencies: vec!["requests".to_string()],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -581,6 +598,8 @@ mod tests {
             dependencies: vec![],
             interpreter: Some("python3.12".to_string()),
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -610,6 +629,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -644,6 +665,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -683,6 +706,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -716,6 +741,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -751,6 +778,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -778,6 +807,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -810,6 +841,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -839,6 +872,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -884,6 +919,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -903,6 +940,73 @@ mod tests {
         );
         // No workspace bind mount in NoWorkspace mode
         assert!(container_config.host_config.is_none());
+    }
+
+    #[test]
+    fn test_state_dir_bind_mount_with_workspace() {
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/workspace".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: Some("/tmp/state".to_string()),
+            state_out_dir: Some("/tmp/state-out".to_string()),
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let binds = container_config.host_config.unwrap().binds.unwrap();
+        assert!(
+            binds.iter().any(|b| b == "/tmp/state:/state:ro"),
+            "state_dir must be bind-mounted read-only at /state, got: {:?}",
+            binds
+        );
+        assert!(
+            binds.iter().any(|b| b == "/tmp/state-out:/state-out:rw"),
+            "state_out_dir must be bind-mounted read-write at /state-out, got: {:?}",
+            binds
+        );
+    }
+
+    #[test]
+    fn test_no_state_dir_no_bind_mount() {
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/workspace".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let binds = container_config.host_config.unwrap().binds.unwrap();
+        assert!(
+            !binds.iter().any(|b| b.contains(":/state")),
+            "No state bind mounts expected when state_dir is None, got: {:?}",
+            binds
+        );
     }
 
     /// Integration test: requires Docker daemon running.
@@ -927,6 +1031,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let result = runner
@@ -955,6 +1061,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec!["hello".to_string(), "world".to_string()],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -987,6 +1095,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec!["--verbose".to_string()],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1022,6 +1132,8 @@ mod tests {
             dependencies: vec![],
             interpreter: None,
             args: vec![],
+            state_dir: None,
+            state_out_dir: None,
         };
 
         let token = CancellationToken::new();

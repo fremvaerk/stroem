@@ -63,10 +63,11 @@ fn setup_state(
         acl: None,
         mcp: None,
         agents: None,
+        state_storage: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace_config);
     let log_storage = LogStorage::new(log_dir);
-    AppState::new(pool, mgr, config, log_storage, HashMap::new())
+    AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
 }
 
 /// Build a minimal workspace config with parent-task and child-task.

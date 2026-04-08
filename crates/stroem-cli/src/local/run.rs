@@ -502,6 +502,8 @@ fn build_run_config(
         dependencies: action.dependencies.clone(),
         interpreter: action.interpreter.clone(),
         args,
+        state_dir: None,
+        state_out_dir: None,
     })
 }
 
