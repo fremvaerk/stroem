@@ -54,13 +54,12 @@ async fn mcp_auth_middleware(
 /// The middleware validates auth and stores the context in a task-local,
 /// which the handler factory reads when constructing per-request handlers.
 pub fn build_mcp_routes(state: Arc<AppState>, ct: CancellationToken) -> Router {
-    let config = StreamableHttpServerConfig {
-        stateful_mode: false,
-        json_response: true,
-        sse_keep_alive: None,
-        sse_retry: None,
-        cancellation_token: ct,
-    };
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_sse_keep_alive(None)
+        .with_sse_retry(None)
+        .with_cancellation_token(ct);
 
     let factory_state = state.clone();
     let mcp_service = StreamableHttpService::new(
