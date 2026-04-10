@@ -47,6 +47,7 @@ export default defineConfig({
               slug: "guides/secrets",
             },
             { label: "Libraries", slug: "guides/libraries" },
+            { label: "Task State", slug: "guides/task-state" },
             { label: "Event Sources", slug: "guides/event-sources" },
             { label: "Multi-Workspace", slug: "guides/multi-workspace" },
             { label: "MCP Integration", slug: "guides/mcp" },
