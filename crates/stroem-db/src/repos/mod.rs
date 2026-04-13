@@ -7,3 +7,4 @@ pub mod user;
 pub mod user_auth_link;
 pub mod user_group;
 pub mod worker;
+pub mod workspace_state;

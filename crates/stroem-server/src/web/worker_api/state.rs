@@ -11,6 +11,169 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// GET /worker/global-state/{ws} — Download the latest global workspace state snapshot.
+///
+/// Returns `200 OK` with `Content-Type: application/gzip` and an
+/// `X-Snapshot-Id` header carrying the snapshot UUID when a snapshot exists.
+///
+/// Returns `204 No Content` when no snapshot has been stored yet, or when
+/// the snapshot key recorded in the database is no longer present in the
+/// archive (stale reference).
+///
+/// Returns `404 Not Found` when state storage is not configured.
+#[tracing::instrument(skip(state))]
+pub async fn download_global_state(
+    State(state): State<Arc<AppState>>,
+    Path(workspace): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let storage = state
+        .state_storage
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
+
+    let snapshot = match stroem_db::WorkspaceStateRepo::get_latest(&state.pool, &workspace)
+        .await
+        .context("lookup latest global state snapshot")?
+    {
+        Some(s) => s,
+        None => return Ok(StatusCode::NO_CONTENT.into_response()),
+    };
+
+    let data = match storage
+        .retrieve(&snapshot.storage_key)
+        .await
+        .context("retrieve global state snapshot")?
+    {
+        Some(d) => d,
+        None => {
+            tracing::warn!(
+                snapshot_id = %snapshot.id,
+                storage_key = %snapshot.storage_key,
+                "Global state snapshot referenced in DB but not found in archive"
+            );
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/gzip".parse().unwrap());
+    if let Ok(val) = snapshot.id.to_string().parse() {
+        headers.insert("x-snapshot-id", val);
+    }
+
+    Ok((StatusCode::OK, headers, data).into_response())
+}
+
+/// POST /worker/global-state/{ws}/{job_id} — Upload a global workspace state snapshot.
+///
+/// The request body must be the raw gzip bytes of the snapshot. The
+/// `?has_json=true` query parameter can be passed when the tarball also
+/// contains a JSON sidecar file.
+///
+/// On success returns `201 Created` with `{ "snapshot_id": "<uuid>" }`.
+///
+/// The upload is rejected with `404 Not Found` when:
+/// - State storage is not configured.
+/// - The referenced job does not exist.
+///
+/// The upload is rejected with `400 Bad Request` when the job does not
+/// belong to the specified workspace.
+///
+/// Old snapshots beyond the configured retention limit are pruned from
+/// both the DB and the archive backend (best-effort, in the background).
+#[tracing::instrument(skip(state, body))]
+pub async fn upload_global_state(
+    State(state): State<Arc<AppState>>,
+    Path((workspace, job_id)): Path<(String, Uuid)>,
+    Query(query): Query<UploadStateQuery>,
+    body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    let storage = state
+        .state_storage
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
+
+    // Validate the job exists and belongs to this workspace.
+    let job = stroem_db::JobRepo::get(&state.pool, job_id)
+        .await
+        .context("lookup job for global state upload")?
+        .ok_or_else(|| AppError::NotFound(format!("Job {} not found", job_id)))?;
+
+    if job.workspace != workspace {
+        return Err(AppError::BadRequest(
+            "Job does not belong to this workspace".into(),
+        ));
+    }
+
+    // Build storage key and persist the bytes.
+    let key = storage.global_storage_key(&workspace, job_id);
+    storage
+        .store(&key, &body)
+        .await
+        .context("store global state snapshot")?;
+
+    // Record the snapshot and prune old ones atomically. If the DB write fails,
+    // delete the blob we just uploaded so no orphaned data is left behind.
+    let (snapshot_id, deleted_keys) = match stroem_db::WorkspaceStateRepo::insert_and_prune(
+        &state.pool,
+        &workspace,
+        &job.task_name,
+        job_id,
+        &key,
+        body.len() as i64,
+        query.has_json,
+        storage.global_max_snapshots(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            // Compensating action: delete the orphaned archive blob.
+            if let Err(del_err) = storage.delete(&key).await {
+                tracing::error!(
+                    "Failed to clean up orphaned global state blob {}: {:#}",
+                    key,
+                    del_err
+                );
+            }
+            return Err(AppError::Internal(
+                e.context("insert global state snapshot record"),
+            ));
+        }
+    };
+
+    // Delete pruned snapshots from the archive backend (best-effort, background).
+    if !deleted_keys.is_empty() {
+        let storage_clone = Arc::clone(storage);
+        tokio::spawn(async move {
+            for key in deleted_keys {
+                if let Err(e) = storage_clone.delete(&key).await {
+                    tracing::warn!(
+                        "Failed to delete pruned global state snapshot {}: {:#}",
+                        key,
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    tracing::info!(
+        workspace = %workspace,
+        task_name = %job.task_name,
+        %job_id,
+        bytes = body.len(),
+        has_json = query.has_json,
+        "Stored global state snapshot"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "snapshot_id": snapshot_id })),
+    )
+        .into_response())
+}
+
 /// Extract `state.json` from a gzip tarball and return the parsed JSON value.
 ///
 /// Iterates over tarball entries looking for a file named `state.json`

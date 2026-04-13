@@ -85,6 +85,8 @@ pub struct StateStorageConfig {
     /// Max snapshots to retain per workspace + task
     #[serde(default = "default_max_snapshots")]
     pub max_snapshots: usize,
+    /// Max snapshots for global workspace state. Defaults to `max_snapshots` when absent.
+    pub global_max_snapshots: Option<usize>,
     /// Optional dedicated archive backend (defaults to log_storage archive when absent)
     pub archive: Option<ArchiveConfig>,
 }

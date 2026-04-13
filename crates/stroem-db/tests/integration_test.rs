@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{
     run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, TaskStateRepo,
-    UserAuthLinkRepo, UserRepo, WorkerRepo,
+    UserAuthLinkRepo, UserRepo, WorkerRepo, WorkspaceStateRepo,
 };
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -3711,6 +3711,143 @@ async fn test_task_state_job_fk_on_delete_set_null() -> Result<()> {
         "job_id must be NULL after referenced job is deleted"
     );
     assert_eq!(row.storage_key, key);
+
+    Ok(())
+}
+
+// ─── WorkspaceStateRepo tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_workspace_state_insert_and_get_latest() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = create_test_job(&pool, "default", "task-a").await?;
+
+    // Nothing yet for this workspace
+    assert!(
+        WorkspaceStateRepo::get_latest(&pool, "default")
+            .await?
+            .is_none(),
+        "no snapshot should exist before insert"
+    );
+
+    // Insert first snapshot
+    let id1 =
+        WorkspaceStateRepo::insert(&pool, "default", "task-a", job_id, "key1", 100, false).await?;
+
+    let latest = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .expect("latest must return the inserted snapshot");
+    assert_eq!(latest.id, id1);
+    assert_eq!(latest.workspace, "default");
+    assert_eq!(latest.written_by_task, "task-a");
+
+    // Insert a newer snapshot from a different task
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let id2 =
+        WorkspaceStateRepo::insert(&pool, "default", "task-b", job_id, "key2", 200, true).await?;
+
+    let latest = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .expect("latest must return the newer snapshot");
+    assert_eq!(latest.id, id2, "get_latest must return the most recent row");
+
+    // A different workspace returns None
+    assert!(
+        WorkspaceStateRepo::get_latest(&pool, "other")
+            .await?
+            .is_none(),
+        "different workspace must have no snapshots"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_workspace_state_insert_and_prune() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = create_test_job(&pool, "default", "task-x").await?;
+
+    // Insert 5 snapshots
+    for i in 0..5 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        WorkspaceStateRepo::insert(
+            &pool,
+            "default",
+            &format!("task-{}", i),
+            job_id,
+            &format!("key{}", i),
+            100,
+            false,
+        )
+        .await?;
+    }
+
+    // insert_and_prune with keep=2: 5 existing + 1 new = 6 total, 4 pruned
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let (new_id, deleted) = WorkspaceStateRepo::insert_and_prune(
+        &pool,
+        "default",
+        "task-final",
+        job_id,
+        "key-final",
+        100,
+        false,
+        2,
+    )
+    .await?;
+
+    assert_eq!(
+        deleted.len(),
+        4,
+        "6 total - 2 kept = 4 deleted, got: {:?}",
+        deleted
+    );
+
+    let remaining = WorkspaceStateRepo::list(&pool, "default").await?;
+    assert_eq!(remaining.len(), 2, "only 2 snapshots must remain");
+    assert_eq!(
+        remaining[0].id, new_id,
+        "newest snapshot must be listed first"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_workspace_state_delete_all() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = create_test_job(&pool, "ws-a", "task").await?;
+
+    // Insert snapshots for workspace A
+    WorkspaceStateRepo::insert(&pool, "ws-a", "task", job_id, "key-a1", 100, false).await?;
+    WorkspaceStateRepo::insert(&pool, "ws-a", "task", job_id, "key-a2", 100, false).await?;
+
+    // Insert a snapshot for workspace B (different job to avoid FK conflicts)
+    let job_id_b = create_test_job(&pool, "ws-b", "task").await?;
+    WorkspaceStateRepo::insert(&pool, "ws-b", "task", job_id_b, "key-b1", 100, false).await?;
+
+    // Delete all for workspace A
+    let deleted = WorkspaceStateRepo::delete_all(&pool, "ws-a").await?;
+    assert_eq!(deleted.len(), 2, "both ws-a snapshots must be deleted");
+    assert!(
+        deleted.contains(&"key-a1".to_string()),
+        "key-a1 must be returned"
+    );
+    assert!(
+        deleted.contains(&"key-a2".to_string()),
+        "key-a2 must be returned"
+    );
+
+    // Workspace A is now empty
+    assert!(
+        WorkspaceStateRepo::list(&pool, "ws-a").await?.is_empty(),
+        "ws-a must have no snapshots after delete_all"
+    );
+
+    // Workspace B must be unaffected
+    let remaining = WorkspaceStateRepo::list(&pool, "ws-b").await?;
+    assert_eq!(remaining.len(), 1, "ws-b snapshot must be unaffected");
+    assert_eq!(remaining[0].storage_key, "key-b1");
 
     Ok(())
 }

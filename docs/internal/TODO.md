@@ -1023,3 +1023,24 @@ Last updated: 2026-03-13.
 ### Documentation
 - [x] Add user-facing docs in `docs/src/content/docs/guides/task-state.md` — usage, STATE: protocol, /state mount, examples
 - [x] Regenerate `docs/public/llms.txt` (added task-state.md to generate-llms-txt.ts sections)
+
+## Global Workspace State Review (Phase 6a.2, 2026-04-10)
+
+### Important (should fix)
+- [x] `WorkspaceStateRepo` integration tests — 3 tests added: insert+get_latest, insert_and_prune, delete_all
+- [x] Docker runner test for global state bind mounts — `test_global_state_dir_bind_mount_with_workspace`
+- [x] Kube runner test for global state volumes — `test_global_state_volumes_present_when_global_state_dir_set` + `test_no_global_state_volumes_when_global_state_dir_none`
+
+### Minor
+- [x] Duplicate lock acquisition for STATE: + GLOBAL_STATE: collection — combined into single pass
+- [x] Shared `max_snapshots` config — added `global_max_snapshots: Option<usize>` to `StateStorageConfig` and `StateStorage`, with `global_max_snapshots()` fallback accessor
+- [x] `task_name` column in `workspace_state` — renamed to `written_by_task` with SQL COMMENT
+- [x] Redundant `is_some()` + `if let Some` pattern — collapsed to single `if let Some(ref storage)` for both task and global state lookups
+- [x] "Deep-merge" comment is misleading — changed to "Shallow merge (top-level key overwrite)"
+- [x] `max_snapshots` doc comment on `StateStorage` — updated to say "per task", added doc for `global_max_snapshots()`
+
+### Missing Tests
+- [x] `WorkspaceStateRepo` integration tests — insert+get_latest, insert_and_prune, delete_all isolation
+- [x] Docker global state bind mount test — verifies `/global-state:ro` and `/global-state-out:rw`
+- [x] Kube global state volume test — verifies `global-state-vol`/`global-state-out-vol` present and absent
+- [x] State merge logic tests — extracted `merge_state_entries()` function with 6 unit tests: empty, single object, multiple distinct keys, last-writer-wins, non-objects skipped, all non-objects returns None

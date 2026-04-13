@@ -15,6 +15,7 @@ Phase 5d complete: Approval gates (`type: approval`, `suspended` status, approve
 Phase 5e complete: Event source triggers (long-running queue consumers via stdout JSON-line protocol).
 Phase 5f complete: Retry mechanism (step/action in-place retry + task-level job retry).
 Phase 6a complete: Task state snapshots (immutable state persistence across runs via `STATE:` protocol + `/state` mount).
+Phase 6a.2 complete: Global workspace state (`GLOBAL_STATE:` protocol + `/global-state` mount, shared across all tasks).
 Phase 6b: Worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -211,6 +212,17 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Retention: `max_snapshots` per task (default 5), pruned on upload
 - Runners: Shell (env vars), Docker (bind mounts `/state:ro` + `/state-out:rw`), Kube (emptyDir volumes)
 - Always available, no opt-in. Upload only triggered if `/state-out` has content or `STATE:` lines emitted.
+
+### Global Workspace State
+- Workspace-scoped state shared across all tasks (any task can read and write)
+- `GLOBAL_STATE:` stdout protocol: `GLOBAL_STATE: {"key": "value"}` — structured state in `state.json`
+- `/global-state` directory: previous snapshot read-only, `/global-state-out`: writable for new state
+- DB: `workspace_state` table — same structure as `task_state` but scoped by `workspace` only (task_name for provenance)
+- Worker API: `GET /worker/global-state/{ws}`, `POST /worker/global-state/{ws}/{job_id}`
+- Tera templates: `{{ global_state.key }}` — separate namespace from task state `{{ state.key }}`
+- Storage key format: `{prefix}__global__/{workspace}/{job_id}.tar.gz`
+- Same `StateArchive` backend and retention model as task state
+- Concurrent writes: last writer wins (immutable snapshots, latest by `created_at`)
 
 ### Retry Mechanism
 - **Two layers**: step/action retry (in-place) and task retry (new job).

@@ -91,6 +91,11 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
             "/state/{ws}/{task}/{job_id}",
             post(state::upload_state).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
+        .route("/global-state/{ws}", get(state::download_global_state))
+        .route(
+            "/global-state/{ws}/{job_id}",
+            post(state::upload_global_state).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,

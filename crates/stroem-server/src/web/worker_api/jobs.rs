@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
-use stroem_db::{JobRepo, JobStepRepo, TaskStateRepo, WorkerRepo};
+use stroem_db::{JobRepo, JobStepRepo, TaskStateRepo, WorkerRepo, WorkspaceStateRepo};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +98,18 @@ pub struct ClaimResponse {
     /// in Tera templates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_has_json: Option<bool>,
+
+    // ── Global workspace state fields ──────────────────────────────
+    /// Storage key for the most recent global workspace state snapshot (if any).
+    /// Workers download this via `GET /worker/global-state/{ws}` to restore
+    /// the `/global-state` directory before running the step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_state_storage_key: Option<String>,
+    /// Whether the previous global state snapshot contains a structured `state.json`
+    /// sidecar. When `true`, the contents are also available as `{{ global_state.* }}`
+    /// in Tera templates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_state_has_json: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +291,8 @@ pub async fn claim_job(
                 event_source_config: None,
                 state_storage_key: None,
                 state_has_json: None,
+                global_state_storage_key: None,
+                global_state_has_json: None,
             })
             .into_response());
         }
@@ -323,13 +337,13 @@ pub async fn claim_job(
     // ── Task state snapshot lookup ─────────────────────────────────────────
     // Resolve the latest snapshot so the worker knows to download it and so
     // the Tera render context can expose `{{ state.* }}` variables.
-    let (state_storage_key, state_has_json, state_json_value) = if state.state_storage.is_some() {
-        match TaskStateRepo::get_latest(&state.pool, &job.workspace, &job.task_name).await {
-            Ok(Some(snapshot)) => {
-                // If the snapshot carries a structured JSON sidecar, retrieve and
-                // parse it now so it can be injected into the Tera context.
-                let json_value = if snapshot.has_json {
-                    if let Some(ref storage) = state.state_storage {
+    let (state_storage_key, state_has_json, state_json_value) =
+        if let Some(ref storage) = state.state_storage {
+            match TaskStateRepo::get_latest(&state.pool, &job.workspace, &job.task_name).await {
+                Ok(Some(snapshot)) => {
+                    // If the snapshot carries a structured JSON sidecar, retrieve and
+                    // parse it now so it can be injected into the Tera context.
+                    let json_value = if snapshot.has_json {
                         match storage.retrieve(&snapshot.storage_key).await {
                             Ok(Some(data)) => super::state::extract_state_json(&data),
                             Ok(None) => None,
@@ -343,6 +357,44 @@ pub async fn claim_job(
                         }
                     } else {
                         None
+                    };
+                    (
+                        Some(snapshot.storage_key),
+                        Some(snapshot.has_json),
+                        json_value,
+                    )
+                }
+                Ok(None) => (None, None, None),
+                Err(e) => {
+                    tracing::warn!("Failed to look up task state snapshot: {:#}", e);
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
+
+    // ── Global workspace state snapshot lookup ────────────────────────────────
+    // Resolve the latest global snapshot so the worker knows to download it and
+    // so the Tera render context can expose `{{ global_state.* }}` variables.
+    let (global_state_storage_key, global_state_has_json, global_state_json_value) = if let Some(
+        ref storage,
+    ) =
+        state.state_storage
+    {
+        match WorkspaceStateRepo::get_latest(&state.pool, &job.workspace).await {
+            Ok(Some(snapshot)) => {
+                let json_value = if snapshot.has_json {
+                    match storage.retrieve(&snapshot.storage_key).await {
+                        Ok(Some(data)) => super::state::extract_state_json(&data),
+                        Ok(None) => None,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to retrieve global state snapshot for Tera context: {:#}",
+                                e
+                            );
+                            None
+                        }
                     }
                 } else {
                     None
@@ -355,7 +407,7 @@ pub async fn claim_job(
             }
             Ok(None) => (None, None, None),
             Err(e) => {
-                tracing::warn!("Failed to look up task state snapshot: {:#}", e);
+                tracing::warn!("Failed to look up global workspace state: {:#}", e);
                 (None, None, None)
             }
         }
@@ -372,6 +424,7 @@ pub async fn claim_job(
             job_input: job.input.as_ref(),
             completed_steps: &completed_steps,
             state_json: state_json_value.as_ref(),
+            global_state_json: global_state_json_value.as_ref(),
         };
 
         let raw_input = match rendering::render_step_input(&ctx) {
@@ -601,6 +654,8 @@ pub async fn claim_job(
         event_source_config,
         state_storage_key,
         state_has_json,
+        global_state_storage_key,
+        global_state_has_json,
     })
     .into_response())
 }
@@ -903,6 +958,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["task_name"], "deploy-api");
@@ -988,6 +1045,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["task_name"].is_null());
@@ -1018,6 +1077,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["revision"], "abc123");
@@ -1048,6 +1109,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -1081,6 +1144,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(
@@ -1127,6 +1192,8 @@ mod tests {
             event_source_config: Some(config),
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_source_config"]["target_task"], "process-event");

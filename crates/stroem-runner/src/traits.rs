@@ -66,6 +66,10 @@ pub struct RunConfig {
     pub state_dir: Option<String>,
     /// Path to new state output directory (mounted read-write at /state-out).
     pub state_out_dir: Option<String>,
+    /// Path to global workspace state directory (mounted read-only at /global-state).
+    pub global_state_dir: Option<String>,
+    /// Path to global workspace state output directory (mounted read-write at /global-state-out).
+    pub global_state_out_dir: Option<String>,
 }
 
 /// A callback for receiving log lines as they're produced
@@ -113,6 +117,14 @@ pub fn parse_state_line(line: &str) -> Option<serde_json::Value> {
     let json_str = line
         .strip_prefix("STATE: ")
         .or_else(|| line.strip_prefix("STATE:"))?;
+    serde_json::from_str(json_str).ok()
+}
+
+/// Parse a "GLOBAL_STATE:{json}" or "GLOBAL_STATE: {json}" line into a JSON value.
+pub fn parse_global_state_line(line: &str) -> Option<serde_json::Value> {
+    let json_str = line
+        .strip_prefix("GLOBAL_STATE: ")
+        .or_else(|| line.strip_prefix("GLOBAL_STATE:"))?;
     serde_json::from_str(json_str).ok()
 }
 
@@ -165,5 +177,30 @@ mod tests {
     #[test]
     fn test_parse_state_line_invalid_json() {
         assert_eq!(parse_state_line("STATE: not json"), None);
+    }
+
+    #[test]
+    fn test_parse_global_state_line_with_space() {
+        let result = parse_global_state_line(r#"GLOBAL_STATE: {"cursor": "abc123"}"#);
+        assert_eq!(result, Some(json!({"cursor": "abc123"})));
+    }
+
+    #[test]
+    fn test_parse_global_state_line_without_space() {
+        let result = parse_global_state_line(r#"GLOBAL_STATE:{"count": 42}"#);
+        assert_eq!(result, Some(json!({"count": 42})));
+    }
+
+    #[test]
+    fn test_parse_global_state_line_no_match() {
+        assert_eq!(parse_global_state_line("some random log line"), None);
+        assert_eq!(parse_global_state_line("OUTPUT: {\"key\": 1}"), None);
+        assert_eq!(parse_global_state_line("STATE: {\"key\": 1}"), None);
+    }
+
+    #[test]
+    fn test_parse_global_state_line_invalid_json() {
+        assert_eq!(parse_global_state_line("GLOBAL_STATE: not json"), None);
+        assert_eq!(parse_global_state_line("GLOBAL_STATE:not json"), None);
     }
 }

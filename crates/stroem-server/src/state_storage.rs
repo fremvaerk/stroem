@@ -265,15 +265,22 @@ pub struct StateStorage {
     archive: Arc<dyn StateArchive>,
     prefix: String,
     max_snapshots: usize,
+    global_max_snapshots: Option<usize>,
 }
 
 impl StateStorage {
     /// Create a new `StateStorage` backed by the given archive.
-    pub fn new(archive: Arc<dyn StateArchive>, prefix: String, max_snapshots: usize) -> Self {
+    pub fn new(
+        archive: Arc<dyn StateArchive>,
+        prefix: String,
+        max_snapshots: usize,
+        global_max_snapshots: Option<usize>,
+    ) -> Self {
         Self {
             archive,
             prefix,
             max_snapshots,
+            global_max_snapshots,
         }
     }
 
@@ -292,6 +299,20 @@ impl StateStorage {
         )
     }
 
+    /// Build the storage key for a global workspace state snapshot.
+    ///
+    /// Format: `{prefix}__global__/{workspace}/{job_id}.tar.gz`
+    ///
+    /// Path traversal sequences (`..`) are replaced with `__` to prevent
+    /// archive key escape in both local-filesystem and S3 backends.
+    pub fn global_storage_key(&self, workspace: &str, job_id: Uuid) -> String {
+        let safe_workspace = workspace.replace("..", "__");
+        format!(
+            "{}__global__/{}/{}.tar.gz",
+            self.prefix, safe_workspace, job_id
+        )
+    }
+
     /// Store a state snapshot under the given key.
     pub async fn store(&self, key: &str, data: &[u8]) -> Result<()> {
         self.archive.store(key, data).await
@@ -307,9 +328,15 @@ impl StateStorage {
         self.archive.delete(key).await
     }
 
-    /// Maximum number of snapshots to retain per workspace + task combination.
+    /// Maximum number of snapshots to retain per task (workspace + task scoping).
     pub fn max_snapshots(&self) -> usize {
         self.max_snapshots
+    }
+
+    /// Maximum number of snapshots to retain for global workspace state.
+    /// Falls back to `max_snapshots` when not explicitly configured.
+    pub fn global_max_snapshots(&self) -> usize {
+        self.global_max_snapshots.unwrap_or(self.max_snapshots)
     }
 }
 
@@ -382,7 +409,7 @@ mod tests {
     #[test]
     fn test_state_storage_key_format() {
         let archive = Arc::new(InMemoryStateArchive::new());
-        let storage = StateStorage::new(archive, "state/".to_string(), 5);
+        let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
         let job_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let key = storage.storage_key("prod", "deploy", job_id);
         assert_eq!(
@@ -394,7 +421,7 @@ mod tests {
     #[test]
     fn test_state_storage_key_no_prefix() {
         let archive = Arc::new(InMemoryStateArchive::new());
-        let storage = StateStorage::new(archive, String::new(), 3);
+        let storage = StateStorage::new(archive, String::new(), 3, None);
         let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let key = storage.storage_key("ws", "task", job_id);
         assert_eq!(key, "ws/task/00000000-0000-0000-0000-000000000001.tar.gz");
@@ -403,7 +430,43 @@ mod tests {
     #[test]
     fn test_state_storage_max_snapshots_returned() {
         let archive = Arc::new(InMemoryStateArchive::new());
-        let storage = StateStorage::new(archive, "pfx/".to_string(), 7);
+        let storage = StateStorage::new(archive, "pfx/".to_string(), 7, None);
         assert_eq!(storage.max_snapshots(), 7);
+    }
+
+    #[test]
+    fn test_global_storage_key_format() {
+        let archive = Arc::new(InMemoryStateArchive::new());
+        let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
+        let job_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let key = storage.global_storage_key("prod", job_id);
+        assert_eq!(
+            key,
+            "state/__global__/prod/550e8400-e29b-41d4-a716-446655440000.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_global_storage_key_no_prefix() {
+        let archive = Arc::new(InMemoryStateArchive::new());
+        let storage = StateStorage::new(archive, String::new(), 3, None);
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let key = storage.global_storage_key("ws", job_id);
+        assert_eq!(
+            key,
+            "__global__/ws/00000000-0000-0000-0000-000000000001.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_global_storage_key_path_traversal_sanitized() {
+        let archive = Arc::new(InMemoryStateArchive::new());
+        let storage = StateStorage::new(archive, "s/".to_string(), 3, None);
+        let job_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let key = storage.global_storage_key("a/../b", job_id);
+        assert_eq!(
+            key,
+            "s/__global__/a/__/b/00000000-0000-0000-0000-000000000002.tar.gz"
+        );
     }
 }

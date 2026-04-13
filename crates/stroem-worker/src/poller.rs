@@ -87,6 +87,30 @@ fn dir_has_content(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Shallow-merge parsed JSON entries into a single `serde_json::Map`.
+///
+/// Each entry should be a JSON object. Top-level keys from later entries
+/// overwrite earlier ones (last writer wins). Non-object entries are skipped.
+/// Returns `None` if the input is empty or no entries are objects.
+fn merge_state_entries(entries: &[serde_json::Value]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut merged = serde_json::Map::new();
+    for val in entries {
+        if let Some(obj) = val.as_object() {
+            for (k, v) in obj {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
 /// Execute a claimed step: download workspace, report start, run with log buffering, report result.
 ///
 /// This function owns the claimed step and drives the full execution lifecycle. It is spawned as
@@ -306,6 +330,58 @@ pub(crate) async fn execute_claimed_step(
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
 
+    // ── Global workspace state: create temp dirs and download ─────────────────
+    let global_state_temp = match tempfile::TempDir::new() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to create global state temp dir, global state will be unavailable: {:#}",
+                e
+            );
+            None
+        }
+    };
+    let (global_state_dir_path, global_state_out_dir_path) =
+        if let Some(ref temp) = global_state_temp {
+            let gsd = temp.path().join("global-state");
+            let gsod = temp.path().join("global-state-out");
+            let _ = std::fs::create_dir_all(&gsd);
+            let _ = std::fs::create_dir_all(&gsod);
+            (Some(gsd), Some(gsod))
+        } else {
+            (None, None)
+        };
+
+    // Download previous global state snapshot if the server indicates one exists
+    if step.global_state_storage_key.is_some() {
+        if let Some(ref gsd) = global_state_dir_path {
+            match client.download_global_state_tarball(&step.workspace).await {
+                Ok(Some(bytes)) => {
+                    if let Err(e) = extract_state_tarball(&bytes, gsd) {
+                        tracing::warn!("Failed to extract global state tarball: {:#}", e);
+                    } else {
+                        tracing::debug!("Extracted global state snapshot for {}", step.workspace);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to download global state for {}, continuing with empty: {:#}",
+                        step.workspace,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    let global_state_dir_str = global_state_dir_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let global_state_out_dir_str = global_state_out_dir_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+
     // Execute the step inside an inner spawn to catch panics
     let inner_executor = executor.clone();
     let inner_step = step.clone();
@@ -315,6 +391,8 @@ pub(crate) async fn execute_claimed_step(
     let inner_client = client.clone();
     let inner_state_dir = state_dir_str.clone();
     let inner_state_out_dir = state_out_dir_str.clone();
+    let inner_global_state_dir = global_state_dir_str.clone();
+    let inner_global_state_out_dir = global_state_out_dir_str.clone();
     let exec_handle = tokio::spawn(async move {
         inner_executor
             .execute_step(
@@ -322,6 +400,8 @@ pub(crate) async fn execute_claimed_step(
                 &inner_ws,
                 inner_state_dir.as_deref(),
                 inner_state_out_dir.as_deref(),
+                inner_global_state_dir.as_deref(),
+                inner_global_state_out_dir.as_deref(),
                 inner_buffer,
                 inner_cancel,
                 &inner_client,
@@ -385,21 +465,30 @@ pub(crate) async fn execute_claimed_step(
     // Wait for log pusher to finish (timeout prevents hanging if something goes wrong)
     let _ = tokio::time::timeout(Duration::from_secs(5), log_handle).await;
 
-    // ── Collect STATE: lines BEFORE draining the log buffer ─────────────────
-    // The drain below empties the buffer, so we must extract STATE: entries first.
-    let state_entries: Vec<serde_json::Value> = {
+    // ── Collect STATE: and GLOBAL_STATE: lines BEFORE draining the log buffer ──
+    // The drain below empties the buffer, so we must extract entries first.
+    // Both collections are gathered in a single lock acquisition.
+    let (state_entries, global_state_entries): (Vec<serde_json::Value>, Vec<serde_json::Value>) = {
         match log_buffer.lock() {
-            Ok(buffer) => buffer
-                .iter()
-                .filter(|entry| entry.get("stream").and_then(|s| s.as_str()) == Some("stdout"))
-                .filter_map(|entry| {
-                    entry
-                        .get("line")
-                        .and_then(|l| l.as_str())
-                        .and_then(stroem_runner::parse_state_line)
-                })
-                .collect(),
-            Err(_) => vec![],
+            Ok(buffer) => {
+                let mut state = Vec::new();
+                let mut global = Vec::new();
+                for entry in buffer.iter() {
+                    if entry.get("stream").and_then(|s| s.as_str()) != Some("stdout") {
+                        continue;
+                    }
+                    if let Some(line) = entry.get("line").and_then(|l| l.as_str()) {
+                        if let Some(v) = stroem_runner::parse_state_line(line) {
+                            state.push(v);
+                        }
+                        if let Some(v) = stroem_runner::parse_global_state_line(line) {
+                            global.push(v);
+                        }
+                    }
+                }
+                (state, global)
+            }
+            Err(_) => (vec![], vec![]),
         }
     };
 
@@ -417,16 +506,7 @@ pub(crate) async fn execute_claimed_step(
     // ── Upload new state if /state-out has content ───────────────────────────
     if result.is_ok() {
         if let Some(ref sod) = state_out_dir_path {
-            if !state_entries.is_empty() {
-                // Deep-merge STATE: lines — later entries overwrite earlier ones for the same key
-                let mut merged = serde_json::Map::new();
-                for val in &state_entries {
-                    if let Some(obj) = val.as_object() {
-                        for (k, v) in obj {
-                            merged.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
+            if let Some(merged) = merge_state_entries(&state_entries) {
                 let state_json_path = sod.join("state.json");
                 match serde_json::to_vec_pretty(&serde_json::Value::Object(merged)) {
                     Ok(json_bytes) => {
@@ -463,6 +543,47 @@ pub(crate) async fn execute_claimed_step(
                         }
                     }
                     Err(e) => tracing::warn!("Failed to build state tarball: {:#}", e),
+                }
+            }
+        }
+
+        // ── Upload global state if /global-state-out has content ─────────────
+        if let Some(ref gsod) = global_state_out_dir_path {
+            if let Some(merged) = merge_state_entries(&global_state_entries) {
+                let state_json_path = gsod.join("state.json");
+                match serde_json::to_vec_pretty(&serde_json::Value::Object(merged)) {
+                    Ok(json_bytes) => {
+                        if let Err(e) = std::fs::write(&state_json_path, json_bytes) {
+                            tracing::warn!("Failed to write global state.json: {:#}", e);
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to serialize global state.json: {:#}", e),
+                }
+            }
+
+            if dir_has_content(gsod) {
+                match build_state_tarball(gsod) {
+                    Ok(tarball_bytes) => {
+                        let has_json = gsod.join("state.json").exists();
+                        if let Err(e) = client
+                            .upload_global_state_tarball(
+                                &step.workspace,
+                                step.job_id,
+                                tarball_bytes,
+                                has_json,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to upload global state snapshot: {:#}", e);
+                        } else {
+                            tracing::info!(
+                                "Uploaded global state snapshot for {} (job {})",
+                                step.workspace,
+                                step.job_id
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to build global state tarball: {:#}", e),
                 }
             }
         }
@@ -929,6 +1050,72 @@ mod tests {
         assert_eq!(tarball[1], 0x8b);
     }
 
+    // --- merge_state_entries tests ---
+
+    #[test]
+    fn test_merge_state_entries_empty_returns_none() {
+        assert!(merge_state_entries(&[]).is_none());
+    }
+
+    #[test]
+    fn test_merge_state_entries_single_object() {
+        let entries = vec![serde_json::json!({"cursor": "abc", "count": 42})];
+        let merged = merge_state_entries(&entries).unwrap();
+        assert_eq!(merged["cursor"], "abc");
+        assert_eq!(merged["count"], 42);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_state_entries_multiple_distinct_keys() {
+        let entries = vec![
+            serde_json::json!({"cursor": "abc"}),
+            serde_json::json!({"count": 42}),
+            serde_json::json!({"last_run": "2026-01-01"}),
+        ];
+        let merged = merge_state_entries(&entries).unwrap();
+        assert_eq!(merged["cursor"], "abc");
+        assert_eq!(merged["count"], 42);
+        assert_eq!(merged["last_run"], "2026-01-01");
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_state_entries_last_writer_wins() {
+        let entries = vec![
+            serde_json::json!({"cursor": "first", "shared": "old"}),
+            serde_json::json!({"cursor": "second"}),
+            serde_json::json!({"cursor": "final", "shared": "new"}),
+        ];
+        let merged = merge_state_entries(&entries).unwrap();
+        assert_eq!(merged["cursor"], "final");
+        assert_eq!(merged["shared"], "new");
+    }
+
+    #[test]
+    fn test_merge_state_entries_non_objects_skipped() {
+        let entries = vec![
+            serde_json::json!({"key": "value"}),
+            serde_json::json!([1, 2, 3]),        // array — skipped
+            serde_json::json!("just a string"),   // string — skipped
+            serde_json::json!(42),                // number — skipped
+            serde_json::json!({"other": true}),
+        ];
+        let merged = merge_state_entries(&entries).unwrap();
+        assert_eq!(merged["key"], "value");
+        assert_eq!(merged["other"], true);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_state_entries_all_non_objects_returns_none() {
+        let entries = vec![
+            serde_json::json!([1, 2]),
+            serde_json::json!("string"),
+        ];
+        assert!(merge_state_entries(&entries).is_none());
+    }
+
     // --- compute_poll_backoff tests ---
 
     #[test]
@@ -1146,6 +1333,8 @@ mod tests {
                 event_source_config: None,
                 state_storage_key: None,
                 state_has_json: None,
+                global_state_storage_key: None,
+                global_state_has_json: None,
             }
         }
 

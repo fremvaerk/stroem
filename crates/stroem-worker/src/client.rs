@@ -56,6 +56,13 @@ pub struct ClaimedStep {
     /// Whether the previous state snapshot contains a structured state.json file.
     #[serde(default)]
     pub state_has_json: Option<bool>,
+    /// Storage key for the previous global workspace state snapshot (worker downloads to
+    /// populate /global-state).
+    #[serde(default)]
+    pub global_state_storage_key: Option<String>,
+    /// Whether the previous global state snapshot contains a structured state.json file.
+    #[serde(default)]
+    pub global_state_has_json: Option<bool>,
 }
 
 /// Raw claim response from server (job_id is Option since it's null when no work)
@@ -83,6 +90,8 @@ struct ClaimResponse {
     pub event_source_config: Option<serde_json::Value>,
     pub state_storage_key: Option<String>,
     pub state_has_json: Option<bool>,
+    pub global_state_storage_key: Option<String>,
+    pub global_state_has_json: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,6 +277,8 @@ impl ServerClient {
             event_source_config: resp.event_source_config,
             state_storage_key: resp.state_storage_key,
             state_has_json: resp.state_has_json,
+            global_state_storage_key: resp.global_state_storage_key,
+            global_state_has_json: resp.global_state_has_json,
         };
 
         Ok(Some(step))
@@ -618,6 +629,60 @@ impl ServerClient {
         Ok(())
     }
 
+    /// Download the latest global workspace state tarball.
+    /// Returns `None` if no global state exists (server returns 204 No Content).
+    #[tracing::instrument(skip(self))]
+    pub async fn download_global_state_tarball(&self, workspace: &str) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}/worker/global-state/{}", self.base_url, workspace);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .timeout(self.download_timeout)
+            .send()
+            .await
+            .context("Failed to download global state tarball")?;
+
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+
+        let response = Self::check_response(response, "Download global state").await?;
+        let bytes = response
+            .bytes()
+            .await
+            .context("Failed to read global state tarball body")?;
+        Ok(Some(bytes.to_vec()))
+    }
+
+    /// Upload a new global workspace state tarball after step completion.
+    /// `has_json` indicates whether the tarball contains a structured `state.json` file.
+    #[tracing::instrument(skip(self, data))]
+    pub async fn upload_global_state_tarball(
+        &self,
+        workspace: &str,
+        job_id: Uuid,
+        data: Vec<u8>,
+        has_json: bool,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/worker/global-state/{}/{}?has_json={}",
+            self.base_url, workspace, job_id, has_json
+        );
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/gzip")
+            .body(data)
+            .send()
+            .await
+            .context("Failed to upload global state tarball")?;
+
+        Self::check_response(response, "Upload global state").await?;
+        Ok(())
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(
@@ -773,6 +838,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         };
         let json = serde_json::to_value(&step_with_revision).unwrap();
         assert_eq!(json["revision"], "deadbeef");

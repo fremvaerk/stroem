@@ -16,6 +16,9 @@ pub struct RenderContext<'a> {
     /// Structured state from the previous task state snapshot (state.json contents).
     /// Available in Tera templates as `{{ state.some_key }}`.
     pub state_json: Option<&'a serde_json::Value>,
+    /// Structured global state from the workspace-scoped snapshot (state.json contents).
+    /// Available in Tera templates as `{{ global_state.some_key }}`.
+    pub global_state_json: Option<&'a serde_json::Value>,
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -68,6 +71,12 @@ pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value
     // can reference `{{ state.some_key }}`.
     if let Some(state_json) = ctx.state_json {
         context.insert("state".to_string(), state_json.clone());
+    }
+
+    // Inject the previous global workspace state into the template context so
+    // step inputs can reference `{{ global_state.some_key }}`.
+    if let Some(global_state_json) = ctx.global_state_json {
+        context.insert("global_state".to_string(), global_state_json.clone());
     }
 
     // Add completed step outputs to context.
@@ -489,6 +498,7 @@ mod tests {
             job_input: None,
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -526,6 +536,7 @@ mod tests {
             job_input: None,
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -565,6 +576,7 @@ mod tests {
             job_input: None,
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -602,6 +614,7 @@ mod tests {
             job_input: Some(&job_input),
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -643,6 +656,7 @@ mod tests {
             job_input: None,
             completed_steps: &completed_steps,
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -686,6 +700,7 @@ mod tests {
             job_input: None,
             completed_steps: &completed_steps,
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -725,6 +740,7 @@ mod tests {
             job_input: None,
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -1085,6 +1101,7 @@ mod tests {
             job_input: Some(&job_input),
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1123,6 +1140,7 @@ mod tests {
             job_input: None,
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1175,6 +1193,7 @@ mod tests {
             job_input: Some(&job_input),
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
         // rendered_input only contains "sql"
         let rendered_input = Some(json!({"sql": "SELECT 1"}));
@@ -1414,6 +1433,7 @@ mod tests {
             job_input: None,
             completed_steps: &[],
             state_json: Some(&state_json),
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1454,9 +1474,143 @@ mod tests {
             job_input: Some(&job_input),
             completed_steps: &[],
             state_json: None,
+            global_state_json: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
         assert_eq!(result["greeting"], "Hello World");
+    }
+
+    // -------------------------------------------------------------------------
+    // global_state_json injection
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_render_step_input_with_global_state_json() {
+        // Flow step input template references {{ global_state.last_cursor }}
+        let flow_input = HashMap::from([(
+            "cursor".to_string(),
+            json!("{{ global_state.last_cursor }}"),
+        )]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow
+            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", None);
+        let global_state_json = json!({"last_cursor": "xyz789"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: Some(&global_state_json),
+        };
+
+        let result = render_step_input(&ctx).unwrap().unwrap();
+        assert_eq!(result["cursor"], "xyz789");
+    }
+
+    #[test]
+    fn test_render_step_input_global_state_json_none_does_not_inject() {
+        // When global_state_json is None, "global_state" key is absent;
+        // a step not referencing it should still render normally.
+        let flow_input = HashMap::from([("greeting".to_string(), json!("Hello {{ input.name }}"))]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow
+            .insert("greet".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("greet", None);
+        let job_input = json!({"name": "World"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: Some(&job_input),
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+        };
+
+        let result = render_step_input(&ctx).unwrap().unwrap();
+        assert_eq!(result["greeting"], "Hello World");
+    }
+
+    #[test]
+    fn test_render_step_input_global_state_and_task_state_both_available() {
+        // Both state and global_state are injected simultaneously
+        let flow_input = HashMap::from([
+            ("task_cursor".to_string(), json!("{{ state.cursor }}")),
+            (
+                "global_cursor".to_string(),
+                json!("{{ global_state.cursor }}"),
+            ),
+        ]);
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow
+            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+
+        let step = make_step_row("step1", None);
+        let state_json = json!({"cursor": "task-cursor-val"});
+        let global_state_json = json!({"cursor": "global-cursor-val"});
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: Some(&state_json),
+            global_state_json: Some(&global_state_json),
+        };
+
+        let result = render_step_input(&ctx).unwrap().unwrap();
+        assert_eq!(result["task_cursor"], "task-cursor-val");
+        assert_eq!(result["global_cursor"], "global-cursor-val");
     }
 }

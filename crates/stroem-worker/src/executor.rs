@@ -95,6 +95,8 @@ impl StepExecutor {
     /// `workspace_dir` is the path to the extracted workspace for this step's workspace.
     /// `state_dir` is the path to the previous state snapshot directory (mounted read-only at /state).
     /// `state_out_dir` is the path to the new state output directory (mounted read-write at /state-out).
+    /// `global_state_dir` is the path to the global workspace state directory (mounted read-only at /global-state).
+    /// `global_state_out_dir` is the path to the global state output directory (mounted read-write at /global-state-out).
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, client, log_buffer, cancel_token))]
     pub async fn execute_step(
@@ -103,6 +105,8 @@ impl StepExecutor {
         workspace_dir: &str,
         state_dir: Option<&str>,
         state_out_dir: Option<&str>,
+        global_state_dir: Option<&str>,
+        global_state_out_dir: Option<&str>,
         log_buffer: Arc<Mutex<Vec<serde_json::Value>>>,
         cancel_token: CancellationToken,
         client: &ServerClient,
@@ -121,6 +125,8 @@ impl StepExecutor {
         // Populate state paths in the config for runners that support them
         config.state_dir = state_dir.map(|s| s.to_string());
         config.state_out_dir = state_out_dir.map(|s| s.to_string());
+        config.global_state_dir = global_state_dir.map(|s| s.to_string());
+        config.global_state_out_dir = global_state_out_dir.map(|s| s.to_string());
 
         // Only set state env vars for WithWorkspace mode — NoWorkspace (container actions)
         // don't have the state directories bind-mounted.
@@ -130,6 +136,16 @@ impl StepExecutor {
             }
             if let Some(ref sod) = config.state_out_dir {
                 config.env.insert("STATE_OUT_DIR".to_string(), sod.clone());
+            }
+            if let Some(ref gsd) = config.global_state_dir {
+                config
+                    .env
+                    .insert("GLOBAL_STATE_DIR".to_string(), gsd.clone());
+            }
+            if let Some(ref gsod) = config.global_state_out_dir {
+                config
+                    .env
+                    .insert("GLOBAL_STATE_OUT_DIR".to_string(), gsod.clone());
             }
         }
 
@@ -447,6 +463,8 @@ impl StepExecutor {
             args,
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         })
     }
 }
@@ -479,6 +497,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         }
     }
 
@@ -763,6 +783,8 @@ mod tests {
                 "/tmp",
                 None,
                 None,
+                None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,
@@ -774,7 +796,7 @@ mod tests {
 
         // Verify log buffer captured output
         let logs = log_buffer.lock().unwrap();
-        let has_output = logs.iter().any(|l| {
+        let has_output = logs.iter().any(|l: &serde_json::Value| {
             l.get("line")
                 .and_then(|v| v.as_str())
                 .map(|s| s.contains("hello-from-test"))
@@ -797,6 +819,8 @@ mod tests {
             .execute_step(
                 &step,
                 "/tmp",
+                None,
+                None,
                 None,
                 None,
                 log_buffer,
@@ -828,6 +852,8 @@ mod tests {
                 "/tmp",
                 None,
                 None,
+                None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,
@@ -838,7 +864,7 @@ mod tests {
         assert_eq!(result.exit_code, 0);
 
         let logs = log_buffer.lock().unwrap();
-        let has_env_output = logs.iter().any(|l| {
+        let has_env_output = logs.iter().any(|l: &serde_json::Value| {
             l.get("line")
                 .and_then(|v| v.as_str())
                 .map(|s| s.contains("test-value-123"))
@@ -863,6 +889,8 @@ mod tests {
                 "/tmp",
                 None,
                 None,
+                None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,
@@ -873,14 +901,14 @@ mod tests {
         assert_eq!(result.exit_code, 0);
 
         let logs = log_buffer.lock().unwrap();
-        let has_stderr = logs.iter().any(|l| {
+        let has_stderr = logs.iter().any(|l: &serde_json::Value| {
             l.get("stream")
-                .and_then(|v| v.as_str())
-                .map(|s| s == "stderr")
+                .and_then(|v: &serde_json::Value| v.as_str())
+                .map(|s: &str| s == "stderr")
                 .unwrap_or(false)
                 && l.get("line")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.contains("error-output"))
+                    .and_then(|v: &serde_json::Value| v.as_str())
+                    .map(|s: &str| s.contains("error-output"))
                     .unwrap_or(false)
         });
         assert!(

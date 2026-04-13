@@ -104,6 +104,12 @@ impl DockerRunner {
                 if let Some(ref state_out_dir) = config.state_out_dir {
                     binds.push(format!("{}:/state-out:rw", state_out_dir));
                 }
+                if let Some(ref global_state_dir) = config.global_state_dir {
+                    binds.push(format!("{}:/global-state:ro", global_state_dir));
+                }
+                if let Some(ref global_state_out_dir) = config.global_state_out_dir {
+                    binds.push(format!("{}:/global-state-out:rw", global_state_out_dir));
+                }
 
                 ContainerCreateBody {
                     image: Some(image),
@@ -415,6 +421,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -461,6 +469,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -490,6 +500,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -525,6 +537,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -569,6 +583,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -600,6 +616,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -631,6 +649,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -667,6 +687,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -708,6 +730,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -743,6 +767,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -780,6 +806,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -809,6 +837,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -843,6 +873,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -874,6 +906,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -921,6 +955,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -962,6 +998,8 @@ mod tests {
             args: vec![],
             state_dir: Some("/tmp/state".to_string()),
             state_out_dir: Some("/tmp/state-out".to_string()),
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -998,6 +1036,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1005,6 +1045,48 @@ mod tests {
         assert!(
             !binds.iter().any(|b| b.contains(":/state")),
             "No state bind mounts expected when state_dir is None, got: {:?}",
+            binds
+        );
+    }
+
+    #[test]
+    fn test_global_state_dir_bind_mount_with_workspace() {
+        let config = RunConfig {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/workspace".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+            global_state_dir: Some("/tmp/global-state".to_string()),
+            global_state_out_dir: Some("/tmp/global-state-out".to_string()),
+        };
+
+        let container_config = DockerRunner::build_container_config(&config);
+        let binds = container_config.host_config.unwrap().binds.unwrap();
+        assert!(
+            binds
+                .iter()
+                .any(|b| b == "/tmp/global-state:/global-state:ro"),
+            "global_state_dir must be bind-mounted read-only at /global-state, got: {:?}",
+            binds
+        );
+        assert!(
+            binds
+                .iter()
+                .any(|b| b == "/tmp/global-state-out:/global-state-out:rw"),
+            "global_state_out_dir must be bind-mounted read-write at /global-state-out, got: {:?}",
             binds
         );
     }
@@ -1033,6 +1115,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let result = runner
@@ -1063,6 +1147,8 @@ mod tests {
             args: vec!["hello".to_string(), "world".to_string()],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1097,6 +1183,8 @@ mod tests {
             args: vec!["--verbose".to_string()],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1134,6 +1222,8 @@ mod tests {
             args: vec![],
             state_dir: None,
             state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
         };
 
         let token = CancellationToken::new();

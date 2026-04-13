@@ -300,9 +300,50 @@ tasks:
         action: build
 ```
 
+## Global workspace state
+
+In addition to per-task state, Strøm supports **global workspace state** — shared across all tasks in a workspace. Any task can read and write it.
+
+### Writing global state
+
+Use the `GLOBAL_STATE:` protocol or write files to `/global-state-out` (`$GLOBAL_STATE_OUT_DIR`):
+
+```bash
+#!/bin/bash
+# Share a token across all tasks in this workspace
+echo "GLOBAL_STATE: {\"api_token\": \"$(vault read -field=token secret/api)\", \"refreshed_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+```
+
+### Reading global state
+
+Previous global state is available at `/global-state` (`$GLOBAL_STATE_DIR`) and in Tera templates as `{{ global_state.* }}`:
+
+```yaml
+tasks:
+  deploy:
+    flow:
+      - name: deploy
+        action: deploy-app
+        input:
+          token: "{{ global_state.api_token }}"
+```
+
+### How it differs from task state
+
+| | Task state | Global state |
+|---|---|---|
+| Scope | Per task | Per workspace (all tasks) |
+| Protocol | `STATE:` | `GLOBAL_STATE:` |
+| Read dir | `/state` | `/global-state` |
+| Write dir | `/state-out` | `/global-state-out` |
+| Templates | `{{ state.* }}` | `{{ global_state.* }}` |
+| Concurrent writes | Per-task (rare) | Cross-task (last writer wins) |
+
+Both types of state are available simultaneously — a step can read and write both task state and global state in the same run.
+
 ## Limitations
 
-- State snapshots are per-task. Steps in different tasks don't share state.
-- State is immutable once a snapshot is created. To update state, emit new `STATE:` lines or write new files from the step.
+- State is immutable once a snapshot is created. To update state, emit new `STATE:`/`GLOBAL_STATE:` lines or write new files from the step.
 - The maximum size of a state snapshot is **50 MB**. Oversized uploads are rejected with a warning (non-fatal — the job continues).
 - For Kubernetes runners, file-based state (`/state-out`) works via the `STATE:` protocol. Direct file uploads are supported on shell and Docker runners.
+- Global state concurrent writes don't merge — last writer wins. Coordinate via task dependencies if ordering matters.

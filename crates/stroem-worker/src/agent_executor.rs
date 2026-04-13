@@ -462,6 +462,8 @@ mod tests {
             event_source_config: None,
             state_storage_key: None,
             state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
         }
     }
 

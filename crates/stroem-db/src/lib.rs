@@ -12,3 +12,4 @@ pub use repos::user::{UserRepo, UserRow};
 pub use repos::user_auth_link::{UserAuthLinkRepo, UserAuthLinkRow};
 pub use repos::user_group::{UserGroupRepo, UserGroupRow};
 pub use repos::worker::{WorkerRepo, WorkerRow};
+pub use repos::workspace_state::{WorkspaceStateRepo, WorkspaceStateRow};

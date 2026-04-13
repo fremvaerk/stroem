@@ -11,8 +11,8 @@ pub mod kubernetes;
 
 pub use shell::ShellRunner;
 pub use traits::{
-    parse_output_line, parse_state_line, LogCallback, LogLine, LogStream, RunConfig, RunResult,
-    Runner, RunnerMode,
+    parse_global_state_line, parse_output_line, parse_state_line, LogCallback, LogLine, LogStream,
+    RunConfig, RunResult, Runner, RunnerMode,
 };
 
 #[cfg(feature = "docker")]
