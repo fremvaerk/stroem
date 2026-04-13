@@ -3,7 +3,8 @@ use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
 use anyhow::Context;
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{extract::Path, extract::State, response::IntoResponse, Json};
+use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -55,4 +56,33 @@ pub async fn list_workspaces(
     }
 
     Ok(Json(infos))
+}
+
+/// POST /api/workspaces/{ws}/refresh — Force-reload a workspace from its source.
+///
+/// Triggers an immediate git fetch (or folder re-hash) and YAML re-parse,
+/// bypassing the normal poll interval. Use this from CI pipelines to ensure
+/// the workspace is up-to-date before triggering a task.
+#[tracing::instrument(skip(state))]
+pub async fn refresh_workspace(
+    State(state): State<Arc<AppState>>,
+    Path(ws): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    if state.workspaces.get_config(&ws).await.is_none() {
+        return Err(AppError::NotFound(format!("Workspace '{}' not found", ws)));
+    }
+
+    state
+        .workspaces
+        .reload(&ws)
+        .await
+        .context("Failed to reload workspace")?;
+
+    let revision = state.workspaces.get_revision(&ws);
+
+    Ok(Json(json!({
+        "workspace": ws,
+        "revision": revision,
+        "refreshed": true,
+    })))
 }

@@ -92,7 +92,9 @@ fn dir_has_content(dir: &std::path::Path) -> bool {
 /// Each entry should be a JSON object. Top-level keys from later entries
 /// overwrite earlier ones (last writer wins). Non-object entries are skipped.
 /// Returns `None` if the input is empty or no entries are objects.
-fn merge_state_entries(entries: &[serde_json::Value]) -> Option<serde_json::Map<String, serde_json::Value>> {
+fn merge_state_entries(
+    entries: &[serde_json::Value],
+) -> Option<serde_json::Map<String, serde_json::Value>> {
     if entries.is_empty() {
         return None;
     }
@@ -1096,9 +1098,9 @@ mod tests {
     fn test_merge_state_entries_non_objects_skipped() {
         let entries = vec![
             serde_json::json!({"key": "value"}),
-            serde_json::json!([1, 2, 3]),        // array — skipped
-            serde_json::json!("just a string"),   // string — skipped
-            serde_json::json!(42),                // number — skipped
+            serde_json::json!([1, 2, 3]),       // array — skipped
+            serde_json::json!("just a string"), // string — skipped
+            serde_json::json!(42),              // number — skipped
             serde_json::json!({"other": true}),
         ];
         let merged = merge_state_entries(&entries).unwrap();
@@ -1109,10 +1111,7 @@ mod tests {
 
     #[test]
     fn test_merge_state_entries_all_non_objects_returns_none() {
-        let entries = vec![
-            serde_json::json!([1, 2]),
-            serde_json::json!("string"),
-        ];
+        let entries = vec![serde_json::json!([1, 2]), serde_json::json!("string")];
         assert!(merge_state_entries(&entries).is_none());
     }
 

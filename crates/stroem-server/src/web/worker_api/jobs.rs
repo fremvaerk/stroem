@@ -377,43 +377,40 @@ pub async fn claim_job(
     // ── Global workspace state snapshot lookup ────────────────────────────────
     // Resolve the latest global snapshot so the worker knows to download it and
     // so the Tera render context can expose `{{ global_state.* }}` variables.
-    let (global_state_storage_key, global_state_has_json, global_state_json_value) = if let Some(
-        ref storage,
-    ) =
-        state.state_storage
-    {
-        match WorkspaceStateRepo::get_latest(&state.pool, &job.workspace).await {
-            Ok(Some(snapshot)) => {
-                let json_value = if snapshot.has_json {
-                    match storage.retrieve(&snapshot.storage_key).await {
-                        Ok(Some(data)) => super::state::extract_state_json(&data),
-                        Ok(None) => None,
-                        Err(e) => {
-                            tracing::warn!(
+    let (global_state_storage_key, global_state_has_json, global_state_json_value) =
+        if let Some(ref storage) = state.state_storage {
+            match WorkspaceStateRepo::get_latest(&state.pool, &job.workspace).await {
+                Ok(Some(snapshot)) => {
+                    let json_value = if snapshot.has_json {
+                        match storage.retrieve(&snapshot.storage_key).await {
+                            Ok(Some(data)) => super::state::extract_state_json(&data),
+                            Ok(None) => None,
+                            Err(e) => {
+                                tracing::warn!(
                                 "Failed to retrieve global state snapshot for Tera context: {:#}",
                                 e
                             );
-                            None
+                                None
+                            }
                         }
-                    }
-                } else {
-                    None
-                };
-                (
-                    Some(snapshot.storage_key),
-                    Some(snapshot.has_json),
-                    json_value,
-                )
+                    } else {
+                        None
+                    };
+                    (
+                        Some(snapshot.storage_key),
+                        Some(snapshot.has_json),
+                        json_value,
+                    )
+                }
+                Ok(None) => (None, None, None),
+                Err(e) => {
+                    tracing::warn!("Failed to look up global workspace state: {:#}", e);
+                    (None, None, None)
+                }
             }
-            Ok(None) => (None, None, None),
-            Err(e) => {
-                tracing::warn!("Failed to look up global workspace state: {:#}", e);
-                (None, None, None)
-            }
-        }
-    } else {
-        (None, None, None)
-    };
+        } else {
+            (None, None, None)
+        };
 
     // Render step input and apply action defaults
     let rendered_input = if let Some(ref workspace) = ws_config {

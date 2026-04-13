@@ -29,6 +29,43 @@ Returns all configured workspaces with task and action counts.
 ]
 ```
 
+## Refresh Workspace
+
+```
+POST /api/workspaces/{ws}/refresh
+```
+
+Force-reload a workspace from its source (git fetch or folder re-hash), bypassing the normal poll interval. Use this from CI pipelines to ensure the workspace is up-to-date before triggering a task.
+
+**Response:**
+
+```json
+{
+  "workspace": "default",
+  "revision": "abc123def456",
+  "refreshed": true
+}
+```
+
+**Errors:**
+
+| Status | Reason |
+|--------|--------|
+| 404 | Workspace not found |
+| 500 | Reload failed (e.g., git fetch error) |
+
+**Example — GitHub Actions workflow:**
+
+```bash
+# Ensure Strøm has the latest code before executing
+curl -X POST https://stroem.example.com/api/workspaces/default/refresh \
+  -H "Authorization: Bearer $STROEM_API_KEY"
+
+# Then trigger the task
+curl -X POST https://stroem.example.com/api/workspaces/default/tasks/deploy/execute \
+  -H "Authorization: Bearer $STROEM_API_KEY"
+```
+
 ## List Tasks
 
 ```
