@@ -5387,7 +5387,7 @@ dependencies = [
  "mime_guess",
  "notify",
  "openidconnect",
- "rand 0.8.5",
+ "rand 0.10.0",
  "reqwest 0.13.2",
  "rmcp",
  "rust-embed",
