@@ -2156,6 +2156,7 @@ triggers:
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -2196,6 +2197,7 @@ triggers:
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -2232,6 +2234,7 @@ triggers:
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("Europe/Copenhagen".to_string()),
+                force_refresh: false,
             },
         );
 
@@ -2268,6 +2271,7 @@ triggers:
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("UTC".to_string()),
+                force_refresh: false,
             },
         );
 
@@ -2304,6 +2308,7 @@ triggers:
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("Not/A/Timezone".to_string()),
+                force_refresh: false,
             },
         );
 
@@ -2342,6 +2347,7 @@ triggers:
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("".to_string()),
+                force_refresh: false,
             },
         );
 

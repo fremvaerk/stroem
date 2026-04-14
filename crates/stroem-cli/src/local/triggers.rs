@@ -78,6 +78,7 @@ mod tests {
                 enabled: true,
                 concurrency: ConcurrencyPolicy::Allow,
                 timezone: None,
+                force_refresh: false,
             },
         );
         config.triggers.insert(
@@ -90,6 +91,7 @@ mod tests {
                 enabled: true,
                 mode: Some("sync".to_string()),
                 timeout_secs: None,
+                force_refresh: false,
             },
         );
         assert!(cmd_triggers(&config).is_ok());
@@ -108,6 +110,7 @@ mod tests {
                 enabled: true,
                 mode: None,
                 timeout_secs: None,
+                force_refresh: false,
             },
         );
         assert!(cmd_triggers(&config).is_ok());
@@ -125,6 +128,7 @@ mod tests {
                 enabled: true,
                 concurrency: ConcurrencyPolicy::Allow,
                 timezone: Some("Europe/Copenhagen".to_string()),
+                force_refresh: false,
             },
         );
         assert!(cmd_triggers(&config).is_ok());
@@ -142,6 +146,7 @@ mod tests {
                 enabled: false,
                 concurrency: ConcurrencyPolicy::Allow,
                 timezone: None,
+                force_refresh: false,
             },
         );
         assert!(cmd_triggers(&config).is_ok());

@@ -1045,6 +1045,7 @@ fn test_workspace() -> WorkspaceConfig {
             enabled: true,
             concurrency: Default::default(),
             timezone: None,
+            force_refresh: false,
         },
     );
 
@@ -1058,6 +1059,7 @@ fn test_workspace() -> WorkspaceConfig {
             enabled: false,
             concurrency: Default::default(),
             timezone: None,
+            force_refresh: false,
         },
     );
 
@@ -1072,6 +1074,7 @@ fn test_workspace() -> WorkspaceConfig {
             enabled: true,
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         },
     );
 
@@ -1086,6 +1089,7 @@ fn test_workspace() -> WorkspaceConfig {
             enabled: true,
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         },
     );
 
@@ -1100,6 +1104,7 @@ fn test_workspace() -> WorkspaceConfig {
             enabled: false,
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         },
     );
 
@@ -13410,6 +13415,7 @@ async fn setup_sync_webhook() -> Result<(
             enabled: true,
             mode: Some("sync".to_string()),
             timeout_secs: Some(1),
+            force_refresh: false,
         },
     );
 
@@ -13948,6 +13954,7 @@ async fn setup_scheduler_workspace(
             enabled,
             concurrency: Default::default(),
             timezone: None,
+            force_refresh: false,
         },
     );
 

@@ -77,6 +77,17 @@ async fn webhook_handler(
         }
     };
 
+    // Force-refresh workspace before job creation if configured
+    if wh.force_refresh {
+        if let Err(e) = state.workspaces.reload(&wh.ws_name).await {
+            tracing::warn!(
+                "Webhook '{}': force_refresh failed, continuing with cached revision: {:#}",
+                name,
+                e
+            );
+        }
+    }
+
     let is_sync = wh.mode.as_deref() == Some("sync");
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
     let revision = state.workspaces.get_revision(&wh.ws_name);
@@ -445,6 +456,7 @@ struct WebhookMatch {
     default_input: HashMap<String, serde_json::Value>,
     mode: Option<String>,
     timeout_secs: Option<u64>,
+    force_refresh: bool,
 }
 
 /// Find the first enabled webhook trigger matching the given name.
@@ -463,6 +475,7 @@ async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMat
                 enabled,
                 mode,
                 timeout_secs,
+                force_refresh,
             } = trigger_def
             {
                 if wh_name == name && *enabled {
@@ -474,6 +487,7 @@ async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMat
                         default_input: input.clone(),
                         mode: mode.clone(),
                         timeout_secs: *timeout_secs,
+                        force_refresh: *force_refresh,
                     });
                 }
             }
@@ -796,6 +810,7 @@ mod tests {
             default_input: HashMap::new(),
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         };
         let headers = HeaderMap::new();
         assert!(validate_webhook_secret(&wh, Some("my-secret"), &headers).is_none());
@@ -811,6 +826,7 @@ mod tests {
             default_input: HashMap::new(),
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         };
         let headers = HeaderMap::new();
         let result = validate_webhook_secret(&wh, Some("wrong-secret"), &headers);
@@ -828,6 +844,7 @@ mod tests {
             default_input: HashMap::new(),
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         };
         let headers = HeaderMap::new();
         let result = validate_webhook_secret(&wh, None, &headers);
@@ -845,6 +862,7 @@ mod tests {
             default_input: HashMap::new(),
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         };
         let headers = HeaderMap::new();
         // Open webhook — no secret configured, should always allow
@@ -861,6 +879,7 @@ mod tests {
             default_input: HashMap::new(),
             mode: None,
             timeout_secs: None,
+            force_refresh: false,
         };
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer bearer-secret".parse().unwrap());

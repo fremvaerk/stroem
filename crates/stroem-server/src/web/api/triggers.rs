@@ -154,6 +154,7 @@ mod tests {
                 enabled,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
             "webhook" => TriggerDef::Webhook {
                 name: "test-hook".to_string(),
@@ -163,6 +164,7 @@ mod tests {
                 enabled,
                 mode: None,
                 timeout_secs: None,
+                force_refresh: false,
             },
             _ => panic!("Unknown trigger type: {trigger_type}"),
         }
@@ -310,6 +312,7 @@ mod tests {
             enabled: true,
             concurrency: Default::default(),
             timezone: None,
+            force_refresh: false,
         };
         let trigger_cph = TriggerDef::Scheduler {
             cron: "0 2 * * *".to_string(),
@@ -318,6 +321,7 @@ mod tests {
             enabled: true,
             concurrency: Default::default(),
             timezone: Some("Europe/Copenhagen".to_string()),
+            force_refresh: false,
         };
 
         let runs_utc = compute_next_runs(&trigger_utc, 1);
@@ -342,6 +346,7 @@ mod tests {
             enabled: true,
             concurrency: Default::default(),
             timezone: Some("America/New_York".to_string()),
+            force_refresh: false,
         };
 
         let runs = compute_next_runs(&trigger, 5);
@@ -374,6 +379,7 @@ mod tests {
             enabled: true,
             concurrency: Default::default(),
             timezone: Some("America/New_York".to_string()),
+            force_refresh: false,
         };
 
         let info = TriggerInfo::from_def("test", &trigger, 1);
@@ -392,6 +398,7 @@ mod tests {
             enabled: true,
             concurrency: Default::default(),
             timezone: None,
+            force_refresh: false,
         };
 
         let info = TriggerInfo::from_def("test", &trigger, 1);

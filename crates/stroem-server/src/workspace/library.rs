@@ -769,6 +769,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 

@@ -688,6 +688,9 @@ pub enum TriggerDef {
         /// IANA timezone name (e.g., "Europe/Copenhagen"). Defaults to UTC when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timezone: Option<String>,
+        /// Force-reload the workspace from its source before creating the job.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force_refresh: bool,
     },
     #[serde(rename = "webhook")]
     Webhook {
@@ -705,6 +708,9 @@ pub enum TriggerDef {
         /// Max seconds to wait in sync mode before returning 202 (default 30, max 300).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_secs: Option<u64>,
+        /// Force-reload the workspace from its source before creating the job.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force_refresh: bool,
     },
     #[serde(rename = "event_source")]
     EventSource {
@@ -781,6 +787,15 @@ impl TriggerDef {
         match self {
             TriggerDef::Scheduler { timezone, .. } => timezone.as_deref(),
             TriggerDef::Webhook { .. } | TriggerDef::EventSource { .. } => None,
+        }
+    }
+
+    /// Whether the workspace should be force-refreshed before creating the job.
+    pub fn force_refresh(&self) -> bool {
+        match self {
+            TriggerDef::Scheduler { force_refresh, .. } => *force_refresh,
+            TriggerDef::Webhook { force_refresh, .. } => *force_refresh,
+            TriggerDef::EventSource { .. } => false,
         }
     }
 

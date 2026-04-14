@@ -27,6 +27,7 @@ struct TriggerState {
     timezone: Option<Tz>,
     /// The raw timezone string from config (for hot-reload comparison).
     timezone_str: Option<String>,
+    force_refresh: bool,
     last_run: Option<DateTime<Utc>>,
     next_run: Option<DateTime<Utc>>,
 }
@@ -128,7 +129,7 @@ async fn load_triggers(
 
         for (trigger_name, trigger_def) in &config.triggers {
             // Only process enabled scheduler triggers
-            let (cron_expr, task, input, concurrency, tz_str) = match trigger_def {
+            let (cron_expr, task, input, concurrency, tz_str, refresh) = match trigger_def {
                 stroem_common::models::workflow::TriggerDef::Scheduler {
                     cron,
                     task,
@@ -136,12 +137,14 @@ async fn load_triggers(
                     enabled,
                     concurrency,
                     timezone,
+                    force_refresh,
                 } if *enabled => (
                     cron.clone(),
                     task.clone(),
                     input.clone(),
                     *concurrency,
                     timezone.clone(),
+                    *force_refresh,
                 ),
                 _ => continue,
             };
@@ -203,6 +206,7 @@ async fn load_triggers(
                     concurrency,
                     timezone: tz,
                     timezone_str: tz_str,
+                    force_refresh: refresh,
                     last_run,
                     next_run,
                 },
@@ -264,6 +268,18 @@ fn compute_next_run(
 async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstate: &TriggerState) {
     let source_id = format!("{}/{}", tstate.workspace, tstate.trigger_name);
     let input = serde_json::to_value(&tstate.input).unwrap_or_default();
+
+    // Force-refresh workspace before job creation if configured
+    if tstate.force_refresh {
+        if let Err(e) = app_state.workspaces.reload(&tstate.workspace).await {
+            tracing::warn!(
+                "Trigger '{}': force_refresh failed, continuing with cached revision: {:#}",
+                source_id,
+                e
+            );
+        }
+    }
+
     let revision = app_state.workspaces.get_revision(&tstate.workspace);
 
     // Apply concurrency policy
@@ -538,6 +554,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -568,6 +585,7 @@ mod tests {
                 enabled: false,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -591,6 +609,7 @@ mod tests {
                 enabled: true,
                 mode: None,
                 timeout_secs: None,
+                force_refresh: false,
             },
         );
 
@@ -613,6 +632,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -658,6 +678,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -681,6 +702,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -705,6 +727,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -731,6 +754,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
         config.triggers.insert(
@@ -742,6 +766,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
         // This one should be skipped (disabled)
@@ -754,6 +779,7 @@ mod tests {
                 enabled: false,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -787,6 +813,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -934,6 +961,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None,
+                force_refresh: false,
             },
         );
 
@@ -958,6 +986,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("Europe/Copenhagen".to_string()), // timezone changed
+                force_refresh: false,
             },
         );
 
@@ -985,6 +1014,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("Europe/Copenhagen".to_string()),
+                force_refresh: false,
             },
         );
 
@@ -1011,6 +1041,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: None, // timezone removed
+                force_refresh: false,
             },
         );
 
@@ -1049,6 +1080,7 @@ mod tests {
                 enabled: true,
                 concurrency: Default::default(),
                 timezone: Some("Garbage/Zone".to_string()),
+                force_refresh: false,
             },
         );
 
