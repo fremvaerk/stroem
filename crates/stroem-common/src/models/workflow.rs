@@ -1412,6 +1412,95 @@ triggers:
     }
 
     #[test]
+    fn test_parse_scheduler_trigger_force_refresh_true() {
+        let yaml = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 3 * * *"
+    task: build
+    force_refresh: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("nightly").unwrap();
+        assert!(trigger.force_refresh());
+    }
+
+    #[test]
+    fn test_parse_scheduler_trigger_force_refresh_defaults_false() {
+        let yaml = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 3 * * *"
+    task: build
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("nightly").unwrap();
+        assert!(!trigger.force_refresh());
+    }
+
+    #[test]
+    fn test_parse_webhook_trigger_force_refresh_true() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: deploy
+    force_refresh: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        assert!(trigger.force_refresh());
+    }
+
+    #[test]
+    fn test_parse_webhook_trigger_force_refresh_defaults_false() {
+        let yaml = r#"
+triggers:
+  on-push:
+    type: webhook
+    name: github-push
+    task: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("on-push").unwrap();
+        assert!(!trigger.force_refresh());
+    }
+
+    #[test]
+    fn test_event_source_force_refresh_always_false() {
+        let yaml = r#"
+triggers:
+  queue:
+    type: event_source
+    task: consumer
+    target_task: processor
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let trigger = config.triggers.get("queue").unwrap();
+        assert!(!trigger.force_refresh());
+    }
+
+    #[test]
+    fn test_force_refresh_false_not_serialized() {
+        let yaml = r#"
+triggers:
+  nightly:
+    type: scheduler
+    cron: "0 3 * * *"
+    task: build
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(
+            !serialized.contains("force_refresh"),
+            "force_refresh: false should be omitted from serialization"
+        );
+    }
+
+    #[test]
     fn test_workspace_merge() {
         let config1: WorkspaceConfig = serde_yaml::from_str(
             r#"

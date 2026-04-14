@@ -291,6 +291,11 @@ impl WorkspaceManager {
         self.entries.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Check whether a workspace with the given name exists (regardless of health status).
+    pub fn has_workspace(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
+    }
+
     /// Get all workspace configs as (name, config) pairs.
     /// Skips workspaces with load errors.
     pub async fn get_all_configs(&self) -> Vec<(String, Arc<WorkspaceConfig>)> {

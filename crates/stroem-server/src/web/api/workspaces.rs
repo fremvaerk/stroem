@@ -68,7 +68,7 @@ pub async fn refresh_workspace(
     State(state): State<Arc<AppState>>,
     Path(ws): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    if state.workspaces.get_config(&ws).await.is_none() {
+    if !state.workspaces.has_workspace(&ws) {
         return Err(AppError::NotFound(format!("Workspace '{}' not found", ws)));
     }
 
@@ -79,6 +79,7 @@ pub async fn refresh_workspace(
         .context("Failed to reload workspace")?;
 
     let revision = state.workspaces.get_revision(&ws);
+    tracing::info!(workspace = %ws, revision = ?revision, "Workspace refreshed via API");
 
     Ok(Json(json!({
         "workspace": ws,

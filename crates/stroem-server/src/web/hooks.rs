@@ -65,7 +65,18 @@ async fn webhook_handler(
     let input_value = serde_json::to_value(&input).unwrap_or_default();
     let source_id = format!("{}/{}", wh.ws_name, wh.trigger_key);
 
-    // 4. Get workspace config and create job
+    // 4. Force-refresh workspace if configured (before fetching config)
+    if wh.force_refresh {
+        if let Err(e) = state.workspaces.reload(&wh.ws_name).await {
+            tracing::warn!(
+                "Webhook '{}': force_refresh failed, continuing with cached revision: {:#}",
+                name,
+                e
+            );
+        }
+    }
+
+    // 5. Get workspace config and create job (after refresh so we use the latest config)
     let config = match state.get_workspace(&wh.ws_name).await {
         Some(c) => c,
         None => {
@@ -76,17 +87,6 @@ async fn webhook_handler(
             .into_response();
         }
     };
-
-    // Force-refresh workspace before job creation if configured
-    if wh.force_refresh {
-        if let Err(e) = state.workspaces.reload(&wh.ws_name).await {
-            tracing::warn!(
-                "Webhook '{}': force_refresh failed, continuing with cached revision: {:#}",
-                name,
-                e
-            );
-        }
-    }
 
     let is_sync = wh.mode.as_deref() == Some("sync");
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
