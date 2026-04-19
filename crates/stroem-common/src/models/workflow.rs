@@ -1004,12 +1004,11 @@ fn render_secret_value(
     use crate::template::render_template;
 
     match value {
-        serde_json::Value::String(s) => {
-            if s.contains("{{") {
-                let rendered = render_template(s, context)?;
-                *s = rendered;
-            }
+        serde_json::Value::String(s) if s.contains("{{") => {
+            let rendered = render_template(s, context)?;
+            *s = rendered;
         }
+        serde_json::Value::String(_) => {}
         serde_json::Value::Object(map) => {
             for (_, v) in map.iter_mut() {
                 render_secret_value(v, context)?;

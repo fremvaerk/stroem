@@ -765,13 +765,11 @@ fn validate_secrets(path: &str, value: &serde_json::Value) -> Result<()> {
                 validate_secrets(&child_path, val)?;
             }
         }
-        serde_json::Value::String(s) => {
-            if s.is_empty() {
-                bail!("Secret '{}' has an empty value", path);
-            }
+        serde_json::Value::String(s) if s.is_empty() => {
+            bail!("Secret '{}' has an empty value", path);
         }
         _ => {
-            // Allow other JSON value types (numbers, booleans) as leaf values
+            // Allow other JSON value types (numbers, booleans) and non-empty strings
         }
     }
     Ok(())

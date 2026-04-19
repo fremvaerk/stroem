@@ -499,7 +499,7 @@ fn cleanup_old_revisions(
     }
 
     // Sort by mtime descending (newest first) — we keep the newest ones
-    old_revisions.sort_by(|a, b| b.2.cmp(&a.2));
+    old_revisions.sort_by_key(|r| std::cmp::Reverse(r.2));
 
     // Remove revisions beyond the retention limit
     for (path, dir_name, _) in old_revisions.iter().skip(max_retained) {

@@ -145,8 +145,8 @@ pub async fn on_step_completed(
         // Collect output from terminal steps (steps no other step depends on)
         let depended_on: HashSet<&str> = task
             .flow
-            .iter()
-            .flat_map(|(_, fs)| fs.depends_on.iter().map(|s| s.as_str()))
+            .values()
+            .flat_map(|fs| fs.depends_on.iter().map(|s| s.as_str()))
             .collect();
         let terminal_steps: HashSet<&str> = task
             .flow
