@@ -130,6 +130,8 @@ pub fn build_snapshot(
 /// - An empty tarball (zero file entries) is valid and returns an empty map.
 /// - Empty input bytes return an empty map (no error).
 /// - Invalid gzip or tar framing returns an error.
+/// - Entries with path-traversal components (`..`) or absolute paths are rejected.
+/// - Total decompressed size is capped at `MAX_SNAPSHOT_BYTES`; exceeding it is an error.
 #[allow(dead_code)]
 pub fn unpack_tarball(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
     use flate2::read::GzDecoder;
@@ -142,9 +144,10 @@ pub fn unpack_tarball(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
     let decoder = GzDecoder::new(bytes);
     let mut archive = Archive::new(decoder);
     let mut out = HashMap::new();
+    let mut total_bytes: usize = 0;
 
     for entry in archive.entries().context("read tar entries")? {
-        let mut entry = entry.context("read tar entry")?;
+        let entry = entry.context("read tar entry")?;
         let header_type = entry.header().entry_type();
         if !header_type.is_file() {
             continue;
@@ -158,8 +161,28 @@ pub fn unpack_tarball(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
         if path.is_empty() {
             continue;
         }
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf).context("read entry bytes")?;
+
+        // Reject path traversal / absolute paths. `..` as a path component
+        // or a leading `/` could escape when this tarball is later extracted
+        // by a consumer that doesn't have its own boundary.
+        if path.starts_with('/') || path.split('/').any(|c| c == "..") {
+            return Err(anyhow!("Tarball contains unsafe path: {}", path));
+        }
+
+        // Bounded read — reject if cumulative decompressed size exceeds the cap.
+        let remaining = MAX_SNAPSHOT_BYTES
+            .checked_sub(total_bytes)
+            .ok_or_else(|| anyhow!("Tarball decompresses beyond size cap"))?;
+        let mut limited = entry.take(remaining as u64 + 1);
+        let mut buf = Vec::new();
+        limited.read_to_end(&mut buf).context("read entry bytes")?;
+        if buf.len() > remaining {
+            return Err(anyhow!(
+                "Tarball decompresses beyond {} byte cap",
+                MAX_SNAPSHOT_BYTES
+            ));
+        }
+        total_bytes += buf.len();
         out.insert(path, buf);
     }
 
@@ -307,22 +330,23 @@ async fn check_run_permission(
 ) -> Result<(), AppError> {
     use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 
-    if let Some(auth) = auth_user {
-        if state.acl.is_configured() {
-            let user_id = auth.user_id()?;
-            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
-                .await
-                .context("load ACL context")
-                .map_err(AppError::Internal)?;
-            let task_path = make_task_path(task_folder, task_name);
-            match state
-                .acl
-                .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
-            {
-                TaskPermission::Deny => return Err(AppError::not_found("Task")),
-                TaskPermission::View => return Err(AppError::Forbidden("View-only access".into())),
-                TaskPermission::Run => {} // allowed
-            }
+    if state.acl.is_configured() {
+        let auth = auth_user
+            .as_ref()
+            .ok_or_else(|| AppError::Unauthorized("Authentication required".into()))?;
+        let user_id = auth.user_id()?;
+        let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+            .await
+            .context("load ACL context")
+            .map_err(AppError::Internal)?;
+        let task_path = make_task_path(task_folder, task_name);
+        match state
+            .acl
+            .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
+        {
+            TaskPermission::Deny => return Err(AppError::not_found("Task")),
+            TaskPermission::View => return Err(AppError::Forbidden("View-only access".into())),
+            TaskPermission::Run => {} // allowed
         }
     }
     Ok(())
@@ -331,7 +355,7 @@ async fn check_run_permission(
 /// POST /api/workspaces/{ws}/tasks/{task}/state — upload a state snapshot for a task.
 ///
 /// See `docs/internal/2026-04-21-state-upload-design.md`.
-#[tracing::instrument(skip(state, auth_user, body))]
+#[tracing::instrument(skip(state, auth_user, body, params))]
 pub async fn upload_task_state(
     State(state): State<std::sync::Arc<AppState>>,
     auth_user: Option<AuthUser>,
@@ -374,10 +398,22 @@ pub async fn upload_task_state(
             .await
             .map_err(AppError::Internal)?
         {
-            Some(row) => storage
-                .retrieve(&row.storage_key)
-                .await
-                .map_err(AppError::Internal)?,
+            Some(row) => {
+                let bytes = storage
+                    .retrieve(&row.storage_key)
+                    .await
+                    .map_err(AppError::Internal)?;
+                if let Some(ref b) = bytes {
+                    if b.len() > MAX_SNAPSHOT_BYTES {
+                        return Err(AppError::Internal(anyhow!(
+                            "Prior snapshot at {} exceeds size cap ({} bytes)",
+                            row.storage_key,
+                            b.len()
+                        )));
+                    }
+                }
+                bytes
+            }
             None => None,
         }
     } else {
@@ -545,7 +581,7 @@ async fn commit_task_upload(
 }
 
 /// POST /api/workspaces/{ws}/state — upload a global workspace state snapshot (admin only).
-#[tracing::instrument(skip(state, auth_user, body))]
+#[tracing::instrument(skip(state, auth_user, body, params))]
 pub async fn upload_global_state(
     State(state): State<std::sync::Arc<AppState>>,
     auth_user: Option<AuthUser>,
@@ -591,10 +627,22 @@ pub async fn upload_global_state(
             .await
             .map_err(AppError::Internal)?
         {
-            Some(row) => storage
-                .retrieve(&row.storage_key)
-                .await
-                .map_err(AppError::Internal)?,
+            Some(row) => {
+                let bytes = storage
+                    .retrieve(&row.storage_key)
+                    .await
+                    .map_err(AppError::Internal)?;
+                if let Some(ref b) = bytes {
+                    if b.len() > MAX_SNAPSHOT_BYTES {
+                        return Err(AppError::Internal(anyhow!(
+                            "Prior snapshot at {} exceeds size cap ({} bytes)",
+                            row.storage_key,
+                            b.len()
+                        )));
+                    }
+                }
+                bytes
+            }
             None => None,
         }
     } else {
@@ -915,5 +963,137 @@ mod tests {
         let uploaded = make_tarball(&[("f.txt", b"bytes")]);
         let out = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
         assert_eq!(list_paths(&out), vec!["f.txt"]);
+    }
+
+    /// Build a raw gzip tarball where the path is written directly into the
+    /// header bytes without the `tar` crate's path-safety checks.
+    /// This lets us craft hostile entries (`../foo`, `/etc/shadow`) that the
+    /// real `tar` crate refuses to produce via its safe API.
+    fn make_hostile_tarball(raw_path: &str, content: &[u8]) -> Vec<u8> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Build a minimal POSIX/ustar tar block by hand.
+        // A tar header is exactly 512 bytes; we need one header + data blocks.
+        let block_size = 512usize;
+        let data_blocks = content.len().div_ceil(block_size);
+        let total_blocks = 1 + data_blocks + 2; // header + data + 2 end-of-archive blocks
+        let mut tar_bytes = vec![0u8; total_blocks * block_size];
+
+        // Name field: bytes 0..100, NUL-terminated
+        let name_bytes = raw_path.as_bytes();
+        let copy_len = name_bytes.len().min(99);
+        tar_bytes[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        // Mode: bytes 100..108
+        tar_bytes[100..107].copy_from_slice(b"0000644");
+        tar_bytes[107] = 0;
+
+        // UID/GID: bytes 108..124
+        tar_bytes[108..115].copy_from_slice(b"0000000");
+        tar_bytes[115] = 0;
+        tar_bytes[116..123].copy_from_slice(b"0000000");
+        tar_bytes[123] = 0;
+
+        // File size in octal: bytes 124..136
+        let size_str = format!("{:011o}\0", content.len());
+        tar_bytes[124..136].copy_from_slice(size_str.as_bytes());
+
+        // Mtime: bytes 136..148
+        tar_bytes[136..147].copy_from_slice(b"00000000000");
+        tar_bytes[147] = 0;
+
+        // Type flag: '0' = regular file (byte 156)
+        tar_bytes[156] = b'0';
+
+        // Magic: bytes 257..265 ("ustar  \0")
+        tar_bytes[257..265].copy_from_slice(b"ustar  \0");
+
+        // Compute checksum: sum all bytes with checksum field (148..156) treated as spaces
+        for b in tar_bytes[148..156].iter_mut() {
+            *b = b' ';
+        }
+        let chksum: u32 = tar_bytes[..block_size].iter().map(|&b| b as u32).sum();
+        let chksum_str = format!("{:06o}\0 ", chksum);
+        tar_bytes[148..156].copy_from_slice(chksum_str.as_bytes());
+
+        // Write file content into the data blocks
+        tar_bytes[block_size..block_size + content.len()].copy_from_slice(content);
+
+        // Gzip-compress the raw tar
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn unpack_tarball_rejects_path_traversal() {
+        let uploaded = make_hostile_tarball("../escape.pem", b"bad");
+        let err = unpack_tarball(&uploaded).unwrap_err();
+        assert!(err.to_string().contains("unsafe path"));
+    }
+
+    #[test]
+    fn unpack_tarball_rejects_absolute_path() {
+        let uploaded = make_hostile_tarball("/etc/shadow", b"bad");
+        let err = unpack_tarball(&uploaded).unwrap_err();
+        assert!(err.to_string().contains("unsafe path"));
+    }
+
+    #[test]
+    fn unpack_tarball_skips_symlinks() {
+        // Build a tarball with a symlink entry and verify it's silently skipped.
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            // Regular file that should be kept
+            let mut header = tar::Header::new_gnu();
+            header.set_size(3);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "real.txt", &b"abc"[..])
+                .unwrap();
+            // Symlink that should be skipped
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_size(0);
+            link_header.set_mode(0o777);
+            link_header.set_entry_type(tar::EntryType::Symlink);
+            link_header.set_link_name("real.txt").unwrap();
+            link_header.set_cksum();
+            builder
+                .append_data(&mut link_header, "link.txt", &[][..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let bytes = encoder.finish().unwrap();
+        let out = unpack_tarball(&bytes).unwrap();
+        assert!(out.contains_key("real.txt"));
+        assert!(!out.contains_key("link.txt"));
+    }
+
+    #[test]
+    fn unpack_tarball_rejects_oversize_cumulative() {
+        // Build a tarball whose total decompressed bytes exceed MAX_SNAPSHOT_BYTES.
+        // Use pseudo-random bytes so gzip doesn't compress them to nothing.
+        let size = MAX_SNAPSHOT_BYTES + 1;
+        let mut data: Vec<u8> = Vec::with_capacity(size);
+        // Simple LCG to generate incompressible-enough bytes without pulling in rand.
+        let mut seed: u32 = 0xDEAD_BEEF;
+        for _ in 0..size {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            data.push((seed >> 16) as u8);
+        }
+        let uploaded = make_tarball(&[("big.bin", data.as_slice())]);
+        let err = unpack_tarball(&uploaded).unwrap_err();
+        assert!(
+            err.to_string().contains("size cap") || err.to_string().contains("beyond"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

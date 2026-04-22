@@ -58,6 +58,46 @@ fn make_tarball(files: &[(&str, &[u8])]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
+/// Build a raw gzip tarball where the path is written directly into the header
+/// bytes, bypassing the `tar` crate's path-safety checks. Used to craft
+/// hostile entries (`../foo`, `/etc/shadow`) for security tests.
+fn make_hostile_tarball(raw_path: &str, content: &[u8]) -> Vec<u8> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let block_size = 512usize;
+    let data_blocks = content.len().div_ceil(block_size);
+    let total_blocks = 1 + data_blocks + 2;
+    let mut tar_bytes = vec![0u8; total_blocks * block_size];
+
+    let name_bytes = raw_path.as_bytes();
+    let copy_len = name_bytes.len().min(99);
+    tar_bytes[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+    tar_bytes[100..107].copy_from_slice(b"0000644");
+    tar_bytes[108..115].copy_from_slice(b"0000000");
+    tar_bytes[116..123].copy_from_slice(b"0000000");
+    let size_str = format!("{:011o}\0", content.len());
+    tar_bytes[124..136].copy_from_slice(size_str.as_bytes());
+    tar_bytes[136..147].copy_from_slice(b"00000000000");
+    tar_bytes[156] = b'0';
+    tar_bytes[257..265].copy_from_slice(b"ustar  \0");
+
+    for b in tar_bytes[148..156].iter_mut() {
+        *b = b' ';
+    }
+    let chksum: u32 = tar_bytes[..block_size].iter().map(|&b| b as u32).sum();
+    let chksum_str = format!("{:06o}\0 ", chksum);
+    tar_bytes[148..156].copy_from_slice(chksum_str.as_bytes());
+
+    tar_bytes[block_size..block_size + content.len()].copy_from_slice(content);
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&tar_bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
 /// Minimal TaskDef suitable for a workspace with just one task.
 fn minimal_task() -> TaskDef {
     TaskDef {
@@ -323,6 +363,56 @@ async fn upload_empty_body_is_accepted() -> Result<()> {
         latest.has_json,
         "state.json synthesised from query params should be present"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_rejects_malformed_gzip() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(b"this is not gzip".to_vec()))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_rejects_oversize_body() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    // 51 MB — should trigger the DefaultBodyLimit layer (413) before the handler runs.
+    let oversize = vec![0u8; 50 * 1024 * 1024 + 1];
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(oversize))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_rejects_path_traversal_in_tarball() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let tarball = make_hostile_tarball("../escape.pem", b"bad");
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     Ok(())
 }
 
