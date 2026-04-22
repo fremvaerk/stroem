@@ -1060,3 +1060,54 @@ Shipping v1 as archive-only upload (`POST /api/workspaces/{ws}/tasks/{task}/stat
 - [ ] **If-Match / content-hash guard** — optional header `If-Match: <snapshot_id>` on mutating calls, rejects with 409 if the snapshot has advanced since the client last read. Prevents last-writer-wins surprises when multiple operators/automations touch the same task state.
 - [ ] **Session-based editor** (option γ) — only if β+download+patch prove insufficient. `POST /state/edit` opens a session, PUT/DELETE files, PATCH JSON, `POST commit` materializes one snapshot. Server-side scratch dir + TTL + cleanup. Probably overkill; defer until a concrete use case demands it.
 - [ ] **UI affordance** — drag-drop file upload on task detail page, JSON editor for `state.json`, diff viewer against previous snapshot.
+
+## State Upload v1 Review (2026-04-22)
+
+Findings from parallel review agents (code-reviewer + security-auditor + database-optimizer + qa-expert) on branch `feat/state-upload`. Verdict: Needs Attention before merge. No critical exploitable vulnerabilities given auth-gated access, but several important correctness/security issues and test coverage gaps.
+
+### Important — fix before merge
+
+- [ ] **Decompression bomb in `unpack_tarball`** — `crates/stroem-server/src/web/api/state_upload.rs:161`. `Vec::with_capacity(entry.size() as usize)` + `read_to_end` has no per-entry or aggregate cap. A ~4 MB gzip can balloon to gigabytes on unpack before the 50 MB post-repack check fires. **Fix**: use `entry.take(MAX_SNAPSHOT_BYTES as u64 + 1)` or accumulate a running byte count and error past the cap. Apply to both uploaded and prior-snapshot unpack paths.
+- [ ] **`source_id` misreports API-key auth as user email** — `state_upload.rs:295` (`resolve_source_id`). Always emits `user:{email}` regardless of auth method, contradicting design spec §"Synthetic seed job" (spec says `api_key:{key_prefix}` for API keys). Audit trail can't distinguish SSO sessions from CI pipelines. **Fix**: branch on `auth_user.is_api_key` and emit `api_key:{first 8 chars}` for API-key callers.
+- [ ] **Dead `insert_synthetic_upload_job` function** — `state_upload.rs:207-241`. `pub async fn` tagged `#[allow(dead_code)]`, disconnected from both handlers (which inline their own INSERT). Signature diverges from what actually runs. **Fix**: either delete entirely or refactor both `commit_*` functions to call it. The `#[allow(dead_code)]` is hiding what would otherwise be a compiler warning.
+- [ ] **`has_root_state_json` double-decompresses the repacked tarball** — `state_upload.rs:266-270, 458`. Called from both commit functions after `build_snapshot` already unpacked+repacked. **Fix**: return `has_json: bool` alongside bytes from `build_snapshot` directly. Performance + correctness risk (two unpack paths could disagree).
+- [ ] **ACL silent pass-through when `auth_user` is None + ACL configured** — `state_upload.rs:311` (`check_run_permission`). The outer `if let Some(auth) = auth_user` skips the entire ACL check when `auth_user` is None, even if `state.acl.is_configured()`. Currently shielded by upstream `require_auth`, but any middleware reordering creates an authz bypass. **Fix**: if ACL is configured and `auth_user.is_none()`, return `Unauthorized`.
+- [ ] **`tracing::instrument` doesn't skip `params`** — `state_upload.rs:334, 548`. Query param values (user-supplied, potentially secrets despite docs warning) land in tracing spans at DEBUG. No redaction backstop. **Fix**: add `params` to `skip(...)` list on both handler attributes.
+- [ ] **Path traversal in tarball entries accepted** — `state_upload.rs:152-157` (`unpack_tarball`). Strips `./` but does not reject `..` components or absolute paths. A malicious `../../etc/passwd` entry gets stored verbatim in the archive. Workers are shielded by container boundaries today, but a future CLI `download` command could be tricked into writing outside the intended directory. **Fix**: in `unpack_tarball`, reject any entry whose path contains `..` as a component or starts with `/`.
+
+### Missing tests — add alongside fixes
+
+- [ ] **51 MB body returns 413** — untested; `DefaultBodyLimit` layer is wired but never exercised by an integration test. Add to `tests/state_upload_test.rs`. Synthesise `vec![0u8; 50 * 1024 * 1024 + 1]` as raw body.
+- [ ] **Malformed/corrupted gzip body returns 400** — untested. Send non-gzip bytes (`b"not gzip"`) and assert `BAD_REQUEST`. Add to `tests/state_upload_test.rs`.
+- [ ] **Path-traversal tarball entry** — no test asserts behavior (rejection vs sanitisation). Add unit test to `state_upload.rs` after deciding on Important #7's fix.
+- [ ] **Symlink/hardlink tarball entries are skipped** — code path at `state_upload.rs:148-150` exists but untested. Use `tar::Header::new_gnu()` with `entry_type` set to `tar::EntryType::Symlink`. Add to unit tests.
+- [ ] **Merge with prior state.json + no query params preserves prior verbatim** — the "read-modify-rewrite with no changes" case. Add to unit tests in `state_upload.rs`.
+- [ ] **Merge with empty-prior (no state.json) + new query params creates state.json** — specific combination untested. Add to unit tests.
+- [ ] **Missing workspace → 404** for both endpoints. Add to integration tests.
+- [ ] **Missing task → 404** for task endpoint. Add to integration tests.
+- [ ] **State storage not configured → 404** — `build_test_app` always wires it. Add a `build_test_app_no_storage` variant and one test per endpoint.
+- [ ] **Max_snapshots pruning removes archive blobs on disk** — current `upload_merge_mode_preserves_prior_files` counts rows but doesn't verify physical blob deletion. Upload 6 snapshots with `max_snapshots=5`, verify 5 rows + 1 blob deleted from the local archive dir. Account for the fire-and-forget `tokio::spawn` prune (short sleep/yield after the 6th upload).
+- [ ] **API-key `source_id` format** — paired with Important #2 fix. After adding `api_key:{prefix}` path, add a test using `strm_…` token and assert `source_id` starts with `api_key:`.
+- [ ] **Non-admin user hitting global endpoint returns 403** — deferred during Task 6 (needs a `build_test_app_with_auth` variant that enables JWT). Adds the only coverage for the `if !auth.is_admin()` branch — currently an auth-bypass risk if the code is ever refactored.
+- [ ] **`GET /api/jobs?source_type=upload` filter returns upload jobs** — audit-trail goal from the design spec. First verify `ListJobsQuery` even supports a `source_type` filter; if not, add the filter or adjust the audit narrative. Add integration test either way.
+
+### Minor — nice to have
+
+- [ ] **CLI swallows response-body read errors** — `crates/stroem-cli/src/remote/state.rs:69`. `response.text().await.unwrap_or_default()` gives user "upload failed: 500 — " with no detail. Use `.context("read response body")?` or log the error.
+- [ ] **CLI basename collision silently overwrites** — `remote/state.rs:86-91`. `./certs/cert.pem` and `./backup/cert.pem` both map to `cert.pem`; second wins. Add a duplicate-basename check with a clear error, or at minimum a `tracing::warn!`.
+- [ ] **Prior snapshot fetch in merge mode has no size cap** — `state_upload.rs:373`. Low risk (own storage), but a defensive `bytes.len() <= MAX_SNAPSHOT_BYTES` assertion after retrieval would be robust against a mis-sized snapshot written by a past/future version.
+- [ ] **Route `DefaultBodyLimit` layer applied per-route instead of router-level** — `crates/stroem-server/src/web/api/mod.rs:264-273`. Inconsistent with `worker_api/mod.rs:92` pattern. Low severity.
+- [ ] **SQL duplication between handlers and `insert_and_prune` repo methods** — `state_upload.rs:445, 664` vs `crates/stroem-db/src/repos/task_state.rs:90` + `repos/workspace_state.rs:88`. Acknowledged trade-off (handlers need the same tx to include the synthetic job INSERT). Long-term fix: refactor the repo methods to accept `&mut Transaction<'_, Postgres>` instead of `&PgPool`, then handlers can delegate. Non-blocking.
+- [ ] **`UPDATE job SET output` round-trip could be eliminated** — `state_upload.rs:535, 758`. Generate `snapshot_id` before the tx so the initial `INSERT INTO job` can carry the final `output` directly. Saves one statement per upload. Non-blocking optimization.
+- [ ] **No index on `job.source_type`** — any audit query filtering by `source_type = 'upload'` does a seq scan today. Also true for `'retry'`, `'hook'`, etc. Add only if query patterns warrant.
+- [ ] **CLI: `state.json` passed as a file** — CLI `build_tarball` happily packs it; server rejects with 400. Add a client-side guard for a clearer error.
+- [ ] **CLI: paths with spaces / unicode in filename** — `path.file_name().to_string_lossy()` handles them; add test for documentation.
+- [ ] **Concurrent uploads for same (ws, task) stress test** — add `// TODO(test): concurrent upload stress` near `commit_task_upload` for when fault-injection tooling exists.
+- [ ] **E2E suite not yet run end-to-end** — `tests/e2e.sh` additions landed but weren't executed (requires docker-compose build cycle). Operator should run `./tests/e2e.sh` before merging.
+
+### Cleared by review (non-issues)
+
+- Migration 030 is safe and consistent with previous `source_type` CHECK migrations (005, 019, 025, 026, 027). `IF EXISTS` guard makes it idempotent.
+- Pruning correctness: the code uses sequential statements (not CTEs). PostgreSQL sees prior-statement effects across a transaction, so the prune `ORDER BY created_at DESC OFFSET max_snapshots` correctly preserves the newly-inserted row (it's the newest by `created_at`).
+- Transaction ordering: archive write → DB tx → compensating storage.delete on tx failure is correct. Compensating path fires for `pool.begin()` failures as well.
+- `ON DELETE SET NULL` retention interaction: when the job-retention sweeper prunes a synthetic upload job, state rows become orphaned with `job_id = NULL`. Existing readers in `TaskStateRepo` / `WorkspaceStateRepo` already type `job_id` as `Option<Uuid>`. No regression.
