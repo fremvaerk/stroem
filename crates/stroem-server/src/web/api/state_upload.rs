@@ -37,6 +37,10 @@ pub fn build_state_json_from_params(
 /// still fit once the prior snapshot is overlaid.
 pub(crate) const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
 
+/// Sentinel `task_name` used in the synthetic upload job row and in
+/// `workspace_state.written_by_task` for global workspace state uploads.
+pub(crate) const GLOBAL_TASK_NAME_SENTINEL: &str = "_global_state";
+
 /// Build the bytes of a new snapshot tarball given an optional prior
 /// tarball, the uploaded tarball, and the state.json key/value pairs from
 /// query params.
@@ -539,6 +543,224 @@ async fn commit_task_upload(
         .context("update synthetic job output")?;
 
     tx.commit().await.context("commit upload tx")?;
+
+    Ok((snapshot_id, deleted_keys))
+}
+
+/// POST /api/workspaces/{ws}/state — upload a global workspace state snapshot (admin only).
+#[tracing::instrument(skip(state, auth_user, body))]
+pub async fn upload_global_state(
+    State(state): State<std::sync::Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+    Path(ws): Path<String>,
+    Query(params): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    // Auth + admin required when auth is enabled
+    let source_id = resolve_source_id(&state, &auth_user)?;
+    if state.config.auth.is_some() {
+        let auth = auth_user
+            .as_ref()
+            .ok_or_else(|| AppError::Unauthorized("Authentication required".into()))?;
+        if !auth.is_admin() {
+            return Err(AppError::Forbidden(
+                "Admin privileges required for global-state upload".into(),
+            ));
+        }
+    }
+
+    // Workspace exists
+    let _workspace = crate::web::api::get_workspace_or_error(&state, &ws).await?;
+
+    // Storage configured
+    let storage = state
+        .state_storage
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
+
+    // Parse mode
+    let mode = parse_mode(&params)?;
+
+    // Body → bytes, empty synthesised
+    let uploaded_bytes: Vec<u8> = if body.is_empty() {
+        pack_tarball(&HashMap::new()).map_err(AppError::Internal)?
+    } else {
+        body.to_vec()
+    };
+
+    // Prior snapshot (merge mode only)
+    let prior_bytes: Option<Vec<u8>> = if matches!(mode, UploadMode::Merge) {
+        match stroem_db::WorkspaceStateRepo::get_latest(&state.pool, &ws)
+            .await
+            .map_err(AppError::Internal)?
+        {
+            Some(row) => storage
+                .retrieve(&row.storage_key)
+                .await
+                .map_err(AppError::Internal)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // Build new snapshot bytes (also rejects root state.json in upload)
+    let new_bytes = build_snapshot(prior_bytes.as_deref(), &uploaded_bytes, &params)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    // Archive write
+    let job_id = Uuid::new_v4();
+    let key = storage.global_storage_key(&ws, job_id);
+    storage
+        .store(&key, &new_bytes)
+        .await
+        .map_err(AppError::Internal)?;
+
+    // DB tx
+    let result = commit_global_upload(
+        &state.pool,
+        &ws,
+        &key,
+        &new_bytes,
+        mode,
+        source_id.as_deref(),
+        state.workspaces.get_revision(&ws).as_deref(),
+        storage.global_max_snapshots(),
+        job_id,
+    )
+    .await;
+
+    let (snapshot_id, deleted_keys) = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = storage.delete(&key).await;
+            return Err(AppError::Internal(e));
+        }
+    };
+
+    // Background prune cleanup
+    if !deleted_keys.is_empty() {
+        let storage_clone = std::sync::Arc::clone(storage);
+        tokio::spawn(async move {
+            for k in deleted_keys {
+                if let Err(e) = storage_clone.delete(&k).await {
+                    tracing::warn!(
+                        "Failed to delete pruned global upload snapshot {}: {:#}",
+                        k,
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "snapshot_id": snapshot_id,
+            "job_id": job_id,
+        })),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_global_upload(
+    pool: &sqlx::PgPool,
+    ws: &str,
+    key: &str,
+    new_bytes: &[u8],
+    mode: UploadMode,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    max_snapshots: usize,
+    job_id: Uuid,
+) -> Result<(Uuid, Vec<String>)> {
+    let sha = sha256_hex(new_bytes);
+    let has_json = has_root_state_json(new_bytes);
+    let mode_str = match mode {
+        UploadMode::Replace => "replace",
+        UploadMode::Merge => "merge",
+    };
+    let input = serde_json::json!({
+        "upload": {
+            "size_bytes": new_bytes.len(),
+            "sha256": sha,
+            "has_json": has_json,
+            "uploaded_by": source_id,
+            "mode": mode_str,
+        }
+    });
+
+    let mut tx = pool.begin().await.context("begin global upload tx")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO job (
+            job_id, workspace, task_name, mode, input, output,
+            status, source_type, source_id, revision,
+            started_at, completed_at
+        )
+        VALUES ($1, $2, $3, 'distributed', $4, NULL,
+                'completed', 'upload', $5, $6,
+                NOW(), NOW())
+        "#,
+    )
+    .bind(job_id)
+    .bind(ws)
+    .bind(GLOBAL_TASK_NAME_SENTINEL)
+    .bind(&input)
+    .bind(source_id)
+    .bind(revision)
+    .execute(&mut *tx)
+    .await
+    .context("insert synthetic upload job (global)")?;
+
+    let snapshot_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO workspace_state (id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(snapshot_id)
+    .bind(ws)
+    .bind(GLOBAL_TASK_NAME_SENTINEL)
+    .bind(job_id)
+    .bind(key)
+    .bind(new_bytes.len() as i64)
+    .bind(has_json)
+    .execute(&mut *tx)
+    .await
+    .context("insert workspace_state")?;
+
+    let deleted_keys: Vec<String> = sqlx::query_scalar(
+        r#"
+        DELETE FROM workspace_state
+        WHERE workspace = $1
+          AND id IN (
+            SELECT id FROM workspace_state
+            WHERE workspace = $1
+            ORDER BY created_at DESC, id DESC
+            OFFSET $2
+          )
+        RETURNING storage_key
+        "#,
+    )
+    .bind(ws)
+    .bind(max_snapshots as i64)
+    .fetch_all(&mut *tx)
+    .await
+    .context("prune workspace_state")?;
+
+    sqlx::query("UPDATE job SET output = $1 WHERE job_id = $2")
+        .bind(serde_json::json!({"snapshot_id": snapshot_id}))
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await
+        .context("update synthetic global job output")?;
+
+    tx.commit().await.context("commit global upload tx")?;
 
     Ok((snapshot_id, deleted_keys))
 }

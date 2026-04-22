@@ -193,6 +193,47 @@ async fn task_state_upload_round_trip() -> Result<()> {
 }
 
 #[tokio::test]
+async fn global_state_upload_round_trip() -> Result<()> {
+    let app = build_test_app("production", &[]).await?;
+    let tarball = make_tarball(&[("config.json", b"{\"k\":\"v\"}")]);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "response body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body)?;
+    assert!(parsed["snapshot_id"].is_string());
+    assert!(parsed["job_id"].is_string());
+
+    let latest = stroem_db::WorkspaceStateRepo::get_latest(&app.pool, "production")
+        .await?
+        .expect("latest global snapshot should exist");
+
+    let row: (String, String) = sqlx::query_as(
+        "SELECT source_type, task_name FROM job WHERE job_id = $1",
+    )
+    .bind(latest.job_id.unwrap())
+    .fetch_one(&app.pool)
+    .await?;
+    assert_eq!(row.0, "upload");
+    assert_eq!(row.1, "_global_state");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn synthetic_upload_job_is_inserted() -> Result<()> {
     let (pool, _pg) = spawn_pg().await?;
 
