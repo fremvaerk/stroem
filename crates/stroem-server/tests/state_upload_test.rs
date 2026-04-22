@@ -15,7 +15,7 @@ use std::sync::Arc;
 use stroem_common::models::workflow::{TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
-    DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
+    AuthConfig, DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
@@ -631,6 +631,275 @@ async fn upload_max_snapshots_prunes_archive_blobs() -> Result<()> {
         5,
         "expected 5 archive blobs on disk, got {}",
         entries.len()
+    );
+
+    Ok(())
+}
+
+// ─── Auth-enabled tests ───────────────────────────────────────────────────────
+
+const TEST_JWT_SECRET: &str = "test-jwt-secret-not-for-production";
+const TEST_REFRESH_SECRET: &str = "test-refresh-secret-not-for-production";
+
+struct TestAppAuth {
+    router: Router,
+    pool: PgPool,
+    _pg: testcontainers::ContainerAsync<Postgres>,
+    _tmp: TempDir,
+    /// Pre-minted JWT for an admin user already in the DB.
+    admin_token: String,
+    /// Pre-minted JWT for a non-admin user already in the DB.
+    user_token: String,
+    /// Admin user's UUID.
+    #[allow(dead_code)]
+    admin_id: uuid::Uuid,
+    /// Non-admin user's UUID.
+    user_id: uuid::Uuid,
+}
+
+/// Build a TestApp with JWT auth enabled. Creates two users in the DB
+/// (admin + regular), mints access tokens for both, and returns the app plus
+/// those tokens.
+async fn build_test_app_with_auth(
+    workspace_name: &str,
+    task_names: &[&str],
+) -> Result<TestAppAuth> {
+    let (pool, _pg) = spawn_pg().await?;
+
+    let tmp = TempDir::new()?;
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let state_dir = tmp.path().join("state-archive");
+    std::fs::create_dir_all(&state_dir)?;
+
+    let auth_config = AuthConfig {
+        jwt_secret: TEST_JWT_SECRET.to_string(),
+        refresh_secret: TEST_REFRESH_SECRET.to_string(),
+        base_url: None,
+        providers: HashMap::new(),
+        initial_user: None,
+    };
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://unused".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            workspace_name.to_string(),
+            WorkspaceSourceDef::Folder {
+                path: tmp.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token".to_string(),
+        auth: Some(auth_config),
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        agents: None,
+        state_storage: None,
+    };
+
+    let mut workspace = WorkspaceConfig::new();
+    for name in task_names {
+        workspace.tasks.insert((*name).to_string(), minimal_task());
+    }
+
+    let mgr = WorkspaceManager::from_config(workspace_name, workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let archive: Arc<dyn StateArchive> = Arc::new(LocalStateArchive::new(&state_dir));
+    let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
+
+    // Create admin user in DB.
+    let admin_id = uuid::Uuid::new_v4();
+    stroem_db::UserRepo::create(&pool, admin_id, "admin@test.local", None, None).await?;
+    stroem_db::UserRepo::set_admin(&pool, admin_id, true).await?;
+
+    // Create regular (non-admin) user in DB.
+    let user_id = uuid::Uuid::new_v4();
+    stroem_db::UserRepo::create(&pool, user_id, "user@test.local", None, None).await?;
+
+    // Mint JWT access tokens for both.
+    let admin_token = stroem_server::auth::create_access_token(
+        &admin_id.to_string(),
+        "admin@test.local",
+        true,
+        TEST_JWT_SECRET,
+    )?;
+    let user_token = stroem_server::auth::create_access_token(
+        &user_id.to_string(),
+        "user@test.local",
+        false,
+        TEST_JWT_SECRET,
+    )?;
+
+    let state = AppState::new(
+        pool.clone(),
+        mgr,
+        config,
+        log_storage,
+        HashMap::new(),
+        Some(storage),
+    );
+    let router = build_router(state, CancellationToken::new());
+
+    Ok(TestAppAuth {
+        router,
+        pool,
+        _pg,
+        _tmp: tmp,
+        admin_token,
+        user_token,
+        admin_id,
+        user_id,
+    })
+}
+
+/// Non-admin users must be rejected with 403 when uploading global workspace state.
+#[tokio::test]
+async fn upload_global_state_non_admin_forbidden() -> Result<()> {
+    let app = build_test_app_with_auth("production", &[]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/state")
+        .header("content-type", "application/gzip")
+        .header("authorization", format!("Bearer {}", app.user_token))
+        .body(Body::empty())?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin user should be forbidden from global-state upload"
+    );
+    Ok(())
+}
+
+/// Admin users can upload global workspace state; the synthetic job's
+/// source_id should be attributed as "user:admin@test.local".
+#[tokio::test]
+async fn upload_global_state_admin_succeeds() -> Result<()> {
+    let app = build_test_app_with_auth("production", &[]).await?;
+
+    let tarball = make_tarball(&[("config.json", b"{}")]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/state")
+        .header("content-type", "application/gzip")
+        .header("authorization", format!("Bearer {}", app.admin_token))
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let latest = stroem_db::WorkspaceStateRepo::get_latest(&app.pool, "production")
+        .await?
+        .expect("latest global snapshot should exist after upload");
+
+    let row: (Option<String>,) = sqlx::query_as("SELECT source_id FROM job WHERE job_id = $1")
+        .bind(latest.job_id.unwrap())
+        .fetch_one(&app.pool)
+        .await?;
+    assert_eq!(
+        row.0.as_deref(),
+        Some("user:admin@test.local"),
+        "source_id should be user:admin@test.local"
+    );
+    Ok(())
+}
+
+/// A request with no Bearer token must be rejected with 401 when auth is enabled.
+#[tokio::test]
+async fn upload_no_token_returns_401() -> Result<()> {
+    let app = build_test_app_with_auth("production", &["t"]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// API-key-authenticated uploads produce a source_id starting with "api_key:"
+/// followed by the key's prefix stored in the DB.
+#[tokio::test]
+async fn upload_task_state_api_key_source_id_is_api_key_prefix() -> Result<()> {
+    let app = build_test_app_with_auth("production", &["t"]).await?;
+
+    // generate_api_key() returns (raw_key, key_hash). The first 12 chars of
+    // raw_key become the prefix stored in the DB (e.g. "strm_a1b2c3d").
+    let (raw_key, key_hash) = stroem_server::auth::generate_api_key();
+    let prefix = raw_key[..12].to_string();
+
+    stroem_db::ApiKeyRepo::create(
+        &app.pool,
+        &key_hash,
+        app.user_id,
+        "test-key",
+        &prefix,
+        None, // no expiry
+    )
+    .await?;
+
+    // ACL is None in this test config — any authenticated user passes.
+    let tarball = make_tarball(&[("cert.pem", b"bytes")]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .header("authorization", format!("Bearer {}", raw_key))
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let latest = stroem_db::TaskStateRepo::get_latest(&app.pool, "production", "t")
+        .await?
+        .expect("latest task snapshot should exist after upload");
+
+    let row: (Option<String>,) = sqlx::query_as("SELECT source_id FROM job WHERE job_id = $1")
+        .bind(latest.job_id.unwrap())
+        .fetch_one(&app.pool)
+        .await?;
+
+    let source_id = row.0.expect("source_id should be set");
+    assert!(
+        source_id.starts_with("api_key:"),
+        "expected source_id to start with 'api_key:', got {:?}",
+        source_id
+    );
+    assert!(
+        source_id.contains(&prefix),
+        "expected source_id to contain the key prefix {}, got {:?}",
+        prefix,
+        source_id
     );
 
     Ok(())

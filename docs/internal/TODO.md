@@ -1087,8 +1087,8 @@ Findings from parallel review agents (code-reviewer + security-auditor + databas
 - [x] **Missing task → 404** for task endpoint. Add to integration tests.
 - [x] **State storage not configured → 404** — `build_test_app` always wires it. Add a `build_test_app_no_storage` variant and one test per endpoint.
 - [x] **Max_snapshots pruning removes archive blobs on disk** — current `upload_merge_mode_preserves_prior_files` counts rows but doesn't verify physical blob deletion. Upload 6 snapshots with `max_snapshots=5`, verify 5 rows + 1 blob deleted from the local archive dir. Account for the fire-and-forget `tokio::spawn` prune (short sleep/yield after the 6th upload).
-- [x] **API-key `source_id` format** — unit tests for `format_source_id` (api_key path, jwt path, missing-prefix fallback) added to `state_upload.rs`. End-to-end integration test deferred: needs `build_test_app_with_auth` variant (TODO: add alongside `Non-admin global endpoint` test below).
-- [ ] **Non-admin user hitting global endpoint returns 403** — deferred during Task 6 (needs a `build_test_app_with_auth` variant that enables JWT). Adds the only coverage for the `if !auth.is_admin()` branch — currently an auth-bypass risk if the code is ever refactored.
+- [x] **API-key `source_id` format** — unit tests for `format_source_id` (api_key path, jwt path, missing-prefix fallback) added to `state_upload.rs`. End-to-end integration test added: `upload_task_state_api_key_source_id_is_api_key_prefix` in `state_upload_test.rs` (Package D).
+- [x] **Non-admin user hitting global endpoint returns 403** — covered by `upload_global_state_non_admin_forbidden` integration test in `state_upload_test.rs` (Package D). Also added: `upload_global_state_admin_succeeds` (source_id attribution) and `upload_no_token_returns_401` (missing-token 401 path).
 - [ ] **`GET /api/jobs?source_type=upload` filter returns upload jobs** — audit-trail goal from the design spec. First verify `ListJobsQuery` even supports a `source_type` filter; if not, add the filter or adjust the audit narrative. Add integration test either way.
 
 ### Minor — nice to have
