@@ -1136,4 +1136,32 @@ mod tests {
             err
         );
     }
+
+    #[test]
+    fn build_snapshot_merge_preserves_state_json_with_no_params() {
+        let prior_state = serde_json::json!({ "domain": "old.com", "keep": "yes" });
+        let prior_state_bytes = serde_json::to_vec(&prior_state).unwrap();
+        let prior = make_tarball(&[("state.json", prior_state_bytes.as_slice())]);
+        let uploaded = make_tarball(&[]);
+        let (out, has_json) = build_snapshot(Some(&prior), &uploaded, &BTreeMap::new()).unwrap();
+        assert!(has_json);
+        let state: serde_json::Value =
+            serde_json::from_slice(&read_file(&out, "state.json").unwrap()).unwrap();
+        assert_eq!(state["domain"], "old.com");
+        assert_eq!(state["keep"], "yes");
+    }
+
+    #[test]
+    fn build_snapshot_merge_empty_prior_with_params_creates_state_json() {
+        let prior = make_tarball(&[("some.txt", b"data")]); // prior exists but no state.json
+        let uploaded = make_tarball(&[]);
+        let p = params(&[("domain", "example.com")]);
+        let (out, has_json) = build_snapshot(Some(&prior), &uploaded, &p).unwrap();
+        assert!(has_json);
+        let state: serde_json::Value =
+            serde_json::from_slice(&read_file(&out, "state.json").unwrap()).unwrap();
+        assert_eq!(state["domain"], "example.com");
+        // File from prior is preserved
+        assert_eq!(read_file(&out, "some.txt"), Some(b"data".to_vec()));
+    }
 }

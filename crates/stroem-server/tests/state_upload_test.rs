@@ -122,16 +122,17 @@ struct TestApp {
     _tmp: TempDir,
 }
 
-/// Build a Router wired to a real testcontainers Postgres, with a workspace
-/// containing the named tasks and a local-filesystem state backend.
-async fn build_test_app(workspace_name: &str, task_names: &[&str]) -> Result<TestApp> {
+/// Inner builder shared by `build_test_app` and `build_test_app_no_storage`.
+async fn build_test_app_inner(
+    workspace_name: &str,
+    task_names: &[&str],
+    with_state_storage: bool,
+) -> Result<TestApp> {
     let (pool, _pg) = spawn_pg().await?;
 
     let tmp = TempDir::new()?;
     let log_dir = tmp.path().join("logs");
     std::fs::create_dir_all(&log_dir)?;
-    let state_dir = tmp.path().join("state-archive");
-    std::fs::create_dir_all(&state_dir)?;
 
     let config = ServerConfig {
         listen: "127.0.0.1:0".to_string(),
@@ -169,8 +170,14 @@ async fn build_test_app(workspace_name: &str, task_names: &[&str]) -> Result<Tes
     let mgr = WorkspaceManager::from_config(workspace_name, workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
 
-    let archive: Arc<dyn StateArchive> = Arc::new(LocalStateArchive::new(&state_dir));
-    let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
+    let storage = if with_state_storage {
+        let state_dir = tmp.path().join("state-archive");
+        std::fs::create_dir_all(&state_dir)?;
+        let archive: Arc<dyn StateArchive> = Arc::new(LocalStateArchive::new(&state_dir));
+        Some(StateStorage::new(archive, "state/".to_string(), 5, None))
+    } else {
+        None
+    };
 
     let state = AppState::new(
         pool.clone(),
@@ -178,7 +185,7 @@ async fn build_test_app(workspace_name: &str, task_names: &[&str]) -> Result<Tes
         config,
         log_storage,
         HashMap::new(),
-        Some(storage),
+        storage,
     );
     let router = build_router(state, CancellationToken::new());
 
@@ -188,6 +195,18 @@ async fn build_test_app(workspace_name: &str, task_names: &[&str]) -> Result<Tes
         _pg,
         _tmp: tmp,
     })
+}
+
+/// Build a Router wired to a real testcontainers Postgres, with a workspace
+/// containing the named tasks and a local-filesystem state backend.
+async fn build_test_app(workspace_name: &str, task_names: &[&str]) -> Result<TestApp> {
+    build_test_app_inner(workspace_name, task_names, true).await
+}
+
+/// Build a test app where `state_storage` is `None` (feature disabled).
+/// Uploads should return 404 "State storage not configured".
+async fn build_test_app_no_storage(workspace_name: &str, task_names: &[&str]) -> Result<TestApp> {
+    build_test_app_inner(workspace_name, task_names, false).await
 }
 
 #[tokio::test]
@@ -457,6 +476,162 @@ async fn upload_merge_mode_preserves_prior_files() -> Result<()> {
     let state: serde_json::Value = serde_json::from_slice(files.get("state.json").unwrap())?;
     assert_eq!(state["x"], "1", "x should be preserved from first upload");
     assert_eq!(state["y"], "2", "y should be added in merge");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_task_state_missing_workspace_returns_404() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let tarball = make_tarball(&[]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/nonexistent/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_global_state_missing_workspace_returns_404() -> Result<()> {
+    let app = build_test_app("production", &[]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/nonexistent/state")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_task_state_missing_task_returns_404() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let tarball = make_tarball(&[]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/does-not-exist/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_task_state_no_storage_returns_404() -> Result<()> {
+    let app = build_test_app_no_storage("production", &["t"]).await?;
+
+    let tarball = make_tarball(&[]);
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_global_state_no_storage_returns_404() -> Result<()> {
+    let app = build_test_app_no_storage("production", &[]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/state")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_max_snapshots_prunes_archive_blobs() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    // Upload 6 snapshots — max_snapshots is 5, so the oldest should be pruned.
+    for i in 0..6 {
+        let tarball = make_tarball(&[("f.txt", format!("v{}", i).as_bytes())]);
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/workspaces/production/tasks/t/state?seq={}",
+                i
+            ))
+            .header("content-type", "application/gzip")
+            .body(Body::from(tarball))?;
+        let response = app.router.clone().oneshot(request).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "upload {} failed",
+            i
+        );
+    }
+
+    // Poll until the fire-and-forget background prune task completes (max 2 s).
+    for _ in 0..20 {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2",
+        )
+        .bind("production")
+        .bind("t")
+        .fetch_one(&app.pool)
+        .await?;
+        if count.0 == 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2")
+            .bind("production")
+            .bind("t")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(count.0, 5, "expected 5 rows after pruning, got {}", count.0);
+
+    // Also verify on-disk archive blobs — there should be exactly 5 .tar.gz files
+    // under the state archive directory. Poll briefly for background storage.delete calls.
+    let archive_dir = app
+        ._tmp
+        .path()
+        .join("state-archive")
+        .join("state")
+        .join("production")
+        .join("t");
+
+    for _ in 0..20 {
+        if archive_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&archive_dir)?.collect();
+            if entries.len() == 5 {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let entries: Vec<_> = std::fs::read_dir(&archive_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(
+        entries.len(),
+        5,
+        "expected 5 archive blobs on disk, got {}",
+        entries.len()
+    );
 
     Ok(())
 }
