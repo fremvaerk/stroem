@@ -88,11 +88,11 @@ pub fn build_snapshot(
     }
 
     // Step 4: compute state.json
-    let mut merged_state: serde_json::Map<String, serde_json::Value> =
-        match files.get("state.json") {
-            Some(bytes) => serde_json::from_slice(bytes).unwrap_or_default(),
-            None => serde_json::Map::new(),
-        };
+    let mut merged_state: serde_json::Map<String, serde_json::Value> = match files.get("state.json")
+    {
+        Some(bytes) => serde_json::from_slice(bytes).unwrap_or_default(),
+        None => serde_json::Map::new(),
+    };
 
     let new_state = build_state_json_from_params(state_params);
     if let Some(new) = new_state {
@@ -310,20 +310,17 @@ async fn check_run_permission(
     if let Some(auth) = auth_user {
         if state.acl.is_configured() {
             let user_id = auth.user_id()?;
-            let (is_admin, groups) =
-                load_user_acl_context(&state.pool, user_id, auth.is_admin())
-                    .await
-                    .context("load ACL context")
-                    .map_err(AppError::Internal)?;
+            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")
+                .map_err(AppError::Internal)?;
             let task_path = make_task_path(task_folder, task_name);
             match state
                 .acl
                 .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
             {
                 TaskPermission::Deny => return Err(AppError::not_found("Task")),
-                TaskPermission::View => {
-                    return Err(AppError::Forbidden("View-only access".into()))
-                }
+                TaskPermission::View => return Err(AppError::Forbidden("View-only access".into())),
                 TaskPermission::Run => {} // allowed
             }
         }
@@ -790,7 +787,10 @@ mod tests {
     fn single_param_becomes_string_entry() {
         let out = build_state_json_from_params(&params(&[("domain", "example.com")])).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out["domain"], serde_json::Value::String("example.com".into()));
+        assert_eq!(
+            out["domain"],
+            serde_json::Value::String("example.com".into())
+        );
     }
 
     #[test]
@@ -801,7 +801,10 @@ mod tests {
         ]))
         .unwrap();
         assert!(!out.contains_key("mode"));
-        assert_eq!(out["domain"], serde_json::Value::String("example.com".into()));
+        assert_eq!(
+            out["domain"],
+            serde_json::Value::String("example.com".into())
+        );
     }
 
     #[test]
@@ -812,8 +815,7 @@ mod tests {
 
     #[test]
     fn values_are_always_strings() {
-        let out =
-            build_state_json_from_params(&params(&[("days", "30"), ("ok", "true")])).unwrap();
+        let out = build_state_json_from_params(&params(&[("days", "30"), ("ok", "true")])).unwrap();
         assert_eq!(out["days"], serde_json::Value::String("30".into()));
         assert_eq!(out["ok"], serde_json::Value::String("true".into()));
     }
@@ -896,7 +898,9 @@ mod tests {
     fn build_snapshot_rejects_root_state_json_in_upload() {
         let uploaded = make_tarball(&[("state.json", b"{}")]);
         let err = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap_err();
-        assert!(err.to_string().contains("must not contain a root-level state.json"));
+        assert!(err
+            .to_string()
+            .contains("must not contain a root-level state.json"));
     }
 
     #[test]

@@ -13,7 +13,16 @@ pub async fn dispatch(client: &Client, server: &str, action: StateAction) -> Res
             state,
             files,
         } => {
-            cmd_upload(client, server, &workspace, Some(&task), &mode, &state, &files).await
+            cmd_upload(
+                client,
+                server,
+                &workspace,
+                Some(&task),
+                &mode,
+                &state,
+                &files,
+            )
+            .await
         }
         StateAction::UploadGlobal {
             workspace,
@@ -72,8 +81,8 @@ fn build_tarball(files: &[std::path::PathBuf]) -> Result<Vec<u8>> {
     {
         let mut builder = tar::Builder::new(&mut encoder);
         for path in files {
-            let bytes = std::fs::read(path)
-                .with_context(|| format!("read file {}", path.display()))?;
+            let bytes =
+                std::fs::read(path).with_context(|| format!("read file {}", path.display()))?;
             let name = path
                 .file_name()
                 .ok_or_else(|| anyhow::anyhow!("path '{}' has no filename", path.display()))?

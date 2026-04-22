@@ -367,17 +367,29 @@ mod tests {
             "stroem-api",
             "state",
             "upload",
-            "--workspace", "prod",
-            "--task", "renew-ssl",
-            "--state", "domain=example.com",
-            "--state", "expiry=2026-07-21",
+            "--workspace",
+            "prod",
+            "--task",
+            "renew-ssl",
+            "--state",
+            "domain=example.com",
+            "--state",
+            "expiry=2026-07-21",
             "fullchain.pem",
             "privkey.pem",
         ])
         .unwrap();
         match cli.command {
             super::Commands::State {
-                action: super::StateAction::Upload { workspace, task, state, files, mode, .. },
+                action:
+                    super::StateAction::Upload {
+                        workspace,
+                        task,
+                        state,
+                        files,
+                        mode,
+                        ..
+                    },
             } => {
                 assert_eq!(workspace, "prod");
                 assert_eq!(task, "renew-ssl");
@@ -397,14 +409,23 @@ mod tests {
             "stroem-api",
             "state",
             "upload-global",
-            "--workspace", "prod",
-            "--mode", "merge",
-            "--state", "api_token=secret",
+            "--workspace",
+            "prod",
+            "--mode",
+            "merge",
+            "--state",
+            "api_token=secret",
         ])
         .unwrap();
         match cli.command {
             super::Commands::State {
-                action: super::StateAction::UploadGlobal { workspace, mode, state, files },
+                action:
+                    super::StateAction::UploadGlobal {
+                        workspace,
+                        mode,
+                        state,
+                        files,
+                    },
             } => {
                 assert_eq!(workspace, "prod");
                 assert_eq!(mode, "merge");

@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::workflow::{TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations};
-use stroem_server::config::{DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef};
+use stroem_server::config::{
+    DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
+};
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::state_storage::{LocalStateArchive, StateArchive, StateStorage};
@@ -156,7 +158,9 @@ async fn task_state_upload_round_trip() -> Result<()> {
 
     let request = Request::builder()
         .method("POST")
-        .uri("/api/workspaces/production/tasks/renew-ssl/state?domain=example.com&expiry=2026-07-21")
+        .uri(
+            "/api/workspaces/production/tasks/renew-ssl/state?domain=example.com&expiry=2026-07-21",
+        )
         .header("content-type", "application/gzip")
         .body(Body::from(tarball.clone()))?;
 
@@ -221,12 +225,11 @@ async fn global_state_upload_round_trip() -> Result<()> {
         .await?
         .expect("latest global snapshot should exist");
 
-    let row: (String, String) = sqlx::query_as(
-        "SELECT source_type, task_name FROM job WHERE job_id = $1",
-    )
-    .bind(latest.job_id.unwrap())
-    .fetch_one(&app.pool)
-    .await?;
+    let row: (String, String) =
+        sqlx::query_as("SELECT source_type, task_name FROM job WHERE job_id = $1")
+            .bind(latest.job_id.unwrap())
+            .fetch_one(&app.pool)
+            .await?;
     assert_eq!(row.0, "upload");
     assert_eq!(row.1, "_global_state");
 
@@ -250,12 +253,11 @@ async fn synthetic_upload_job_is_inserted() -> Result<()> {
     .await?;
     tx.commit().await?;
 
-    let row: (String, String, String) = sqlx::query_as(
-        "SELECT status, source_type, task_name FROM job WHERE job_id = $1",
-    )
-    .bind(job_id)
-    .fetch_one(&pool)
-    .await?;
+    let row: (String, String, String) =
+        sqlx::query_as("SELECT status, source_type, task_name FROM job WHERE job_id = $1")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await?;
 
     assert_eq!(row.0, "completed");
     assert_eq!(row.1, "upload");
@@ -307,12 +309,20 @@ async fn upload_empty_body_is_accepted() -> Result<()> {
     let response = app.router.clone().oneshot(request).await?;
     let status = response.status();
     let body = response.into_body().collect().await?.to_bytes();
-    assert_eq!(status, StatusCode::CREATED, "response body: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "response body: {}",
+        String::from_utf8_lossy(&body)
+    );
 
     let latest = stroem_db::TaskStateRepo::get_latest(&app.pool, "production", "t")
         .await?
         .unwrap();
-    assert!(latest.has_json, "state.json synthesised from query params should be present");
+    assert!(
+        latest.has_json,
+        "state.json synthesised from query params should be present"
+    );
     Ok(())
 }
 
@@ -340,16 +350,20 @@ async fn upload_merge_mode_preserves_prior_files() -> Result<()> {
     let resp2 = app.router.clone().oneshot(req2).await?;
     let status2 = resp2.status();
     let body2 = resp2.into_body().collect().await?.to_bytes();
-    assert_eq!(status2, StatusCode::CREATED, "response body: {}", String::from_utf8_lossy(&body2));
+    assert_eq!(
+        status2,
+        StatusCode::CREATED,
+        "response body: {}",
+        String::from_utf8_lossy(&body2)
+    );
 
     // Two snapshots total: first and second.
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2",
-    )
-    .bind("production")
-    .bind("t")
-    .fetch_one(&app.pool)
-    .await?;
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2")
+            .bind("production")
+            .bind("t")
+            .fetch_one(&app.pool)
+            .await?;
     assert_eq!(count.0, 2, "both snapshots should exist");
 
     // Fetch the merged snapshot from the archive by reading from the TempDir.
@@ -359,17 +373,29 @@ async fn upload_merge_mode_preserves_prior_files() -> Result<()> {
 
     let storage_key = latest.storage_key.clone();
     let archive_path = app._tmp.path().join("state-archive").join(&storage_key);
-    let bytes = std::fs::read(&archive_path)
-        .map_err(|e| anyhow::anyhow!("read merged snapshot at {}: {}", archive_path.display(), e))?;
+    let bytes = std::fs::read(&archive_path).map_err(|e| {
+        anyhow::anyhow!("read merged snapshot at {}: {}", archive_path.display(), e)
+    })?;
 
     let files = stroem_server::web::api::state_upload::unpack_tarball(&bytes)?;
-    assert!(files.contains_key("a.txt"), "a.txt should be preserved from prior snapshot");
-    assert_eq!(files.get("b.txt").map(|v| v.as_slice()), Some(b"NEWB".as_slice()));
-    assert!(files.contains_key("c.txt"), "c.txt should be added from upload");
-    assert!(files.contains_key("state.json"), "merged state.json should exist");
+    assert!(
+        files.contains_key("a.txt"),
+        "a.txt should be preserved from prior snapshot"
+    );
+    assert_eq!(
+        files.get("b.txt").map(|v| v.as_slice()),
+        Some(b"NEWB".as_slice())
+    );
+    assert!(
+        files.contains_key("c.txt"),
+        "c.txt should be added from upload"
+    );
+    assert!(
+        files.contains_key("state.json"),
+        "merged state.json should exist"
+    );
 
-    let state: serde_json::Value =
-        serde_json::from_slice(files.get("state.json").unwrap())?;
+    let state: serde_json::Value = serde_json::from_slice(files.get("state.json").unwrap())?;
     assert_eq!(state["x"], "1", "x should be preserved from first upload");
     assert_eq!(state["y"], "2", "y should be added in merge");
 
