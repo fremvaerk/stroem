@@ -6,6 +6,13 @@ db:
 log_storage:
   local_dir: /var/stroem/logs
 
+state_storage:
+  prefix: "state/"
+  max_snapshots: 5
+  archive:
+    type: local
+    path: /var/stroem/state
+
 workspaces:
   default:
     type: folder

@@ -1,0 +1,19 @@
+actions:
+  read-state:
+    type: script
+    script: |
+      #!/bin/bash
+      set -e
+      if [ -f "$STATE_DIR/hello.txt" ]; then
+        echo "FILE_CONTENT: $(cat $STATE_DIR/hello.txt)"
+      else
+        echo "FILE_CONTENT: (no file)"
+      fi
+      echo "TEMPLATE_GREETING: {{ state.greeting | default(value='(no greeting)') }}"
+
+tasks:
+  read-state:
+    mode: distributed
+    flow:
+      read:
+        action: read-state
