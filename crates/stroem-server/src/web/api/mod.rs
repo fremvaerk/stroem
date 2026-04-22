@@ -3,6 +3,7 @@ pub mod auth;
 pub mod jobs;
 pub mod middleware;
 pub mod oidc;
+pub mod state_upload;
 pub mod tasks;
 pub mod triggers;
 pub mod users;
