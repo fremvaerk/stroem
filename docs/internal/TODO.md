@@ -1044,3 +1044,19 @@ Last updated: 2026-03-13.
 - [x] Docker global state bind mount test — verifies `/global-state:ro` and `/global-state-out:rw`
 - [x] Kube global state volume test — verifies `global-state-vol`/`global-state-out-vol` present and absent
 - [x] State merge logic tests — extracted `merge_state_entries()` function with 6 unit tests: empty, single object, multiple distinct keys, last-writer-wins, non-objects skipped, all non-objects returns None
+
+## Future: Snapshot Management API (follow-up to archive-upload v1)
+
+**v1 status**: shipped on branch `feat/state-upload` (commits `7d12461`..`09d5507`). Design: `docs/internal/2026-04-21-state-upload-design.md`. Plan: `docs/internal/2026-04-21-state-upload-plan.md`. E2E test added but **not yet run** — operator should run `./tests/e2e.sh` before merging.
+
+Shipping v1 as archive-only upload (`POST /api/workspaces/{ws}/tasks/{task}/state` and `POST /api/workspaces/{ws}/state`, whole gzip tarball → one new snapshot, synthetic `source_type="upload"` job for audit). These are the follow-ups for a richer snapshot-management experience:
+
+- [ ] **Multi-file upload in one request** (option β) — `multipart/form-data` with `file=@...` (repeatable), `state_json=...`, `base=latest|empty`, `merge_json=true|false`. Server unpacks latest (if `base=latest`), overlays uploaded files, deep-merges `state_json`, repacks as new snapshot. Subsumes archive-only case (a single `tar` field could carry a pre-built archive).
+- [ ] **Individual file download** — `GET /api/workspaces/{ws}/tasks/{task}/state/files/{path}` to retrieve one file from the latest snapshot without pulling the whole tarball. Symmetric `GET /api/workspaces/{ws}/state/files/{path}` for global.
+- [ ] **State JSON read/patch** — `GET /api/workspaces/{ws}/tasks/{task}/state/json` returns the current `state.json`; `PATCH` with a JSON merge-patch document creates a new snapshot with merged values. Parallels global.
+- [ ] **List snapshot contents** — `GET /api/workspaces/{ws}/tasks/{task}/state/files` returns `[{path, size, sha256}]` for the latest snapshot. Useful for UI and debugging.
+- [ ] **Snapshot history + rollback** — `GET /api/workspaces/{ws}/tasks/{task}/state/snapshots` lists prior snapshots with IDs; `POST .../state/snapshots/{id}/restore` creates a new snapshot copied from an older one (for "oops, revert").
+- [ ] **Delete-files directive** — form field `delete_paths=a.pem&delete_paths=b.json` in β multipart removes listed files from the `base=latest` overlay before repacking.
+- [ ] **If-Match / content-hash guard** — optional header `If-Match: <snapshot_id>` on mutating calls, rejects with 409 if the snapshot has advanced since the client last read. Prevents last-writer-wins surprises when multiple operators/automations touch the same task state.
+- [ ] **Session-based editor** (option γ) — only if β+download+patch prove insufficient. `POST /state/edit` opens a session, PUT/DELETE files, PATCH JSON, `POST commit` materializes one snapshot. Server-side scratch dir + TTL + cleanup. Probably overkill; defer until a concrete use case demands it.
+- [ ] **UI affordance** — drag-drop file upload on task detail page, JSON editor for `state.json`, diff viewer against previous snapshot.

@@ -212,6 +212,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Retention: `max_snapshots` per task (default 5), pruned on upload
 - Runners: Shell (env vars), Docker (bind mounts `/state:ro` + `/state-out:rw`), Kube (emptyDir volumes)
 - Always available, no opt-in. Upload only triggered if `/state-out` has content or `STATE:` lines emitted.
+- Snapshots can also be uploaded out-of-band via `POST /api/workspaces/{ws}/tasks/{task}/state` and `POST /api/workspaces/{ws}/state` (see `docs/src/content/docs/guides/task-state.md` §"Uploading state manually"). Creates a synthetic `source_type="upload"` job for audit.
 
 ### Global Workspace State
 - Workspace-scoped state shared across all tasks (any task can read and write)

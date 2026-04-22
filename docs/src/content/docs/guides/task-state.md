@@ -341,6 +341,89 @@ tasks:
 
 Both types of state are available simultaneously — a step can read and write both task state and global state in the same run.
 
+## Uploading state manually
+
+State snapshots are normally written by tasks, but operators can also upload a snapshot out-of-band via the API. This is useful for bootstrapping — for example, seeding a Let's Encrypt certificate so a renewal task has something to read on first run.
+
+### Endpoints
+
+```
+POST /api/workspaces/{ws}/tasks/{task}/state    # task-state
+POST /api/workspaces/{ws}/state                 # global workspace state (admin)
+```
+
+Both accept a gzip tarball (max 50 MB) in the request body and state-JSON key/value pairs as query parameters.
+
+### Auth
+
+- Task-state: requires `Run` permission on the task (same permission as triggering it via `/execute`).
+- Global-state: requires admin.
+
+### Query parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `mode` | `replace` | `replace` = snapshot contains exactly what you upload; `merge` = overlay on top of the latest snapshot |
+| any other `key=value` | — | becomes a top-level string entry in `state.json` |
+
+### Modes
+
+- **Replace** (default): the new snapshot's files are exactly the tarball's contents plus `state.json` synthesised from query params. Any file or key present in the previous snapshot and absent from the upload is dropped.
+- **Merge**: the new snapshot starts from the previous snapshot's contents, then uploaded files overlay same-named files (new wins), and query-param state keys shallow-merge over the previous `state.json` (new wins).
+
+Merge cannot delete files or state keys — to remove something, use `mode=replace` and omit it.
+
+### The tarball
+
+- Include any files you want available at `$STATE_DIR` on the next run.
+- **Do not** include a root-level `state.json` — pass state values via query parameters instead. Nested paths like `subdir/state.json` are allowed.
+- An empty tarball is valid; an empty body (Content-Length 0) is also valid and is treated as an empty tarball.
+
+### Examples
+
+Bootstrap a Let's Encrypt certificate for a renewal task:
+
+```bash
+stroem-api state upload \
+    --workspace production \
+    --task renew-ssl \
+    --state domain=example.com \
+    --state expiry=2026-07-21 \
+    fullchain.pem privkey.pem
+```
+
+Rotate only the expiry value (merge mode, no file changes):
+
+```bash
+stroem-api state upload \
+    --workspace production \
+    --task renew-ssl \
+    --mode merge \
+    --state expiry=2027-07-21
+```
+
+Raw curl:
+
+```bash
+tar -czf /tmp/certs.tar.gz fullchain.pem privkey.pem
+curl -X POST \
+    -H "Authorization: Bearer $STROEM_TOKEN" \
+    -H "Content-Type: application/gzip" \
+    --data-binary @/tmp/certs.tar.gz \
+    "$STROEM_URL/api/workspaces/production/tasks/renew-ssl/state?domain=example.com&expiry=2026-07-21"
+```
+
+### Audit
+
+Each upload creates a synthetic job row with `source_type="upload"` and `status="completed"`. Filter the jobs list with `?source_type=upload` to see upload history. The job's `input` JSON records the uploader, size, and SHA-256 of the stored tarball.
+
+### Caveats
+
+- Values are **strings** — use `| int` / `| bool` in templates if type coercion matters.
+- Total query-string size is limited by the web server (~8 KB typical). For larger state, emit via the `STATE:` protocol from a task run.
+- Do **not** put secrets in query parameters — they land in access logs and tracing spans. Use the secret backend (see [Secrets & Encryption](/guides/secrets/)) instead.
+- To remove files or state keys, use `mode=replace`.
+
 ## Limitations
 
 - State is immutable once a snapshot is created. To update state, emit new `STATE:`/`GLOBAL_STATE:` lines or write new files from the step.
