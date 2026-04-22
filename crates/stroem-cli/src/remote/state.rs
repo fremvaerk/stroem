@@ -66,7 +66,7 @@ async fn cmd_upload(
         .context("POST state")?;
 
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await.context("read response body")?;
     if !status.is_success() {
         anyhow::bail!("upload failed: {} — {}", status, body);
     }
@@ -77,6 +77,9 @@ async fn cmd_upload(
 fn build_tarball(files: &[std::path::PathBuf]) -> Result<Vec<u8>> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<String> = HashSet::new();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     {
         let mut builder = tar::Builder::new(&mut encoder);
@@ -88,6 +91,13 @@ fn build_tarball(files: &[std::path::PathBuf]) -> Result<Vec<u8>> {
                 .ok_or_else(|| anyhow::anyhow!("path '{}' has no filename", path.display()))?
                 .to_string_lossy()
                 .into_owned();
+            if !seen.insert(name.clone()) {
+                anyhow::bail!(
+                    "Duplicate filename '{}' in upload set — two input paths share the same basename. \
+                     Rename one of the files or use distinct basenames.",
+                    name
+                );
+            }
             let mut header = tar::Header::new_gnu();
             header.set_size(bytes.len() as u64);
             header.set_mode(0o644);
@@ -100,4 +110,51 @@ fn build_tarball(files: &[std::path::PathBuf]) -> Result<Vec<u8>> {
         builder.finish().context("finish tar")?;
     }
     Ok(encoder.finish()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn build_tarball_rejects_duplicate_basenames() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        std::fs::create_dir(&a).unwrap();
+        let b = tmp.path().join("b");
+        std::fs::create_dir(&b).unwrap();
+        let f1 = a.join("cert.pem");
+        let f2 = b.join("cert.pem");
+        std::fs::write(&f1, b"A").unwrap();
+        std::fs::write(&f2, b"B").unwrap();
+
+        let err = build_tarball(&[f1, f2]).unwrap_err();
+        assert!(
+            err.to_string().contains("Duplicate filename"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn build_tarball_accepts_distinct_basenames() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = tmp.path().join("cert.pem");
+        let f2 = tmp.path().join("privkey.pem");
+        std::fs::write(&f1, b"A").unwrap();
+        std::fs::write(&f2, b"B").unwrap();
+
+        let bytes = build_tarball(&[f1, f2]).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn build_tarball_handles_empty_file_list() {
+        let bytes = build_tarball(&[]).unwrap();
+        assert!(
+            !bytes.is_empty(),
+            "empty tarball should still be valid gzip"
+        );
+    }
 }

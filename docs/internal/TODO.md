@@ -1093,8 +1093,8 @@ Findings from parallel review agents (code-reviewer + security-auditor + databas
 
 ### Minor — nice to have
 
-- [ ] **CLI swallows response-body read errors** — `crates/stroem-cli/src/remote/state.rs:69`. `response.text().await.unwrap_or_default()` gives user "upload failed: 500 — " with no detail. Use `.context("read response body")?` or log the error.
-- [ ] **CLI basename collision silently overwrites** — `remote/state.rs:86-91`. `./certs/cert.pem` and `./backup/cert.pem` both map to `cert.pem`; second wins. Add a duplicate-basename check with a clear error, or at minimum a `tracing::warn!`.
+- [x] **CLI swallows response-body read errors** — `crates/stroem-cli/src/remote/state.rs:69`. `response.text().await.unwrap_or_default()` gives user "upload failed: 500 — " with no detail. Use `.context("read response body")?` or log the error.
+- [x] **CLI basename collision silently overwrites** — `remote/state.rs:86-91`. `./certs/cert.pem` and `./backup/cert.pem` both map to `cert.pem`; second wins. Add a duplicate-basename check with a clear error, or at minimum a `tracing::warn!`.
 - [x] **Prior snapshot fetch in merge mode has no size cap** — `state_upload.rs:373`. Low risk (own storage), but a defensive `bytes.len() <= MAX_SNAPSHOT_BYTES` assertion after retrieval would be robust against a mis-sized snapshot written by a past/future version.
 - [ ] **Route `DefaultBodyLimit` layer applied per-route instead of router-level** — `crates/stroem-server/src/web/api/mod.rs:264-273`. Inconsistent with `worker_api/mod.rs:92` pattern. Low severity.
 - [ ] **SQL duplication between handlers and `insert_and_prune` repo methods** — `state_upload.rs:445, 664` vs `crates/stroem-db/src/repos/task_state.rs:90` + `repos/workspace_state.rs:88`. Acknowledged trade-off (handlers need the same tx to include the synthetic job INSERT). Long-term fix: refactor the repo methods to accept `&mut Transaction<'_, Postgres>` instead of `&PgPool`, then handlers can delegate. Non-blocking.
