@@ -27,7 +27,6 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
     let container = Postgres::default().start().await?;
@@ -272,36 +271,6 @@ async fn global_state_upload_round_trip() -> Result<()> {
             .await?;
     assert_eq!(row.0, "upload");
     assert_eq!(row.1, "_global_state");
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn synthetic_upload_job_is_inserted() -> Result<()> {
-    let (pool, _pg) = spawn_pg().await?;
-
-    let mut tx = pool.begin().await?;
-    let job_id = stroem_server::web::api::state_upload::insert_synthetic_upload_job(
-        &mut tx,
-        "production",
-        "renew-ssl",
-        Some("user:ala@allunite.com"),
-        serde_json::json!({"upload": {"size_bytes": 123, "mode": "replace"}}),
-        serde_json::json!({"snapshot_id": Uuid::new_v4()}),
-        Some("rev-abc"),
-    )
-    .await?;
-    tx.commit().await?;
-
-    let row: (String, String, String) =
-        sqlx::query_as("SELECT status, source_type, task_name FROM job WHERE job_id = $1")
-            .bind(job_id)
-            .fetch_one(&pool)
-            .await?;
-
-    assert_eq!(row.0, "completed");
-    assert_eq!(row.1, "upload");
-    assert_eq!(row.2, "renew-ssl");
 
     Ok(())
 }

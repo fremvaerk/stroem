@@ -45,6 +45,10 @@ pub(crate) const GLOBAL_TASK_NAME_SENTINEL: &str = "_global_state";
 /// tarball, the uploaded tarball, and the state.json key/value pairs from
 /// query params.
 ///
+/// Returns `(bytes, has_json)` where `has_json` is `true` when the resulting
+/// tarball contains a root-level `state.json`. This avoids a redundant
+/// decompress pass in the callers.
+///
 /// Algorithm:
 /// 1. If `prior` is `Some`: unpack into `files: HashMap<String, Vec<u8>>`.
 ///    Else: start empty. This is how the handler signals `mode=replace`:
@@ -64,7 +68,7 @@ pub fn build_snapshot(
     prior: Option<&[u8]>,
     uploaded: &[u8],
     state_params: &BTreeMap<String, String>,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, bool)> {
     // Step 1: unpack prior (if any)
     let mut files: HashMap<String, Vec<u8>> = match prior {
         Some(bytes) => unpack_tarball(bytes).context("unpack prior snapshot")?,
@@ -110,6 +114,7 @@ pub fn build_snapshot(
     }
 
     // Step 5: repack (deterministic order so tests can assert on bytes shape)
+    let has_json = files.contains_key("state.json");
     let repacked = pack_tarball(&files)?;
 
     // Step 6: size guard
@@ -120,7 +125,7 @@ pub fn build_snapshot(
         ));
     }
 
-    Ok(repacked)
+    Ok((repacked, has_json))
 }
 
 /// Unpack a gzip tarball into a map of `path -> bytes`.
@@ -217,52 +222,6 @@ pub fn pack_tarball(files: &HashMap<String, Vec<u8>>) -> Result<Vec<u8>> {
     encoder.finish().context("finish gzip")
 }
 
-/// Insert a synthetic job row to represent an out-of-band state upload.
-///
-/// The returned UUID is used as both the `job_id` foreign key on the
-/// state-snapshot row and the filename in the archive's storage key.
-///
-/// Runs inside an existing transaction so the job insert and the
-/// state-snapshot insert commit atomically (or roll back together).
-///
-/// See `docs/internal/2026-04-21-state-upload-design.md` § "Synthetic seed job".
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_synthetic_upload_job(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workspace: &str,
-    task_name: &str,
-    source_id: Option<&str>,
-    input: serde_json::Value,
-    output: serde_json::Value,
-    revision: Option<&str>,
-) -> Result<uuid::Uuid> {
-    let job_id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"
-        INSERT INTO job (
-            job_id, workspace, task_name, mode, input, output,
-            status, source_type, source_id, revision,
-            started_at, completed_at
-        )
-        VALUES ($1, $2, $3, 'distributed', $4, $5,
-                'completed', 'upload', $6, $7,
-                NOW(), NOW())
-        "#,
-    )
-    .bind(job_id)
-    .bind(workspace)
-    .bind(task_name)
-    .bind(&input)
-    .bind(&output)
-    .bind(source_id)
-    .bind(revision)
-    .execute(&mut **tx)
-    .await
-    .context("insert synthetic upload job")?;
-
-    Ok(job_id)
-}
-
 // ─── HTTP handler ────────────────────────────────────────────────────────────
 
 use crate::state::AppState;
@@ -285,13 +244,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Determine whether a tarball contains a root-level `state.json`.
-fn has_root_state_json(bytes: &[u8]) -> bool {
-    unpack_tarball(bytes)
-        .map(|m| m.contains_key("state.json"))
-        .unwrap_or(false)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UploadMode {
     Replace,
@@ -310,13 +262,30 @@ fn parse_mode(params: &BTreeMap<String, String>) -> Result<UploadMode, AppError>
     }
 }
 
+/// Format the audit-trail `source_id` for a state upload.
+///
+/// - Auth disabled → `None` (anonymous upload, no attribution).
+/// - Auth enabled + API key → `"api_key:{prefix}"` (e.g. `"api_key:strm_a1b2c3d"`).
+/// - Auth enabled + JWT session → `"user:{email}"`.
+/// - Auth enabled + no user → authentication required error.
+fn format_source_id(user: &AuthUser) -> String {
+    if user.is_api_key {
+        format!(
+            "api_key:{}",
+            user.api_key_prefix.as_deref().unwrap_or("unknown")
+        )
+    } else {
+        format!("user:{}", user.claims.email)
+    }
+}
+
 fn resolve_source_id(
     state: &std::sync::Arc<AppState>,
     auth_user: &Option<AuthUser>,
 ) -> Result<Option<String>, AppError> {
     match (state.config.auth.is_some(), auth_user) {
         (false, _) => Ok(None),
-        (true, Some(user)) => Ok(Some(format!("user:{}", user.claims.email))),
+        (true, Some(user)) => Ok(Some(format_source_id(user))),
         (true, None) => Err(AppError::Unauthorized("Authentication required".into())),
     }
 }
@@ -421,7 +390,7 @@ pub async fn upload_task_state(
     };
 
     // Build the new snapshot bytes (also validates no root-level state.json in upload)
-    let new_bytes = build_snapshot(prior_bytes.as_deref(), &uploaded_bytes, &params)
+    let (new_bytes, has_json) = build_snapshot(prior_bytes.as_deref(), &uploaded_bytes, &params)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // Archive write (followed by DB tx; compensating delete on failure)
@@ -439,6 +408,7 @@ pub async fn upload_task_state(
         &task,
         &key,
         &new_bytes,
+        has_json,
         mode,
         source_id.as_deref(),
         state.workspaces.get_revision(&ws).as_deref(),
@@ -484,6 +454,7 @@ async fn commit_task_upload(
     task: &str,
     key: &str,
     new_bytes: &[u8],
+    has_json: bool,
     mode: UploadMode,
     source_id: Option<&str>,
     revision: Option<&str>,
@@ -491,7 +462,6 @@ async fn commit_task_upload(
     job_id: Uuid,
 ) -> Result<(Uuid, Vec<String>)> {
     let sha = sha256_hex(new_bytes);
-    let has_json = has_root_state_json(new_bytes);
     let mode_str = match mode {
         UploadMode::Replace => "replace",
         UploadMode::Merge => "merge",
@@ -650,7 +620,7 @@ pub async fn upload_global_state(
     };
 
     // Build new snapshot bytes (also rejects root state.json in upload)
-    let new_bytes = build_snapshot(prior_bytes.as_deref(), &uploaded_bytes, &params)
+    let (new_bytes, has_json) = build_snapshot(prior_bytes.as_deref(), &uploaded_bytes, &params)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     // Archive write
@@ -667,6 +637,7 @@ pub async fn upload_global_state(
         &ws,
         &key,
         &new_bytes,
+        has_json,
         mode,
         source_id.as_deref(),
         state.workspaces.get_revision(&ws).as_deref(),
@@ -714,6 +685,7 @@ async fn commit_global_upload(
     ws: &str,
     key: &str,
     new_bytes: &[u8],
+    has_json: bool,
     mode: UploadMode,
     source_id: Option<&str>,
     revision: Option<&str>,
@@ -721,7 +693,6 @@ async fn commit_global_upload(
     job_id: Uuid,
 ) -> Result<(Uuid, Vec<String>)> {
     let sha = sha256_hex(new_bytes);
-    let has_json = has_root_state_json(new_bytes);
     let mode_str = match mode {
         UploadMode::Replace => "replace",
         UploadMode::Merge => "merge",
@@ -892,20 +863,22 @@ mod tests {
     #[test]
     fn build_snapshot_no_prior_no_uploaded_no_params_is_empty() {
         let uploaded = make_tarball(&[]);
-        let out = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
+        let (out, has_json) = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
         assert!(list_paths(&out).is_empty());
+        assert!(!has_json);
     }
 
     #[test]
     fn build_snapshot_no_prior_with_file_and_state() {
         let uploaded = make_tarball(&[("cert.pem", b"PEMBYTES")]);
         let params = params(&[("domain", "example.com")]);
-        let out = build_snapshot(None, &uploaded, &params).unwrap();
+        let (out, has_json) = build_snapshot(None, &uploaded, &params).unwrap();
         assert_eq!(list_paths(&out), vec!["cert.pem", "state.json"]);
         assert_eq!(read_file(&out, "cert.pem"), Some(b"PEMBYTES".to_vec()));
         let state: serde_json::Value =
             serde_json::from_slice(&read_file(&out, "state.json").unwrap()).unwrap();
         assert_eq!(state["domain"], "example.com");
+        assert!(has_json);
     }
 
     #[test]
@@ -913,18 +886,20 @@ mod tests {
         // Prior contained a file, uploaded doesn't; replace mode = no prior passed.
         let _prior = make_tarball(&[("old.pem", b"OLD")]);
         let uploaded = make_tarball(&[("new.pem", b"NEW")]);
-        let out = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
+        let (out, has_json) = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
         assert_eq!(list_paths(&out), vec!["new.pem"]);
+        assert!(!has_json);
     }
 
     #[test]
     fn build_snapshot_merge_preserves_prior_files() {
         let prior = make_tarball(&[("keep.pem", b"KEEP"), ("replace.pem", b"OLD")]);
         let uploaded = make_tarball(&[("replace.pem", b"NEW"), ("add.pem", b"ADD")]);
-        let out = build_snapshot(Some(&prior), &uploaded, &BTreeMap::new()).unwrap();
+        let (out, has_json) = build_snapshot(Some(&prior), &uploaded, &BTreeMap::new()).unwrap();
         assert_eq!(list_paths(&out), vec!["add.pem", "keep.pem", "replace.pem"]);
         assert_eq!(read_file(&out, "replace.pem"), Some(b"NEW".to_vec()));
         assert_eq!(read_file(&out, "keep.pem"), Some(b"KEEP".to_vec()));
+        assert!(!has_json);
     }
 
     #[test]
@@ -934,12 +909,13 @@ mod tests {
         let prior = make_tarball(&[("state.json", prior_state_bytes.as_slice())]);
         let uploaded = make_tarball(&[]);
         let params = params(&[("domain", "new.com"), ("extra", "42")]);
-        let out = build_snapshot(Some(&prior), &uploaded, &params).unwrap();
+        let (out, has_json) = build_snapshot(Some(&prior), &uploaded, &params).unwrap();
         let state: serde_json::Value =
             serde_json::from_slice(&read_file(&out, "state.json").unwrap()).unwrap();
         assert_eq!(state["domain"], "new.com"); // overwritten
         assert_eq!(state["keep"], "yes"); // preserved
         assert_eq!(state["extra"], "42"); // added
+        assert!(has_json);
     }
 
     #[test]
@@ -954,15 +930,79 @@ mod tests {
     #[test]
     fn build_snapshot_allows_nested_state_json() {
         let uploaded = make_tarball(&[("subdir/state.json", b"{}")]);
-        let out = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
+        let (out, has_json) = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
         assert!(read_file(&out, "subdir/state.json").is_some());
+        assert!(!has_json, "nested state.json does not set has_json");
     }
 
     #[test]
     fn build_snapshot_merge_with_no_prior_behaves_as_replace() {
         let uploaded = make_tarball(&[("f.txt", b"bytes")]);
-        let out = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
+        let (out, has_json) = build_snapshot(None, &uploaded, &BTreeMap::new()).unwrap();
         assert_eq!(list_paths(&out), vec!["f.txt"]);
+        assert!(!has_json);
+    }
+
+    #[test]
+    fn format_source_id_api_key() {
+        use crate::web::api::middleware::AuthUser;
+        use stroem_common::models::auth::Claims;
+        let now = chrono::Utc::now().timestamp();
+        let user = AuthUser {
+            claims: Claims {
+                sub: "user-1".into(),
+                email: "test@example.com".into(),
+                is_admin: false,
+                iat: now,
+                exp: now + 3600,
+            },
+            is_api_key: true,
+            api_key_prefix: Some("strm_a1b2c3d".into()),
+        };
+        let sid = format_source_id(&user);
+        assert_eq!(sid, "api_key:strm_a1b2c3d");
+        assert!(sid.starts_with("api_key:"));
+    }
+
+    #[test]
+    fn format_source_id_jwt_user() {
+        use crate::web::api::middleware::AuthUser;
+        use stroem_common::models::auth::Claims;
+        let now = chrono::Utc::now().timestamp();
+        let user = AuthUser {
+            claims: Claims {
+                sub: "user-2".into(),
+                email: "ala@allunite.com".into(),
+                is_admin: false,
+                iat: now,
+                exp: now + 900,
+            },
+            is_api_key: false,
+            api_key_prefix: None,
+        };
+        let sid = format_source_id(&user);
+        assert_eq!(sid, "user:ala@allunite.com");
+        assert!(sid.starts_with("user:"));
+    }
+
+    #[test]
+    fn format_source_id_api_key_missing_prefix_falls_back() {
+        use crate::web::api::middleware::AuthUser;
+        use stroem_common::models::auth::Claims;
+        let now = chrono::Utc::now().timestamp();
+        let user = AuthUser {
+            claims: Claims {
+                sub: "user-3".into(),
+                email: "x@example.com".into(),
+                is_admin: false,
+                iat: now,
+                exp: now + 3600,
+            },
+            is_api_key: true,
+            api_key_prefix: None, // edge case: shouldn't happen, but guard is there
+        };
+        let sid = format_source_id(&user);
+        assert_eq!(sid, "api_key:unknown");
     }
 
     /// Build a raw gzip tarball where the path is written directly into the
