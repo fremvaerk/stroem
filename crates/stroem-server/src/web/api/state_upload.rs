@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 ///
 /// Returns `None` if the resulting map is empty, so callers can decide
 /// whether to emit a `state.json` entry at all.
-pub(crate) fn build_state_json_from_params(
+pub fn build_state_json_from_params(
     params: &BTreeMap<String, String>,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut out = serde_json::Map::new();
@@ -56,7 +56,7 @@ pub(crate) const MAX_SNAPSHOT_BYTES: usize = 50 * 1024 * 1024;
 /// 5. Repack `files` in deterministic order into a new gzip tarball.
 /// 6. If the repacked output exceeds `MAX_SNAPSHOT_BYTES`, return an error.
 #[allow(dead_code)]
-pub(crate) fn build_snapshot(
+pub fn build_snapshot(
     prior: Option<&[u8]>,
     uploaded: &[u8],
     state_params: &BTreeMap<String, String>,
@@ -127,7 +127,7 @@ pub(crate) fn build_snapshot(
 /// - Empty input bytes return an empty map (no error).
 /// - Invalid gzip or tar framing returns an error.
 #[allow(dead_code)]
-pub(crate) fn unpack_tarball(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
+pub fn unpack_tarball(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
     use flate2::read::GzDecoder;
     use tar::Archive;
 
@@ -166,7 +166,7 @@ pub(crate) fn unpack_tarball(bytes: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
 ///
 /// Entries are sorted lexicographically so the output is deterministic.
 #[allow(dead_code)]
-pub(crate) fn pack_tarball(files: &HashMap<String, Vec<u8>>) -> Result<Vec<u8>> {
+pub fn pack_tarball(files: &HashMap<String, Vec<u8>>) -> Result<Vec<u8>> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
@@ -188,6 +188,52 @@ pub(crate) fn pack_tarball(files: &HashMap<String, Vec<u8>>) -> Result<Vec<u8>> 
         builder.finish().context("finish tar")?;
     }
     encoder.finish().context("finish gzip")
+}
+
+/// Insert a synthetic job row to represent an out-of-band state upload.
+///
+/// The returned UUID is used as both the `job_id` foreign key on the
+/// state-snapshot row and the filename in the archive's storage key.
+///
+/// Runs inside an existing transaction so the job insert and the
+/// state-snapshot insert commit atomically (or roll back together).
+///
+/// See `docs/internal/2026-04-21-state-upload-design.md` § "Synthetic seed job".
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_synthetic_upload_job(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace: &str,
+    task_name: &str,
+    source_id: Option<&str>,
+    input: serde_json::Value,
+    output: serde_json::Value,
+    revision: Option<&str>,
+) -> Result<uuid::Uuid> {
+    let job_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO job (
+            job_id, workspace, task_name, mode, input, output,
+            status, source_type, source_id, revision,
+            started_at, completed_at
+        )
+        VALUES ($1, $2, $3, 'distributed', $4, $5,
+                'completed', 'upload', $6, $7,
+                NOW(), NOW())
+        "#,
+    )
+    .bind(job_id)
+    .bind(workspace)
+    .bind(task_name)
+    .bind(&input)
+    .bind(&output)
+    .bind(source_id)
+    .bind(revision)
+    .execute(&mut **tx)
+    .await
+    .context("insert synthetic upload job")?;
+
+    Ok(job_id)
 }
 
 #[cfg(test)]
