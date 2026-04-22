@@ -80,28 +80,28 @@ async fn test_list_jobs() -> Result<()> {
     }
 
     // List with pagination
-    let jobs = JobRepo::list(&pool, None, None, None, 3, 0).await?;
+    let jobs = JobRepo::list(&pool, None, None, None, None, 3, 0).await?;
     assert_eq!(jobs.len(), 3);
 
     // List with offset
-    let jobs = JobRepo::list(&pool, None, None, None, 3, 3).await?;
+    let jobs = JobRepo::list(&pool, None, None, None, None, 3, 3).await?;
     assert_eq!(jobs.len(), 2);
 
     // List with workspace filter
-    let jobs = JobRepo::list(&pool, Some("default"), None, None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 5);
 
     // List by task name — single match
-    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].task_name, "task-0");
 
     // List by task name — nonexistent task
-    let jobs = JobRepo::list_by_task(&pool, "default", "nope", None, 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "nope", None, None, 10, 0).await?;
     assert!(jobs.is_empty());
 
     // List by task name — wrong workspace
-    let jobs = JobRepo::list_by_task(&pool, "other", "task-0", None, 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "other", "task-0", None, None, 10, 0).await?;
     assert!(jobs.is_empty());
 
     // List by task name — multiple jobs for same task, newest first
@@ -118,7 +118,7 @@ async fn test_list_jobs() -> Result<()> {
         )
         .await?;
     }
-    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 4); // 1 original + 3 new
                                // Verify newest-first ordering
     for pair in jobs.windows(2) {
@@ -126,11 +126,11 @@ async fn test_list_jobs() -> Result<()> {
     }
 
     // Pagination on list_by_task
-    let page1 = JobRepo::list_by_task(&pool, "default", "task-0", None, 2, 0).await?;
+    let page1 = JobRepo::list_by_task(&pool, "default", "task-0", None, None, 2, 0).await?;
     assert_eq!(page1.len(), 2);
-    let page2 = JobRepo::list_by_task(&pool, "default", "task-0", None, 2, 2).await?;
+    let page2 = JobRepo::list_by_task(&pool, "default", "task-0", None, None, 2, 2).await?;
     assert_eq!(page2.len(), 2);
-    let page3 = JobRepo::list_by_task(&pool, "default", "task-0", None, 2, 4).await?;
+    let page3 = JobRepo::list_by_task(&pool, "default", "task-0", None, None, 2, 4).await?;
     assert!(page3.is_empty());
 
     Ok(())
@@ -2051,32 +2051,38 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
     JobRepo::mark_failed(&pool, job2).await?;
 
     // Filter by completed
-    let jobs = JobRepo::list(&pool, None, Some("completed"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, None, Some("completed"), None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status, "completed");
 
     // Filter by failed
-    let jobs = JobRepo::list(&pool, None, Some("failed"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, None, Some("failed"), None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status, "failed");
 
     // Filter by pending
-    let jobs = JobRepo::list(&pool, None, Some("pending"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, None, Some("pending"), None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].status, "pending");
 
     // No filter — all 3
-    let jobs = JobRepo::list(&pool, None, None, None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, None, None, None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 3);
 
     // Count with status filter
     assert_eq!(
-        JobRepo::count(&pool, None, Some("completed"), None).await?,
+        JobRepo::count(&pool, None, Some("completed"), None, None).await?,
         1
     );
-    assert_eq!(JobRepo::count(&pool, None, Some("failed"), None).await?, 1);
-    assert_eq!(JobRepo::count(&pool, None, Some("pending"), None).await?, 1);
-    assert_eq!(JobRepo::count(&pool, None, None, None).await?, 3);
+    assert_eq!(
+        JobRepo::count(&pool, None, Some("failed"), None, None).await?,
+        1
+    );
+    assert_eq!(
+        JobRepo::count(&pool, None, Some("pending"), None, None).await?,
+        1
+    );
+    assert_eq!(JobRepo::count(&pool, None, None, None, None).await?, 3);
 
     Ok(())
 }
@@ -2125,25 +2131,28 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
     JobRepo::mark_completed(&pool, j3, None).await?;
 
     // ws-a + completed = 1
-    let jobs = JobRepo::list(&pool, Some("ws-a"), Some("completed"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, Some("ws-a"), Some("completed"), None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].workspace, "ws-a");
     assert_eq!(jobs[0].status, "completed");
 
     // ws-a + pending = 1
-    let jobs = JobRepo::list(&pool, Some("ws-a"), Some("pending"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, Some("ws-a"), Some("pending"), None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
 
     // ws-b + completed = 1
-    let jobs = JobRepo::list(&pool, Some("ws-b"), Some("completed"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, Some("ws-b"), Some("completed"), None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
 
     // Count matches
     assert_eq!(
-        JobRepo::count(&pool, Some("ws-a"), Some("completed"), None).await?,
+        JobRepo::count(&pool, Some("ws-a"), Some("completed"), None, None).await?,
         1
     );
-    assert_eq!(JobRepo::count(&pool, Some("ws-a"), None, None).await?, 2);
+    assert_eq!(
+        JobRepo::count(&pool, Some("ws-a"), None, None, None).await?,
+        2
+    );
 
     Ok(())
 }
@@ -2190,26 +2199,28 @@ async fn test_list_by_task_with_status_filter() -> Result<()> {
     JobRepo::mark_completed(&pool, j1, None).await?;
 
     // list_by_task with status filter
-    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", Some("completed"), 10, 0).await?;
+    let jobs =
+        JobRepo::list_by_task(&pool, "default", "deploy", Some("completed"), None, 10, 0).await?;
     assert_eq!(jobs.len(), 1);
 
-    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", Some("pending"), 10, 0).await?;
+    let jobs =
+        JobRepo::list_by_task(&pool, "default", "deploy", Some("pending"), None, 10, 0).await?;
     assert_eq!(jobs.len(), 2);
 
-    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", None, 10, 0).await?;
+    let jobs = JobRepo::list_by_task(&pool, "default", "deploy", None, None, 10, 0).await?;
     assert_eq!(jobs.len(), 3);
 
     // count_by_task with status filter
     assert_eq!(
-        JobRepo::count_by_task(&pool, "default", "deploy", Some("completed")).await?,
+        JobRepo::count_by_task(&pool, "default", "deploy", Some("completed"), None).await?,
         1
     );
     assert_eq!(
-        JobRepo::count_by_task(&pool, "default", "deploy", Some("pending")).await?,
+        JobRepo::count_by_task(&pool, "default", "deploy", Some("pending"), None).await?,
         2
     );
     assert_eq!(
-        JobRepo::count_by_task(&pool, "default", "deploy", None).await?,
+        JobRepo::count_by_task(&pool, "default", "deploy", None, None).await?,
         3
     );
 
@@ -2233,9 +2244,12 @@ async fn test_status_filter_returns_empty_for_nonexistent_status() -> Result<()>
     .await?;
 
     // No jobs with "running" status
-    let jobs = JobRepo::list(&pool, None, Some("running"), None, 10, 0).await?;
+    let jobs = JobRepo::list(&pool, None, Some("running"), None, None, 10, 0).await?;
     assert!(jobs.is_empty());
-    assert_eq!(JobRepo::count(&pool, None, Some("running"), None).await?, 0);
+    assert_eq!(
+        JobRepo::count(&pool, None, Some("running"), None, None).await?,
+        0
+    );
 
     Ok(())
 }
@@ -3116,7 +3130,7 @@ async fn test_get_status_counts() -> Result<()> {
     let worker_id = Uuid::new_v4();
     WorkerRepo::register(&pool, worker_id, "w1", &["script".to_string()], None).await?;
 
-    let job_ids: Vec<Uuid> = JobRepo::list(&pool, None, None, None, 10, 0)
+    let job_ids: Vec<Uuid> = JobRepo::list(&pool, None, None, None, None, 10, 0)
         .await?
         .into_iter()
         .map(|j| j.job_id)

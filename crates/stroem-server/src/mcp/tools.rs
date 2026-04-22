@@ -570,13 +570,13 @@ impl StromMcpHandler {
 
         let jobs = match (params.workspace.as_deref(), params.task_name.as_deref()) {
             (Some(ws), Some(task)) => {
-                JobRepo::list_by_task(&self.state.pool, ws, task, status, limit, 0)
+                JobRepo::list_by_task(&self.state.pool, ws, task, status, None, limit, 0)
                     .await
                     .map_err(|e| internal_err(format!("DB error: {e}")))?
             }
             _ => {
                 let ws = params.workspace.as_deref();
-                JobRepo::list(&self.state.pool, ws, status, None, limit, 0)
+                JobRepo::list(&self.state.pool, ws, status, None, None, limit, 0)
                     .await
                     .map_err(|e| internal_err(format!("DB error: {e}")))?
             }

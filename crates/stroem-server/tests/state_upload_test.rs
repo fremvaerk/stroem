@@ -840,6 +840,120 @@ async fn upload_no_token_returns_401() -> Result<()> {
     Ok(())
 }
 
+// ─── source_type filter tests ────────────────────────────────────────────────
+
+/// GET /api/jobs?source_type=upload returns only upload jobs.
+#[tokio::test]
+async fn upload_jobs_discoverable_via_source_type_filter() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    // Create an upload job (source_type = "upload").
+    let tarball = make_tarball(&[("f.txt", b"data")]);
+    let upload_req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state?k=v")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+    let resp = app.router.clone().oneshot(upload_req).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = resp.into_body().collect().await?.to_bytes();
+    let upload_job_id = serde_json::from_slice::<serde_json::Value>(&body)?["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Query GET /api/jobs?source_type=upload
+    let list_req = Request::builder()
+        .method("GET")
+        .uri("/api/jobs?source_type=upload")
+        .body(Body::empty())?;
+    let list_resp = app.router.clone().oneshot(list_req).await?;
+    assert_eq!(list_resp.status(), StatusCode::OK);
+
+    let list_body = list_resp.into_body().collect().await?.to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&list_body)?;
+
+    // Response shape: `{ "items": [...], "total": N }`
+    let jobs = parsed["items"].as_array().expect("items array");
+    assert!(
+        !jobs.is_empty(),
+        "upload job should be in the filtered list"
+    );
+
+    // Every returned job must have source_type = "upload"
+    for job in jobs {
+        assert_eq!(
+            job["source_type"].as_str(),
+            Some("upload"),
+            "unexpected source_type in filtered list: {:?}",
+            job
+        );
+    }
+
+    // The upload we just created should be among them
+    let found = jobs
+        .iter()
+        .any(|j| j["job_id"].as_str() == Some(&upload_job_id));
+    assert!(
+        found,
+        "expected to find upload job_id {} in list",
+        upload_job_id
+    );
+
+    Ok(())
+}
+
+/// GET /api/jobs?source_type=<invalid> returns 400.
+#[tokio::test]
+async fn list_jobs_rejects_invalid_source_type_filter() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/jobs?source_type=wat")
+        .body(Body::empty())?;
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+/// GET /api/jobs?source_type=api returns only api-sourced jobs (not uploads).
+#[tokio::test]
+async fn source_type_filter_excludes_non_matching_jobs() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    // Create one upload job.
+    let tarball = make_tarball(&[("f.txt", b"data")]);
+    let upload_req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+    app.router.clone().oneshot(upload_req).await?;
+
+    // Filter for source_type=api — upload jobs must NOT appear
+    let list_req = Request::builder()
+        .method("GET")
+        .uri("/api/jobs?source_type=api")
+        .body(Body::empty())?;
+    let list_resp = app.router.clone().oneshot(list_req).await?;
+    assert_eq!(list_resp.status(), StatusCode::OK);
+
+    let list_body = list_resp.into_body().collect().await?.to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&list_body)?;
+    let jobs = parsed["items"].as_array().expect("items array");
+
+    for job in jobs {
+        assert_ne!(
+            job["source_type"].as_str(),
+            Some("upload"),
+            "upload job should not appear when filtering for source_type=api"
+        );
+    }
+
+    Ok(())
+}
+
 /// API-key-authenticated uploads produce a source_id starting with "api_key:"
 /// followed by the key's prefix stored in the DB.
 #[tokio::test]

@@ -25,6 +25,7 @@ pub struct ListJobsQuery {
     pub workspace: Option<String>,
     pub task_name: Option<String>,
     pub status: Option<String>,
+    pub source_type: Option<String>,
     pub search: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -39,6 +40,20 @@ const VALID_STATUSES: &[&str] = &[
     "failed",
     "cancelled",
     "skipped",
+];
+
+const VALID_SOURCE_TYPES: &[&str] = &[
+    "api",
+    "trigger",
+    "webhook",
+    "task",
+    "hook",
+    "user",
+    "mcp",
+    "agent_tool",
+    "event_source",
+    "retry",
+    "upload",
 ];
 
 #[derive(Debug, Serialize)]
@@ -110,6 +125,16 @@ pub async fn list_jobs(
         }
     }
 
+    if let Some(ref st) = query.source_type {
+        if !VALID_SOURCE_TYPES.contains(&st.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Invalid source_type filter '{}'. Must be one of: {}",
+                st,
+                VALID_SOURCE_TYPES.join(", ")
+            )));
+        }
+    }
+
     // Trim and validate search parameter
     let search = query
         .search
@@ -128,6 +153,7 @@ pub async fn list_jobs(
     let acl_pairs = resolve_acl_scope(&state, &auth_user).await?;
 
     let status = query.status.as_deref();
+    let source_type = query.source_type.as_deref();
 
     let (result, total) = match acl_pairs {
         // ACL filtering is active — use ACL-aware queries
@@ -151,29 +177,47 @@ pub async fn list_jobs(
                 &state.pool,
                 &effective_pairs,
                 status,
+                source_type,
                 search,
                 query.limit,
                 query.offset,
             )
             .await;
             let count =
-                JobRepo::count_with_acl(&state.pool, &effective_pairs, status, search).await;
+                JobRepo::count_with_acl(&state.pool, &effective_pairs, status, source_type, search)
+                    .await;
             (jobs, count)
         }
         // No ACL filtering — use existing queries
         None => match (query.workspace.as_deref(), query.task_name.as_deref()) {
             (Some(ws), Some(task)) => {
-                let jobs =
-                    JobRepo::list_by_task(&state.pool, ws, task, status, query.limit, query.offset)
-                        .await;
-                let count = JobRepo::count_by_task(&state.pool, ws, task, status).await;
+                let jobs = JobRepo::list_by_task(
+                    &state.pool,
+                    ws,
+                    task,
+                    status,
+                    source_type,
+                    query.limit,
+                    query.offset,
+                )
+                .await;
+                let count =
+                    JobRepo::count_by_task(&state.pool, ws, task, status, source_type).await;
                 (jobs, count)
             }
             _ => {
                 let ws = query.workspace.as_deref();
-                let jobs =
-                    JobRepo::list(&state.pool, ws, status, search, query.limit, query.offset).await;
-                let count = JobRepo::count(&state.pool, ws, status, search).await;
+                let jobs = JobRepo::list(
+                    &state.pool,
+                    ws,
+                    status,
+                    source_type,
+                    search,
+                    query.limit,
+                    query.offset,
+                )
+                .await;
+                let count = JobRepo::count(&state.pool, ws, status, source_type, search).await;
                 (jobs, count)
             }
         },
