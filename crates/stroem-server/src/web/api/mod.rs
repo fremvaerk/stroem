@@ -261,6 +261,11 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/workspaces/{ws}/tasks/{name}/execute",
             post(tasks::execute_task),
         )
+        .route(
+            "/workspaces/{ws}/tasks/{name}/state",
+            post(state_upload::upload_task_state)
+                .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .route("/users", get(users::list_users))
         .route("/users/{id}", get(users::get_user))
         .route("/users/{id}/admin", put(users::set_user_admin))

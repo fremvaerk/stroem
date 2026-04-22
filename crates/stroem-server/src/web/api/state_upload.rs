@@ -236,6 +236,313 @@ pub async fn insert_synthetic_upload_job(
     Ok(job_id)
 }
 
+// ─── HTTP handler ────────────────────────────────────────────────────────────
+
+use crate::state::AppState;
+use crate::web::api::middleware::AuthUser;
+use crate::web::error::AppError;
+use axum::{
+    body::Bytes,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
+use uuid::Uuid;
+
+/// Compute SHA-256 of the given bytes, return lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Determine whether a tarball contains a root-level `state.json`.
+fn has_root_state_json(bytes: &[u8]) -> bool {
+    unpack_tarball(bytes)
+        .map(|m| m.contains_key("state.json"))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UploadMode {
+    Replace,
+    Merge,
+}
+
+/// Parse the `?mode=` query param. Defaults to `replace`. Rejects unknown values.
+fn parse_mode(params: &BTreeMap<String, String>) -> Result<UploadMode, AppError> {
+    match params.get("mode").map(|s| s.as_str()) {
+        None | Some("replace") => Ok(UploadMode::Replace),
+        Some("merge") => Ok(UploadMode::Merge),
+        Some(other) => Err(AppError::BadRequest(format!(
+            "Invalid mode '{}': must be 'replace' or 'merge'",
+            other
+        ))),
+    }
+}
+
+fn resolve_source_id(
+    state: &std::sync::Arc<AppState>,
+    auth_user: &Option<AuthUser>,
+) -> Result<Option<String>, AppError> {
+    match (state.config.auth.is_some(), auth_user) {
+        (false, _) => Ok(None),
+        (true, Some(user)) => Ok(Some(format!("user:{}", user.claims.email))),
+        (true, None) => Err(AppError::Unauthorized("Authentication required".into())),
+    }
+}
+
+async fn check_run_permission(
+    state: &std::sync::Arc<AppState>,
+    auth_user: &Option<AuthUser>,
+    ws: &str,
+    task_name: &str,
+    task_folder: Option<&str>,
+) -> Result<(), AppError> {
+    use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
+
+    if let Some(auth) = auth_user {
+        if state.acl.is_configured() {
+            let user_id = auth.user_id()?;
+            let (is_admin, groups) =
+                load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                    .await
+                    .context("load ACL context")
+                    .map_err(AppError::Internal)?;
+            let task_path = make_task_path(task_folder, task_name);
+            match state
+                .acl
+                .evaluate(ws, &task_path, &auth.claims.email, &groups, is_admin)
+            {
+                TaskPermission::Deny => return Err(AppError::not_found("Task")),
+                TaskPermission::View => {
+                    return Err(AppError::Forbidden("View-only access".into()))
+                }
+                TaskPermission::Run => {} // allowed
+            }
+        }
+    }
+    Ok(())
+}
+
+/// POST /api/workspaces/{ws}/tasks/{task}/state — upload a state snapshot for a task.
+///
+/// See `docs/internal/2026-04-21-state-upload-design.md`.
+#[tracing::instrument(skip(state, auth_user, body))]
+pub async fn upload_task_state(
+    State(state): State<std::sync::Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+    Path((ws, task)): Path<(String, String)>,
+    Query(params): Query<BTreeMap<String, String>>,
+    body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    // Auth + source_id
+    let source_id = resolve_source_id(&state, &auth_user)?;
+
+    // Workspace + task exist
+    let workspace = crate::web::api::get_workspace_or_error(&state, &ws).await?;
+    let task_def = workspace
+        .tasks
+        .get(&task)
+        .ok_or_else(|| AppError::not_found("Task"))?;
+
+    // ACL: Run permission required
+    check_run_permission(&state, &auth_user, &ws, &task, task_def.folder.as_deref()).await?;
+
+    // State storage configured
+    let storage = state
+        .state_storage
+        .as_ref()
+        .ok_or_else(|| AppError::NotFound("State storage not configured".into()))?;
+
+    // Parse mode
+    let mode = parse_mode(&params)?;
+
+    // Body can be empty → synthesise an empty tarball
+    let uploaded_bytes: Vec<u8> = if body.is_empty() {
+        pack_tarball(&HashMap::new()).map_err(AppError::Internal)?
+    } else {
+        body.to_vec()
+    };
+
+    // Prior snapshot bytes (merge mode only)
+    let prior_bytes: Option<Vec<u8>> = if matches!(mode, UploadMode::Merge) {
+        match stroem_db::TaskStateRepo::get_latest(&state.pool, &ws, &task)
+            .await
+            .map_err(AppError::Internal)?
+        {
+            Some(row) => storage
+                .retrieve(&row.storage_key)
+                .await
+                .map_err(AppError::Internal)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // Build the new snapshot bytes (also validates no root-level state.json in upload)
+    let new_bytes = build_snapshot(prior_bytes.as_deref(), &uploaded_bytes, &params)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    // Archive write (followed by DB tx; compensating delete on failure)
+    let job_id = Uuid::new_v4();
+    let key = storage.storage_key(&ws, &task, job_id);
+    storage
+        .store(&key, &new_bytes)
+        .await
+        .map_err(AppError::Internal)?;
+
+    // DB tx: synthetic job + state row + prune
+    let result = commit_task_upload(
+        &state.pool,
+        &ws,
+        &task,
+        &key,
+        &new_bytes,
+        mode,
+        source_id.as_deref(),
+        state.workspaces.get_revision(&ws).as_deref(),
+        storage.max_snapshots(),
+        job_id,
+    )
+    .await;
+
+    let (snapshot_id, deleted_keys) = match result {
+        Ok(r) => r,
+        Err(e) => {
+            // Compensating delete
+            let _ = storage.delete(&key).await;
+            return Err(AppError::Internal(e));
+        }
+    };
+
+    // Background-delete pruned storage keys
+    if !deleted_keys.is_empty() {
+        let storage_clone = std::sync::Arc::clone(storage);
+        tokio::spawn(async move {
+            for k in deleted_keys {
+                if let Err(e) = storage_clone.delete(&k).await {
+                    tracing::warn!("Failed to delete pruned upload snapshot {}: {:#}", k, e);
+                }
+            }
+        });
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "snapshot_id": snapshot_id,
+            "job_id": job_id,
+        })),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_task_upload(
+    pool: &sqlx::PgPool,
+    ws: &str,
+    task: &str,
+    key: &str,
+    new_bytes: &[u8],
+    mode: UploadMode,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    max_snapshots: usize,
+    job_id: Uuid,
+) -> Result<(Uuid, Vec<String>)> {
+    let sha = sha256_hex(new_bytes);
+    let has_json = has_root_state_json(new_bytes);
+    let mode_str = match mode {
+        UploadMode::Replace => "replace",
+        UploadMode::Merge => "merge",
+    };
+    let input = serde_json::json!({
+        "upload": {
+            "size_bytes": new_bytes.len(),
+            "sha256": sha,
+            "has_json": has_json,
+            "uploaded_by": source_id,
+            "mode": mode_str,
+        }
+    });
+
+    let mut tx = pool.begin().await.context("begin upload tx")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO job (
+            job_id, workspace, task_name, mode, input, output,
+            status, source_type, source_id, revision,
+            started_at, completed_at
+        )
+        VALUES ($1, $2, $3, 'distributed', $4, NULL,
+                'completed', 'upload', $5, $6,
+                NOW(), NOW())
+        "#,
+    )
+    .bind(job_id)
+    .bind(ws)
+    .bind(task)
+    .bind(&input)
+    .bind(source_id)
+    .bind(revision)
+    .execute(&mut *tx)
+    .await
+    .context("insert synthetic upload job")?;
+
+    let snapshot_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(snapshot_id)
+    .bind(ws)
+    .bind(task)
+    .bind(job_id)
+    .bind(key)
+    .bind(new_bytes.len() as i64)
+    .bind(has_json)
+    .execute(&mut *tx)
+    .await
+    .context("insert task_state")?;
+
+    let deleted_keys: Vec<String> = sqlx::query_scalar(
+        r#"
+        DELETE FROM task_state
+        WHERE (workspace, task_name) = ($1, $2)
+          AND id IN (
+            SELECT id FROM task_state
+            WHERE (workspace, task_name) = ($1, $2)
+            ORDER BY created_at DESC, id DESC
+            OFFSET $3
+          )
+        RETURNING storage_key
+        "#,
+    )
+    .bind(ws)
+    .bind(task)
+    .bind(max_snapshots as i64)
+    .fetch_all(&mut *tx)
+    .await
+    .context("prune task_state")?;
+
+    sqlx::query("UPDATE job SET output = $1 WHERE job_id = $2")
+        .bind(serde_json::json!({"snapshot_id": snapshot_id}))
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await
+        .context("update synthetic job output")?;
+
+    tx.commit().await.context("commit upload tx")?;
+
+    Ok((snapshot_id, deleted_keys))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
