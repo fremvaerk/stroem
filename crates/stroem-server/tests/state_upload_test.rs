@@ -263,3 +263,115 @@ async fn synthetic_upload_job_is_inserted() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn upload_rejects_tarball_with_root_state_json() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+    let tarball = make_tarball(&[("state.json", b"{}")]);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state")
+        .header("content-type", "application/gzip")
+        .body(Body::from(tarball))?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_rejects_invalid_mode() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state?mode=wat")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_empty_body_is_accepted() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state?k=v")
+        .body(Body::empty())?;
+
+    let response = app.router.clone().oneshot(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    assert_eq!(status, StatusCode::CREATED, "response body: {}", String::from_utf8_lossy(&body));
+
+    let latest = stroem_db::TaskStateRepo::get_latest(&app.pool, "production", "t")
+        .await?
+        .unwrap();
+    assert!(latest.has_json, "state.json synthesised from query params should be present");
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_merge_mode_preserves_prior_files() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    // First upload (replace-mode by default): creates snapshot with a.txt and b.txt
+    let first = make_tarball(&[("a.txt", b"A"), ("b.txt", b"B")]);
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state?x=1")
+        .header("content-type", "application/gzip")
+        .body(Body::from(first))?;
+    let resp1 = app.router.clone().oneshot(req1).await?;
+    assert_eq!(resp1.status(), StatusCode::CREATED);
+
+    // Second upload (merge mode): replaces only b.txt and adds c.txt. a.txt should be preserved.
+    let second = make_tarball(&[("b.txt", b"NEWB"), ("c.txt", b"C")]);
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/production/tasks/t/state?mode=merge&y=2")
+        .header("content-type", "application/gzip")
+        .body(Body::from(second))?;
+    let resp2 = app.router.clone().oneshot(req2).await?;
+    let status2 = resp2.status();
+    let body2 = resp2.into_body().collect().await?.to_bytes();
+    assert_eq!(status2, StatusCode::CREATED, "response body: {}", String::from_utf8_lossy(&body2));
+
+    // Two snapshots total: first and second.
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2",
+    )
+    .bind("production")
+    .bind("t")
+    .fetch_one(&app.pool)
+    .await?;
+    assert_eq!(count.0, 2, "both snapshots should exist");
+
+    // Fetch the merged snapshot from the archive by reading from the TempDir.
+    let latest = stroem_db::TaskStateRepo::get_latest(&app.pool, "production", "t")
+        .await?
+        .unwrap();
+
+    let storage_key = latest.storage_key.clone();
+    let archive_path = app._tmp.path().join("state-archive").join(&storage_key);
+    let bytes = std::fs::read(&archive_path)
+        .map_err(|e| anyhow::anyhow!("read merged snapshot at {}: {}", archive_path.display(), e))?;
+
+    let files = stroem_server::web::api::state_upload::unpack_tarball(&bytes)?;
+    assert!(files.contains_key("a.txt"), "a.txt should be preserved from prior snapshot");
+    assert_eq!(files.get("b.txt").map(|v| v.as_slice()), Some(b"NEWB".as_slice()));
+    assert!(files.contains_key("c.txt"), "c.txt should be added from upload");
+    assert!(files.contains_key("state.json"), "merged state.json should exist");
+
+    let state: serde_json::Value =
+        serde_json::from_slice(files.get("state.json").unwrap())?;
+    assert_eq!(state["x"], "1", "x should be preserved from first upload");
+    assert_eq!(state["y"], "2", "y should be added in merge");
+
+    Ok(())
+}
