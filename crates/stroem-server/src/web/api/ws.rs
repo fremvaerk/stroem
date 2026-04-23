@@ -53,7 +53,7 @@ pub async fn job_log_stream(
         match token {
             Some(t) if t.starts_with("strm_") => {
                 match crate::web::api::middleware::validate_api_key(&t, &state).await {
-                    Ok(c) => Some(c),
+                    Ok((c, _prefix)) => Some(c),
                     Err(resp) => return resp,
                 }
             }

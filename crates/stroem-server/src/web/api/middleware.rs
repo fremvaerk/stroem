@@ -20,6 +20,9 @@ pub struct AuthUser {
     pub claims: Claims,
     /// True when the request was authenticated via an API key (not a JWT).
     pub is_api_key: bool,
+    /// The stored prefix of the API key (e.g. `"strm_a1b2c3d"`), populated
+    /// only when `is_api_key == true`. Used for audit-trail `source_id`.
+    pub api_key_prefix: Option<String>,
 }
 
 impl AuthUser {
@@ -48,11 +51,14 @@ impl AuthUser {
     }
 }
 
-/// Validate an API key token and return Claims if valid.
+/// Validate an API key token and return `(Claims, prefix)` if valid.
+///
+/// The returned prefix is the DB-stored short identifier (e.g. `"strm_a1b2c3d"`)
+/// used to attribute audit-trail `source_id` values.
 pub(crate) async fn validate_api_key(
     token: &str,
     state: &Arc<AppState>,
-) -> Result<Claims, Response> {
+) -> Result<(Claims, String), Response> {
     let key_hash = hash_api_key(token);
 
     let key_row = match ApiKeyRepo::get_by_hash(&state.pool, &key_hash).await {
@@ -83,6 +89,8 @@ pub(crate) async fn validate_api_key(
         }
     };
 
+    let prefix = key_row.prefix.clone();
+
     // Update last_used_at in the background (don't block the request)
     let pool = state.pool.clone();
     let hash = key_hash.clone();
@@ -92,13 +100,14 @@ pub(crate) async fn validate_api_key(
         }
     });
 
-    Ok(Claims {
+    let claims = Claims {
         sub: user.user_id.to_string(),
         email: user.email,
         is_admin: user.is_admin,
         iat: chrono::Utc::now().timestamp(),
         exp: chrono::Utc::now().timestamp() + 3600, // synthetic expiry for Claims struct
-    })
+    };
+    Ok((claims, prefix))
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthUser {
@@ -141,10 +150,13 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
         // API key path: starts with "strm_"
         if token.starts_with("strm_") {
-            return validate_api_key(token, state).await.map(|claims| AuthUser {
-                claims,
-                is_api_key: true,
-            });
+            return validate_api_key(token, state)
+                .await
+                .map(|(claims, prefix)| AuthUser {
+                    claims,
+                    is_api_key: true,
+                    api_key_prefix: Some(prefix),
+                });
         }
 
         // JWT path
@@ -152,6 +164,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             Ok(claims) => Ok(AuthUser {
                 claims,
                 is_api_key: false,
+                api_key_prefix: None,
             }),
             Err(_) => {
                 Err(AppError::Unauthorized("Invalid or expired token".into()).into_response())
@@ -180,9 +193,10 @@ impl OptionalFromRequestParts<Arc<AppState>> for AuthUser {
 
         match token {
             Some(t) if t.starts_with("strm_") => match validate_api_key(t, state).await {
-                Ok(claims) => Ok(Some(AuthUser {
+                Ok((claims, prefix)) => Ok(Some(AuthUser {
                     claims,
                     is_api_key: true,
+                    api_key_prefix: Some(prefix),
                 })),
                 Err(_) => Ok(None),
             },
@@ -190,6 +204,7 @@ impl OptionalFromRequestParts<Arc<AppState>> for AuthUser {
                 Ok(claims) => Ok(Some(AuthUser {
                     claims,
                     is_api_key: false,
+                    api_key_prefix: None,
                 })),
                 Err(_) => Ok(None),
             },

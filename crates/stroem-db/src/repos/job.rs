@@ -248,11 +248,12 @@ impl JobRepo {
         Ok(job)
     }
 
-    /// List jobs with pagination and optional workspace/status/search filters
+    /// List jobs with pagination and optional workspace/status/source_type/search filters
     pub async fn list(
         pool: &PgPool,
         workspace: Option<&str>,
         status: Option<&str>,
+        source_type: Option<&str>,
         search: Option<&str>,
         limit: i64,
         offset: i64,
@@ -266,6 +267,10 @@ impl JobRepo {
         }
         if status.is_some() {
             conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+        if source_type.is_some() {
+            conditions.push(format!("source_type = ${param_idx}"));
             param_idx += 1;
         }
         if search.is_some() {
@@ -293,6 +298,9 @@ impl JobRepo {
         }
         if let Some(s) = status {
             query = query.bind(s);
+        }
+        if let Some(st) = source_type {
+            query = query.bind(st);
         }
         if let Some(s) = search {
             query = query.bind(format!("%{}%", escape_like(s)));
@@ -450,11 +458,12 @@ impl JobRepo {
         Ok(())
     }
 
-    /// Count jobs with optional workspace/status/search filters (mirrors `list()`)
+    /// Count jobs with optional workspace/status/source_type/search filters (mirrors `list()`)
     pub async fn count(
         pool: &PgPool,
         workspace: Option<&str>,
         status: Option<&str>,
+        source_type: Option<&str>,
         search: Option<&str>,
     ) -> Result<i64> {
         let mut conditions = Vec::new();
@@ -468,9 +477,16 @@ impl JobRepo {
             conditions.push(format!("status = ${param_idx}"));
             param_idx += 1;
         }
+        if source_type.is_some() {
+            conditions.push(format!("source_type = ${param_idx}"));
+            param_idx += 1;
+        }
         if search.is_some() {
             conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
+            param_idx += 1;
         }
+        // suppress unused warning when both source_type and search are None
+        let _ = param_idx;
 
         let where_clause = if conditions.is_empty() {
             String::new()
@@ -487,6 +503,9 @@ impl JobRepo {
         if let Some(s) = status {
             query = query.bind(s);
         }
+        if let Some(st) = source_type {
+            query = query.bind(st);
+        }
         if let Some(s) = search {
             query = query.bind(format!("%{}%", escape_like(s)));
         }
@@ -498,23 +517,37 @@ impl JobRepo {
         Ok(count.0)
     }
 
-    /// Count jobs by workspace + task name with optional status filter (mirrors `list_by_task()`)
+    /// Count jobs by workspace + task name with optional status/source_type filter (mirrors `list_by_task()`)
     pub async fn count_by_task(
         pool: &PgPool,
         workspace: &str,
         task_name: &str,
         status: Option<&str>,
+        source_type: Option<&str>,
     ) -> Result<i64> {
-        let sql = if status.is_some() {
-            "SELECT COUNT(*) FROM job WHERE workspace = $1 AND task_name = $2 AND status = $3"
-        } else {
-            "SELECT COUNT(*) FROM job WHERE workspace = $1 AND task_name = $2"
-        };
-        let mut query = sqlx::query_as::<_, (i64,)>(sql)
+        let mut conditions = vec!["workspace = $1".to_string(), "task_name = $2".to_string()];
+        let mut param_idx = 3u32;
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+        if source_type.is_some() {
+            conditions.push(format!("source_type = ${param_idx}"));
+            param_idx += 1;
+        }
+        let _ = param_idx;
+        let sql = format!(
+            "SELECT COUNT(*) FROM job WHERE {}",
+            conditions.join(" AND ")
+        );
+        let mut query = sqlx::query_as::<_, (i64,)>(&sql)
             .bind(workspace)
             .bind(task_name);
         if let Some(s) = status {
             query = query.bind(s);
+        }
+        if let Some(st) = source_type {
+            query = query.bind(st);
         }
         let count = query
             .fetch_one(pool)
@@ -523,31 +556,41 @@ impl JobRepo {
         Ok(count.0)
     }
 
-    /// List jobs by workspace + task name with pagination and optional status filter
+    /// List jobs by workspace + task name with pagination and optional status/source_type filter
     pub async fn list_by_task(
         pool: &PgPool,
         workspace: &str,
         task_name: &str,
         status: Option<&str>,
+        source_type: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<JobRow>> {
-        let sql = if status.is_some() {
-            format!(
-                "SELECT {} FROM job WHERE workspace = $1 AND task_name = $2 AND status = $3 ORDER BY created_at DESC LIMIT $4 OFFSET $5",
-                JOB_COLUMNS
-            )
-        } else {
-            format!(
-                "SELECT {} FROM job WHERE workspace = $1 AND task_name = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
-                JOB_COLUMNS
-            )
-        };
+        let mut conditions = vec!["workspace = $1".to_string(), "task_name = $2".to_string()];
+        let mut param_idx = 3u32;
+        if status.is_some() {
+            conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+        if source_type.is_some() {
+            conditions.push(format!("source_type = ${param_idx}"));
+            param_idx += 1;
+        }
+        let limit_idx = param_idx;
+        let offset_idx = param_idx + 1;
+        let sql = format!(
+            "SELECT {} FROM job WHERE {} ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}",
+            JOB_COLUMNS,
+            conditions.join(" AND ")
+        );
         let mut query = sqlx::query_as::<_, JobRow>(&sql)
             .bind(workspace)
             .bind(task_name);
         if let Some(s) = status {
             query = query.bind(s);
+        }
+        if let Some(st) = source_type {
+            query = query.bind(st);
         }
         let jobs = query
             .bind(limit)
@@ -740,6 +783,7 @@ impl JobRepo {
         pool: &PgPool,
         allowed_pairs: &[(String, String)],
         status: Option<&str>,
+        source_type: Option<&str>,
         search: Option<&str>,
         limit: i64,
         offset: i64,
@@ -762,6 +806,10 @@ impl JobRepo {
             conditions.push(format!("status = ${param_idx}"));
             param_idx += 1;
         }
+        if source_type.is_some() {
+            conditions.push(format!("source_type = ${param_idx}"));
+            param_idx += 1;
+        }
         if search.is_some() {
             conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
             param_idx += 1;
@@ -779,6 +827,9 @@ impl JobRepo {
         }
         if let Some(s) = status {
             query = query.bind(s);
+        }
+        if let Some(st) = source_type {
+            query = query.bind(st);
         }
         if let Some(s) = search {
             query = query.bind(format!("%{}%", escape_like(s)));
@@ -798,6 +849,7 @@ impl JobRepo {
         pool: &PgPool,
         allowed_pairs: &[(String, String)],
         status: Option<&str>,
+        source_type: Option<&str>,
         search: Option<&str>,
     ) -> Result<i64> {
         if allowed_pairs.is_empty() {
@@ -818,9 +870,15 @@ impl JobRepo {
             conditions.push(format!("status = ${param_idx}"));
             param_idx += 1;
         }
+        if source_type.is_some() {
+            conditions.push(format!("source_type = ${param_idx}"));
+            param_idx += 1;
+        }
         if search.is_some() {
             conditions.push(format!("(task_name ILIKE ${param_idx} OR workspace ILIKE ${param_idx} OR source_id ILIKE ${param_idx} OR job_id::text ILIKE ${param_idx})"));
+            param_idx += 1;
         }
+        let _ = param_idx;
         let where_clause = format!(" WHERE {}", conditions.join(" AND "));
         let sql = format!("SELECT COUNT(*) FROM job{where_clause}");
         let mut query = sqlx::query_as::<_, (i64,)>(&sql);
@@ -829,6 +887,9 @@ impl JobRepo {
         }
         if let Some(s) = status {
             query = query.bind(s);
+        }
+        if let Some(st) = source_type {
+            query = query.bind(st);
         }
         if let Some(s) = search {
             query = query.bind(format!("%{}%", escape_like(s)));

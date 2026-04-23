@@ -2,6 +2,7 @@ pub mod cancel;
 pub mod client;
 pub mod jobs;
 pub mod logs;
+pub mod state;
 pub mod status;
 pub mod tasks;
 pub mod trigger;
@@ -52,6 +53,53 @@ pub enum Commands {
     },
     /// List workspaces
     Workspaces,
+    /// Manage workspace state snapshots
+    State {
+        #[command(subcommand)]
+        action: StateAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StateAction {
+    /// Upload a task state snapshot
+    Upload {
+        /// Workspace name
+        #[arg(long, short, default_value = "default")]
+        workspace: String,
+        /// Task name
+        #[arg(long, short)]
+        task: String,
+        /// Upload mode: replace (default) or merge
+        #[arg(long, default_value = "replace")]
+        mode: String,
+        /// State values as KEY=VALUE (repeatable)
+        #[arg(long = "state", value_parser = parse_kv)]
+        state: Vec<(String, String)>,
+        /// Files to include in the tarball
+        files: Vec<std::path::PathBuf>,
+    },
+    /// Upload a global workspace state snapshot (admin only)
+    UploadGlobal {
+        /// Workspace name
+        #[arg(long, short, default_value = "default")]
+        workspace: String,
+        /// Upload mode: replace (default) or merge
+        #[arg(long, default_value = "replace")]
+        mode: String,
+        /// State values as KEY=VALUE (repeatable)
+        #[arg(long = "state", value_parser = parse_kv)]
+        state: Vec<(String, String)>,
+        /// Files to include in the tarball
+        files: Vec<std::path::PathBuf>,
+    },
+}
+
+fn parse_kv(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) => Ok((k.to_string(), v.to_string())),
+        None => Err(format!("expected KEY=VALUE, got '{}'", s)),
+    }
 }
 
 pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> Result<()> {
@@ -82,6 +130,9 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         }
         Commands::Workspaces => {
             workspaces::cmd_workspaces(&http_client, server).await?;
+        }
+        Commands::State { action } => {
+            state::dispatch(&http_client, server, action).await?;
         }
     }
 
@@ -308,5 +359,80 @@ mod tests {
     fn no_subcommand_is_rejected() {
         let result = parse(&["stroem-api"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn state_upload_subcommand_parses() {
+        let cli = parse(&[
+            "stroem-api",
+            "state",
+            "upload",
+            "--workspace",
+            "prod",
+            "--task",
+            "renew-ssl",
+            "--state",
+            "domain=example.com",
+            "--state",
+            "expiry=2026-07-21",
+            "fullchain.pem",
+            "privkey.pem",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::State {
+                action:
+                    super::StateAction::Upload {
+                        workspace,
+                        task,
+                        state,
+                        files,
+                        mode,
+                        ..
+                    },
+            } => {
+                assert_eq!(workspace, "prod");
+                assert_eq!(task, "renew-ssl");
+                assert_eq!(mode, "replace");
+                assert_eq!(state.len(), 2);
+                assert_eq!(state[0].0, "domain");
+                assert_eq!(state[0].1, "example.com");
+                assert_eq!(files.len(), 2);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn state_upload_global_subcommand_parses() {
+        let cli = parse(&[
+            "stroem-api",
+            "state",
+            "upload-global",
+            "--workspace",
+            "prod",
+            "--mode",
+            "merge",
+            "--state",
+            "api_token=secret",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::State {
+                action:
+                    super::StateAction::UploadGlobal {
+                        workspace,
+                        mode,
+                        state,
+                        files,
+                    },
+            } => {
+                assert_eq!(workspace, "prod");
+                assert_eq!(mode, "merge");
+                assert_eq!(state.len(), 1);
+                assert!(files.is_empty());
+            }
+            _ => panic!("unexpected command variant"),
+        }
     }
 }

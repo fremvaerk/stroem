@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use stroem_db::{create_pool, run_migrations, UserRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::ServerConfig;
@@ -172,6 +173,58 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Initialize optional state storage (task + global workspace state snapshots).
+    // Prefers the dedicated `state_storage.archive` config if present, falling back
+    // to the log-storage archive backend (per Phase 6a design).
+    let state_storage = if let Some(ref ss_config) = config.state_storage {
+        let archive_config = ss_config
+            .archive
+            .clone()
+            .or_else(|| config.log_storage.effective_archive())
+            .context(
+                "state_storage requires an `archive` section or a log_storage.archive backend",
+            )?;
+        let archive: Arc<dyn stroem_server::state_storage::StateArchive> =
+            match archive_config.archive_type.as_str() {
+                #[cfg(feature = "s3")]
+                "s3" => {
+                    let archive =
+                        stroem_server::state_storage::S3StateArchive::from_config(&archive_config)
+                            .await
+                            .context("Failed to initialize S3 state archive backend")?;
+                    Arc::new(archive)
+                }
+                #[cfg(not(feature = "s3"))]
+                "s3" => {
+                    anyhow::bail!(
+                    "state_storage archive type 's3' requires the 's3' cargo feature to be enabled"
+                );
+                }
+                "local" => {
+                    let path = archive_config
+                        .path
+                        .as_deref()
+                        .context("Local state archive requires 'path' field")?;
+                    tracing::info!("Local state archival enabled: path={}", path);
+                    Arc::new(stroem_server::state_storage::LocalStateArchive::new(path))
+                }
+                other => {
+                    anyhow::bail!(
+                        "Unknown state_storage archive type: '{}' (expected 's3' or 'local')",
+                        other
+                    );
+                }
+            };
+        Some(stroem_server::state_storage::StateStorage::new(
+            archive,
+            ss_config.prefix.clone(),
+            ss_config.max_snapshots,
+            ss_config.global_max_snapshots,
+        ))
+    } else {
+        None
+    };
+
     // Build application state
     let state = AppState::new(
         pool,
@@ -179,7 +232,7 @@ async fn main() -> Result<()> {
         config.clone(),
         log_storage,
         oidc_providers,
-        None,
+        state_storage,
     );
 
     // Start background tasks

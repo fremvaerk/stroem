@@ -159,6 +159,7 @@ pub fn prepare_step_action_input(
 ///
 /// Returns `None` if `action_spec` is `None`. Returns the spec unchanged if
 /// it is not a JSON object.
+#[allow(clippy::too_many_arguments)]
 pub fn render_action_spec(
     action_spec: Option<&serde_json::Value>,
     rendered_input: Option<&serde_json::Value>,
@@ -167,6 +168,8 @@ pub fn render_action_spec(
     loop_item: Option<&serde_json::Value>,
     loop_index: Option<i32>,
     loop_total: Option<i32>,
+    state_json: Option<&serde_json::Value>,
+    global_state_json: Option<&serde_json::Value>,
 ) -> Result<Option<serde_json::Value>> {
     let original_spec = match action_spec {
         Some(s) => s,
@@ -184,6 +187,14 @@ pub fn render_action_spec(
         spec_ctx.insert("input".to_string(), input_val.clone());
     }
     spec_ctx.insert("secret".to_string(), secrets.clone());
+    // Task + global workspace state so `{{ state.* }}` and `{{ global_state.* }}`
+    // resolve in action bodies (script, cmd, env, source, args, manifest).
+    if let Some(state_val) = state_json {
+        spec_ctx.insert("state".to_string(), state_val.clone());
+    }
+    if let Some(global_state_val) = global_state_json {
+        spec_ctx.insert("global_state".to_string(), global_state_val.clone());
+    }
     for (step_name, output) in completed_steps {
         let mut step_ctx = serde_json::Map::new();
         if let Some(output) = output {
@@ -754,7 +765,8 @@ mod tests {
     #[test]
     fn test_render_action_spec_none_returns_none() {
         let secrets = json!({});
-        let result = render_action_spec(None, None, &secrets, &[], None, None, None).unwrap();
+        let result =
+            render_action_spec(None, None, &secrets, &[], None, None, None, None, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -762,8 +774,18 @@ mod tests {
     fn test_render_action_spec_non_object_returns_unchanged() {
         let spec = json!("just a string");
         let secrets = json!({});
-        let result =
-            render_action_spec(Some(&spec), None, &secrets, &[], None, None, None).unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            None,
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Some(json!("just a string")));
     }
 
@@ -778,6 +800,8 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
+            None,
             None,
             None,
             None,
@@ -802,6 +826,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -820,6 +846,8 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
+            None,
             None,
             None,
             None,
@@ -847,6 +875,8 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
+            None,
             None,
             None,
             None,
@@ -941,6 +971,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -965,6 +997,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -986,6 +1020,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1002,9 +1038,19 @@ mod tests {
         });
         let input = serde_json::json!({"target": "prod", "region": "us-east-1"});
         let secrets = serde_json::json!({});
-        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[], None, None, None)
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&input),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         let args = result["args"].as_array().unwrap();
         assert_eq!(args[0], "prod");
         assert_eq!(args[1], "--region");
@@ -1032,6 +1078,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1048,9 +1096,19 @@ mod tests {
         });
         let input = serde_json::json!({});
         let secrets = serde_json::json!({"api_token": "xyz123"});
-        let result = render_action_spec(Some(&spec), Some(&input), &secrets, &[], None, None, None)
-            .unwrap()
-            .unwrap();
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&input),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         let args = result["args"].as_array().unwrap();
         assert_eq!(args[0], "--token");
         assert_eq!(args[1], "xyz123");
@@ -1075,6 +1133,8 @@ mod tests {
             Some(&input),
             &secrets,
             &completed,
+            None,
+            None,
             None,
             None,
             None,
@@ -1354,6 +1414,8 @@ mod tests {
             Some(&loop_item),
             Some(2),
             Some(5),
+            None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1384,6 +1446,8 @@ mod tests {
             Some(&loop_item),
             Some(3),
             Some(10),
+            None,
+            None,
         )
         .unwrap()
         .unwrap();

@@ -27,6 +27,7 @@ services:
       - ./workspace-ops:/workspace-ops:ro
       - ./docker/server-config.yaml:/etc/stroem/server-config.yaml:ro
       - logs:/var/stroem/logs
+      - state:/var/stroem/state
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,3 +58,4 @@ services:
 volumes:
   pgdata:
   logs:
+  state:

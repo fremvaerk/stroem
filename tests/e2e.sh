@@ -416,6 +416,83 @@ else
     fail "Hook job error_message missing Python KeyError - traceback not propagated to hook"
 fi
 
+# --- 15. State upload + read ---
+info "Test: state upload"
+
+# Create a known tarball with a single file
+TMPDIR_STATE=$(mktemp -d)
+echo "hello from state" > "$TMPDIR_STATE/hello.txt"
+tar -czf "$TMPDIR_STATE/state.tar.gz" -C "$TMPDIR_STATE" hello.txt
+
+# Upload the snapshot for the read-state task with a query-param state value
+UPLOAD_RESP=$(curl -sf -X POST \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/gzip" \
+    --data-binary "@$TMPDIR_STATE/state.tar.gz" \
+    "$BASE_URL/api/workspaces/default/tasks/read-state/state?greeting=hi")
+
+SNAP_ID=$(echo "$UPLOAD_RESP" | jq -r '.snapshot_id')
+UPLOAD_JOB_ID=$(echo "$UPLOAD_RESP" | jq -r '.job_id')
+
+if [ -z "$SNAP_ID" ] || [ "$SNAP_ID" = "null" ]; then
+    fail "State upload failed: $UPLOAD_RESP"
+fi
+pass "State uploaded: snapshot_id=$SNAP_ID, synthetic job_id=$UPLOAD_JOB_ID"
+
+# Verify the synthetic job is queryable with source_type=upload
+JOB_DETAIL_UPLOAD=$(acurl "$BASE_URL/api/jobs/$UPLOAD_JOB_ID")
+JOB_SOURCE_TYPE=$(echo "$JOB_DETAIL_UPLOAD" | jq -r '.source_type')
+if [ "$JOB_SOURCE_TYPE" != "upload" ]; then
+    fail "Expected upload job source_type=upload, got $JOB_SOURCE_TYPE"
+fi
+pass "Synthetic upload job has source_type=upload"
+
+# Trigger the read-state task and verify it reads the file + state.greeting
+EXEC_STATE_RESP=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/read-state/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+READ_JOB_ID=$(echo "$EXEC_STATE_RESP" | jq -r '.job_id')
+if [ -z "$READ_JOB_ID" ] || [ "$READ_JOB_ID" = "null" ]; then
+    fail "read-state execute failed: $EXEC_STATE_RESP"
+fi
+
+# Poll for completion (use the same MAX_POLL pattern as earlier tests)
+READ_POLLED=0
+READ_STATUS="pending"
+while [ "$READ_POLLED" -lt 60 ]; do
+    READ_DETAIL=$(acurl "$BASE_URL/api/jobs/$READ_JOB_ID")
+    READ_STATUS=$(echo "$READ_DETAIL" | jq -r '.status')
+    if [ "$READ_STATUS" = "completed" ] || [ "$READ_STATUS" = "failed" ]; then
+        break
+    fi
+    sleep 2
+    READ_POLLED=$((READ_POLLED + 2))
+done
+
+if [ "$READ_STATUS" != "completed" ]; then
+    fail "read-state job did not complete: status=$READ_STATUS"
+fi
+pass "read-state job completed"
+
+# Check job logs for the expected lines
+READ_LOGS=$(acurl "$BASE_URL/api/jobs/$READ_JOB_ID/logs")
+if ! echo "$READ_LOGS" | grep -q "hello from state"; then
+    info "Logs:"
+    echo "$READ_LOGS"
+    fail "read-state job logs did not contain uploaded file content"
+fi
+pass "read-state job read uploaded file from \$STATE_DIR"
+
+if ! echo "$READ_LOGS" | grep -q "TEMPLATE_GREETING: hi"; then
+    info "Logs:"
+    echo "$READ_LOGS"
+    fail "read-state job logs did not render state.greeting from query params"
+fi
+pass "read-state job rendered state.greeting from query param"
+
+# Cleanup
+rm -rf "$TMPDIR_STATE"
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"

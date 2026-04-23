@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskStateRow {
     pub id: Uuid,
@@ -81,14 +83,21 @@ impl TaskStateRepo {
         Ok(id)
     }
 
-    /// Insert a new snapshot and prune old ones in a single transaction.
+    /// Insert a new snapshot and prune old ones, running both statements against
+    /// the provided transaction.
     ///
-    /// Returns the new snapshot UUID and the storage keys of any pruned rows.
-    /// Both operations are committed atomically so the DB is never left with
-    /// an excess of snapshots even under concurrent uploads.
+    /// The caller is responsible for beginning and committing (or rolling back)
+    /// the transaction. This lets callers compose additional SQL statements —
+    /// such as inserting a synthetic job row — in the same atomic unit.
+    ///
+    /// `snapshot_id`: pass `Some(id)` to use a pre-generated UUID (useful when
+    /// the caller needs the ID before calling this method, e.g. to include it in
+    /// a job `output` column). Pass `None` to let the method generate one.
+    ///
+    /// Returns the snapshot UUID and the storage keys of any pruned rows.
     #[allow(clippy::too_many_arguments)]
-    pub async fn insert_and_prune(
-        pool: &PgPool,
+    pub async fn insert_and_prune<'a>(
+        tx: &mut Tx<'a>,
         workspace: &str,
         task_name: &str,
         job_id: Uuid,
@@ -96,13 +105,10 @@ impl TaskStateRepo {
         size_bytes: i64,
         has_json: bool,
         keep: usize,
+        snapshot_id: Option<Uuid>,
     ) -> Result<(Uuid, Vec<String>)> {
-        let mut tx = pool
-            .begin()
-            .await
-            .context("begin state snapshot transaction")?;
+        let id = snapshot_id.unwrap_or_else(Uuid::new_v4);
 
-        let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json) \
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -114,7 +120,7 @@ impl TaskStateRepo {
         .bind(storage_key)
         .bind(size_bytes)
         .bind(has_json)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to insert task state snapshot")?;
 
@@ -131,13 +137,10 @@ impl TaskStateRepo {
         .bind(workspace)
         .bind(task_name)
         .bind(keep as i64)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("Failed to prune task state snapshots")?;
 
-        tx.commit()
-            .await
-            .context("commit state snapshot transaction")?;
         Ok((id, deleted_keys))
     }
 

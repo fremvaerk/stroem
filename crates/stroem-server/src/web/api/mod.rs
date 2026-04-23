@@ -3,6 +3,7 @@ pub mod auth;
 pub mod jobs;
 pub mod middleware;
 pub mod oidc;
+pub mod state_upload;
 pub mod tasks;
 pub mod triggers;
 pub mod users;
@@ -259,6 +260,17 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route(
             "/workspaces/{ws}/tasks/{name}/execute",
             post(tasks::execute_task),
+        )
+        // Per-route DefaultBodyLimit mirrors the pattern in worker_api/mod.rs:92-98.
+        .route(
+            "/workspaces/{ws}/tasks/{name}/state",
+            post(state_upload::upload_task_state)
+                .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
+        .route(
+            "/workspaces/{ws}/state",
+            post(state_upload::upload_global_state)
+                .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
         .route("/users", get(users::list_users))
         .route("/users/{id}", get(users::get_user))
