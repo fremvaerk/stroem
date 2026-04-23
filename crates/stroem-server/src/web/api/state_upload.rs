@@ -476,6 +476,11 @@ async fn commit_task_upload(
         }
     });
 
+    // Generate snapshot_id up-front so the job INSERT can carry the final
+    // output directly, eliminating a second UPDATE round-trip in the same tx.
+    let snapshot_id = Uuid::new_v4();
+    let output = serde_json::json!({ "snapshot_id": snapshot_id });
+
     let mut tx = pool.begin().await.context("begin upload tx")?;
 
     sqlx::query(
@@ -485,8 +490,8 @@ async fn commit_task_upload(
             status, source_type, source_id, revision,
             started_at, completed_at
         )
-        VALUES ($1, $2, $3, 'distributed', $4, NULL,
-                'completed', 'upload', $5, $6,
+        VALUES ($1, $2, $3, 'distributed', $4, $5,
+                'completed', 'upload', $6, $7,
                 NOW(), NOW())
         "#,
     )
@@ -494,13 +499,13 @@ async fn commit_task_upload(
     .bind(ws)
     .bind(task)
     .bind(&input)
+    .bind(&output)
     .bind(source_id)
     .bind(revision)
     .execute(&mut *tx)
     .await
     .context("insert synthetic upload job")?;
 
-    let snapshot_id = Uuid::new_v4();
     sqlx::query(
         r#"
         INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json)
@@ -537,13 +542,6 @@ async fn commit_task_upload(
     .fetch_all(&mut *tx)
     .await
     .context("prune task_state")?;
-
-    sqlx::query("UPDATE job SET output = $1 WHERE job_id = $2")
-        .bind(serde_json::json!({"snapshot_id": snapshot_id}))
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await
-        .context("update synthetic job output")?;
 
     tx.commit().await.context("commit upload tx")?;
 
@@ -707,6 +705,11 @@ async fn commit_global_upload(
         }
     });
 
+    // Generate snapshot_id up-front so the job INSERT can carry the final
+    // output directly, eliminating a second UPDATE round-trip in the same tx.
+    let snapshot_id = Uuid::new_v4();
+    let output = serde_json::json!({ "snapshot_id": snapshot_id });
+
     let mut tx = pool.begin().await.context("begin global upload tx")?;
 
     sqlx::query(
@@ -716,8 +719,8 @@ async fn commit_global_upload(
             status, source_type, source_id, revision,
             started_at, completed_at
         )
-        VALUES ($1, $2, $3, 'distributed', $4, NULL,
-                'completed', 'upload', $5, $6,
+        VALUES ($1, $2, $3, 'distributed', $4, $5,
+                'completed', 'upload', $6, $7,
                 NOW(), NOW())
         "#,
     )
@@ -725,13 +728,12 @@ async fn commit_global_upload(
     .bind(ws)
     .bind(GLOBAL_TASK_NAME_SENTINEL)
     .bind(&input)
+    .bind(&output)
     .bind(source_id)
     .bind(revision)
     .execute(&mut *tx)
     .await
     .context("insert synthetic upload job (global)")?;
-
-    let snapshot_id = Uuid::new_v4();
 
     sqlx::query(
         r#"
@@ -768,13 +770,6 @@ async fn commit_global_upload(
     .fetch_all(&mut *tx)
     .await
     .context("prune workspace_state")?;
-
-    sqlx::query("UPDATE job SET output = $1 WHERE job_id = $2")
-        .bind(serde_json::json!({"snapshot_id": snapshot_id}))
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await
-        .context("update synthetic global job output")?;
 
     tx.commit().await.context("commit global upload tx")?;
 

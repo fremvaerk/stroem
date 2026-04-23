@@ -79,6 +79,20 @@ fn build_tarball(files: &[std::path::PathBuf]) -> Result<Vec<u8>> {
     use flate2::Compression;
     use std::collections::HashSet;
 
+    // Client-side guard: reject state.json before the server does so the
+    // user gets a clear, actionable error message.
+    for path in files {
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("path '{}' has no filename", path.display()))?
+            .to_string_lossy();
+        if name == "state.json" {
+            anyhow::bail!(
+                "state.json cannot be uploaded as a file — pass state values via --state KEY=VALUE flags instead"
+            );
+        }
+    }
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     {
@@ -155,6 +169,47 @@ mod tests {
         assert!(
             !bytes.is_empty(),
             "empty tarball should still be valid gzip"
+        );
+    }
+
+    #[test]
+    fn build_tarball_rejects_state_json_filename() {
+        let tmp = TempDir::new().unwrap();
+        let f = tmp.path().join("state.json");
+        std::fs::write(&f, b"{}").unwrap();
+
+        let err = build_tarball(&[f]).unwrap_err();
+        assert!(
+            err.to_string().contains("state values via --state"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn build_tarball_handles_unicode_and_spaces_in_basenames() {
+        let tmp = TempDir::new().unwrap();
+        let f1 = tmp.path().join("my file.pem");
+        let f2 = tmp.path().join("证书.pem");
+        std::fs::write(&f1, b"A").unwrap();
+        std::fs::write(&f2, b"B").unwrap();
+
+        let bytes = build_tarball(&[f1, f2]).unwrap();
+
+        // Unpack to verify the filenames round-trip correctly.
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+        let mut archive = Archive::new(GzDecoder::new(&bytes[..]));
+        let mut names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["my file.pem".to_string(), "证书.pem".to_string()]
         );
     }
 }

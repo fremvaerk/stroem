@@ -1096,13 +1096,13 @@ Findings from parallel review agents (code-reviewer + security-auditor + databas
 - [x] **CLI swallows response-body read errors** — `crates/stroem-cli/src/remote/state.rs:69`. `response.text().await.unwrap_or_default()` gives user "upload failed: 500 — " with no detail. Use `.context("read response body")?` or log the error.
 - [x] **CLI basename collision silently overwrites** — `remote/state.rs:86-91`. `./certs/cert.pem` and `./backup/cert.pem` both map to `cert.pem`; second wins. Add a duplicate-basename check with a clear error, or at minimum a `tracing::warn!`.
 - [x] **Prior snapshot fetch in merge mode has no size cap** — `state_upload.rs:373`. Low risk (own storage), but a defensive `bytes.len() <= MAX_SNAPSHOT_BYTES` assertion after retrieval would be robust against a mis-sized snapshot written by a past/future version.
-- [ ] **Route `DefaultBodyLimit` layer applied per-route instead of router-level** — `crates/stroem-server/src/web/api/mod.rs:264-273`. Inconsistent with `worker_api/mod.rs:92` pattern. Low severity.
+- [x] **Route `DefaultBodyLimit` layer applied per-route instead of router-level** — `crates/stroem-server/src/web/api/mod.rs:264-273`. Pattern is consistent with `worker_api/mod.rs:92-98`; added a one-line comment linking the two for clarity.
 - [ ] **SQL duplication between handlers and `insert_and_prune` repo methods** — `state_upload.rs:445, 664` vs `crates/stroem-db/src/repos/task_state.rs:90` + `repos/workspace_state.rs:88`. Acknowledged trade-off (handlers need the same tx to include the synthetic job INSERT). Long-term fix: refactor the repo methods to accept `&mut Transaction<'_, Postgres>` instead of `&PgPool`, then handlers can delegate. Non-blocking.
-- [ ] **`UPDATE job SET output` round-trip could be eliminated** — `state_upload.rs:535, 758`. Generate `snapshot_id` before the tx so the initial `INSERT INTO job` can carry the final `output` directly. Saves one statement per upload. Non-blocking optimization.
-- [ ] **No index on `job.source_type`** — any audit query filtering by `source_type = 'upload'` does a seq scan today. Also true for `'retry'`, `'hook'`, etc. Add only if query patterns warrant.
-- [ ] **CLI: `state.json` passed as a file** — CLI `build_tarball` happily packs it; server rejects with 400. Add a client-side guard for a clearer error.
-- [ ] **CLI: paths with spaces / unicode in filename** — `path.file_name().to_string_lossy()` handles them; add test for documentation.
-- [ ] **Concurrent uploads for same (ws, task) stress test** — add `// TODO(test): concurrent upload stress` near `commit_task_upload` for when fault-injection tooling exists.
+- [x] **`UPDATE job SET output` round-trip could be eliminated** — `state_upload.rs:535, 758`. `snapshot_id` now generated before the tx; initial `INSERT INTO job` carries the final `output` directly. Saves one statement per upload.
+- [x] **No index on `job.source_type`** — migration `031_job_source_type_index.sql` adds a partial index (WHERE source_type NOT IN ('api', 'trigger')) for audit queries.
+- [x] **CLI: `state.json` passed as a file** — client-side guard added in `build_tarball`; server rejects with clear message. Unit test added.
+- [x] **CLI: paths with spaces / unicode in filename** — `build_tarball_handles_unicode_and_spaces_in_basenames` unit test added.
+- [x] **Concurrent uploads for same (ws, task) stress test** — `concurrent_uploads_preserve_max_snapshots_invariant` integration test added in `state_upload_test.rs`; uses `tokio::task::JoinSet` for N=10 concurrent uploads, asserts all 201, DB row count = max_snapshots, and no dangling blobs.
 - [ ] **E2E suite not yet run end-to-end** — `tests/e2e.sh` additions landed but weren't executed (requires docker-compose build cycle). Operator should run `./tests/e2e.sh` before merging.
 
 ### Cleared by review (non-issues)

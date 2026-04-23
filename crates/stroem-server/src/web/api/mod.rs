@@ -261,6 +261,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/workspaces/{ws}/tasks/{name}/execute",
             post(tasks::execute_task),
         )
+        // Per-route DefaultBodyLimit mirrors the pattern in worker_api/mod.rs:92-98.
         .route(
             "/workspaces/{ws}/tasks/{name}/state",
             post(state_upload::upload_task_state)

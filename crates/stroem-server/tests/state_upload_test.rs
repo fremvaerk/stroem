@@ -903,6 +903,112 @@ async fn upload_jobs_discoverable_via_source_type_filter() -> Result<()> {
     Ok(())
 }
 
+/// Firing N concurrent uploads for the same (workspace, task) must all
+/// succeed and the DB must end up with exactly min(N, max_snapshots) rows.
+/// Every storage_key still in the DB must correspond to an on-disk blob.
+#[tokio::test]
+async fn concurrent_uploads_preserve_max_snapshots_invariant() -> Result<()> {
+    let app = build_test_app("production", &["t"]).await?;
+
+    const N_UPLOADS: usize = 10;
+    // build_test_app wires max_snapshots = 5.
+    const EXPECTED_FINAL_COUNT: i64 = 5;
+
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..N_UPLOADS {
+        let router = app.router.clone();
+        set.spawn(async move {
+            let tarball = {
+                use flate2::write::GzEncoder;
+                use flate2::Compression;
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                {
+                    let mut builder = tar::Builder::new(&mut encoder);
+                    let bytes = format!("v{}", i).into_bytes();
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(bytes.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_mtime(0);
+                    header.set_cksum();
+                    builder
+                        .append_data(&mut header, "f.txt", &bytes[..])
+                        .unwrap();
+                    builder.finish().unwrap();
+                }
+                encoder.finish().unwrap()
+            };
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/workspaces/production/tasks/t/state?seq={}",
+                    i
+                ))
+                .header("content-type", "application/gzip")
+                .body(Body::from(tarball))
+                .unwrap();
+            router.oneshot(request).await.map(|r| r.status())
+        });
+    }
+
+    let mut statuses = Vec::new();
+    while let Some(res) = set.join_next().await {
+        statuses.push(res.unwrap().unwrap());
+    }
+
+    for (i, s) in statuses.iter().enumerate() {
+        assert_eq!(*s, StatusCode::CREATED, "upload {} status: {}", i, s);
+    }
+
+    // Poll until pruning stabilises (background delete is fire-and-forget).
+    for _ in 0..30 {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2",
+        )
+        .bind("production")
+        .bind("t")
+        .fetch_one(&app.pool)
+        .await?;
+        if count.0 == EXPECTED_FINAL_COUNT {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM task_state WHERE workspace = $1 AND task_name = $2")
+            .bind("production")
+            .bind("t")
+            .fetch_one(&app.pool)
+            .await?;
+    assert_eq!(
+        count.0, EXPECTED_FINAL_COUNT,
+        "after {} concurrent uploads, expected {} rows, got {}",
+        N_UPLOADS, EXPECTED_FINAL_COUNT, count.0
+    );
+
+    // Every remaining storage_key must correspond to an on-disk blob.
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT storage_key FROM task_state WHERE workspace = $1 AND task_name = $2",
+    )
+    .bind("production")
+    .bind("t")
+    .fetch_all(&app.pool)
+    .await?;
+
+    let archive_dir = app._tmp.path().join("state-archive");
+    for (key,) in rows {
+        let path = archive_dir.join(&key);
+        assert!(
+            path.exists(),
+            "storage_key {} references missing blob at {}",
+            key,
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// GET /api/jobs?source_type=<invalid> returns 400.
 #[tokio::test]
 async fn list_jobs_rejects_invalid_source_type_filter() -> Result<()> {
