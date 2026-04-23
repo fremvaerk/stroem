@@ -3798,8 +3798,9 @@ async fn test_workspace_state_insert_and_prune() -> Result<()> {
 
     // insert_and_prune with keep=2: 5 existing + 1 new = 6 total, 4 pruned
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let mut tx = pool.begin().await?;
     let (new_id, deleted) = WorkspaceStateRepo::insert_and_prune(
-        &pool,
+        &mut tx,
         "default",
         "task-final",
         job_id,
@@ -3807,8 +3808,10 @@ async fn test_workspace_state_insert_and_prune() -> Result<()> {
         100,
         false,
         2,
+        None,
     )
     .await?;
+    tx.commit().await?;
 
     assert_eq!(
         deleted.len(),

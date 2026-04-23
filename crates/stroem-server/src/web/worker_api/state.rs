@@ -112,10 +112,21 @@ pub async fn upload_global_state(
         .await
         .context("store global state snapshot")?;
 
-    // Record the snapshot and prune old ones atomically. If the DB write fails,
-    // delete the blob we just uploaded so no orphaned data is left behind.
+    // Record the snapshot and prune old ones atomically inside a transaction
+    // owned here. If anything fails, delete the blob we just uploaded so no
+    // orphaned data is left behind.
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            let _ = storage.delete(&key).await;
+            return Err(AppError::Internal(
+                anyhow::anyhow!(e).context("begin global state upload tx"),
+            ));
+        }
+    };
+
     let (snapshot_id, deleted_keys) = match stroem_db::WorkspaceStateRepo::insert_and_prune(
-        &state.pool,
+        &mut tx,
         &workspace,
         &job.task_name,
         job_id,
@@ -123,6 +134,7 @@ pub async fn upload_global_state(
         body.len() as i64,
         query.has_json,
         storage.global_max_snapshots(),
+        None,
     )
     .await
     {
@@ -141,6 +153,13 @@ pub async fn upload_global_state(
             ));
         }
     };
+
+    if let Err(e) = tx.commit().await {
+        let _ = storage.delete(&key).await;
+        return Err(AppError::Internal(
+            anyhow::anyhow!(e).context("commit global state upload tx"),
+        ));
+    }
 
     // Delete pruned snapshots from the archive backend (best-effort, background).
     if !deleted_keys.is_empty() {
@@ -388,10 +407,21 @@ pub async fn upload_state(
         .await
         .context("store state snapshot")?;
 
-    // Record the snapshot and prune old ones atomically. If the DB write fails,
-    // delete the blob we just uploaded so no orphaned data is left behind.
+    // Record the snapshot and prune old ones atomically inside a transaction
+    // owned here. If anything fails, delete the blob we just uploaded so no
+    // orphaned data is left behind.
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            let _ = storage.delete(&key).await;
+            return Err(AppError::Internal(
+                anyhow::anyhow!(e).context("begin state upload tx"),
+            ));
+        }
+    };
+
     let (snapshot_id, deleted_keys) = match stroem_db::TaskStateRepo::insert_and_prune(
-        &state.pool,
+        &mut tx,
         &workspace,
         &task_name,
         job_id,
@@ -399,6 +429,7 @@ pub async fn upload_state(
         body.len() as i64,
         query.has_json,
         storage.max_snapshots(),
+        None,
     )
     .await
     {
@@ -417,6 +448,13 @@ pub async fn upload_state(
             ));
         }
     };
+
+    if let Err(e) = tx.commit().await {
+        let _ = storage.delete(&key).await;
+        return Err(AppError::Internal(
+            anyhow::anyhow!(e).context("commit state upload tx"),
+        ));
+    }
 
     // Delete pruned snapshots from the archive backend (best-effort, background).
     if !deleted_keys.is_empty() {

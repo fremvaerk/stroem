@@ -483,6 +483,7 @@ async fn commit_task_upload(
 
     let mut tx = pool.begin().await.context("begin upload tx")?;
 
+    // Insert the synthetic job first (FK parent of task_state.job_id).
     sqlx::query(
         r#"
         INSERT INTO job (
@@ -506,42 +507,20 @@ async fn commit_task_upload(
     .await
     .context("insert synthetic upload job")?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        "#,
+    // Insert state row + prune via repo (FK child — job row already exists above).
+    let (_, deleted_keys) = stroem_db::TaskStateRepo::insert_and_prune(
+        &mut tx,
+        ws,
+        task,
+        job_id,
+        key,
+        new_bytes.len() as i64,
+        has_json,
+        max_snapshots,
+        Some(snapshot_id),
     )
-    .bind(snapshot_id)
-    .bind(ws)
-    .bind(task)
-    .bind(job_id)
-    .bind(key)
-    .bind(new_bytes.len() as i64)
-    .bind(has_json)
-    .execute(&mut *tx)
     .await
-    .context("insert task_state")?;
-
-    let deleted_keys: Vec<String> = sqlx::query_scalar(
-        r#"
-        DELETE FROM task_state
-        WHERE (workspace, task_name) = ($1, $2)
-          AND id IN (
-            SELECT id FROM task_state
-            WHERE (workspace, task_name) = ($1, $2)
-            ORDER BY created_at DESC, id DESC
-            OFFSET $3
-          )
-        RETURNING storage_key
-        "#,
-    )
-    .bind(ws)
-    .bind(task)
-    .bind(max_snapshots as i64)
-    .fetch_all(&mut *tx)
-    .await
-    .context("prune task_state")?;
+    .context("insert task state snapshot record")?;
 
     tx.commit().await.context("commit upload tx")?;
 
@@ -712,6 +691,7 @@ async fn commit_global_upload(
 
     let mut tx = pool.begin().await.context("begin global upload tx")?;
 
+    // Insert the synthetic job first (FK parent of workspace_state.job_id).
     sqlx::query(
         r#"
         INSERT INTO job (
@@ -735,41 +715,20 @@ async fn commit_global_upload(
     .await
     .context("insert synthetic upload job (global)")?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO workspace_state (id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        "#,
+    // Insert state row + prune via repo (FK child — job row already exists above).
+    let (_, deleted_keys) = stroem_db::WorkspaceStateRepo::insert_and_prune(
+        &mut tx,
+        ws,
+        GLOBAL_TASK_NAME_SENTINEL,
+        job_id,
+        key,
+        new_bytes.len() as i64,
+        has_json,
+        max_snapshots,
+        Some(snapshot_id),
     )
-    .bind(snapshot_id)
-    .bind(ws)
-    .bind(GLOBAL_TASK_NAME_SENTINEL)
-    .bind(job_id)
-    .bind(key)
-    .bind(new_bytes.len() as i64)
-    .bind(has_json)
-    .execute(&mut *tx)
     .await
-    .context("insert workspace_state")?;
-
-    let deleted_keys: Vec<String> = sqlx::query_scalar(
-        r#"
-        DELETE FROM workspace_state
-        WHERE workspace = $1
-          AND id IN (
-            SELECT id FROM workspace_state
-            WHERE workspace = $1
-            ORDER BY created_at DESC, id DESC
-            OFFSET $2
-          )
-        RETURNING storage_key
-        "#,
-    )
-    .bind(ws)
-    .bind(max_snapshots as i64)
-    .fetch_all(&mut *tx)
-    .await
-    .context("prune workspace_state")?;
+    .context("insert global state snapshot record")?;
 
     tx.commit().await.context("commit global upload tx")?;
 
