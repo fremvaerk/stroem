@@ -464,6 +464,8 @@ pub async fn claim_job(
         step.loop_item.as_ref(),
         step.loop_index,
         step.loop_total,
+        state_json_value.as_ref(),
+        global_state_json_value.as_ref(),
     ) {
         Ok(spec) => spec,
         Err(e) => {
