@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { useParams, Link, useNavigate } from "react-router";
+import { useParams, Link, useNavigate, useLocation } from "react-router";
 import {
   ArrowLeft,
   Clock,
@@ -81,6 +81,13 @@ function topoSortFlow(
 export function TaskDetailPage() {
   const { workspace, name } = useParams<{ workspace: string; name: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const prefill = location.state as
+    | { sourceJobId?: string; rawInput?: Record<string, unknown> | null }
+    | null;
+  const sourceJobId = prefill?.sourceJobId;
+  const rawInput = prefill?.rawInput ?? null;
+  const isLegacySource = !!sourceJobId && !rawInput;
   useTitle(name ? `Task: ${name}` : "Task");
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -105,7 +112,15 @@ export function TaskDetailPage() {
           setTask(data);
           const defaults: Record<string, unknown> = {};
           for (const [key, field] of Object.entries(data.input)) {
-            if (field.secret && field.default !== undefined) {
+            const prefillVal =
+              rawInput && Object.prototype.hasOwnProperty.call(rawInput, key)
+                ? rawInput[key]
+                : undefined;
+
+            if (prefillVal !== undefined) {
+              // Plain, connection, or redacted-secret value from raw_input.
+              defaults[key] = prefillVal;
+            } else if (field.secret && field.default !== undefined) {
               defaults[key] = SECRET_SENTINEL;
             } else if (field.default !== undefined) {
               defaults[key] = field.default;
@@ -116,6 +131,15 @@ export function TaskDetailPage() {
             }
           }
           setValues(defaults);
+
+          // Clear router state so a refresh shows the form without prefill.
+          if (rawInput || sourceJobId) {
+            window.history.replaceState(
+              null,
+              "",
+              window.location.pathname + window.location.search,
+            );
+          }
         }
       } catch (err) {
         if (!cancelled)
@@ -129,6 +153,7 @@ export function TaskDetailPage() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, name]);
 
   const loadJobs = useCallback(async () => {
@@ -161,14 +186,26 @@ export function TaskDetailPage() {
       const input: Record<string, unknown> = {};
       for (const [key, val] of Object.entries(values)) {
         const field = task.input[key];
-        if (field?.secret && val === SECRET_SENTINEL) continue;
+        // SECRET_SENTINEL ("********") means "field unchanged from its stored default"
+        // — drop so server uses the schema default. REDACTED_SENTINEL ("••••••") means
+        // "replay from source job's raw_input" and is a different string, so it falls
+        // through unchanged below; the server interprets it (only meaningful when
+        // sourceJobId is also being sent).
+        if (field?.secret && val === SECRET_SENTINEL) {
+          continue;
+        }
         if (field?.type === "number") {
           input[key] = Number(val);
         } else {
           input[key] = val;
         }
       }
-      const res = await executeTask(workspace, task.id, input);
+      const res = await executeTask(
+        workspace,
+        task.id,
+        input,
+        sourceJobId ? { sourceJobId } : undefined,
+      );
       navigate(`/jobs/${res.job_id}`);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to execute task");
@@ -199,6 +236,11 @@ export function TaskDetailPage() {
 
   return (
     <div className="space-y-6">
+      {isLegacySource && (
+        <div className="rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950 dark:text-yellow-200">
+          This job predates Re-run prefill — defaults shown.
+        </div>
+      )}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" asChild>
           <Link to="/tasks">
