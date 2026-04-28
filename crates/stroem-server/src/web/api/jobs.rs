@@ -956,7 +956,7 @@ pub async fn approve_step(
 ///
 /// Returns the user's permission level, or an `AppError` on failure.
 /// Returns `Ok(TaskPermission::Run)` when ACL is not configured or auth is absent.
-async fn check_job_acl(
+pub(crate) async fn check_job_acl(
     state: &AppState,
     auth_user: &Option<AuthUser>,
     workspace: &str,

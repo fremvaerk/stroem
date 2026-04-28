@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use stroem_common::template::PRIMITIVE_TYPES;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct TaskListItem {
@@ -55,6 +56,8 @@ pub struct TaskDetail {
 pub struct ExecuteTaskRequest {
     #[serde(default)]
     pub input: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub source_job_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,9 +322,43 @@ pub async fn execute_task(
         }
     }
 
+    // 4. Re-run validation: source_job_id must reference a job in this workspace
+    //    that the user is allowed to view. Authorization mirrors GET /api/jobs/{id}.
+    let mut effective_source_type = source_type;
+    if let Some(src_id) = req.source_job_id {
+        let source_job = stroem_db::JobRepo::get(&state.pool, src_id)
+            .await
+            .context("load source job for re-run")?
+            .ok_or_else(|| AppError::BadRequest(format!("Source job {} not found", src_id)))?;
+        if source_job.workspace != ws {
+            return Err(AppError::BadRequest(
+                "Source job belongs to a different workspace".into(),
+            ));
+        }
+        if source_job.raw_input.is_none() {
+            return Err(AppError::BadRequest(
+                "Source job predates Re-run prefill (no raw_input)".into(),
+            ));
+        }
+        // Authorization: user must have at least View on the source job's task path.
+        let perm = crate::web::api::jobs::check_job_acl(
+            &state,
+            &auth_user,
+            &source_job.workspace,
+            &source_job.task_name,
+        )
+        .await?;
+        if matches!(perm, TaskPermission::Deny) {
+            return Err(AppError::Forbidden(
+                "Not authorized to read source job".into(),
+            ));
+        }
+        effective_source_type = "rerun";
+    }
+
     let input_value = serde_json::to_value(&req.input).unwrap_or_default();
 
-    // 4. Create job + steps via shared function
+    // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
     let job_id = create_job_for_task(
         &state.pool,
@@ -329,10 +366,10 @@ pub async fn execute_task(
         &ws,
         &name,
         input_value,
-        source_type,
+        effective_source_type,
         source_id.as_deref(),
         revision.as_deref(),
-        None, // source_job_id: Task 6 will wire req.source_job_id here
+        req.source_job_id,
         state.config.agents.as_ref(),
     )
     .await
@@ -350,11 +387,11 @@ pub async fn execute_task(
         }
     })?;
 
-    // 5. Fire on_suspended hooks for any root-level approval steps that were
+    // 6. Fire on_suspended hooks for any root-level approval steps that were
     //    suspended during job creation (FIX 2).
     crate::job_creator::fire_initial_suspended_hooks(&state, &workspace, &ws, &name, job_id).await;
 
-    // 6. Return job_id
+    // 7. Return job_id
     Ok(Json(ExecuteTaskResponse {
         job_id: job_id.to_string(),
     }))
