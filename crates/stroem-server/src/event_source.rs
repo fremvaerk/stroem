@@ -591,6 +591,7 @@ async fn create_event_source_job(
         "event_source",
         Some(&source_id),
         revision.as_deref(),
+        None,
         state.config.agents.as_ref(),
     )
     .await

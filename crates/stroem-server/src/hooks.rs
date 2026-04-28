@@ -378,6 +378,7 @@ async fn fire_single_hook(
             "hook",
             Some(source_id),
             revision,
+            None, // source_job_id: hooks never re-run a specific job
             None, // agents_config not available in hook context; orchestrator dispatches agents
         )
         .await
@@ -405,6 +406,7 @@ async fn fire_single_hook(
         "hook",
         Some(source_id),
         revision,
+        None, // raw_input: hook jobs don't persist raw_input (no re-run use case)
     )
     .await
     .context("Failed to create hook job")?;

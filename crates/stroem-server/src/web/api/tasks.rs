@@ -332,6 +332,7 @@ pub async fn execute_task(
         source_type,
         source_id.as_deref(),
         revision.as_deref(),
+        None, // source_job_id: Task 6 will wire req.source_job_id here
         state.config.agents.as_ref(),
     )
     .await

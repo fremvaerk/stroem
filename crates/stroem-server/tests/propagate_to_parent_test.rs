@@ -337,6 +337,7 @@ async fn child_completed_propagates_to_parent() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
     let child_job_id = JobRepo::create_with_parent(
@@ -351,6 +352,9 @@ async fn child_completed_propagates_to_parent() -> Result<()> {
         Some("run-child"),
         None,
         None,
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
     )
     .await?;
 
@@ -403,6 +407,7 @@ async fn child_failed_propagates_to_parent() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
     let child_job_id = JobRepo::create_with_parent(
@@ -417,6 +422,9 @@ async fn child_failed_propagates_to_parent() -> Result<()> {
         Some("run-child"),
         None,
         None,
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
     )
     .await?;
 
@@ -467,6 +475,7 @@ async fn child_cancelled_propagates_to_parent() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
     let child_job_id = JobRepo::create_with_parent(
@@ -481,6 +490,9 @@ async fn child_cancelled_propagates_to_parent() -> Result<()> {
         Some("run-child"),
         None,
         None,
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
     )
     .await?;
 
@@ -743,6 +755,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -759,6 +772,9 @@ async fn deep_nesting_three_levels() -> Result<()> {
         Some("run-parent"),
         None,
         None,
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
     )
     .await?;
 
@@ -775,6 +791,9 @@ async fn deep_nesting_three_levels() -> Result<()> {
         Some("run-child"),
         None,
         None,
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
     )
     .await?;
 
@@ -1082,6 +1101,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -1143,6 +1163,9 @@ async fn parent_with_mixed_steps() -> Result<()> {
         Some("task-step"),
         None,
         None,
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
     )
     .await?;
 

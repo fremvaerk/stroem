@@ -21,6 +21,10 @@ const MAX_TASK_DEPTH: u32 = 10;
 /// Shared by the API handler (`execute_task`) and the scheduler.
 /// Pass `agents_config` to enable initial dispatch of ready `type: agent` steps
 /// without waiting for the orchestrator to trigger them.
+///
+/// `source_job_id` — when set, the new job is treated as a Re-run of that job.
+/// Sentinel values in `input` are resolved against the source job's `raw_input`,
+/// and both `raw_input` and `source_job_id` are persisted on the new job row.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(pool, workspace_config, agents_config, input))]
 pub async fn create_job_for_task(
@@ -32,6 +36,7 @@ pub async fn create_job_for_task(
     source_type: &str,
     source_id: Option<&str>,
     revision: Option<&str>,
+    source_job_id: Option<Uuid>,
     agents_config: Option<&AgentsConfig>,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
@@ -45,6 +50,7 @@ pub async fn create_job_for_task(
         None,
         None,
         revision,
+        source_job_id,
         agents_config,
     )
     .await
@@ -78,6 +84,7 @@ pub async fn create_child_job_for_task(
         Some(parent_job_id),
         Some(parent_step_name),
         revision,
+        None, // child paths never set source_job_id
         None,
     )
     .await
@@ -96,6 +103,7 @@ fn create_job_for_task_inner<'a>(
     parent_job_id: Option<Uuid>,
     parent_step_name: Option<&'a str>,
     revision: Option<&'a str>,
+    source_job_id: Option<Uuid>,
     _agents_config: Option<&'a AgentsConfig>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
     Box::pin(async move {
@@ -107,9 +115,45 @@ fn create_job_for_task_inner<'a>(
             )
         })?;
 
+        // Re-run flow: if the caller named a source job, resolve any "reuse from source"
+        // sentinels in the incoming input by looking up the source's raw_input. Done
+        // BEFORE merge_defaults so a sentinel that the source did not override falls
+        // through to the schema default (supports secret rotation).
+        let mut effective_input = input;
+        if let Some(src_id) = source_job_id {
+            let source_job = stroem_db::JobRepo::get(pool, src_id)
+                .await
+                .context("fetch source job for re-run")?
+                .ok_or_else(|| anyhow::anyhow!("Source job {} not found", src_id))?;
+            if source_job.workspace != workspace_name {
+                bail!(
+                    "Source job {} belongs to workspace '{}', cannot Re-run into '{}'",
+                    src_id,
+                    source_job.workspace,
+                    workspace_name
+                );
+            }
+            let source_raw = match source_job.raw_input {
+                Some(v) => v,
+                None => bail!(
+                    "Source job {} predates Re-run prefill (no raw_input)",
+                    src_id
+                ),
+            };
+            effective_input = stroem_common::template::resolve_rerun_sentinels(
+                &effective_input,
+                &source_raw,
+                &task.input,
+            )
+            .context("resolve re-run sentinels")?;
+        }
+
+        // Capture the user's submission verbatim before defaults/connections are merged.
+        let raw_input_to_persist = Some(effective_input.clone());
+
         // Merge input defaults from the task schema
         let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
-        let merged_input = merge_defaults(&input, &task.input, &secrets_ctx)
+        let merged_input = merge_defaults(&effective_input, &task.input, &secrets_ctx)
             .context("Failed to merge input defaults")?;
 
         // Resolve connection inputs (replace connection names with full objects)
@@ -210,6 +254,9 @@ fn create_job_for_task_inner<'a>(
             task.timeout
                 .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
             revision,
+            raw_input_to_persist,
+            source_job_id,
+            None, // restart_from_step (feature B)
         )
         .await
         .context("Failed to create job")?;
@@ -415,6 +462,7 @@ pub async fn handle_task_steps(
             Some(job_id),
             Some(&step.step_name),
             job.revision.as_deref(),
+            None, // source_job_id: child task jobs never inherit re-run source
             None, // agents_config not available; orchestrator will dispatch
         )
         .await
@@ -1219,6 +1267,9 @@ mod tests {
             retry_job_id: None,
             retry_attempt: 0,
             max_retries: None,
+            raw_input: None,
+            source_job_id: None,
+            restart_from_step: None,
         }
     }
 

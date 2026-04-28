@@ -846,6 +846,7 @@ async fn try_retry_job(
         "retry",
         Some(&failed_job.job_id.to_string()),
         failed_job.revision.as_deref(),
+        None, // source_job_id: automatic retries don't prefill from source
         None,
     )
     .await

@@ -50,6 +50,7 @@ async fn create_job(pool: &PgPool) -> Uuid {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await
     .expect("job creation")

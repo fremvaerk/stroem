@@ -101,6 +101,7 @@ pub async fn emit_event(
         "event_source",
         Some(&req.source_id),
         revision.as_deref(),
+        None,
         state.config.agents.as_ref(),
     )
     .await

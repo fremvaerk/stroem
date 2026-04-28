@@ -1307,6 +1307,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -1744,6 +1745,7 @@ async fn test_log_append_and_retrieve() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -1947,6 +1949,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -2068,6 +2071,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -2814,6 +2818,7 @@ async fn test_worker_complete_job() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -3741,6 +3746,7 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
         "api",
         Some("test/script-render-fail"),
         None,
+        None, // raw_input
     )
     .await?;
     JobStepRepo::create_steps(
@@ -3836,6 +3842,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         "api",
         Some("test/env-render-fail"),
         None,
+        None, // raw_input
     )
     .await?;
     JobStepRepo::create_steps(
@@ -3922,6 +3929,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         "api",
         Some("test/script-render-fail"),
         None,
+        None, // raw_input
     )
     .await?;
     JobStepRepo::create_steps(
@@ -4008,6 +4016,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         "api",
         Some("test/manifest-render-fail"),
         None,
+        None, // raw_input
     )
     .await?;
     // A pod-type step with a manifest containing a template referencing a missing key
@@ -4101,6 +4110,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         "api",
         Some("test/image-render-fail"),
         None,
+        None, // raw_input
     )
     .await?;
     // A docker-type step whose image tag is a template referencing a missing key
@@ -5205,6 +5215,7 @@ async fn test_ws_backfill_existing_logs() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5272,6 +5283,7 @@ async fn test_ws_live_log_streaming() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5331,6 +5343,7 @@ async fn test_ws_backfill_plus_live() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5462,6 +5475,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5599,6 +5613,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5754,6 +5769,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5867,6 +5883,7 @@ async fn test_jsonl_logs_contain_stderr_stream() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -5942,6 +5959,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -6095,6 +6113,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -6255,6 +6274,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -6394,6 +6414,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -6540,6 +6561,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -6685,6 +6707,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -6841,6 +6864,7 @@ async fn test_cascading_skip() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -7313,6 +7337,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -8153,6 +8178,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -8194,6 +8220,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -8409,6 +8436,7 @@ async fn test_create_job_for_task_trigger_source() -> Result<()> {
         Some("default/every-minute"),
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -8450,6 +8478,7 @@ async fn test_create_job_for_task_multi_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -8485,6 +8514,7 @@ async fn test_create_job_for_task_missing_task() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await;
 
@@ -8554,6 +8584,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await;
 
@@ -9200,6 +9231,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -9318,6 +9350,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -9417,6 +9450,7 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
         "hook",
         Some("default/deploy-task/abc/on_success[0]"),
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -9502,6 +9536,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -9615,6 +9650,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -9758,6 +9794,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -9877,6 +9914,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -9999,6 +10037,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -10370,6 +10409,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -10423,6 +10463,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -10546,6 +10587,7 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -10699,6 +10741,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -10778,6 +10821,7 @@ async fn test_task_action_in_hook() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -10987,6 +11031,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -11186,6 +11231,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -11241,6 +11287,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -11352,6 +11399,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -11771,6 +11819,7 @@ async fn test_get_worker_with_steps() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
     JobRepo::mark_running(&pool, job_id, worker_id).await?;
@@ -12711,6 +12760,7 @@ async fn test_ws_auth_rejects_without_token() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -12751,6 +12801,7 @@ async fn test_ws_auth_accepts_jwt_via_query_param() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -12792,6 +12843,7 @@ async fn test_ws_auth_accepts_api_key_via_query_param() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -12846,6 +12898,7 @@ async fn test_ws_auth_rejects_invalid_token() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -12885,6 +12938,7 @@ async fn test_ws_no_auth_allows_without_token() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -12923,6 +12977,7 @@ async fn test_ws_skip_backfill_suppresses_existing_logs() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -13003,6 +13058,7 @@ async fn test_ws_without_skip_backfill_sends_existing_logs() -> Result<()> {
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
 
@@ -14333,6 +14389,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
     JobStepRepo::create_steps(
@@ -14373,6 +14430,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
         "api",
         None,
         None,
+        None, // raw_input
     )
     .await?;
     JobStepRepo::create_steps(
@@ -14913,6 +14971,7 @@ async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -14965,6 +15024,7 @@ async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15005,6 +15065,7 @@ async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15040,6 +15101,7 @@ async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15084,6 +15146,7 @@ async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()>
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15156,6 +15219,7 @@ async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15296,6 +15360,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15357,6 +15422,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15539,6 +15605,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -15625,6 +15692,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -16456,6 +16524,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
         None,
         Some("test-rev"),
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -16567,6 +16636,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
         None,
         Some("test-rev"),
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -18054,6 +18124,7 @@ async fn test_event_source_workspace_setup_diagnostic() -> Result<()> {
         "event_source",
         Some("default/my-source"),
         None,
+        None, // raw_input
     )
     .await?;
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -18807,6 +18878,7 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -18889,6 +18961,7 @@ async fn test_step_retry_exhausted_fails_job() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -18998,6 +19071,7 @@ async fn test_step_retry_claim_respects_retry_at() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -19229,6 +19303,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -19471,6 +19546,7 @@ async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -19558,6 +19634,7 @@ async fn test_task_retry_exhausted_fires_hooks() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -19830,6 +19907,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -19917,6 +19995,7 @@ async fn test_retry_edge_zero_max_retries_no_retry_job() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -19997,6 +20076,7 @@ async fn test_step_retry_success_on_second_attempt() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 

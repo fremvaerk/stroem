@@ -977,6 +977,7 @@ async fn test_mcp_get_job_status_includes_revision() -> Result<()> {
         None,
         Some(revision),
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -1029,6 +1030,7 @@ async fn test_mcp_list_jobs_includes_revision() -> Result<()> {
         None,
         Some(revision),
         None,
+        None, // source_job_id
     )
     .await?;
 
@@ -1094,6 +1096,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         None,
         None,
         None,
+        None, // source_job_id
     )
     .await?;
 

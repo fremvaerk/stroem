@@ -392,6 +392,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         "trigger",
         Some(&source_id),
         revision.as_deref(),
+        None,
         app_state.config.agents.as_ref(),
     )
     .await
