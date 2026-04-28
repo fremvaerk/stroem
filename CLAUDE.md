@@ -16,6 +16,7 @@ Phase 5e complete: Event source triggers (long-running queue consumers via stdou
 Phase 5f complete: Retry mechanism (step/action in-place retry + task-level job retry).
 Phase 6a complete: Task state snapshots (immutable state persistence across runs via `STATE:` protocol + `/state` mount).
 Phase 6a.2 complete: Global workspace state (`GLOBAL_STATE:` protocol + `/global-state` mount, shared across all tasks).
+Phase 6c complete: Re-run prefill (`source_job_id` lineage + `raw_input` persistence; UI Re-run button replays connections + non-default secrets).
 Phase 6b: Worker affinity.
 Phase 7: AI agent actions & MCP integration.
 
@@ -310,7 +311,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **`retry_of_job_id`** — server-initiated retry of a failed job. Same logical run, attempt N+1.
 - **`source_job_id`** + **`source_type = 'rerun'`** — user clicked **Re-run** in the UI. New job uses `source.raw_input` to prefill the form; UI sends `••••••` for fields the user didn't touch and the server replaces it with the source value before merging defaults / resolving connections (see `crates/stroem-common/src/template.rs::resolve_rerun_sentinels`).
 - **`source_job_id`** + **`source_type = 'restart'`** + **`restart_from_step`** — *reserved* for the Restart-from-failed-step feature.
-- **`raw_input`** — verbatim user submission stored on every job, before `merge_defaults` and `resolve_connection_inputs`. Returned by `GET /api/jobs/{id}` with secret values redacted to `••••••`. NULL for jobs created before migration `032_job_raw_input_and_lineage.sql`.
+- **`raw_input`** — verbatim user submission stored on every job, before `merge_defaults` and `resolve_connection_inputs`. Returned by `GET /api/jobs/{id}` with workspace-defined secret values redacted to `••••••`. NULL for jobs created before migration `032_job_raw_input_and_lineage.sql`. **Redaction limitation:** the existing `redact_response` only matches values listed in `workspace.secrets`; user-typed secret values not present in the workspace config are stored and returned as plain text (same exposure as the existing `job.input` column — pre-existing limitation, not introduced by Re-run prefill).
 
 ### Health Check
 - `GET /healthz` — unauthenticated. Checks DB, scheduler liveness, recovery sweeper liveness.

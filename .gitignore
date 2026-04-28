@@ -19,3 +19,4 @@ server-config.*.yaml
 worker-config.*.yaml
 
 .envrc
+test_output.txt

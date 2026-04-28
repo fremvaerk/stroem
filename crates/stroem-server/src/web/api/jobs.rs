@@ -54,6 +54,8 @@ const VALID_SOURCE_TYPES: &[&str] = &[
     "event_source",
     "retry",
     "upload",
+    "rerun",
+    "restart",
 ];
 
 #[derive(Debug, Serialize)]

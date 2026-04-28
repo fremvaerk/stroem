@@ -471,3 +471,94 @@ async fn rerun_cross_workspace_returns_400() -> Result<()> {
     );
     Ok(())
 }
+
+/// Negative: source job with `raw_input = NULL` (legacy job that predates the
+/// 032 migration) → 400 Bad Request with a clear "predates Re-run prefill" message.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_with_legacy_source_job_returns_400() -> Result<()> {
+    let app = build_test_app("default", build_rerun_workspace()).await?;
+
+    // Insert a synthetic legacy job — workspace matches but raw_input IS NULL.
+    let legacy_job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job \
+         (job_id, workspace, task_name, mode, input, source_type, status, created_at) \
+         VALUES ($1, 'default', 'rerun-task', 'distributed', \
+                 '{}'::jsonb, 'api', 'completed', NOW())",
+    )
+    .bind(legacy_job_id)
+    .execute(&app.pool)
+    .await?;
+
+    let (status, body) = execute_task(
+        &app,
+        "default",
+        "rerun-task",
+        json!({
+            "input": {},
+            "source_job_id": legacy_job_id.to_string(),
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "expected 400 for source job with NULL raw_input, got: {body:?}"
+    );
+    Ok(())
+}
+
+/// Re-run a re-run: chained lineage works without truncation. The third job's
+/// `source_job_id` points to the second job (immediate predecessor), and
+/// `source_type` is still `"rerun"`.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_chain_preserves_immediate_source() -> Result<()> {
+    let app = build_test_app("default", build_rerun_workspace()).await?;
+
+    // First job — plain values.
+    let (_, body) = execute_task(
+        &app,
+        "default",
+        "rerun-task",
+        json!({"input": {"data": "round-1"}}),
+    )
+    .await?;
+    let first_id = body["job_id"].as_str().expect("first job_id").to_string();
+
+    // Second job — re-run of first.
+    let (_, body) = execute_task(
+        &app,
+        "default",
+        "rerun-task",
+        json!({
+            "input": {"data": "round-1"},
+            "source_job_id": first_id,
+        }),
+    )
+    .await?;
+    let second_id = body["job_id"].as_str().expect("second job_id").to_string();
+
+    // Third job — re-run of second.
+    let (status, body) = execute_task(
+        &app,
+        "default",
+        "rerun-task",
+        json!({
+            "input": {"data": "round-1"},
+            "source_job_id": second_id,
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "third execute failed: {body:?}");
+    let third_id = body["job_id"].as_str().expect("third job_id");
+
+    let third_resp = get_job(&app, third_id).await?;
+    assert_eq!(
+        third_resp["source_job_id"],
+        json!(second_id),
+        "source_job_id must point to the IMMEDIATE predecessor, not the chain root"
+    );
+    assert_eq!(third_resp["source_type"], json!("rerun"));
+
+    Ok(())
+}

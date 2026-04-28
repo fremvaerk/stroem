@@ -193,6 +193,15 @@ New fields on `JobDetailResponse`:
 for secret field values, same `ref+` substring redaction. Connection-type field values
 in `raw_input` are connection names (strings), which are not sensitive and not redacted.
 
+**Known redaction limitation (pre-existing, not introduced by this feature):** the
+`redact_response` function matches only values that appear in `workspace.secrets`. A
+user-typed secret value not present in the workspace config (e.g., a personal API key
+typed into a `secret: true` field) is stored and returned as plain text. This same
+gap already exists for `job.input` today — adding `raw_input` does not widen the
+exposure surface, but it doubles the number of places the same string is returned.
+A future hardening pass should make redaction field-aware (redact every value of a
+field whose schema is `secret: true`, regardless of `workspace.secrets` membership).
+
 ### `POST /api/workspaces/{ws}/tasks/{task}/execute` request body
 
 ```json

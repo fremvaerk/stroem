@@ -200,11 +200,14 @@ export function TaskDetailPage() {
           input[key] = val;
         }
       }
+      // Only forward sourceJobId when the source job actually carries raw_input.
+      // For legacy sources (raw_input === null) the server would reject with 400;
+      // the form already shows defaults via the legacy banner, so submit a normal run.
       const res = await executeTask(
         workspace,
         task.id,
         input,
-        sourceJobId ? { sourceJobId } : undefined,
+        sourceJobId && rawInput ? { sourceJobId } : undefined,
       );
       navigate(`/jobs/${res.job_id}`);
     } catch (err) {
