@@ -123,7 +123,10 @@ export function JobDetailPage() {
             </Button>
           )}
           <Button variant="outline" asChild>
-            <Link to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}>
+            <Link
+              to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
+              state={{ sourceJobId: job.job_id, rawInput: job.raw_input }}
+            >
               Re-run
             </Link>
           </Button>
@@ -198,6 +201,21 @@ export function JobDetailPage() {
                       className="font-mono text-xs text-primary hover:underline"
                     >
                       {job.retry_job_id.substring(0, 8)}
+                    </Link>
+                  ),
+                },
+              ]
+            : []),
+          ...(job.source_job_id && job.source_type === "rerun"
+            ? [
+                {
+                  label: "Re-run of",
+                  value: (
+                    <Link
+                      to={`/jobs/${job.source_job_id}`}
+                      className="font-mono text-xs text-primary hover:underline"
+                    >
+                      {job.source_job_id.substring(0, 8)}
                     </Link>
                   ),
                 },
