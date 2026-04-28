@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries";
+const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step";
 
 /// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
 fn escape_like(input: &str) -> String {
@@ -40,6 +40,9 @@ pub struct JobRow {
     pub retry_job_id: Option<Uuid>,
     pub retry_attempt: i32,
     pub max_retries: Option<i32>,
+    pub raw_input: Option<JsonValue>,
+    pub source_job_id: Option<Uuid>,
+    pub restart_from_step: Option<String>,
 }
 
 /// Lightweight projection returned by [`JobRepo::get_old_terminal_jobs`].
@@ -69,6 +72,7 @@ impl JobRepo {
         source_type: &str,
         source_id: Option<&str>,
         revision: Option<&str>,
+        raw_input: Option<JsonValue>,
     ) -> Result<Uuid> {
         Self::create_with_parent(
             pool,
@@ -82,6 +86,9 @@ impl JobRepo {
             None,
             None,
             revision,
+            raw_input,
+            None,
+            None,
         )
         .await
     }
@@ -100,6 +107,9 @@ impl JobRepo {
         parent_step_name: Option<&str>,
         timeout_secs: Option<i32>,
         revision: Option<&str>,
+        raw_input: Option<JsonValue>,
+        source_job_id: Option<Uuid>,
+        restart_from_step: Option<&str>,
     ) -> Result<Uuid> {
         Self::create_with_parent_tx(
             pool,
@@ -113,6 +123,9 @@ impl JobRepo {
             parent_step_name,
             timeout_secs,
             revision,
+            raw_input,
+            source_job_id,
+            restart_from_step,
         )
         .await
     }
@@ -135,6 +148,9 @@ impl JobRepo {
         parent_step_name: Option<&str>,
         timeout_secs: Option<i32>,
         revision: Option<&str>,
+        raw_input: Option<JsonValue>,
+        source_job_id: Option<Uuid>,
+        restart_from_step: Option<&str>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -152,6 +168,9 @@ impl JobRepo {
             parent_step_name,
             timeout_secs,
             revision,
+            raw_input,
+            source_job_id,
+            restart_from_step,
         )
         .await
     }
@@ -171,14 +190,17 @@ impl JobRepo {
         parent_step_name: Option<&str>,
         timeout_secs: Option<i32>,
         revision: Option<&str>,
+        raw_input: Option<JsonValue>,
+        source_job_id: Option<Uuid>,
+        restart_from_step: Option<&str>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#,
         )
         .bind(job_id)
@@ -192,6 +214,9 @@ impl JobRepo {
         .bind(parent_step_name)
         .bind(timeout_secs)
         .bind(revision)
+        .bind(raw_input)
+        .bind(source_job_id)
+        .bind(restart_from_step)
         .execute(executor)
         .await
         .context("Failed to create job")?;
