@@ -14074,7 +14074,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -14228,7 +14228,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries FROM job WHERE source_type = $1 LIMIT 1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1 LIMIT 1",
     )
     .bind("trigger")
     .fetch_all(&pool)
@@ -16261,7 +16261,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
     let jobs = sqlx::query_as::<_, stroem_db::JobRow>(
         "SELECT job_id, workspace, task_name, mode, input, output, status, source_type, \
          source_id, worker_id, revision, created_at, started_at, completed_at, log_path, \
-         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries FROM job WHERE source_type = $1",
+         parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step FROM job WHERE source_type = $1",
     )
     .bind("trigger")
     .fetch_all(&pool)
