@@ -36,7 +36,7 @@ pub struct ConnectionDef {
 }
 
 /// Input field definition for actions and tasks
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InputFieldDef {
     #[serde(rename = "type")]
     pub field_type: String, // "string", "text", "integer", "number", "boolean", "date", "datetime", or connection type

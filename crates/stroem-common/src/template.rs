@@ -375,6 +375,63 @@ pub fn resolve_connection_inputs(
     Ok(serde_json::Value::Object(result))
 }
 
+/// Sentinel string used by the server to redact secret values in API responses.
+/// The UI sends this exact byte sequence on Re-run for fields the user did not
+/// edit, signalling "replay this from the source job's `raw_input`".
+pub const REDACTED_SENTINEL: &str = "••••••";
+
+/// Resolve Re-run "reuse from source" sentinels in the incoming input.
+///
+/// For each field in the schema that is a secret or connection type, if the
+/// incoming value equals [`REDACTED_SENTINEL`]:
+/// - If the source job's `raw_input` has that field, replace the sentinel with
+///   the source value.
+/// - Otherwise, remove the field entirely so `merge_defaults` fills it from
+///   the schema default (supports secret rotation).
+///
+/// All other fields pass through unchanged. The sentinel only has meaning for
+/// secret and connection-typed fields — a user typing literal bullets into a
+/// plain field is preserved verbatim.
+pub fn resolve_rerun_sentinels(
+    incoming: &serde_json::Value,
+    source_raw_input: &serde_json::Value,
+    input_schema: &HashMap<String, InputFieldDef>,
+) -> Result<serde_json::Value> {
+    let empty = serde_json::Map::new();
+    let incoming_map = incoming.as_object().unwrap_or(&empty);
+    let source_map = source_raw_input.as_object().unwrap_or(&empty);
+
+    let mut result = incoming_map.clone();
+
+    for (field_name, field_def) in input_schema {
+        let is_connection = !PRIMITIVE_TYPES.contains(&field_def.field_type.as_str());
+        let is_secret_or_connection = field_def.secret || is_connection;
+        if !is_secret_or_connection {
+            continue;
+        }
+
+        let value = match result.get(field_name) {
+            Some(v) => v,
+            None => continue,
+        };
+        if value.as_str() != Some(REDACTED_SENTINEL) {
+            continue;
+        }
+
+        // Sentinel detected on a secret/connection field — replay or drop.
+        match source_map.get(field_name) {
+            Some(source_value) => {
+                result.insert(field_name.clone(), source_value.clone());
+            }
+            None => {
+                result.remove(field_name);
+            }
+        }
+    }
+
+    Ok(serde_json::Value::Object(result))
+}
+
 /// Recursively walk a JSON value tree and render all string values containing `{{`
 /// through Tera. Objects and arrays are traversed recursively; other types are cloned as-is.
 pub fn render_value_deep(
@@ -1944,5 +2001,96 @@ mod tests {
         assert!(!evaluate_condition("none", &ctx).unwrap());
         assert!(!evaluate_condition("None", &ctx).unwrap());
         assert!(!evaluate_condition("NONE", &ctx).unwrap());
+    }
+
+    // --- resolve_rerun_sentinels tests ---
+
+    #[test]
+    fn test_resolve_rerun_sentinels_secret_with_source_value() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "password".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                secret: true,
+                ..Default::default()
+            },
+        );
+        let incoming = json!({"password": "••••••"});
+        let source_raw = json!({"password": "real-secret-value"});
+        let result = resolve_rerun_sentinels(&incoming, &source_raw, &schema).unwrap();
+        assert_eq!(result, json!({"password": "real-secret-value"}));
+    }
+
+    #[test]
+    fn test_resolve_rerun_sentinels_secret_without_source_value() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "password".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                secret: true,
+                ..Default::default()
+            },
+        );
+        let incoming = json!({"password": "••••••"});
+        let source_raw = json!({}); // source didn't override the secret
+        let result = resolve_rerun_sentinels(&incoming, &source_raw, &schema).unwrap();
+        // Field removed so merge_defaults will fill from schema default.
+        assert_eq!(result, json!({}));
+    }
+
+    #[test]
+    fn test_resolve_rerun_sentinels_connection_with_source_value() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "db".to_string(),
+            InputFieldDef {
+                field_type: "Postgres".to_string(), // non-primitive => connection type
+                secret: false,
+                ..Default::default()
+            },
+        );
+        let incoming = json!({"db": "••••••"});
+        let source_raw = json!({"db": "production-db"});
+        let result = resolve_rerun_sentinels(&incoming, &source_raw, &schema).unwrap();
+        assert_eq!(result, json!({"db": "production-db"}));
+    }
+
+    #[test]
+    fn test_resolve_rerun_sentinels_non_sentinel_passthrough() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "name".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                secret: false,
+                ..Default::default()
+            },
+        );
+        let incoming = json!({"name": "alice"});
+        let source_raw = json!({"name": "bob"});
+        let result = resolve_rerun_sentinels(&incoming, &source_raw, &schema).unwrap();
+        // Non-secret, non-connection field with non-sentinel value: untouched.
+        assert_eq!(result, json!({"name": "alice"}));
+    }
+
+    #[test]
+    fn test_resolve_rerun_sentinels_plain_field_with_sentinel_untouched() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "note".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                secret: false,
+                ..Default::default()
+            },
+        );
+        // User literally typed bullets into a plain string field. Server should
+        // store as-is — sentinel only meaningful for secret/connection types.
+        let incoming = json!({"note": "••••••"});
+        let source_raw = json!({"note": "previous"});
+        let result = resolve_rerun_sentinels(&incoming, &source_raw, &schema).unwrap();
+        assert_eq!(result, json!({"note": "••••••"}));
     }
 }
