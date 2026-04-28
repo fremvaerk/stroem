@@ -240,12 +240,15 @@ export async function executeTask(
   workspace: string,
   name: string,
   input: Record<string, unknown>,
+  opts?: { sourceJobId?: string },
 ): Promise<ExecuteTaskResponse> {
+  const body: Record<string, unknown> = { input };
+  if (opts?.sourceJobId) body.source_job_id = opts.sourceJobId;
   return apiFetch<ExecuteTaskResponse>(
     `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(name)}/execute`,
     {
       method: "POST",
-      body: JSON.stringify({ input }),
+      body: JSON.stringify(body),
     },
   );
 }

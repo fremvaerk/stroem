@@ -119,10 +119,13 @@ export interface JobDetail {
   task_name: string;
   mode: string;
   input: Record<string, unknown> | null;
+  raw_input: Record<string, unknown> | null;
   output: Record<string, unknown> | null;
   status: string;
   source_type: string;
   source_id: string | null;
+  source_job_id: string | null;
+  restart_from_step: string | null;
   revision: string | null;
   worker_id: string | null;
   created_at: string;
