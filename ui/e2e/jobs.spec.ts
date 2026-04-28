@@ -303,6 +303,43 @@ test.describe("Jobs", () => {
     expect(summarize.depends_on).toEqual(["transform"]);
   });
 
+  test("re-run button prefills form and links lineage", async ({
+    page,
+    baseURL,
+  }) => {
+    // data-pipeline has a single string input `data` (default: "test").
+    const customValue = "rerun-prefill-value";
+    const sourceJobId = await triggerJob(baseURL!, "data-pipeline", {
+      data: customValue,
+    });
+
+    await waitForJob(baseURL!, sourceJobId);
+
+    await page.goto(`/jobs/${sourceJobId}`);
+    await expect(
+      page.getByRole("heading", { name: "data-pipeline" }),
+    ).toBeVisible();
+
+    // Click Re-run.
+    await page.getByRole("link", { name: "Re-run" }).click();
+    await page.waitForURL(/\/workspaces\/default\/tasks\/data-pipeline/);
+
+    // The data input should be prefilled with the original value, not the default ("test").
+    await expect(page.locator("#input-data")).toHaveValue(customValue);
+
+    // Submit the form to create the rerun job.
+    await page.getByRole("button", { name: "Run Task" }).click();
+    await page.waitForURL(/\/jobs\/.+/);
+
+    // Lineage badge: "Re-run of" should appear with a link back to the source job.
+    const rerunOfLabel = page.locator("p").filter({ hasText: /^Re-run of$/ });
+    await expect(rerunOfLabel).toBeVisible();
+    const rerunOfCard = rerunOfLabel.locator("..");
+    await expect(rerunOfCard.locator("a")).toContainText(
+      sourceJobId.substring(0, 8),
+    );
+  });
+
   test("job detail shows graph toggle for multi-step job", async ({
     page,
     baseURL,
