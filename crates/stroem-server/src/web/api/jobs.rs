@@ -259,10 +259,13 @@ pub struct JobDetailResponse {
     pub task_name: String,
     pub mode: String,
     pub input: Option<serde_json::Value>,
+    pub raw_input: Option<serde_json::Value>,
     pub output: Option<serde_json::Value>,
     pub status: String,
     pub source_type: String,
     pub source_id: Option<String>,
+    pub source_job_id: Option<Uuid>,
+    pub restart_from_step: Option<String>,
     pub revision: Option<String>,
     pub worker_id: Option<Uuid>,
     pub created_at: String,
@@ -435,10 +438,13 @@ pub async fn get_job(
         task_name: job.task_name,
         mode: job.mode,
         input: job.input,
+        raw_input: job.raw_input,
         output: job.output,
         status: job.status,
         source_type: job.source_type,
         source_id: job.source_id,
+        source_job_id: job.source_job_id,
+        restart_from_step: job.restart_from_step,
         revision: job.revision,
         worker_id: job.worker_id,
         created_at: job.created_at.to_rfc3339(),
@@ -522,6 +528,9 @@ fn redact_json(value: &mut serde_json::Value, secret_values: &[String]) {
 fn redact_response(response: &mut JobDetailResponse, secret_values: &[String]) {
     if let Some(ref mut input) = response.input {
         redact_json(input, secret_values);
+    }
+    if let Some(ref mut raw_input) = response.raw_input {
+        redact_json(raw_input, secret_values);
     }
     if let Some(ref mut output) = response.output {
         redact_json(output, secret_values);
@@ -1136,10 +1145,13 @@ mod tests {
             task_name: "test".to_string(),
             mode: "normal".to_string(),
             input: Some(json!({"token": "my-secret-token"})),
+            raw_input: None,
             output: Some(json!({"result": "ok"})),
             status: "completed".to_string(),
             source_type: "api".to_string(),
             source_id: None,
+            source_job_id: None,
+            restart_from_step: None,
             revision: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -1167,6 +1179,39 @@ mod tests {
             response.steps[0]["error_message"],
             json!(format!("failed to connect: {REDACTED} rejected"))
         );
+    }
+
+    #[test]
+    fn test_redact_response_redacts_raw_input() {
+        let secrets = vec!["my-secret-token".to_string()];
+        let mut response = JobDetailResponse {
+            job_id: Uuid::nil(),
+            workspace: "default".to_string(),
+            task_name: "t".to_string(),
+            mode: "distributed".to_string(),
+            input: None,
+            raw_input: Some(json!({"token": "my-secret-token", "name": "alice"})),
+            output: None,
+            status: "completed".to_string(),
+            source_type: "rerun".to_string(),
+            source_id: None,
+            source_job_id: Some(Uuid::nil()),
+            restart_from_step: None,
+            revision: None,
+            worker_id: None,
+            created_at: "".to_string(),
+            started_at: None,
+            completed_at: None,
+            steps: vec![],
+            retry_of_job_id: None,
+            retry_job_id: None,
+            retry_attempt: 0,
+            max_retries: None,
+        };
+        redact_response(&mut response, &secrets);
+        let raw = response.raw_input.unwrap();
+        assert_eq!(raw["token"], json!(REDACTED));
+        assert_eq!(raw["name"], json!("alice")); // non-secret untouched
     }
 
     #[test]
