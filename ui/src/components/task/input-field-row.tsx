@@ -14,7 +14,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ComboboxField } from "@/components/task/combobox-field";
 import type { InputField } from "@/lib/types";
-import { PRIMITIVE_TYPES } from "@/components/task/constants";
+import { PRIMITIVE_TYPES, REDACTED_SENTINEL } from "@/components/task/constants";
 
 export interface InputFieldRowProps {
   fieldKey: string;
@@ -69,6 +69,7 @@ export function InputFieldRow({
   }
 
   if (field.secret) {
+    const isReplayPrefill = value === REDACTED_SENTINEL;
     return (
       <div className="space-y-2">
         <Label htmlFor={id}>
@@ -85,7 +86,12 @@ export function InputFieldRow({
           placeholder={field.description || fieldKey}
           required={field.required && !field.default}
         />
-        {field.description && (
+        {isReplayPrefill && (
+          <p className="text-xs text-muted-foreground">
+            Using value from previous run — type to override.
+          </p>
+        )}
+        {field.description && !isReplayPrefill && (
           <p className="text-xs text-muted-foreground">{field.description}</p>
         )}
       </div>
