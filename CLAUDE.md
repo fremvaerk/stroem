@@ -306,6 +306,12 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Job claiming: `SELECT ... FOR UPDATE SKIP LOCKED`
 - `job.revision` stores workspace revision at creation. Sub-jobs and hook jobs inherit parent's revision.
 
+### Job Lineage (retry / rerun / restart)
+- **`retry_of_job_id`** — server-initiated retry of a failed job. Same logical run, attempt N+1.
+- **`source_job_id`** + **`source_type = 'rerun'`** — user clicked **Re-run** in the UI. New job uses `source.raw_input` to prefill the form; UI sends `••••••` for fields the user didn't touch and the server replaces it with the source value before merging defaults / resolving connections (see `crates/stroem-common/src/template.rs::resolve_rerun_sentinels`).
+- **`source_job_id`** + **`source_type = 'restart'`** + **`restart_from_step`** — *reserved* for the Restart-from-failed-step feature.
+- **`raw_input`** — verbatim user submission stored on every job, before `merge_defaults` and `resolve_connection_inputs`. Returned by `GET /api/jobs/{id}` with secret values redacted to `••••••`. NULL for jobs created before migration `032_job_raw_input_and_lineage.sql`.
+
 ### Health Check
 - `GET /healthz` — unauthenticated. Checks DB, scheduler liveness, recovery sweeper liveness.
 - `AliveGuard` drop guards set flags true on creation, false on drop.
