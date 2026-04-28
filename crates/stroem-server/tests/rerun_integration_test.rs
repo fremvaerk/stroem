@@ -18,7 +18,9 @@ use stroem_common::models::workflow::{
     ActionDef, ConnectionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
 use stroem_db::{create_pool, run_migrations};
-use stroem_server::config::{DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef};
+use stroem_server::config::{
+    DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
+};
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;

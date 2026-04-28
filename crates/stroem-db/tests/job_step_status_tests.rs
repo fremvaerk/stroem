@@ -30,7 +30,7 @@ async fn make_job(pool: &PgPool, task_name: &str) -> Result<Uuid> {
         None,
         None,
         None,
-        )
+    )
     .await
 }
 
@@ -293,7 +293,7 @@ async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create a child job that references the parent.
@@ -312,7 +312,7 @@ async fn test_job_with_parent_columns_are_stored_and_retrieved() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let child = JobRepo::get(&pool, child_id)
@@ -349,7 +349,7 @@ async fn test_job_without_parent_has_null_parent_columns() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let job = JobRepo::get(&pool, job_id).await?.expect("job must exist");
@@ -382,7 +382,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let child_id = JobRepo::create_with_parent(
@@ -400,7 +400,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let grandchild_id = JobRepo::create_with_parent(
@@ -418,7 +418,7 @@ async fn test_job_grandchild_parent_chain() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let grandchild = JobRepo::get(&pool, grandchild_id)
@@ -672,7 +672,7 @@ async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![make_step(child_id, "run", "ready")];
@@ -723,7 +723,7 @@ async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> 
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![make_step(child_id, "run", "ready")];

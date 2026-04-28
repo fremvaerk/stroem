@@ -42,7 +42,7 @@ async fn test_create_and_get_job() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Retrieve it
@@ -77,7 +77,7 @@ async fn test_list_jobs() -> Result<()> {
             None,
             None,
             None,
-            )
+        )
         .await?;
     }
 
@@ -118,7 +118,7 @@ async fn test_list_jobs() -> Result<()> {
             None,
             None,
             None,
-            )
+        )
         .await?;
     }
     let jobs = JobRepo::list_by_task(&pool, "default", "task-0", None, None, 10, 0).await?;
@@ -165,7 +165,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create steps
@@ -277,7 +277,7 @@ async fn test_claim_concurrency() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let mut steps = Vec::new();
@@ -367,7 +367,7 @@ async fn test_step_lifecycle() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let worker_id = Uuid::new_v4();
@@ -453,7 +453,7 @@ async fn test_update_input() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![NewJobStep {
@@ -510,7 +510,7 @@ async fn test_promote_ready_steps() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create a DAG: step1 -> step2 -> step3
@@ -765,7 +765,7 @@ async fn test_all_steps_terminal() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![
@@ -848,7 +848,7 @@ async fn test_any_step_failed() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![
@@ -930,7 +930,7 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![NewJobStep {
@@ -989,7 +989,7 @@ async fn test_job_status_transitions() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -1033,7 +1033,7 @@ async fn test_job_status_transitions() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     JobRepo::mark_failed(&pool, job_id2).await?;
@@ -1059,7 +1059,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create steps with different action_types
@@ -1186,7 +1186,7 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Step only requires "docker" — a strict subset of the worker's tags
@@ -1256,7 +1256,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Step requires "script" — the empty-tag worker cannot satisfy this
@@ -1323,7 +1323,7 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Step has no required tags — the empty set is a subset of every set
@@ -1378,7 +1378,7 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Step requires both "docker" and "gpu"
@@ -1463,7 +1463,7 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Two steps in the same job: one needs "kubernetes", one needs "script"
@@ -1556,7 +1556,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Step is action_type "task" with no required tags and status "ready"
@@ -2042,7 +2042,7 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
     let job2 = JobRepo::create(
         &pool,
@@ -2054,7 +2054,7 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
     let _job3 = JobRepo::create(
         &pool,
@@ -2066,7 +2066,7 @@ async fn test_list_jobs_with_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // job1 → completed, job2 → failed, job3 stays pending
@@ -2125,7 +2125,7 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
     let _j2 = JobRepo::create(
         &pool,
@@ -2137,7 +2137,7 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
     let j3 = JobRepo::create(
         &pool,
@@ -2149,7 +2149,7 @@ async fn test_list_jobs_with_workspace_and_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // j1 → completed, j2 stays pending, j3 → completed
@@ -2197,7 +2197,7 @@ async fn test_list_by_task_with_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
     let _j2 = JobRepo::create(
         &pool,
@@ -2209,7 +2209,7 @@ async fn test_list_by_task_with_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
     let _j3 = JobRepo::create(
         &pool,
@@ -2221,7 +2221,7 @@ async fn test_list_by_task_with_status_filter() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // j1 → completed, j2/j3 stay pending
@@ -2270,7 +2270,7 @@ async fn test_status_filter_returns_empty_for_nonexistent_status() -> Result<()>
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // No jobs with "running" status
@@ -2311,7 +2311,7 @@ async fn test_transaction_rollback_on_step_failure() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Verify job exists within the transaction
@@ -2358,7 +2358,7 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps = vec![NewJobStep {
@@ -2419,7 +2419,7 @@ async fn test_cancel_job() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Verify initial state is pending
@@ -2478,7 +2478,7 @@ async fn test_cancel_job_running() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Transition to running via mark_running_if_pending
@@ -2516,7 +2516,7 @@ async fn test_cancel_job_already_completed() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Mark completed before attempting cancel
@@ -2558,7 +2558,7 @@ async fn test_get_child_jobs() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create two active child jobs linked to the parent
@@ -2577,7 +2577,7 @@ async fn test_get_child_jobs() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let child2_id = JobRepo::create_with_parent(
@@ -2595,7 +2595,7 @@ async fn test_get_child_jobs() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Both children are pending — get_child_jobs returns pending + running
@@ -2651,7 +2651,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create three steps: one pending, one ready, one running
@@ -2776,7 +2776,7 @@ async fn test_get_running_steps() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create steps in mixed statuses
@@ -2949,7 +2949,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create a completed step and a running step
@@ -3069,7 +3069,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Create steps, then complete them all so none are pending or ready
@@ -3173,7 +3173,7 @@ async fn test_get_status_counts() -> Result<()> {
             None,
             None,
             None,
-            )
+        )
         .await?;
     }
 
@@ -3285,7 +3285,7 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let steps: Vec<NewJobStep> = (0..3)
@@ -3420,7 +3420,7 @@ async fn test_job_stores_revision() -> Result<()> {
         None,
         Some("abc123def456"),
         None,
-        )
+    )
     .await?;
 
     let job = JobRepo::get(&pool, job_id)
@@ -3439,7 +3439,7 @@ async fn test_job_stores_revision() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let job_none = JobRepo::get(&pool, job_id_none)
@@ -3489,7 +3489,7 @@ async fn test_sub_job_inherits_revision() -> Result<()> {
         None,
         Some("parent-rev-abc"),
         None,
-        )
+    )
     .await?;
 
     // Create child with same revision (simulating inheritance)
@@ -3508,7 +3508,7 @@ async fn test_sub_job_inherits_revision() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let parent = JobRepo::get(&pool, parent_id)
@@ -3548,7 +3548,7 @@ async fn test_event_source_job_source_type() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     let job = JobRepo::get(&pool, job_id)
@@ -3576,7 +3576,7 @@ async fn create_test_job(pool: &PgPool, workspace: &str, task_name: &str) -> Res
         None,
         None,
         None,
-        )
+    )
     .await?;
     Ok(id)
 }
@@ -3948,7 +3948,7 @@ async fn test_event_source_step_action_type() -> Result<()> {
         None,
         None,
         None,
-        )
+    )
     .await?;
 
     // Insert a step with action_type = 'event_source'.
