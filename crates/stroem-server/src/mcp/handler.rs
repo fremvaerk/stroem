@@ -13,6 +13,9 @@ use std::sync::Arc;
 pub struct StromMcpHandler {
     pub(crate) state: Arc<AppState>,
     pub(crate) auth: Option<McpAuthContext>,
+    // Constructed via `Self::tool_router()` and read by the `#[tool_handler]`
+    // macro internally. The dead_code lint can't see through the macro expansion.
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
