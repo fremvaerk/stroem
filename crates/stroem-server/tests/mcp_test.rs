@@ -425,10 +425,17 @@ async fn setup_with_auth_and_mcp() -> Result<(
 
 // ─── Request helpers ─────────────────────────────────────────────────────────
 
+/// rmcp 1.5+ enforces a Host header check (DNS-rebinding protection per the
+/// MCP spec's "Origin / Host validation" requirement). The bare hyper `Request::builder()`
+/// doesn't synthesize a Host like a real HTTP client would, so tests must set it
+/// explicitly. The value is arbitrary as long as it's present.
+const TEST_HOST: &str = "localhost";
+
 fn mcp_request(session_id: Option<&str>, body: Value) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/mcp")
+        .header("Host", TEST_HOST)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream");
     if let Some(sid) = session_id {
@@ -443,6 +450,7 @@ fn mcp_request_with_auth(session_id: Option<&str>, token: &str, body: Value) -> 
     let mut builder = Request::builder()
         .method("POST")
         .uri("/mcp")
+        .header("Host", TEST_HOST)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .header("Authorization", format!("Bearer {token}"));
