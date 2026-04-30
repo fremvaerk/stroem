@@ -36,9 +36,20 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
-        manualChunks: {
-          "vendor-xyflow": ["@xyflow/react", "@dagrejs/dagre"],
-          "vendor-react": ["react", "react-dom", "react-router"],
+        // Rollup 5 (Vite 8) tightened the TS shape for `manualChunks` — the
+        // `{ [chunk]: string[] }` form no longer typechecks against the new
+        // OutputOptions, so we use the equivalent function form instead.
+        manualChunks(id) {
+          if (id.includes("/@xyflow/react/") || id.includes("/@dagrejs/dagre/")) {
+            return "vendor-xyflow";
+          }
+          if (
+            id.includes("/node_modules/react/") ||
+            id.includes("/node_modules/react-dom/") ||
+            id.includes("/node_modules/react-router/")
+          ) {
+            return "vendor-react";
+          }
         },
       },
     },
