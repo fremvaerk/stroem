@@ -29,6 +29,10 @@ uuid.workspace = true
 argon2.workspace = true
 jsonwebtoken.workspace = true
 sha2.workspace = true
+# Used to render sha2 digests as lowercase hex strings; replaces format!("{:x}", ...)
+# which broke when sha2 0.11 switched Output from GenericArray to hybrid_array::Array
+# (the new Array doesn't implement LowerHex).
+hex = "0.4"
 rust-embed.workspace = true
 mime_guess.workspace = true
 async-trait.workspace = true

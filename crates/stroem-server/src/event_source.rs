@@ -459,7 +459,7 @@ fn compute_fingerprint(
             .unwrap_or_default()
             .as_str(),
     );
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn restart_policy_str(policy: RestartPolicy) -> &'static str {

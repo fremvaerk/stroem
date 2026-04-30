@@ -82,7 +82,7 @@ pub fn generate_refresh_token() -> (String, String) {
 pub fn hash_token(raw: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Hash a refresh token using SHA256.
