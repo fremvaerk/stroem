@@ -19,6 +19,13 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // react-hooks 7.1+ flags `setState(...)` followed by an async load inside
+      // useEffect as a "cascading render" anti-pattern. Our pages use this
+      // intentionally for loading indicators around fetches — the two renders
+      // (loading=true, then loading=false on completion) are not cascading.
+      'react-hooks/set-state-in-effect': 'off',
+    },
   },
   {
     files: ['src/components/ui/**/*.{ts,tsx}', 'src/context/**/*.{ts,tsx}'],
