@@ -311,6 +311,7 @@ pub async fn execute_agent_step(
                         output_tokens: resp.output_tokens,
                         total_tokens: resp.input_tokens + resp.output_tokens,
                         cached_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
                     },
                     turns: 1,
                 })

@@ -339,6 +339,7 @@ pub async fn dispatch_agent_loop(
                     output_tokens: conv_state.total_output_tokens,
                     total_tokens: conv_state.total_input_tokens + conv_state.total_output_tokens,
                     cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 },
                 turns: conv_state.turn,
             });

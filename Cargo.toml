@@ -88,7 +88,7 @@ schemars = "1"
 http = "1"
 
 # LLM agent framework
-rig-core = "0.33"
+rig-core = "0.36"
 
 # Workspace sources
 async-trait = "0.1"
