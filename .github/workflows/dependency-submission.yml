@@ -17,7 +17,7 @@ jobs:
     name: Submit Cargo dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Syft parses Cargo.lock natively and submits via GitHub's
       # dependency submission API when dependency-snapshot is true.
@@ -37,7 +37,7 @@ jobs:
         # (anchore/syft#4862, in progress as of 2026-05). Submit ourselves.
         workspace: [ui, docs]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Submit bun.lock snapshot
         env:
