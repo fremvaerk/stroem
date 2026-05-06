@@ -10,6 +10,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# CI only needs to read the repo. No job writes back, pushes packages, or
+# creates releases — those live in release.yml / build.yml /
+# dependency-submission.yml with their own scoped permissions.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
