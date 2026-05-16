@@ -183,6 +183,7 @@ mod tests {
                 default: None,
                 options: Some(vec!["staging".to_string(), "production".to_string()]),
                 allow_custom: false,
+                multiple: false,
                 order: Some(1),
             },
         );

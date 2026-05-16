@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ComboboxField } from "@/components/task/combobox-field";
+import { MultiSelectField } from "@/components/task/multi-select-field";
 import { approveStep } from "@/lib/api";
 import { formatTime } from "@/lib/formatting";
 import type { InputField, JobStep } from "@/lib/types";
@@ -214,8 +215,29 @@ function ApprovalGateCard({ jobId, step, onAction }: ApprovalCardProps) {
               const label = field.name ?? key;
               const value = approvalInput[key];
 
-              // options: use combobox (no custom input for approval fields)
+              // options: use combobox (or multi-select when multiple: true)
               if (field.options && field.options.length > 0) {
+                if (field.multiple) {
+                  const arrayValue = Array.isArray(value)
+                    ? (value as unknown[]).map(String)
+                    : [];
+                  return (
+                    <MultiSelectField
+                      key={key}
+                      id={id}
+                      label={label}
+                      options={field.options}
+                      value={arrayValue}
+                      onChange={(v) =>
+                        setApprovalInput((prev) => ({ ...prev, [key]: v }))
+                      }
+                      placeholder={field.description ?? key}
+                      required={field.required}
+                      description={field.description}
+                      allowCustom={field.allow_custom}
+                    />
+                  );
+                }
                 return (
                   <ComboboxField
                     key={key}

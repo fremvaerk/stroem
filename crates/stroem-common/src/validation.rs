@@ -534,7 +534,7 @@ fn validate_workflow_config_inner(
     warnings.extend(validate_connection_inputs(config)?);
 
     // Validate input field options
-    warnings.extend(validate_input_options(config));
+    warnings.extend(validate_input_options(config)?);
 
     // Validate secrets
     validate_secrets(
@@ -650,7 +650,9 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
 }
 
 /// Validates input field options across all actions and tasks.
-fn validate_input_options(config: &WorkspaceConfig) -> Vec<String> {
+/// Returns warnings for soft issues; bails for unrecoverable misconfigurations
+/// (e.g., `multiple: true` combined with `secret: true` or a non-string `type`).
+fn validate_input_options(config: &WorkspaceConfig) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
     // Check action-level inputs
@@ -660,7 +662,7 @@ fn validate_input_options(config: &WorkspaceConfig) -> Vec<String> {
                 &format!("Action '{action_name}' input '{field_name}'"),
                 field,
                 &mut warnings,
-            );
+            )?;
         }
     }
 
@@ -671,18 +673,32 @@ fn validate_input_options(config: &WorkspaceConfig) -> Vec<String> {
                 &format!("Task '{task_name}' input '{field_name}'"),
                 field,
                 &mut warnings,
-            );
+            )?;
         }
     }
 
-    warnings
+    Ok(warnings)
 }
 
 fn check_input_field_options(
     context: &str,
     field: &crate::models::workflow::InputFieldDef,
     warnings: &mut Vec<String>,
-) {
+) -> Result<()> {
+    // Hard errors for `multiple: true` misuse — these have no working semantics.
+    if field.multiple {
+        if field.secret {
+            bail!("{context}: secret and multiple cannot be combined");
+        }
+        // v1 only supports string-typed multi-select (UI renders string options only).
+        if field.field_type != "string" && field.field_type != "text" {
+            bail!(
+                "{context}: multiple is only supported on string/text fields (got '{}')",
+                field.field_type
+            );
+        }
+    }
+
     if let Some(ref options) = field.options {
         if options.is_empty() {
             warnings.push(format!("{context}: options list is empty"));
@@ -696,9 +712,34 @@ fn check_input_field_options(
                 warnings.push(format!("{context}: duplicate option '{opt}'"));
             }
         }
-        // Warn if default value is not in options (strict mode only)
-        if !field.allow_custom {
-            if let Some(ref default) = field.default {
+        // Check default value against options based on cardinality
+        if let Some(ref default) = field.default {
+            if field.multiple {
+                match default.as_array() {
+                    None => warnings.push(format!(
+                        "{context}: multiple is true but default is not an array"
+                    )),
+                    Some(items) => {
+                        let mut seen_default = std::collections::HashSet::new();
+                        for item in items {
+                            let Some(s) = item.as_str() else {
+                                warnings.push(format!(
+                                    "{context}: default array items must be strings"
+                                ));
+                                continue;
+                            };
+                            if !seen_default.insert(s) {
+                                warnings.push(format!("{context}: duplicate default item '{s}'"));
+                            }
+                            if !field.allow_custom && !options.iter().any(|o| o == s) {
+                                warnings.push(format!(
+                                    "{context}: default item '{s}' is not in options list"
+                                ));
+                            }
+                        }
+                    }
+                }
+            } else if !field.allow_custom {
                 if let Some(default_str) = default.as_str() {
                     if !options.iter().any(|o| o == default_str) {
                         warnings.push(format!(
@@ -709,11 +750,18 @@ fn check_input_field_options(
                 }
             }
         }
-    } else if field.allow_custom {
-        warnings.push(format!(
-            "{context}: allow_custom has no effect without options"
-        ));
+    } else {
+        if field.allow_custom {
+            warnings.push(format!(
+                "{context}: allow_custom has no effect without options"
+            ));
+        }
+        if field.multiple {
+            warnings.push(format!("{context}: multiple requires options to be set"));
+        }
     }
+
+    Ok(())
 }
 
 /// Validates that task input fields referencing connection types have valid references.
@@ -726,19 +774,42 @@ fn validate_connection_inputs(config: &WorkspaceConfig) -> Result<Vec<String>> {
         "string", "text", "integer", "number", "boolean", "date", "datetime",
     ];
 
+    let check = |scope: &str,
+                 owner: &str,
+                 field_name: &str,
+                 field_def: &crate::models::workflow::InputFieldDef|
+     -> Result<()> {
+        if primitives.contains(&field_def.field_type.as_str()) {
+            return Ok(());
+        }
+        // Non-primitive type — must be a connection type reference
+        if !config.connection_types.contains_key(&field_def.field_type) {
+            bail!(
+                "{} '{}' input '{}' references unknown type '{}' (not a primitive or connection type)",
+                scope, owner, field_name, field_def.field_type
+            );
+        }
+        if field_def.multiple {
+            // Defense in depth — check_input_field_options already rejects non-(string|text)
+            // + multiple, but a non-primitive type here means a connection ref, which is
+            // also unsupported with multiple.
+            bail!(
+                "{} '{}' input '{}': multiple is not supported on connection-type fields (type '{}')",
+                scope, owner, field_name, field_def.field_type
+            );
+        }
+        Ok(())
+    };
+
+    for (action_name, action) in &config.actions {
+        for (field_name, field_def) in &action.input {
+            check("Action", action_name, field_name, field_def)?;
+        }
+    }
+
     for (task_name, task) in &config.tasks {
         for (field_name, field_def) in &task.input {
-            if !primitives.contains(&field_def.field_type.as_str()) {
-                // Non-primitive type — must be a connection type reference
-                if !config.connection_types.contains_key(&field_def.field_type) {
-                    bail!(
-                        "Task '{}' input '{}' references unknown type '{}' (not a primitive or connection type)",
-                        task_name,
-                        field_name,
-                        field_def.field_type
-                    );
-                }
-            }
+            check("Task", task_name, field_name, field_def)?;
         }
     }
 
@@ -4302,6 +4373,378 @@ tasks:
             0,
             "Expected no warnings with allow_custom, got: {:?}",
             warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_ok() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        default: [dev, staging]
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings for valid multi-select, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_requires_options() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        multiple: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("multiple requires options")),
+            "Expected multiple-requires-options warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_default_must_be_array() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        default: dev
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("default is not an array")),
+            "Expected default-not-array warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_default_items_in_options() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        default: [dev, sandbox]
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("'sandbox' is not in options list")),
+            "Expected default-item-not-in-options warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_default_allow_custom_ok() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        allow_custom: true
+        default: [dev, sandbox]
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings with allow_custom, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_default_unique() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        default: [dev, dev]
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("duplicate default item")),
+            "Expected duplicate-default warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_secret_rejected() {
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      envs:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        secret: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("secret and multiple cannot be combined"),
+            "Expected secret+multiple error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_at_action_level_warning() {
+        // Verify check_input_field_options runs against action-level inputs too,
+        // not just task-level. The warning context should name the action.
+        let yaml = r#"
+actions:
+  notify:
+    type: script
+    script: "echo hi"
+    input:
+      tags:
+        type: string
+        multiple: true
+        # No options — should warn.
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Action 'notify'") && w.contains("multiple requires options")),
+            "Expected action-level multiple-requires-options warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_at_action_level_secret_rejected() {
+        // secret+multiple on an action-level input must also bail!.
+        let yaml = r#"
+actions:
+  notify:
+    type: script
+    script: "echo hi"
+    input:
+      keys:
+        type: string
+        options: [a, b]
+        multiple: true
+        secret: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Action 'notify'")
+                && msg.contains("secret and multiple cannot be combined"),
+            "Expected action-level secret+multiple error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_on_integer_rejected() {
+        // multiple is only supported on string/text fields in v1.
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      nums:
+        type: integer
+        options: [1, 2, 3]
+        multiple: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("multiple is only supported on string/text fields"),
+            "Expected multiple-on-integer error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_non_string_default_item_warning() {
+        // type: string + multiple: true + default contains a non-string item (e.g., a number).
+        // Should warn — items must be strings to match string options.
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      tags:
+        type: string
+        options: [a, b]
+        multiple: true
+        default: [a, 42]
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("default array items must be strings")),
+            "Expected non-string default item warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_on_text_ok() {
+        // `text` is also acceptable for multiple.
+        let yaml = r#"
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      notes:
+        type: text
+        options: ["one note", "two note"]
+        multiple: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_input_field_multiple_on_connection_type_rejected() {
+        let yaml = r#"
+connection_types:
+  postgres:
+    host:
+      type: string
+actions:
+  deploy:
+    type: script
+    script: "echo deploy"
+tasks:
+  test:
+    input:
+      databases:
+        type: postgres
+        multiple: true
+    flow:
+      step1:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("multiple is not supported on connection-type fields"),
+            "Expected multiple-on-connection error, got: {msg}"
         );
     }
 

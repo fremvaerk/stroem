@@ -50,6 +50,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -209,6 +210,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -283,6 +285,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -558,6 +561,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -686,6 +690,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -773,6 +778,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -820,6 +826,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -878,6 +885,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -975,6 +983,7 @@ fn test_workspace() -> WorkspaceConfig {
             default: Some(json!("test")),
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -2355,6 +2364,7 @@ async fn test_task_detail_connections() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -2369,6 +2379,7 @@ async fn test_task_detail_connections() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -2383,6 +2394,7 @@ async fn test_task_detail_connections() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -2397,6 +2409,7 @@ async fn test_task_detail_connections() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -2450,6 +2463,7 @@ async fn test_task_detail_connections() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -9085,6 +9099,7 @@ fn hook_test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -10709,6 +10724,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -13177,6 +13193,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             secret: false,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -13191,6 +13208,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             secret: false,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -13247,6 +13265,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             secret: false,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -13261,6 +13280,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
             secret: false,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );

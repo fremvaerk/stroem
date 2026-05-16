@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { ComboboxField } from "@/components/task/combobox-field";
+import { MultiSelectField } from "@/components/task/multi-select-field";
 import type { InputField } from "@/lib/types";
 import { PRIMITIVE_TYPES, REDACTED_SENTINEL } from "@/components/task/constants";
 
@@ -53,6 +54,26 @@ export function InputFieldRow({
   }
 
   if (field.options && field.options.length > 0) {
+    if (field.multiple) {
+      const arrayValue = Array.isArray(value)
+        ? (value as unknown[]).map(String)
+        : [];
+      return (
+        <MultiSelectField
+          id={id}
+          label={displayLabel}
+          options={field.options}
+          value={arrayValue}
+          onChange={onChange}
+          placeholder={
+            field.description || `Select ${displayLabel.toLowerCase()}`
+          }
+          required={field.required}
+          description={field.description}
+          allowCustom={field.allow_custom}
+        />
+      );
+    }
     return (
       <ComboboxField
         id={id}

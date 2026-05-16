@@ -273,6 +273,7 @@ Input parameters define the schema for action and task inputs.
 | `default` | any | — | Default value when not provided |
 | `options` | list | — | Predefined dropdown choices |
 | `allow_custom` | bool | `false` | Allow values outside `options` list |
+| `multiple` | bool | `false` | Accept multiple values (requires `options`). Submitted value is a JSON array; see [Multi-select](/guides/input-and-output/#multi-select) |
 | `order` | integer | — | Display order in UI (lower = earlier). Fields without `order` appear last |
 
 ```yaml

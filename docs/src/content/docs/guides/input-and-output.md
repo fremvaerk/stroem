@@ -138,6 +138,30 @@ When `options` is set, the UI renders a select dropdown instead of a text input.
 
 Set `allow_custom: true` to let users type a custom value in addition to the predefined options. The UI renders a text input with autocomplete suggestions.
 
+### Multi-select
+
+Set `multiple: true` (alongside `options`) to let users pick more than one value. The UI renders a searchable popover with a checkbox per option, and the submitted value is a JSON array.
+
+```yaml
+tasks:
+  deploy:
+    input:
+      environments:
+        type: string
+        options: [dev, staging, prod, sandbox]
+        multiple: true
+        default: [dev, staging]
+        required: true
+        description: Target environments
+```
+
+Notes:
+
+- `default`, if present, must be a JSON array. Each item must appear in `options` unless `allow_custom: true`.
+- `allow_custom: true` works the same way as for single-select — users can type values not in the list and add them to the selection.
+- `multiple: true` is not supported on connection-type fields, and cannot be combined with `secret: true`.
+- Inside templates the value is a list — use Tera's array filters, e.g. `{{ input.environments | join(sep=', ') }}` or iterate with `{% for env in input.environments %}`.
+
 ### Display order
 
 By default, input fields appear in YAML key order (which may vary since YAML maps are unordered). Use `order` to control the display order in the UI:

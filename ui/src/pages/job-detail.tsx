@@ -229,7 +229,7 @@ export function JobDetailPage() {
       {(job.input || job.output) && (
         <div className="grid gap-4 lg:grid-cols-2">
           {job.input && (
-            <Card>
+            <Card data-testid="job-input">
               <CardHeader>
                 <CardTitle className="text-base">Job Input</CardTitle>
               </CardHeader>

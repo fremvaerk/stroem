@@ -118,6 +118,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
             default: Some(json!("default-data")),
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -133,6 +134,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -148,6 +150,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
             default: Some(json!("{{ secret.api_key }}")),
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );

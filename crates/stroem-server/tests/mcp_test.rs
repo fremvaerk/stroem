@@ -52,6 +52,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -107,6 +108,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );
@@ -182,6 +184,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         },
     );

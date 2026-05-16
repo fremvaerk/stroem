@@ -399,6 +399,7 @@ mod tests {
             default: None,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         }
     }

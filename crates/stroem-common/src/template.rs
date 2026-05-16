@@ -922,6 +922,7 @@ mod tests {
             default,
             options: None,
             allow_custom: false,
+            multiple: false,
             order: None,
         }
     }
@@ -1137,6 +1138,7 @@ mod tests {
                 default: Some(json!("the-secret-value")),
                 options: None,
                 allow_custom: false,
+                multiple: false,
                 order: None,
             },
         );
@@ -1151,6 +1153,7 @@ mod tests {
                 default: Some(json!("staging")),
                 options: None,
                 allow_custom: false,
+                multiple: false,
                 order: None,
             },
         );
@@ -1162,6 +1165,64 @@ mod tests {
 
         assert_eq!(result["env"], "production");
         assert_eq!(result["api_key"], "the-secret-value");
+    }
+
+    #[test]
+    fn test_merge_defaults_array_default_for_multiple_field() {
+        // multiple:true field with an array default — user omits it, default fills in verbatim.
+        let mut schema = HashMap::new();
+        schema.insert(
+            "environments".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                multiple: true,
+                options: Some(vec!["dev".into(), "staging".into(), "prod".into()]),
+                default: Some(json!(["dev", "staging"])),
+                ..Default::default()
+            },
+        );
+
+        let result = merge_defaults(&json!({}), &schema, &json!({})).unwrap();
+        assert_eq!(result["environments"], json!(["dev", "staging"]));
+        // Crucially: the value is an array, not a stringified one.
+        assert!(result["environments"].is_array());
+    }
+
+    #[test]
+    fn test_render_template_join_filter_on_array_input() {
+        // The multi-select.yaml fixture relies on `{{ input.environments | join(sep=', ') }}`
+        // rendering correctly when `input.environments` is a JSON array.
+        let context = json!({
+            "input": {
+                "environments": ["dev", "staging"],
+            }
+        });
+        let result =
+            render_template("{{ input.environments | join(sep=', ') }}", &context).unwrap();
+        assert_eq!(result, "dev, staging");
+    }
+
+    #[test]
+    fn test_resolve_rerun_sentinels_array_passthrough_for_multiple_field() {
+        // A plain (non-secret, non-connection) multiple-true field with an array value
+        // must pass through resolve_rerun_sentinels unchanged.
+        let mut schema = HashMap::new();
+        schema.insert(
+            "environments".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                multiple: true,
+                options: Some(vec!["dev".into(), "staging".into()]),
+                ..Default::default()
+            },
+        );
+
+        let incoming = json!({ "environments": ["dev", "staging"] });
+        let source_raw_input = json!({ "environments": ["prod"] });
+
+        let result = resolve_rerun_sentinels(&incoming, &source_raw_input, &schema).unwrap();
+        // The incoming array wins — no sentinel was sent, so the source value is not consulted.
+        assert_eq!(result["environments"], json!(["dev", "staging"]));
     }
 
     // --- resolve_connection_inputs tests ---

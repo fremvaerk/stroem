@@ -39,15 +39,15 @@ pub struct ConnectionDef {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InputFieldDef {
     #[serde(rename = "type")]
-    pub field_type: String, // "string", "text", "integer", "number", "boolean", "date", "datetime", or connection type
+    pub field_type: String, // "string", "text", "integer", "number", "boolean", "date", "datetime", or connection type. Element type — value is an array when `multiple: true`.
     /// Human-readable display name for this input field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub secret: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
@@ -55,11 +55,19 @@ pub struct InputFieldDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
     /// When true and options are set, allows entering custom values not in the list.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub allow_custom: bool,
+    /// When true (and options are set), the field accepts multiple values.
+    /// Submitted value is a JSON array; `default`, if present, must also be an array.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub multiple: bool,
     /// Display order in the UI (lower numbers appear first). Fields without order appear last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<i32>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Output field definition
@@ -3443,7 +3451,65 @@ tasks:
 
         assert!(field.options.is_none());
         assert!(!field.allow_custom);
+        assert!(!field.multiple);
         assert!(field.order.is_none());
+    }
+
+    #[test]
+    fn test_input_field_multiple_default_false() {
+        let yaml = r#"
+tasks:
+  deploy:
+    input:
+      env:
+        type: string
+        options: [dev, prod]
+    flow:
+      run:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let field = config.tasks["deploy"].input.get("env").unwrap();
+        assert!(!field.multiple);
+    }
+
+    #[test]
+    fn test_input_field_multiple_roundtrip() {
+        let yaml = r#"
+tasks:
+  deploy:
+    input:
+      environments:
+        type: string
+        options: [dev, staging, prod]
+        multiple: true
+        default: [dev, staging]
+    flow:
+      run:
+        action: deploy
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let field = config.tasks["deploy"].input.get("environments").unwrap();
+        assert!(field.multiple);
+        assert_eq!(field.options.as_ref().unwrap(), &["dev", "staging", "prod"]);
+        let default = field.default.as_ref().unwrap();
+        assert!(default.is_array());
+        assert_eq!(default.as_array().unwrap().len(), 2);
+        assert_eq!(default[0], "dev");
+        assert_eq!(default[1], "staging");
+    }
+
+    #[test]
+    fn test_input_field_multiple_serializes() {
+        let field = InputFieldDef {
+            field_type: "string".to_string(),
+            options: Some(vec!["a".into(), "b".into()]),
+            multiple: true,
+            default: Some(serde_json::json!(["a"])),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&field).unwrap();
+        assert!(yaml.contains("multiple: true"));
     }
 
     #[test]

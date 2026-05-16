@@ -59,4 +59,109 @@ test.describe("Tasks", () => {
     await page.waitForURL(/\/jobs\/.+/);
     await expect(page.locator("h1")).toBeVisible();
   });
+
+  test("multi-select input submits an array (verified via network)", async ({
+    page,
+  }) => {
+    await page.goto("/workspaces/default/tasks/multi-select-demo");
+    await page.waitForLoadState("networkidle");
+
+    // Open the multi-select popover for `environments` (Label "environments *")
+    const trigger = page.getByLabel(/environments/i);
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+
+    await page.getByRole("option", { name: "dev" }).click();
+    await page.getByRole("option", { name: "staging" }).click();
+
+    // Popover stays open across selections
+    await expect(
+      page.getByPlaceholder("Search or type a value..."),
+    ).toBeVisible();
+
+    // Close popover and verify both chips are visible in the trigger
+    await page.keyboard.press("Escape");
+    await expect(trigger).toContainText("dev");
+    await expect(trigger).toContainText("staging");
+
+    // Intercept the execute request and verify input.environments is an actual array
+    const executePromise = page.waitForRequest(
+      (req) =>
+        req.url().includes("/api/workspaces/") &&
+        req.url().includes("/tasks/") &&
+        req.url().includes("/execute") &&
+        req.method() === "POST",
+    );
+    await page.getByRole("button", { name: "Run Task" }).click();
+    const executeReq = await executePromise;
+    const body = executeReq.postDataJSON() as {
+      input?: { environments?: unknown };
+    };
+    expect(Array.isArray(body.input?.environments)).toBe(true);
+    expect(body.input?.environments).toEqual(["dev", "staging"]);
+
+    await page.waitForURL(/\/jobs\/.+/);
+
+    // Job detail's Job Input card should contain the array values
+    const inputCard = page.getByTestId("job-input");
+    await expect(inputCard).toContainText(/dev/);
+    await expect(inputCard).toContainText(/staging/);
+  });
+
+  test("multi-select: deselect-all returns trigger to placeholder", async ({
+    page,
+  }) => {
+    await page.goto("/workspaces/default/tasks/multi-select-demo");
+    await page.waitForLoadState("networkidle");
+
+    const trigger = page.getByLabel(/environments/i);
+    await trigger.click();
+    await page.getByRole("option", { name: "dev" }).click();
+    await page.getByRole("option", { name: "staging" }).click();
+    await expect(
+      page.getByPlaceholder("Search or type a value..."),
+    ).toBeVisible();
+
+    // Deselect both
+    await page.getByRole("option", { name: "dev" }).click();
+    await page.getByRole("option", { name: "staging" }).click();
+    await page.keyboard.press("Escape");
+
+    // Placeholder text from the field description is restored
+    await expect(trigger).toContainText(/target environments/i);
+  });
+
+  test("multi-select: allow_custom lets users add a value outside options", async ({
+    page,
+  }) => {
+    await page.goto("/workspaces/default/tasks/multi-select-demo");
+    await page.waitForLoadState("networkidle");
+
+    // The `tags` field has allow_custom: true
+    const tagsTrigger = page.getByLabel(/tags/i);
+    await tagsTrigger.click();
+    await page.getByPlaceholder("Search or type a value...").fill("hotfix");
+    await page.getByRole("option", { name: /Add "hotfix"/ }).click();
+    await page.keyboard.press("Escape");
+    await expect(tagsTrigger).toContainText("hotfix");
+
+    // Submit and verify the network body has the custom tag in the array
+    const executePromise = page.waitForRequest(
+      (req) =>
+        req.url().includes("/execute") && req.method() === "POST",
+    );
+    // environments is required — pick something so the form is valid
+    const envTrigger = page.getByLabel(/environments/i);
+    await envTrigger.click();
+    await page.getByRole("option", { name: "dev" }).click();
+    await page.keyboard.press("Escape");
+
+    await page.getByRole("button", { name: "Run Task" }).click();
+    const executeReq = await executePromise;
+    const body = executeReq.postDataJSON() as {
+      input?: { tags?: unknown };
+    };
+    expect(Array.isArray(body.input?.tags)).toBe(true);
+    expect(body.input?.tags).toContain("hotfix");
+  });
 });

@@ -28,6 +28,7 @@ export interface InputField {
   secret?: boolean;
   options?: string[];
   allow_custom?: boolean;
+  multiple?: boolean;
   order?: number;
 }
 

@@ -1,0 +1,36 @@
+actions:
+  echo-envs:
+    type: script
+    script: |
+      echo "Deploying to: {{ input.environments | join(sep=', ') }}"
+      echo "Tags: {{ input.tags | join(sep=', ') }}"
+    input:
+      environments:
+        type: string
+        required: true
+      tags:
+        type: string
+
+tasks:
+  multi-select-demo:
+    mode: distributed
+    description: Demonstrates the multi-select input field type.
+    input:
+      environments:
+        type: string
+        options: [dev, staging, prod, sandbox]
+        multiple: true
+        required: true
+        description: One or more target environments
+      tags:
+        type: string
+        options: [smoke, canary, full]
+        multiple: true
+        allow_custom: true
+        description: Optional run tags
+    flow:
+      deploy:
+        action: echo-envs
+        input:
+          environments: "{{ input.environments | json_encode() }}"
+          tags: "{{ input.tags | json_encode() }}"
