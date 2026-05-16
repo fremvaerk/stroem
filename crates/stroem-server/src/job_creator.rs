@@ -11,7 +11,7 @@ use stroem_common::validation::{compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
-use crate::config::AgentsConfig;
+use crate::config::{AgentsConfig, JobDefaults};
 
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
 const MAX_TASK_DEPTH: u32 = 10;
@@ -38,6 +38,7 @@ pub async fn create_job_for_task(
     revision: Option<&str>,
     source_job_id: Option<Uuid>,
     agents_config: Option<&AgentsConfig>,
+    defaults: JobDefaults,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
         pool,
@@ -52,6 +53,7 @@ pub async fn create_job_for_task(
         revision,
         source_job_id,
         agents_config,
+        defaults,
     )
     .await
 }
@@ -72,6 +74,7 @@ pub async fn create_child_job_for_task(
     parent_job_id: Uuid,
     parent_step_name: &str,
     revision: Option<&str>,
+    defaults: JobDefaults,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
         pool,
@@ -86,6 +89,7 @@ pub async fn create_child_job_for_task(
         revision,
         None, // child paths never set source_job_id
         None,
+        defaults,
     )
     .await
 }
@@ -105,6 +109,7 @@ fn create_job_for_task_inner<'a>(
     revision: Option<&'a str>,
     source_job_id: Option<Uuid>,
     _agents_config: Option<&'a AgentsConfig>,
+    defaults: JobDefaults,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
     Box::pin(async move {
         // Look up task
@@ -207,7 +212,8 @@ fn create_job_for_task_inner<'a>(
                 runner,
                 timeout_secs: flow_step
                     .timeout
-                    .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
+                    .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32"))
+                    .or(defaults.step_timeout_secs),
                 when_condition: flow_step.when.clone(),
                 for_each_expr: flow_step.for_each.as_ref().map(|v| {
                     // Store human-readable form: raw string for templates, compact JSON for arrays
@@ -252,7 +258,8 @@ fn create_job_for_task_inner<'a>(
             parent_job_id,
             parent_step_name,
             task.timeout
-                .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32")),
+                .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32"))
+                .or(defaults.job_timeout_secs),
             revision,
             raw_input_to_persist,
             source_job_id,
@@ -309,7 +316,7 @@ fn create_job_for_task_inner<'a>(
         }
 
         // Handle any initially-ready type: task steps
-        handle_task_steps(pool, workspace_config, workspace_name, job_id).await?;
+        handle_task_steps(pool, workspace_config, workspace_name, job_id, defaults).await?;
 
         // Handle any initially-ready type: approval steps
         if let Err(e) =
@@ -346,6 +353,7 @@ pub async fn handle_task_steps(
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
     job_id: Uuid,
+    defaults: JobDefaults,
 ) -> Result<()> {
     let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
     let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
@@ -450,7 +458,8 @@ pub async fn handle_task_steps(
         // Create child job with parent tracking (inherits parent revision).
         // agents_config is not available here (handle_task_steps only has pool),
         // so agent steps in child jobs will be dispatched by the orchestrator
-        // when it processes the child job's ready steps.
+        // when it processes the child job's ready steps. `defaults` is threaded
+        // through so sub-jobs inherit the server-level timeout defaults.
         match create_job_for_task_inner(
             pool,
             workspace_config,
@@ -464,6 +473,7 @@ pub async fn handle_task_steps(
             job.revision.as_deref(),
             None, // source_job_id: child task jobs never inherit re-run source
             None, // agents_config not available; orchestrator will dispatch
+            defaults,
         )
         .await
         {

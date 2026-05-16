@@ -3989,3 +3989,517 @@ async fn test_event_source_step_action_type() -> Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Duration stats (TODO #142)
+// ---------------------------------------------------------------------------
+
+/// Helper: create a completed job whose total duration is `duration_secs`.
+/// Backdates `started_at`/`completed_at` directly via SQL so percentile math
+/// has deterministic inputs.
+async fn create_completed_job(
+    pool: &PgPool,
+    workspace: &str,
+    task: &str,
+    duration_secs: i64,
+) -> Result<Uuid> {
+    let job_id = JobRepo::create(
+        pool,
+        workspace,
+        task,
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let completed_at = Utc::now();
+    let started_at = completed_at - Duration::seconds(duration_secs);
+    sqlx::query(
+        "UPDATE job SET status='completed', started_at=$1, completed_at=$2 WHERE job_id=$3",
+    )
+    .bind(started_at)
+    .bind(completed_at)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+    Ok(job_id)
+}
+
+#[tokio::test]
+async fn test_task_duration_stats_basic_percentiles() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Five completed runs: 1s, 2s, 3s, 4s, 5s. p50 = 3s, p95 ≈ 4.8s.
+    for secs in [1, 2, 3, 4, 5] {
+        create_completed_job(&pool, "default", "build", secs).await?;
+    }
+
+    let stats = JobRepo::get_task_duration_stats(&pool, "default", "build", 50).await?;
+    assert_eq!(stats.sample_size, 5);
+
+    // p50 should be ~3000ms (median of 1..5 = 3s). Allow small float slack.
+    let p50 = stats.p50_ms.expect("p50 should be present");
+    assert!(
+        (p50 - 3000.0).abs() < 1.0,
+        "p50 expected ~3000ms, got {}",
+        p50
+    );
+
+    let avg = stats.avg_ms.expect("avg should be present");
+    assert!(
+        (avg - 3000.0).abs() < 1.0,
+        "avg expected ~3000ms, got {}",
+        avg
+    );
+
+    let p95 = stats.p95_ms.expect("p95 should be present");
+    assert!(
+        p95 >= 4500.0 && p95 <= 5000.0,
+        "p95 expected ~4800ms, got {}",
+        p95
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_duration_stats_empty_returns_zero_sample() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let stats = JobRepo::get_task_duration_stats(&pool, "default", "nope", 50).await?;
+    assert_eq!(stats.sample_size, 0);
+    assert!(stats.p50_ms.is_none());
+    assert!(stats.avg_ms.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_duration_stats_excludes_non_completed() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // One completed job — should be the only thing counted.
+    create_completed_job(&pool, "default", "build", 10).await?;
+
+    // Failed job with timestamps — should NOT be counted.
+    let failed_id = JobRepo::create(
+        &pool,
+        "default",
+        "build",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query("UPDATE job SET status='failed', started_at=$1, completed_at=$2 WHERE job_id=$3")
+        .bind(Utc::now() - Duration::seconds(100))
+        .bind(Utc::now())
+        .bind(failed_id)
+        .execute(&pool)
+        .await?;
+
+    // Pending job — also ignored.
+    JobRepo::create(
+        &pool,
+        "default",
+        "build",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let stats = JobRepo::get_task_duration_stats(&pool, "default", "build", 50).await?;
+    assert_eq!(stats.sample_size, 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_duration_stats_respects_limit() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // 10 runs of 1s each.
+    for _ in 0..10 {
+        create_completed_job(&pool, "default", "build", 1).await?;
+    }
+    // 1 outlier 100s run, most recent. With limit=5 the outlier is included; with limit=15 still included.
+    create_completed_job(&pool, "default", "build", 100).await?;
+
+    // limit=5 → recent jobs are: the outlier + 4 of the 1s ones. max should be ~100s
+    let stats5 = JobRepo::get_task_duration_stats(&pool, "default", "build", 5).await?;
+    assert_eq!(stats5.sample_size, 5);
+    let max5 = stats5.max_ms.unwrap();
+    assert!(
+        max5 >= 99_000.0,
+        "max with limit=5 should include outlier, got {}",
+        max5
+    );
+
+    // limit=3 → 3 most recent: outlier + 2 of the 1s ones, max still ~100s
+    let stats3 = JobRepo::get_task_duration_stats(&pool, "default", "build", 3).await?;
+    assert_eq!(stats3.sample_size, 3);
+    assert!(stats3.max_ms.unwrap() >= 99_000.0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recent_durations_ordered_newest_first() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Insert in an order such that the oldest is the longest.
+    create_completed_job(&pool, "default", "build", 30).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    create_completed_job(&pool, "default", "build", 10).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    create_completed_job(&pool, "default", "build", 20).await?;
+
+    let recent = JobRepo::get_recent_durations(&pool, "default", "build", 10).await?;
+    assert_eq!(recent.len(), 3);
+    // Newest-first: 20s, 10s, 30s
+    assert!((recent[0].duration_ms - 20_000.0).abs() < 1.0);
+    assert!((recent[1].duration_ms - 10_000.0).abs() < 1.0);
+    assert!((recent[2].duration_ms - 30_000.0).abs() < 1.0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_step_duration_stats_aggregates_per_step() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create three completed jobs with two steps each: "build" and "test".
+    // "build" varies between runs; "test" is constant.
+    let cases = [(2, 5), (4, 5), (6, 5)];
+    for (build_secs, test_secs) in cases {
+        let job_id = create_completed_job(&pool, "default", "ci", 100).await?;
+
+        // Insert step rows directly to control timestamps.
+        sqlx::query(
+            "INSERT INTO job_step \
+             (job_id, step_name, action_name, action_type, status, required_tags, runner, \
+              started_at, completed_at) \
+             VALUES \
+             ($1, 'build', 'build-action', 'script', 'completed', '[]'::jsonb, 'local', $2, $3), \
+             ($1, 'test',  'test-action',  'script', 'completed', '[]'::jsonb, 'local', $4, $5)",
+        )
+        .bind(job_id)
+        .bind(Utc::now() - Duration::seconds(build_secs))
+        .bind(Utc::now())
+        .bind(Utc::now() - Duration::seconds(test_secs))
+        .bind(Utc::now())
+        .execute(&pool)
+        .await?;
+    }
+
+    let step_stats =
+        JobStepRepo::get_step_duration_stats_for_task(&pool, "default", "ci", 50).await?;
+    assert_eq!(step_stats.len(), 2);
+
+    let build = step_stats.iter().find(|s| s.step_name == "build").unwrap();
+    let test = step_stats.iter().find(|s| s.step_name == "test").unwrap();
+    assert_eq!(build.sample_size, 3);
+    assert_eq!(test.sample_size, 3);
+
+    // build p50 should be ~4s (median of 2,4,6); test p50 should be ~5s.
+    let build_p50 = build.p50_ms.unwrap();
+    let test_p50 = test.p50_ms.unwrap();
+    assert!(
+        (build_p50 - 4000.0).abs() < 100.0,
+        "build p50 got {}",
+        build_p50
+    );
+    assert!(
+        (test_p50 - 5000.0).abs() < 100.0,
+        "test p50 got {}",
+        test_p50
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_step_duration_stats_excludes_for_each_instances() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_completed_job(&pool, "default", "fanout", 30).await?;
+
+    // Insert placeholder + two instances. Only the placeholder should appear in stats.
+    sqlx::query(
+        "INSERT INTO job_step \
+         (job_id, step_name, action_name, action_type, status, required_tags, runner, \
+          started_at, completed_at, loop_source, loop_index) \
+         VALUES \
+         ($1, 'fanout',    'a', 'script', 'completed', '[]'::jsonb, 'local', $2, $3, NULL, NULL), \
+         ($1, 'fanout[0]', 'a', 'script', 'completed', '[]'::jsonb, 'local', $2, $3, 'fanout', 0), \
+         ($1, 'fanout[1]', 'a', 'script', 'completed', '[]'::jsonb, 'local', $2, $3, 'fanout', 1)",
+    )
+    .bind(job_id)
+    .bind(Utc::now() - Duration::seconds(10))
+    .bind(Utc::now())
+    .execute(&pool)
+    .await?;
+
+    let stats =
+        JobStepRepo::get_step_duration_stats_for_task(&pool, "default", "fanout", 50).await?;
+    assert_eq!(stats.len(), 1, "instance rows must be excluded");
+    assert_eq!(stats[0].step_name, "fanout");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Additional duration-stats tests (findings #1, #5, #6, #10)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_task_duration_stats_single_sample() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    create_completed_job(&pool, "ws1", "solo", 7).await?;
+
+    let stats = JobRepo::get_task_duration_stats(&pool, "ws1", "solo", 50).await?;
+    assert_eq!(stats.sample_size, 1);
+
+    let avg = stats.avg_ms.expect("avg present");
+    let p50 = stats.p50_ms.expect("p50 present");
+    let p95 = stats.p95_ms.expect("p95 present");
+    let min = stats.min_ms.expect("min present");
+    let max = stats.max_ms.expect("max present");
+    // All aggregates must equal the single observation (7 s = 7000 ms).
+    let expected_ms = 7000.0_f64;
+    for (label, val) in [
+        ("avg", avg),
+        ("p50", p50),
+        ("p95", p95),
+        ("min", min),
+        ("max", max),
+    ] {
+        assert!(
+            (val - expected_ms).abs() < 1.0,
+            "{label} expected ~{expected_ms} ms, got {val}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_duration_stats_zero_ms_duration() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Force started_at == completed_at (zero-duration run).
+    let job_id = JobRepo::create(
+        &pool,
+        "ws2",
+        "instant",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE job SET status='completed', started_at=$1, completed_at=$1 WHERE job_id=$2",
+    )
+    .bind(now)
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    let stats = JobRepo::get_task_duration_stats(&pool, "ws2", "instant", 50).await?;
+    assert_eq!(stats.sample_size, 1, "zero-duration row must be counted");
+
+    let p50 = stats.p50_ms.expect("p50 present for single sample");
+    assert!(
+        p50.abs() < 1.0,
+        "p50 of a zero-duration run should be ~0 ms, got {p50}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_duration_stats_excludes_negative_duration() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Force completed_at < started_at (clock skew anomaly).
+    let job_id = JobRepo::create(
+        &pool,
+        "ws3",
+        "skewed",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE job SET status='completed', started_at=$1, completed_at=$2 WHERE job_id=$3",
+    )
+    .bind(now) // started_at = now
+    .bind(now - Duration::seconds(10)) // completed_at = 10s BEFORE started_at
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    let stats = JobRepo::get_task_duration_stats(&pool, "ws3", "skewed", 50).await?;
+    assert_eq!(
+        stats.sample_size, 0,
+        "negative-duration row must be excluded; sample_size should be 0"
+    );
+    assert!(
+        stats.avg_ms.is_none(),
+        "avg should be None with zero samples"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_recent_durations_tie_breaker_deterministic() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // Create three jobs and then force them all to the same completed_at
+    // timestamp so that only job_id ordering distinguishes them.
+    let mut ids = Vec::new();
+    for secs in [1, 2, 3] {
+        let id = create_completed_job(&pool, "ws4", "tied", secs).await?;
+        ids.push(id);
+    }
+    let fixed_ts = Utc::now();
+    sqlx::query("UPDATE job SET completed_at=$1 WHERE workspace='ws4' AND task_name='tied'")
+        .bind(fixed_ts)
+        .execute(&pool)
+        .await?;
+
+    let first = JobRepo::get_recent_durations(&pool, "ws4", "tied", 10).await?;
+    let second = JobRepo::get_recent_durations(&pool, "ws4", "tied", 10).await?;
+
+    assert_eq!(first.len(), 3);
+    assert_eq!(second.len(), 3);
+
+    // Both calls must return identical job_id order.
+    let first_ids: Vec<_> = first.iter().map(|r| r.job_id).collect();
+    let second_ids: Vec<_> = second.iter().map(|r| r.job_id).collect();
+    assert_eq!(
+        first_ids, second_ids,
+        "order must be deterministic across calls when completed_at is identical"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_step_duration_stats_includes_for_each_placeholder() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = create_completed_job(&pool, "ws5", "fanned", 60).await?;
+
+    // Placeholder step (loop_source IS NULL) — should appear in stats.
+    // Two for-each instances (loop_source = 'fanout') — must NOT appear.
+    sqlx::query(
+        "INSERT INTO job_step \
+         (job_id, step_name, action_name, action_type, status, required_tags, runner, \
+          started_at, completed_at, loop_source, loop_index, for_each_expr) \
+         VALUES \
+         ($1, 'fanout',    'a', 'script', 'completed', '[]'::jsonb, 'local', $2, $3, NULL,     NULL, '[1,2]'), \
+         ($1, 'fanout[0]', 'a', 'script', 'completed', '[]'::jsonb, 'local', $2, $3, 'fanout', 0,    NULL  ), \
+         ($1, 'fanout[1]', 'a', 'script', 'completed', '[]'::jsonb, 'local', $2, $3, 'fanout', 1,    NULL  )",
+    )
+    .bind(job_id)
+    .bind(Utc::now() - Duration::seconds(30))
+    .bind(Utc::now())
+    .execute(&pool)
+    .await?;
+
+    let stats = JobStepRepo::get_step_duration_stats_for_task(&pool, "ws5", "fanned", 50).await?;
+    assert_eq!(
+        stats.len(),
+        1,
+        "only the placeholder should appear, not instances"
+    );
+    assert_eq!(stats[0].step_name, "fanout");
+    assert_eq!(stats[0].sample_size, 1);
+    // Placeholder duration spans 30 s.
+    let p50 = stats[0].p50_ms.expect("p50 present");
+    assert!(
+        (p50 - 30_000.0).abs() < 100.0,
+        "placeholder p50 should be ~30 000 ms, got {p50}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_step_duration_stats_handles_partial_coverage() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    // 3 jobs: only the most recent has a "cleanup" step.
+    // All jobs have a "build" step.
+    for i in 0..3_i64 {
+        let job_id = create_completed_job(&pool, "ws6", "partial", 10).await?;
+        let started = Utc::now() - Duration::seconds(5);
+        let completed = Utc::now();
+
+        // build step present in every job
+        sqlx::query(
+            "INSERT INTO job_step \
+             (job_id, step_name, action_name, action_type, status, required_tags, runner, \
+              started_at, completed_at) \
+             VALUES ($1, 'build', 'b', 'script', 'completed', '[]'::jsonb, 'local', $2, $3)",
+        )
+        .bind(job_id)
+        .bind(started)
+        .bind(completed)
+        .execute(&pool)
+        .await?;
+
+        // cleanup step only in the most-recently created job (i == 2)
+        if i == 2 {
+            sqlx::query(
+                "INSERT INTO job_step \
+                 (job_id, step_name, action_name, action_type, status, required_tags, runner, \
+                  started_at, completed_at) \
+                 VALUES ($1, 'cleanup', 'c', 'script', 'completed', '[]'::jsonb, 'local', $2, $3)",
+            )
+            .bind(job_id)
+            .bind(started)
+            .bind(completed)
+            .execute(&pool)
+            .await?;
+        }
+    }
+
+    let stats = JobStepRepo::get_step_duration_stats_for_task(&pool, "ws6", "partial", 50).await?;
+
+    // Both "build" and "cleanup" should appear.
+    assert!(
+        stats.iter().any(|s| s.step_name == "build"),
+        "build missing"
+    );
+    let cleanup = stats
+        .iter()
+        .find(|s| s.step_name == "cleanup")
+        .expect("cleanup missing");
+    assert_eq!(
+        cleanup.sample_size, 1,
+        "cleanup should have exactly 1 sample"
+    );
+
+    Ok(())
+}

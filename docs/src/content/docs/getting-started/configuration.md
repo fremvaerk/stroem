@@ -38,6 +38,11 @@ workspaces:
   #   ref: main
   #   poll_interval_secs: 60
 worker_token: "change-in-production"
+# Optional: fleet-wide timeout defaults applied when a task or step does not
+# specify its own `timeout`. Capped at 24h (step) and 7d (job). Omit to leave
+# tasks without explicit timeouts unbounded (existing behaviour).
+# default_step_timeout: 30m
+# default_job_timeout: 4h
 # Optional: worker recovery settings
 # recovery:
 #   heartbeat_timeout_secs: 120

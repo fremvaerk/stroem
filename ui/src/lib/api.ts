@@ -15,6 +15,7 @@ import type {
   ExecuteTaskResponse,
   ApiKey,
   CreateApiKeyResponse,
+  TaskStatsResponse,
 } from "./types";
 
 // The refresh token is stored in an HttpOnly cookie managed by the server.
@@ -233,6 +234,19 @@ export async function getTask(
 ): Promise<TaskDetail> {
   return apiFetch<TaskDetail>(
     `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(name)}`,
+  );
+}
+
+export async function getTaskStats(
+  workspace: string,
+  name: string,
+  limit = 50,
+): Promise<TaskStatsResponse> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return apiFetch<TaskStatsResponse>(
+    `/api/workspaces/${encodeURIComponent(workspace)}/tasks/${encodeURIComponent(
+      name,
+    )}/stats?${params}`,
   );
 }
 

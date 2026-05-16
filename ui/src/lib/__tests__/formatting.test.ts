@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   formatTime,
   formatDuration,
+  formatDurationMs,
   formatRelativeTime,
   formatFutureTime,
 } from "../formatting";
@@ -159,5 +160,39 @@ describe("formatFutureTime", () => {
   it("formats days and hours in the future correctly", () => {
     const future = new Date(NOW + (2 * 24 + 4) * 3_600_000).toISOString(); // 2d 4h
     expect(formatFutureTime(future)).toBe("in 2d 4h");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatDurationMs
+// ---------------------------------------------------------------------------
+describe("formatDurationMs", () => {
+  it("returns '—' for null / undefined / non-finite", () => {
+    expect(formatDurationMs(null)).toBe("—");
+    expect(formatDurationMs(undefined)).toBe("—");
+    expect(formatDurationMs(NaN)).toBe("—");
+    expect(formatDurationMs(Infinity)).toBe("—");
+  });
+
+  it("formats sub-second values as ms", () => {
+    expect(formatDurationMs(240)).toBe("240ms");
+    expect(formatDurationMs(0)).toBe("0ms");
+    expect(formatDurationMs(999)).toBe("999ms");
+  });
+
+  it("formats sub-minute values as seconds with one decimal", () => {
+    expect(formatDurationMs(1_000)).toBe("1.0s");
+    expect(formatDurationMs(5_200)).toBe("5.2s");
+    expect(formatDurationMs(59_999)).toBe("60.0s");
+  });
+
+  it("formats minutes and seconds", () => {
+    expect(formatDurationMs(60_000)).toBe("1m 0s");
+    expect(formatDurationMs(150_000)).toBe("2m 30s");
+  });
+
+  it("formats hours and minutes for >1h", () => {
+    expect(formatDurationMs(3_600_000)).toBe("1h 0m");
+    expect(formatDurationMs(3_900_000)).toBe("1h 5m");
   });
 });

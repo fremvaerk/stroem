@@ -103,6 +103,7 @@ async fn webhook_handler(
         revision.as_deref(),
         None,
         state.config.agents.as_ref(),
+        crate::config::JobDefaults::from(state.config.as_ref()),
     )
     .await
     .context("create webhook job")

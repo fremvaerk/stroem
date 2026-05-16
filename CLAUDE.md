@@ -184,6 +184,7 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Step**: `FlowStep.timeout: Option<HumanDuration>` (max 24h) — **Task/job**: `TaskDef.timeout` (max 7d)
 - `HumanDuration` parses `"30s"`, `"5m"`, `"1h30m"`, or plain integer (seconds)
 - Server-side: recovery sweep Phase 2 (steps) + Phase 3 (jobs). Worker-side: `tokio::time::timeout`
+- **Server-level defaults**: `default_step_timeout` / `default_job_timeout` on `ServerConfig`. Applied at job-creation time: when `flow_step.timeout` or `task.timeout` is absent, the default fills in. Visible via the API and enforced by the same recovery sweep. Same caps as explicit timeouts (24h/7d). `None` = no default (existing behaviour, unbounded). Resolved into a `JobDefaults` Copy struct threaded through `create_job_for_task` / `create_child_job_for_task` / `handle_task_steps`. To opt a single task out of the global default, set the task's `timeout` to the maximum (`86400s` / `7d`).
 
 ### Conditional Flow Steps (`when`)
 - `FlowStep.when: Option<String>` — Tera expression evaluated at step promotion time
@@ -343,6 +344,11 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 
 ### WebSocket Log Streaming
 - `GET /api/jobs/{id}/logs/stream` — backfill on connect, then live via `tokio::sync::broadcast`
+
+### Task Duration Stats
+- `GET /api/workspaces/{ws}/tasks/{name}/stats?limit=50` — p50/p95/avg/min/max + recent durations + per-step breakdown over last N **completed** runs (View permission sufficient). Failed/cancelled runs excluded; `for_each` instance rows excluded from per-step breakdown.
+- Queries: `JobRepo::get_task_duration_stats` / `get_recent_durations` and `JobStepRepo::get_step_duration_stats_for_task` use Postgres `percentile_cont(...)` directly.
+- UI: `<DurationInsightsCard>` on Task Detail page; ETA / overrun pill on Job Detail page driven by `lib/eta.ts::computeEta`; per-step `p50: Xs` badges in `<StepTimeline>`.
 
 ### Worker Recovery
 - `recovery.rs` — sweeper with 4 phases: (1) stale workers → fail steps, (2) timed-out steps, (3) timed-out jobs, (4) unmatched ready steps

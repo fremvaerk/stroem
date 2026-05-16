@@ -11,17 +11,19 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { getJob, cancelJob } from "@/lib/api";
+import { getJob, getTaskStats, cancelJob } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
-import { formatTime, formatDuration } from "@/lib/formatting";
-import type { JobDetail } from "@/lib/types";
+import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
+import { computeEta } from "@/lib/eta";
+import type { JobDetail, TaskStatsResponse } from "@/lib/types";
 
 export function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   useTitle(id ? `Job: ${id.substring(0, 8)}` : "Job");
   const workerNames = useWorkerNames();
   const [job, setJob] = useState<JobDetail | null>(null);
+  const [stats, setStats] = useState<TaskStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
@@ -43,6 +45,44 @@ export function JobDetailPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Fetch task stats once per (workspace, task) — used for the ETA pill and
+  // per-step p50 comparisons. Failure is non-fatal: ETA simply won't render.
+  useEffect(() => {
+    if (!job) return;
+    let cancelled = false;
+    getTaskStats(job.workspace, job.task_name, 50)
+      .then((data) => {
+        if (!cancelled) setStats(data);
+      })
+      .catch(() => {
+        /* non-fatal */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [job?.workspace, job?.task_name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-tick once a second while running so the ETA countdown stays current
+  // without re-fetching the job. (load() already fires on a 3–8s cadence.)
+  const [tickNow, setTickNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!job || job.status !== "running") return;
+    const t = setInterval(() => setTickNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [job?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const eta = useMemo(() => {
+    if (!job) return null;
+    return computeEta({ job, stats, now: tickNow });
+  }, [job, stats, tickNow]);
+
+  const stepStatsMap = useMemo(() => {
+    if (!stats) return undefined;
+    const m = new Map<string, (typeof stats.steps)[number]>();
+    for (const s of stats.steps) m.set(s.step_name, s);
+    return m;
+  }, [stats]);
 
   // Auto-refresh while pending or running (adaptive interval)
   // A job with suspended steps has status "running", so this covers approval gates too.
@@ -94,6 +134,24 @@ export function JobDetailPage() {
               {job.task_name}
             </h1>
             <StatusBadge status={job.status} />
+            {eta?.type === "eta" && (
+              <span
+                data-testid="job-eta"
+                className="inline-flex items-center rounded-md bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100"
+                title={`Based on the p50 of recent runs (${stats?.task.sample_size ?? 0} samples).`}
+              >
+                ETA ~{formatDurationMs(eta.remainingMs)}
+              </span>
+            )}
+            {eta?.type === "overrun" && (
+              <span
+                data-testid="job-overrun"
+                className="inline-flex items-center rounded-md bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-950 dark:text-amber-100"
+                title={`Past p50 of ${formatDurationMs(eta.referenceMs)} from recent runs.`}
+              >
+                Overrun {formatDurationMs(eta.overrunMs)} vs p50
+              </span>
+            )}
           </div>
           <p className="mt-0.5 font-mono text-xs text-muted-foreground">
             {job.job_id}
@@ -301,6 +359,8 @@ export function JobDetailPage() {
                 onSelectStep={setSelectedStep}
                 workerNames={workerNames}
                 onRefresh={load}
+                stepStats={stepStatsMap}
+                now={tickNow}
               />
             </>
           )}

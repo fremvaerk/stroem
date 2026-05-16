@@ -57,6 +57,36 @@ pub struct RetentionJobInfo {
     pub created_at: DateTime<Utc>,
 }
 
+/// Aggregate duration statistics over a window of completed jobs.
+///
+/// `sample_size` is the row count behind the percentiles. Callers should treat
+/// the percentile fields as `None` (or hide them) when the sample is too small
+/// to be meaningful — recommended threshold is 5.
+///
+/// **Inclusion policy**: `source_type='rerun'` jobs are counted as independent
+/// runs because they represent real production execution durations, not
+/// duplicates of prior runs. Single retry attempts (`source_type='retry'`) are
+/// also counted — each completed retry is a real run whose duration matters for
+/// performance analysis. Jobs are filtered to `completed_at >= started_at` to
+/// exclude any rows with clock-skew anomalies.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DurationStatsRow {
+    pub sample_size: i64,
+    pub avg_ms: Option<f64>,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub min_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+}
+
+/// One historical run, used to draw a duration history sparkline.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RecentDurationRow {
+    pub job_id: Uuid,
+    pub duration_ms: f64,
+    pub completed_at: DateTime<Utc>,
+}
+
 /// Repository for job operations
 pub struct JobRepo;
 
@@ -959,5 +989,76 @@ impl JobRepo {
             counts.insert(status, count);
         }
         Ok(counts)
+    }
+
+    /// Aggregate duration statistics over the last `limit` *completed* runs of a task.
+    ///
+    /// Only includes jobs with `status = 'completed'` and non-NULL `started_at` /
+    /// `completed_at`. Returns zero-sample row (all fields `None`) when no runs
+    /// match — never returns `Err` for "no data".
+    pub async fn get_task_duration_stats(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        limit: i64,
+    ) -> Result<DurationStatsRow> {
+        let row = sqlx::query_as::<_, DurationStatsRow>(
+            "SELECT \
+               COUNT(*)::BIGINT AS sample_size, \
+               EXTRACT(EPOCH FROM AVG(d)) * 1000.0 AS avg_ms, \
+               EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY d)) * 1000.0 AS p50_ms, \
+               EXTRACT(EPOCH FROM percentile_cont(0.95) WITHIN GROUP (ORDER BY d)) * 1000.0 AS p95_ms, \
+               EXTRACT(EPOCH FROM MIN(d)) * 1000.0 AS min_ms, \
+               EXTRACT(EPOCH FROM MAX(d)) * 1000.0 AS max_ms \
+             FROM ( \
+               SELECT (completed_at - started_at) AS d \
+               FROM job \
+               WHERE workspace = $1 AND task_name = $2 \
+                 AND status = 'completed' \
+                 AND started_at IS NOT NULL AND completed_at IS NOT NULL \
+                 AND completed_at >= started_at \
+               ORDER BY completed_at DESC, job_id \
+               LIMIT $3 \
+             ) recent",
+        )
+        .bind(workspace)
+        .bind(task_name)
+        .bind(limit)
+        .fetch_one(pool)
+        .await
+        .context("get_task_duration_stats")?;
+        Ok(row)
+    }
+
+    /// Most recent N completed-run durations, newest-first.
+    ///
+    /// Companion to [`get_task_duration_stats`] for sparkline rendering. The
+    /// caller typically reverses the slice so the sparkline reads oldest→newest
+    /// left-to-right.
+    pub async fn get_recent_durations(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentDurationRow>> {
+        let rows = sqlx::query_as::<_, RecentDurationRow>(
+            "SELECT job_id, \
+                    EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000.0 AS duration_ms, \
+                    completed_at \
+             FROM job \
+             WHERE workspace = $1 AND task_name = $2 \
+               AND status = 'completed' \
+               AND started_at IS NOT NULL AND completed_at IS NOT NULL \
+               AND completed_at >= started_at \
+             ORDER BY completed_at DESC, job_id \
+             LIMIT $3",
+        )
+        .bind(workspace)
+        .bind(task_name)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .context("get_recent_durations")?;
+        Ok(rows)
     }
 }

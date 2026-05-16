@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import { PaginationControls } from "@/components/pagination-controls";
 import { LoadingSpinner } from "@/components/loading-spinner";
+import { DurationInsightsCard } from "@/components/duration-insights-card";
 import { InputFieldRow } from "@/components/task/input-field-row";
 import { SECRET_SENTINEL } from "@/components/task/constants";
 import { getTask, listJobs, executeTask } from "@/lib/api";
@@ -458,6 +459,10 @@ export function TaskDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {workspace && name && (
+        <DurationInsightsCard workspace={workspace} taskName={name} />
+      )}
 
       <Card>
         <CardHeader>

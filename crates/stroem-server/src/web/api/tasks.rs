@@ -1,4 +1,5 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
+use crate::config::JobDefaults;
 use crate::job_creator::create_job_for_task;
 use crate::state::AppState;
 use crate::web::api::get_workspace_or_error;
@@ -50,6 +51,51 @@ pub struct TaskDetail {
     pub connections: HashMap<String, Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_execute: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentDuration {
+    pub job_id: String,
+    pub duration_ms: f64,
+    pub completed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskDurationStats {
+    pub sample_size: i64,
+    pub avg_ms: Option<f64>,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub min_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+    /// Newest-first list of recent run durations (used for the sparkline).
+    pub recent: Vec<RecentDuration>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StepDurationStats {
+    pub step_name: String,
+    pub sample_size: i64,
+    pub avg_ms: Option<f64>,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub min_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskStatsResponse {
+    /// Window the stats were computed over (the request's `limit`, clamped).
+    pub window: i64,
+    pub task: TaskDurationStats,
+    pub steps: Vec<StepDurationStats>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TaskStatsQuery {
+    /// Number of most-recent completed runs to aggregate over. Clamped to [1, 500].
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +322,84 @@ pub async fn get_task(
     Ok(Json(detail))
 }
 
+/// GET /api/workspaces/:ws/tasks/:name/stats - Duration percentiles over recent completed runs
+#[tracing::instrument(skip(state, auth_user))]
+pub async fn get_task_stats(
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+    Path((ws, name)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<TaskStatsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let workspace = get_workspace_or_error(&state, &ws).await?;
+
+    let task = workspace
+        .tasks
+        .get(&name)
+        .ok_or_else(|| AppError::not_found("Task"))?;
+
+    // ACL: stats are read-only — View permission is sufficient. Deny -> 404.
+    if let Some(ref auth) = auth_user {
+        if state.acl.is_configured() {
+            let user_id = auth.user_id()?;
+            let (is_admin, groups) = load_user_acl_context(&state.pool, user_id, auth.is_admin())
+                .await
+                .context("load ACL context")?;
+            let task_path = make_task_path(task.folder.as_deref(), &name);
+            let perm = state
+                .acl
+                .evaluate(&ws, &task_path, &auth.claims.email, &groups, is_admin);
+            if matches!(perm, TaskPermission::Deny) {
+                return Err(AppError::not_found("Task"));
+            }
+        }
+    }
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 500);
+
+    let (task_stats, recent_rows, step_stats) = tokio::try_join!(
+        stroem_db::JobRepo::get_task_duration_stats(&state.pool, &ws, &name, limit),
+        stroem_db::JobRepo::get_recent_durations(&state.pool, &ws, &name, limit),
+        stroem_db::JobStepRepo::get_step_duration_stats_for_task(&state.pool, &ws, &name, limit),
+    )
+    .with_context(|| format!("get_task_stats {ws}/{name}"))?;
+
+    let recent = recent_rows
+        .into_iter()
+        .map(|r| RecentDuration {
+            job_id: r.job_id.to_string(),
+            duration_ms: r.duration_ms,
+            completed_at: r.completed_at,
+        })
+        .collect();
+
+    let response = TaskStatsResponse {
+        window: limit,
+        task: TaskDurationStats {
+            sample_size: task_stats.sample_size,
+            avg_ms: task_stats.avg_ms,
+            p50_ms: task_stats.p50_ms,
+            p95_ms: task_stats.p95_ms,
+            min_ms: task_stats.min_ms,
+            max_ms: task_stats.max_ms,
+            recent,
+        },
+        steps: step_stats
+            .into_iter()
+            .map(|s| StepDurationStats {
+                step_name: s.step_name,
+                sample_size: s.sample_size,
+                avg_ms: s.avg_ms,
+                p50_ms: s.p50_ms,
+                p95_ms: s.p95_ms,
+                min_ms: s.min_ms,
+                max_ms: s.max_ms,
+            })
+            .collect(),
+    };
+
+    Ok(Json(response))
+}
+
 /// POST /api/workspaces/:ws/tasks/:name/execute - Trigger task execution
 #[tracing::instrument(skip(state, auth_user, req))]
 pub async fn execute_task(
@@ -371,6 +495,7 @@ pub async fn execute_task(
         revision.as_deref(),
         req.source_job_id,
         state.config.agents.as_ref(),
+        JobDefaults::from(state.config.as_ref()),
     )
     .await
     .map_err(|e| {

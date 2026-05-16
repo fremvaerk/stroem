@@ -135,6 +135,56 @@ GET /api/workspaces/{ws}/tasks/{name}
 
 The `triggers` array contains all triggers targeting this task. Scheduler triggers include `next_runs` with the next 5 upcoming fire times.
 
+## Task Duration Stats
+
+```
+GET /api/workspaces/{ws}/tasks/{name}/stats?limit=50
+```
+
+Aggregated duration percentiles over the most recent **completed** runs of a task. Used by the UI to render the per-task duration insights card, the running-job ETA pill, and per-step p50 comparisons.
+
+| Parameter | Description |
+|-----------|-------------|
+| `ws` | Workspace name |
+| `name` | Task name |
+| `limit` (query) | Number of most-recent completed runs to aggregate. Default `50`, clamped to `[1, 500]`. |
+
+Failed, cancelled, and skipped runs are excluded — they would distort the distribution. `for_each` instance step rows (`step[0]`, `step[1]`, …) are also excluded from the per-step breakdown; the placeholder row already spans the whole loop, which is what you want for ETA.
+
+ACL: `View` permission is sufficient.
+
+**Response:**
+
+```json
+{
+  "window": 50,
+  "task": {
+    "sample_size": 47,
+    "avg_ms": 5230.4,
+    "p50_ms": 4800.1,
+    "p95_ms": 12100.8,
+    "min_ms": 2100.0,
+    "max_ms": 18000.0,
+    "recent": [
+      { "job_id": "...", "duration_ms": 4900.0, "completed_at": "2026-05-14T09:31:00Z" }
+    ]
+  },
+  "steps": [
+    {
+      "step_name": "build",
+      "sample_size": 47,
+      "avg_ms": 1900.0,
+      "p50_ms": 1820.0,
+      "p95_ms": 4100.0,
+      "min_ms": 800.0,
+      "max_ms": 6200.0
+    }
+  ]
+}
+```
+
+All percentile and aggregate fields are `null` when `sample_size` is `0`. Clients should treat percentiles as untrustworthy below ~5 samples and surface "insufficient data" instead.
+
 ## Execute Task
 
 ```

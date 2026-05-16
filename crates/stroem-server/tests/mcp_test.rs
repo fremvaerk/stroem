@@ -12,8 +12,8 @@ use stroem_common::models::workflow::{
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, UserRepo, WorkerRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
-    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, McpConfig, RetentionConfig,
-    ServerConfig, WorkspaceSourceDef,
+    AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, McpConfig,
+    RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::job_creator::create_job_for_task;
 use stroem_server::log_storage::LogStorage;
@@ -293,6 +293,8 @@ async fn setup_with_mcp() -> Result<(
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -344,6 +346,8 @@ async fn setup_mcp_disabled() -> Result<(
         mcp: None, // MCP disabled
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -404,6 +408,8 @@ async fn setup_with_auth_and_mcp() -> Result<(
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     // Seed initial user
@@ -989,6 +995,7 @@ async fn test_mcp_get_job_status_includes_revision() -> Result<()> {
         Some(revision),
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -1042,6 +1049,7 @@ async fn test_mcp_list_jobs_includes_revision() -> Result<()> {
         Some(revision),
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -1108,6 +1116,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -1168,6 +1177,8 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         mcp: Some(McpConfig { enabled: true }),
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);

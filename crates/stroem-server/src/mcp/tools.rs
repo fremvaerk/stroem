@@ -406,6 +406,7 @@ impl StromMcpHandler {
             revision.as_deref(),
             None,
             self.state.config.agents.as_ref(),
+            crate::config::JobDefaults::from(self.state.config.as_ref()),
         )
         .await
         .map_err(|e| internal_err(format!("Failed to create job: {e}")))?;

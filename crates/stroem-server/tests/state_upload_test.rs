@@ -160,6 +160,8 @@ async fn build_test_app_inner(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mut workspace = WorkspaceConfig::new();
@@ -706,6 +708,8 @@ async fn build_test_app_with_auth(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mut workspace = WorkspaceConfig::new();

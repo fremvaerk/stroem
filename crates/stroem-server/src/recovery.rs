@@ -455,6 +455,8 @@ mod tests {
             mcp: None,
             agents: None,
             state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
         };
 
         let ws_config = WorkspaceConfig::new();

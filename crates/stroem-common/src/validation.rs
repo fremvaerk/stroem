@@ -2,6 +2,17 @@ use crate::dag;
 use crate::models::workflow::{ActionDef, WorkspaceConfig};
 use anyhow::{bail, Result};
 
+/// Maximum allowed `FlowStep.timeout` (24h, in seconds).
+///
+/// Also the upper bound for `ServerConfig.default_step_timeout`. Mirrored in
+/// the server-side config validation so the two checks can't drift.
+pub const MAX_STEP_TIMEOUT_SECS: u64 = 86_400;
+
+/// Maximum allowed `TaskDef.timeout` (7d, in seconds).
+///
+/// Also the upper bound for `ServerConfig.default_job_timeout`.
+pub const MAX_JOB_TIMEOUT_SECS: u64 = 604_800;
+
 /// Validates a workflow config and returns list of warnings.
 /// Errors are returned as Err.
 ///
@@ -215,14 +226,15 @@ fn validate_workflow_config_inner(
                 ));
             }
 
-            // Validate step timeout (max 24h = 86400s)
+            // Validate step timeout (cap is shared with ServerConfig.default_step_timeout)
             if let Some(ref timeout) = step.timeout {
-                if timeout.as_secs() > 86400 {
+                if timeout.as_secs() > MAX_STEP_TIMEOUT_SECS {
                     bail!(
-                        "Task '{}' step '{}' timeout {}s exceeds maximum of 86400s (24h)",
+                        "Task '{}' step '{}' timeout {}s exceeds maximum of {}s (24h)",
                         task_name,
                         step_name,
-                        timeout.as_secs()
+                        timeout.as_secs(),
+                        MAX_STEP_TIMEOUT_SECS
                     );
                 }
             }
@@ -245,13 +257,14 @@ fn validate_workflow_config_inner(
             }
         }
 
-        // Validate task/job timeout (max 7d = 604800s)
+        // Validate task/job timeout (cap is shared with ServerConfig.default_job_timeout)
         if let Some(ref timeout) = task.timeout {
-            if timeout.as_secs() > 604800 {
+            if timeout.as_secs() > MAX_JOB_TIMEOUT_SECS {
                 bail!(
-                    "Task '{}' timeout {}s exceeds maximum of 604800s (7d)",
+                    "Task '{}' timeout {}s exceeds maximum of {}s (7d)",
                     task_name,
-                    timeout.as_secs()
+                    timeout.as_secs(),
+                    MAX_JOB_TIMEOUT_SECS
                 );
             }
         }

@@ -131,6 +131,7 @@ pub async fn fire_hooks(
         "on_error"
     };
 
+    let defaults = crate::config::JobDefaults::from(state.config.as_ref());
     for (i, hook) in hooks.iter().enumerate() {
         let source_id = job.job_id.to_string();
 
@@ -142,6 +143,7 @@ pub async fn fire_hooks(
             &ctx_value,
             &source_id,
             job.revision.as_deref(),
+            defaults,
         )
         .await
         {
@@ -227,6 +229,7 @@ pub async fn fire_suspended_hooks(
     };
 
     let source_id = job.job_id.to_string();
+    let defaults = crate::config::JobDefaults::from(state.config.as_ref());
     for (i, hook) in hooks.iter().enumerate() {
         if let Err(e) = fire_single_hook(
             &state.pool,
@@ -236,6 +239,7 @@ pub async fn fire_suspended_hooks(
             &ctx_value,
             &source_id,
             job.revision.as_deref(),
+            defaults,
         )
         .await
         {
@@ -323,6 +327,7 @@ async fn build_hook_context(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
@@ -331,6 +336,7 @@ async fn fire_single_hook(
     ctx_value: &serde_json::Value,
     source_id: &str,
     revision: Option<&str>,
+    defaults: crate::config::JobDefaults,
 ) -> anyhow::Result<()> {
     // Note: `state` is not available here — fire_initial_suspended_hooks is called
     // by the top-level callers of create_job_for_task which do have AppState.
@@ -380,6 +386,7 @@ async fn fire_single_hook(
             revision,
             None, // source_job_id: hooks never re-run a specific job
             None, // agents_config not available in hook context; orchestrator dispatches agents
+            defaults,
         )
         .await
         .context("Failed to create hook task job")?;

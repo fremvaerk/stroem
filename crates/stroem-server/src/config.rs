@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use stroem_common::duration::HumanDuration;
+use stroem_common::validation::{MAX_JOB_TIMEOUT_SECS, MAX_STEP_TIMEOUT_SECS};
 
 /// Database configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +351,43 @@ pub struct ServerConfig {
     pub agents: Option<AgentsConfig>,
     /// Task state snapshot configuration (optional — defaults to log archive backend)
     pub state_storage: Option<StateStorageConfig>,
+    /// Default step timeout applied when a `FlowStep` has no `timeout` field.
+    /// Capped at the same 24h limit as per-step timeouts. `None` = no default
+    /// (existing behaviour: steps without timeouts run unbounded).
+    #[serde(default)]
+    pub default_step_timeout: Option<HumanDuration>,
+    /// Default job timeout applied when a `TaskDef` has no `timeout` field.
+    /// Capped at the same 7d limit as per-task timeouts. `None` = no default.
+    #[serde(default)]
+    pub default_job_timeout: Option<HumanDuration>,
+}
+
+/// Resolved timeout defaults passed into job creation.
+///
+/// Bundles the two `Option<i32>` values so we don't have to thread two more
+/// arguments through every `create_job_for_task` call site. `Copy` + `Default`
+/// keep test callers terse: `JobDefaults::default()`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JobDefaults {
+    /// Default step timeout in seconds. `None` = no default (run unbounded).
+    pub step_timeout_secs: Option<i32>,
+    /// Default job timeout in seconds. `None` = no default.
+    pub job_timeout_secs: Option<i32>,
+}
+
+impl From<&ServerConfig> for JobDefaults {
+    /// Conversion is fallible only at the `i32::try_from` cast, which
+    /// validation guarantees fits (caps are well below `i32::MAX`).
+    fn from(config: &ServerConfig) -> Self {
+        Self {
+            step_timeout_secs: config.default_step_timeout.map(|d| {
+                i32::try_from(d.as_secs()).expect("default_step_timeout validated to fit i32")
+            }),
+            job_timeout_secs: config.default_job_timeout.map(|d| {
+                i32::try_from(d.as_secs()).expect("default_job_timeout validated to fit i32")
+            }),
+        }
+    }
 }
 
 /// Agent provider configuration types — defined in `stroem-agent` and re-exported here.
@@ -384,6 +423,28 @@ impl ServerConfig {
         if let Some(days) = self.retention.job_days {
             if days < 1 {
                 anyhow::bail!("retention.job_days must be at least 1");
+            }
+        }
+        // Zero is already rejected by HumanDuration's deserializer, so we only
+        // need to enforce the upper bounds. The cap constants live in
+        // `stroem-common::validation` and are shared with the per-step /
+        // per-task timeout checks so the two paths can't drift.
+        if let Some(ref t) = self.default_step_timeout {
+            if t.as_secs() > MAX_STEP_TIMEOUT_SECS {
+                anyhow::bail!(
+                    "default_step_timeout {}s exceeds maximum of {}s (24h)",
+                    t.as_secs(),
+                    MAX_STEP_TIMEOUT_SECS
+                );
+            }
+        }
+        if let Some(ref t) = self.default_job_timeout {
+            if t.as_secs() > MAX_JOB_TIMEOUT_SECS {
+                anyhow::bail!(
+                    "default_job_timeout {}s exceeds maximum of {}s (7d)",
+                    t.as_secs(),
+                    MAX_JOB_TIMEOUT_SECS
+                );
             }
         }
         if let Some(ref agents) = self.agents {
@@ -1947,5 +2008,136 @@ agents:
             "Error should mention the bad type, got: {}",
             msg
         );
+    }
+
+    // ───── default_step_timeout / default_job_timeout ─────────────────────
+
+    fn make_minimal_config_with_field(extra: &str) -> String {
+        format!(
+            r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+{extra}
+"#
+        )
+    }
+
+    #[test]
+    fn test_default_timeouts_absent_yields_none() {
+        let yaml = make_minimal_config_with_field("");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.default_step_timeout.is_none());
+        assert!(config.default_job_timeout.is_none());
+        assert!(config.validate().is_ok());
+        let defaults = JobDefaults::from(&config);
+        assert!(defaults.step_timeout_secs.is_none());
+        assert!(defaults.job_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn test_default_timeouts_parsed_from_human_duration() {
+        let yaml = make_minimal_config_with_field(
+            "default_step_timeout: \"5m\"\ndefault_job_timeout: \"2h\"\n",
+        );
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let defaults = JobDefaults::from(&config);
+        assert_eq!(defaults.step_timeout_secs, Some(300));
+        assert_eq!(defaults.job_timeout_secs, Some(7200));
+    }
+
+    #[test]
+    fn test_default_step_timeout_at_max_24h_passes() {
+        let yaml = make_minimal_config_with_field("default_step_timeout: \"24h\"\n");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_default_step_timeout_over_24h_fails() {
+        let yaml = make_minimal_config_with_field("default_step_timeout: \"25h\"\n");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("default_step_timeout"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_job_timeout_at_max_7d_passes() {
+        // HumanDuration doesn't recognise "d" — operators specify days via h or integer.
+        let yaml = make_minimal_config_with_field("default_job_timeout: 604800\n");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_default_job_timeout_over_7d_fails() {
+        let yaml = make_minimal_config_with_field("default_job_timeout: 604801\n");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("default_job_timeout"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_default_step_timeout_zero_rejected_at_parse() {
+        // 0 is rejected by HumanDuration's deserializer before validate() is even called.
+        let yaml = make_minimal_config_with_field("default_step_timeout: 0\n");
+        let result: Result<ServerConfig, _> = serde_yaml::from_str(&yaml);
+        assert!(result.is_err(), "0 should fail to deserialize");
+    }
+
+    #[test]
+    fn test_default_job_timeout_zero_rejected_at_parse() {
+        // Mirror of the step-side test: HumanDuration rejects 0 on the job
+        // field too, before validate() is called. Independent confirmation
+        // that the job path is wired through the same deserializer.
+        let yaml = make_minimal_config_with_field("default_job_timeout: 0\n");
+        let result: Result<ServerConfig, _> = serde_yaml::from_str(&yaml);
+        assert!(result.is_err(), "0 should fail to deserialize");
+    }
+
+    #[test]
+    fn test_only_step_default_converts_correctly() {
+        // Asymmetric config: only step default is set. Guards against a future
+        // bug where the From impl couples the two fields.
+        let yaml = make_minimal_config_with_field("default_step_timeout: \"10m\"\n");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let defaults = JobDefaults::from(&config);
+        assert_eq!(defaults.step_timeout_secs, Some(600));
+        assert_eq!(defaults.job_timeout_secs, None);
+    }
+
+    #[test]
+    fn test_only_job_default_converts_correctly() {
+        // Mirror: only job default is set.
+        let yaml = make_minimal_config_with_field("default_job_timeout: \"1h\"\n");
+        let config: ServerConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.validate().is_ok());
+        let defaults = JobDefaults::from(&config);
+        assert_eq!(defaults.step_timeout_secs, None);
+        assert_eq!(defaults.job_timeout_secs, Some(3600));
+    }
+
+    #[test]
+    fn test_job_defaults_default_is_none() {
+        let d = JobDefaults::default();
+        assert!(d.step_timeout_secs.is_none());
+        assert!(d.job_timeout_secs.is_none());
     }
 }

@@ -840,6 +840,7 @@ pub async fn agent_task_tool(
         job_id,
         &step_name,
         job.revision.as_deref(),
+        crate::config::JobDefaults::from(state.config.as_ref()),
     )
     .await
     .context("create child job for task tool")?;

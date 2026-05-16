@@ -8,9 +8,9 @@ import {
   Repeat,
 } from "lucide-react";
 import { StepDetail } from "@/components/step-detail";
-import { formatDuration } from "@/lib/formatting";
+import { formatDuration, formatDurationMs } from "@/lib/formatting";
 import { statusIcons } from "@/lib/status-icons";
-import type { JobStep } from "@/lib/types";
+import type { JobStep, StepDurationStats } from "@/lib/types";
 import { cn, formatActionName } from "@/lib/utils";
 
 interface StepTimelineProps {
@@ -20,6 +20,10 @@ interface StepTimelineProps {
   onSelectStep: (stepName: string | null) => void;
   workerNames?: Map<string, string>;
   onRefresh?: () => void;
+  /** Per-step duration stats keyed by step_name. Optional. */
+  stepStats?: Map<string, StepDurationStats>;
+  /** Current epoch ms — passed in so child overrun calculations stay pure. */
+  now?: number;
 }
 
 interface StepRowProps {
@@ -32,6 +36,8 @@ interface StepRowProps {
   /** When true, renders with indentation (instance step inside a loop group) */
   indented?: boolean;
   onRefresh?: () => void;
+  stats?: StepDurationStats;
+  now?: number;
 }
 
 function StepRow({
@@ -43,7 +49,25 @@ function StepRow({
   isLast,
   indented,
   onRefresh,
+  stats,
+  now,
 }: StepRowProps) {
+  // Compute overrun for currently-running steps where we have stats.
+  // `now` is supplied by the parent (kept pure for render); if absent we skip.
+  const runningOverrunMs =
+    now != null && stats?.p50_ms != null && step.status === "running" && step.started_at
+      ? now - new Date(step.started_at).getTime() - stats.p50_ms
+      : null;
+  const isOverrun = runningOverrunMs != null && runningOverrunMs > 0;
+
+  // Determine whether a retry-at badge should appear. When `now` is provided
+  // (the normal path — ticker-driven), compare against it. When absent (SSR /
+  // tests without a ticker), skip the comparison to stay render-pure.
+  const isRetryPending =
+    step.status === "ready" &&
+    step.retry_at != null &&
+    now != null &&
+    new Date(step.retry_at).getTime() > now;
   return (
     <div id={`step-${step.step_name}`}>
       <div
@@ -54,9 +78,7 @@ function StepRow({
           step.retry_attempt > 0 && step.max_retries != null
             ? `attempt ${step.retry_attempt + 1} of ${step.max_retries + 1}`
             : null,
-          step.status === "ready" && step.retry_at && new Date(step.retry_at) > new Date()
-            ? "waiting for retry"
-            : null,
+          isRetryPending ? "waiting for retry" : null,
         ].filter(Boolean).join(", ")}
         aria-expanded={isExpanded}
         className={cn(
@@ -119,7 +141,7 @@ function StepRow({
                 retry: {step.max_retries}
               </span>
             )}
-            {step.status === "ready" && step.retry_at && new Date(step.retry_at) > new Date() && (
+            {isRetryPending && (
               <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
                 waiting for retry
               </span>
@@ -134,8 +156,22 @@ function StepRow({
               </Link>
             )}
             {(step.started_at || step.completed_at) && (
-              <span className="ml-auto font-mono text-xs text-muted-foreground">
+              <span
+                className={cn(
+                  "ml-auto font-mono text-xs",
+                  isOverrun ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground",
+                )}
+              >
                 {formatDuration(step.started_at, step.completed_at)}
+              </span>
+            )}
+            {stats?.p50_ms != null && (
+              <span
+                className="font-mono text-[10px] text-muted-foreground/70"
+                title={`p50 ${formatDurationMs(stats.p50_ms)} / p95 ${formatDurationMs(stats.p95_ms)} over ${stats.sample_size} runs`}
+                data-testid={`step-p50-${step.step_name}`}
+              >
+                p50 {formatDurationMs(stats.p50_ms)}
               </span>
             )}
           </div>
@@ -323,6 +359,8 @@ export function StepTimeline({
   onSelectStep,
   workerNames,
   onRefresh,
+  stepStats,
+  now,
 }: StepTimelineProps) {
   // User-toggled loop expansion state, keyed by placeholder step name
   const [expandedLoops, setExpandedLoops] = useState<Record<string, boolean>>({});
@@ -351,22 +389,26 @@ export function StepTimeline({
 
   // Separate placeholder steps (loop_source === null but loop_total !== null)
   // from instance steps (loop_source !== null).
-  const instancesBySource = new Map<string, JobStep[]>();
-
-  for (const step of steps) {
-    if (step.loop_source !== null) {
-      const existing = instancesBySource.get(step.loop_source) ?? [];
-      existing.push(step);
-      instancesBySource.set(step.loop_source, existing);
+  // Only `steps` is the input — `now` does not affect grouping — so we can
+  // memoize this expensive Map rebuild independently of the 1s ticker.
+  const { instancesBySource, topLevelSteps } = useMemo(() => {
+    const map = new Map<string, JobStep[]>();
+    for (const step of steps) {
+      if (step.loop_source !== null) {
+        const existing = map.get(step.loop_source) ?? [];
+        existing.push(step);
+        map.set(step.loop_source, existing);
+      }
     }
-  }
-  // Sort instances by loop_index so they render in order regardless of API order
-  for (const arr of instancesBySource.values()) {
-    arr.sort((a, b) => (a.loop_index ?? 0) - (b.loop_index ?? 0));
-  }
-
-  // Top-level steps: not an instance step themselves.
-  const topLevelSteps = steps.filter((s) => s.loop_source === null);
+    // Sort instances by loop_index so they render in order regardless of API order
+    for (const arr of map.values()) {
+      arr.sort((a, b) => (a.loop_index ?? 0) - (b.loop_index ?? 0));
+    }
+    return {
+      instancesBySource: map,
+      topLevelSteps: steps.filter((s) => s.loop_source === null),
+    };
+  }, [steps]);
 
   return (
     <div className="space-y-0">
@@ -419,6 +461,8 @@ export function StepTimeline({
             workerNames={workerNames}
             isLast={isLast}
             onRefresh={onRefresh}
+            stats={stepStats?.get(step.step_name)}
+            now={now}
           />
         );
       })}

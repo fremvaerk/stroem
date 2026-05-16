@@ -228,6 +228,8 @@ impl TestEnv {
             mcp: None,
             agents: None,
             state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
         };
 
         // 4. Load workspaces using real FolderSource

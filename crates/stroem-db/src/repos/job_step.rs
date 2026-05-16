@@ -123,6 +123,22 @@ pub struct WorkerStepRow {
     pub job_status: String,
 }
 
+/// Per-step duration aggregates over a window of completed runs of a task.
+///
+/// `for_each` instance rows (`loop_source IS NOT NULL`) are excluded — the
+/// placeholder row's `completed_at - started_at` already spans the whole loop,
+/// which is what callers want for ETA estimation.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StepDurationStatsRow {
+    pub step_name: String,
+    pub sample_size: i64,
+    pub avg_ms: Option<f64>,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub min_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+}
+
 /// Repository for job step operations
 pub struct JobStepRepo;
 
@@ -1054,6 +1070,48 @@ impl JobStepRepo {
                 .await
                 .context("Failed to count steps by worker")?;
         Ok(count)
+    }
+
+    /// Per-step duration percentiles aggregated over the last `job_limit`
+    /// completed runs of a task. Ordered by the step's average start-time within
+    /// the job (best-effort flow order). Excludes `for_each` instance rows.
+    pub async fn get_step_duration_stats_for_task(
+        pool: &PgPool,
+        workspace: &str,
+        task_name: &str,
+        job_limit: i64,
+    ) -> Result<Vec<StepDurationStatsRow>> {
+        let rows = sqlx::query_as::<_, StepDurationStatsRow>(
+            "WITH recent_jobs AS ( \
+               SELECT job_id, started_at AS job_started_at FROM job \
+               WHERE workspace = $1 AND task_name = $2 AND status = 'completed' \
+                 AND started_at IS NOT NULL \
+               ORDER BY completed_at DESC, job_id \
+               LIMIT $3 \
+             ) \
+             SELECT s.step_name, \
+                    COUNT(*)::BIGINT AS sample_size, \
+                    EXTRACT(EPOCH FROM AVG(s.completed_at - s.started_at)) * 1000.0 AS avg_ms, \
+                    EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY s.completed_at - s.started_at)) * 1000.0 AS p50_ms, \
+                    EXTRACT(EPOCH FROM percentile_cont(0.95) WITHIN GROUP (ORDER BY s.completed_at - s.started_at)) * 1000.0 AS p95_ms, \
+                    EXTRACT(EPOCH FROM MIN(s.completed_at - s.started_at)) * 1000.0 AS min_ms, \
+                    EXTRACT(EPOCH FROM MAX(s.completed_at - s.started_at)) * 1000.0 AS max_ms \
+             FROM job_step s \
+             JOIN recent_jobs r ON s.job_id = r.job_id \
+             WHERE s.status = 'completed' \
+               AND s.started_at IS NOT NULL AND s.completed_at IS NOT NULL \
+               AND s.completed_at >= s.started_at \
+               AND s.loop_source IS NULL \
+             GROUP BY s.step_name \
+             ORDER BY AVG(EXTRACT(EPOCH FROM (s.started_at - r.job_started_at))) ASC",
+        )
+        .bind(workspace)
+        .bind(task_name)
+        .bind(job_limit)
+        .fetch_all(pool)
+        .await
+        .context("get_step_duration_stats_for_task")?;
+        Ok(rows)
     }
 }
 

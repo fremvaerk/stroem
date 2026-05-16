@@ -175,6 +175,8 @@ mod tests {
             mcp: None,
             agents: None,
             state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
         };
         let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
         let log_storage = LogStorage::new(log_dir);

@@ -51,7 +51,7 @@ Last updated: 2026-03-13.
 - [ ] No heartbeat failure → worker re-registration logic
 - [x] Store workspace revision (git SHA / folder content hash) on job creation — enables linking jobs to the exact config/scripts version, diffing between runs, and detecting stale workers running old code
 - [x] Move agent dispatch from server to workers — workers now claim agent steps, execute LLM calls, and manage MCP connections. Server only validates provider names. stroem-agent crate holds shared dispatch logic.
-- [ ] No default timeout for running jobs/steps — a stuck pod or script runs forever if no explicit `timeout` is set. Add server-level `default_step_timeout` / `default_job_timeout` config that applies when tasks/steps don't specify their own.
+- [x] No default timeout for running jobs/steps — added `default_step_timeout` / `default_job_timeout` to `ServerConfig` (capped at 24h / 7d). Resolved into a `JobDefaults` Copy struct threaded through `create_job_for_task` / `create_child_job_for_task` / `handle_task_steps`. Applied at job-creation time so the DB row carries the effective timeout (visible via API, enforced by the existing recovery sweep). Hooks, retries, and `type: task` sub-jobs all inherit. Explicit `flow_step.timeout` / `task.timeout` wins. `None` = no default (existing behaviour). 7 unit tests + 5 integration tests.
 - [x] Folder workspace revision pinning — server-side TarballCache keyed by (workspace, revision), workers download pinned revision via `?revision=` query param, ClaimResponse includes job revision, stale cache entries cleaned up during retention sweep
 
 ## Simplification (from codex review 2026-03-17)
@@ -139,7 +139,7 @@ Last updated: 2026-03-13.
 - [x] Both `tw-animate-css` and `tailwindcss-animate` installed — remove unused one
 - [x] No sourcemap in production builds
 - [x] `vite.config.ts` suppresses proxy errors silently
-- [ ] Job duration insights: show average/p50/p95 duration for a task and per-step, estimated time remaining on running jobs and individual steps, and a duration history chart on the job detail page (with per-step breakdown)
+- [x] Job duration insights: show average/p50/p95 duration for a task and per-step, estimated time remaining on running jobs and individual steps, and a duration history chart on the job detail page (with per-step breakdown) — `GET /api/workspaces/{ws}/tasks/{name}/stats` returns aggregates + per-step breakdown + recent durations; UI shows a `<DurationInsightsCard>` on Task Detail (sparkline + p50/p95 chips + per-step table), an ETA / overrun pill on running jobs in Job Detail, and `p50: Xs` badges on each step in `<StepTimeline>`. ETA algorithm lives in `ui/src/lib/eta.ts`.
 
 ## CLI: `stroem run` (local task execution, 2026-03-25)
 
@@ -1112,3 +1112,89 @@ Findings from parallel review agents (code-reviewer + security-auditor + databas
 - Pruning correctness: the code uses sequential statements (not CTEs). PostgreSQL sees prior-statement effects across a transaction, so the prune `ORDER BY created_at DESC OFFSET max_snapshots` correctly preserves the newly-inserted row (it's the newest by `created_at`).
 - Transaction ordering: archive write → DB tx → compensating storage.delete on tx failure is correct. Compensating path fires for `pool.begin()` failures as well.
 - `ON DELETE SET NULL` retention interaction: when the job-retention sweeper prunes a synthetic upload job, state rows become orphaned with `job_id = NULL`. Existing readers in `TaskStateRepo` / `WorkspaceStateRepo` already type `job_id` as `Option<Uuid>`. No regression.
+
+## Review: Job Duration Insights (2026-05-16)
+
+### Important
+
+- [x] Step-stats ordering is broken across day boundaries — `crates/stroem-db/src/repos/job_step.rs`. **Fixed**: CTE now selects `started_at AS job_started_at` and `ORDER BY AVG(EXTRACT(EPOCH FROM (s.started_at - r.job_started_at))) ASC`.
+- [x] Missing composite index for the stats hot path. **Fixed**: added migration `crates/stroem-db/migrations/036_job_duration_index.sql` with partial index `idx_job_task_completed_at` covering all three hot-path queries.
+- [x] `instancesBySource` rebuilt every render in `ui/src/components/step-timeline.tsx`. **Fixed**: wrapped Map construction + `topLevelSteps` filter in `useMemo(() => …, [steps])` so the 1s ETA ticker no longer triggers the rebuild.
+- [x] Three sequential DB round-trips per request — `crates/stroem-server/src/web/api/tasks.rs`. **Fixed**: parallelized with `tokio::try_join!`; combined context string includes `{ws}/{name}`.
+- [x] Negative durations from clock skew not defended. **Fixed**: added `AND completed_at >= started_at` to `get_task_duration_stats` inner subquery (`job.rs`), `get_recent_durations` (`job.rs`), and `get_step_duration_stats_for_task` WHERE clause (`job_step.rs`).
+
+### Minor
+
+- [x] No `ORDER BY` tie-breaker. **Fixed**: added `, job_id` as secondary sort to all three queries (`job.rs` get_task_duration_stats, get_recent_durations; `job_step.rs` recent_jobs CTE).
+- [x] Sparkline `xStep` recomputed in render loop. **Fixed**: `xStep` is now returned from the `useMemo` and reused inside the circle map.
+- [x] `sparkValues` NaN guard. **Fixed**: `duration-insights-card.tsx` adds `.filter((v): v is number => v != null)` after `.map`.
+- [x] `new Date(step.retry_at) > new Date()` in render — `step-timeline.tsx`. **Fixed**: derived `isRetryPending` as a pre-render boolean comparing `step.retry_at` against the threaded `now` prop; the badge is hidden when `now` is absent rather than falling back to an impure call.
+- [x] Rerun inclusion policy. **Fixed**: rustdoc paragraph added to `DurationStatsRow` (`crates/stroem-db/src/repos/job.rs`) noting `rerun` + `retry` jobs are counted as independent runs and that the `completed_at >= started_at` filter is in effect.
+- [x] `.context()` strings include workspace+task. **Fixed**: the combined `tokio::try_join!` error in the handler carries `format!("get_task_stats {ws}/{name}")`. Repo-level context strings intentionally left bare so each caller adds its own.
+- [ ] No `#[serde(deny_unknown_fields)]` on `TaskStatsQuery`. **Deferred** — consistent with codebase; not exploitable. Skip unless we standardise across all query types.
+
+### Missing Tests — DB integration (added to `crates/stroem-db/tests/integration_test.rs`)
+
+- [x] `test_task_duration_stats_single_sample` — one completed job, all aggregates equal the single value
+- [x] `test_task_duration_stats_zero_ms_duration` — `started_at == completed_at`; verifies `percentile_cont` returns 0.0 and `sample_size == 1`
+- [x] `test_step_duration_stats_includes_for_each_placeholder` — placeholder included with loop-spanning duration; instances excluded
+- [x] `test_recent_durations_tie_breaker_deterministic` — three jobs with identical `completed_at`; two consecutive calls return identical order
+- [x] `test_step_duration_stats_handles_partial_coverage` — step present in only the most recent of three jobs; `sample_size == 1`
+- [x] `test_task_duration_stats_excludes_negative_duration` — clock-skew anomaly excluded; `sample_size == 0`
+
+### Missing Tests — Server handler (added to `crates/stroem-server/tests/duration_stats_test.rs`)
+
+- [x] `test_stats_nonexistent_workspace_returns_404`
+- [x] `test_stats_missing_task_returns_404`
+- [x] `test_stats_zero_completed_runs` — `sample_size: 0`, all aggregates null
+- [x] `test_stats_limit_zero_clamped` — `?limit=0` → window=1
+- [x] `test_stats_limit_large_clamped` — `?limit=9999` → window=500
+- [x] `test_stats_limit_negative_clamped` — `?limit=-5` → window=1
+- [x] `test_stats_limit_non_numeric_returns_400` — `?limit=abc` → 400
+- [ ] ACL Deny → 404 and ACL View → 200 — **not added**; the existing handler-test infrastructure doesn't yet stand up an ACL-configured server. Tracked under "Integration tests for ACL enforcement (handler-level with DB)" in the ACL section above (line 316).
+
+### Missing Tests — Frontend (added to `ui/src/components/__tests__/`)
+
+- [x] `sparkline.test.tsx` (5 tests) — empty array, single value, all-identical (verifies y is at the top with t=1.0), p95 > all data, aria-label content
+- [x] `duration-insights-card.test.tsx` (8 tests) — loading, error, insufficient-data, boundary at `sample_size === minSample`, happy path, race condition on unmount, stale-fetch ignore on props change
+- [x] `step-timeline.test.tsx` (6 tests) — p50 badge present/absent/missing-from-map; for_each instance rows get no badge; overrun coloring on/off
+- [ ] `JobDetailPage` ETA pill state transitions — **not added**; page too heavy to render in isolation under jsdom (depends on react-router, auth context, WebSocket hook). The interaction is covered indirectly via the StepTimeline and DurationInsightsCard tests.
+- [ ] Playwright E2E `duration-insights.spec.ts` — **not added**; E2E harness has no seeded fixtures pre-populating 5+ completed runs, and the `getTaskStats` endpoint is real-DB-backed with no mock path in the Playwright context. Unit + integration coverage via Vitest mocks is the appropriate boundary.
+
+### Cleared by review (non-issues)
+
+- Sparkline "all-identical values" denominator-of-1 concern raised by QA — `min` is hardcoded to `0`, so `(max - 0) || 1` ≥ 1 and points map correctly to `t = 1.0`. Not a bug.
+- SQL injection on `ws` / `name` — fully parameterized via `.bind()` in all three queries. No string interpolation of user input into SQL.
+- ACL flow on `get_task_stats` matches sibling `get_task` (Deny→404, View→200). Consistent with the rest of the API and read-only semantics.
+- Workspace existence leak via differing 404 messages — pre-existing across the codebase (`get_task`, `execute_task`); not introduced here.
+- Per-worker rate limiting not specific to this endpoint — global protected-routes rate limiting is a platform-wide concern, not blocking this feature.
+- `f64` precision for durations — 2^53 ms ≈ 285k years; no realistic loss.
+- Concurrent-read safety under `READ COMMITTED` — analytical read-only `SELECT`s; no isolation upgrade warranted.
+
+## Review: Default Step/Job Timeouts (2026-05-16)
+
+Three review agents (rust code review, rust patterns, qa-expert) checked the feature end-to-end. No critical or important findings. All polish items + missing tests now resolved.
+
+### Minor (all fixed)
+- [x] `JobDefaults::from(...)` recomputed inside the `fire_hooks` loop — hoisted once before the loop in both `fire_hooks` and `fire_suspended_hooks` (`crates/stroem-server/src/hooks.rs`).
+- [x] Duplicate `JobDefaults::from_config` inherent method + `From<&ServerConfig>` impl — dropped `from_config`, inlined body into the trait impl (`crates/stroem-server/src/config.rs`).
+- [x] Magic numbers `86400` / `604800` duplicated between `config.rs` validation and `stroem-common/src/validation.rs` — extracted `MAX_STEP_TIMEOUT_SECS` / `MAX_JOB_TIMEOUT_SECS` constants in `stroem-common::validation`; both call sites reference them.
+
+### Missing tests (all added)
+- [x] `test_only_step_default_set_job_timeout_is_null` — asymmetric defaults assert both columns
+- [x] `test_explicit_larger_task_timeout_beats_smaller_default` — opt-out via explicit > default; catches `min()` regressions
+- [x] `test_explicit_smaller_step_timeout_beats_larger_default` — explicit < default; catches `max()` regressions
+- [x] `test_for_each_instances_inherit_step_default` — verify for_each instance rows inherit the default transitively from the placeholder
+- [x] `test_retry_job_inherits_defaults` — exercise the retry call site at `job_recovery.rs:847`
+- [x] `test_only_step_default_converts_correctly` — config unit test for partial JobDefaults conversion
+- [x] `test_only_job_default_converts_correctly` — mirror for the job side
+- [x] `test_default_job_timeout_zero_rejected_at_parse` — mirror the existing step-side zero-rejection test
+
+### Cleared by review (non-issues)
+- All 9 production call sites correctly thread `JobDefaults::from(state.config.as_ref())`. No `JobDefaults::default()` leakage in prod.
+- `.expect("validated to fit i32")` paths are unreachable in production (caps are well below `i32::MAX`; `load_config` runs `validate()` before any production caller).
+- HumanDuration rejects zero at parse-time, so `.or()` semantics are correct (`Some(0)` is impossible).
+- No DB migration needed — `timeout_secs` columns predate the feature.
+- No borrow-across-await: `state.config.as_ref()` produces a `Copy` value synchronously before any `.await`.
+- Single-step (non-task) hook jobs intentionally do NOT inherit `default_step_timeout`; consistent with existing design where hook steps never had per-step timeouts. Task-type hooks go through `create_job_for_task` and do inherit.
+- Operator UX risk of tiny defaults (`1s`) — addressed by the existing docs noting the opt-out via the per-task max value.

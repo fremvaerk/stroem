@@ -243,6 +243,20 @@ When a task times out, all running steps are cancelled and the job is marked as 
 
 Both timeouts are enforced server-side by the recovery sweeper (periodic check) and, for step timeouts, also client-side by the worker process for immediate enforcement.
 
+#### Server-level defaults
+
+Operators can set fleet-wide defaults in `server-config.yaml` so a forgotten timeout never leaves a stuck pod running forever:
+
+```yaml
+# server-config.yaml
+default_step_timeout: 30m   # applied to every step without an explicit `timeout`
+default_job_timeout: 4h     # applied to every task without an explicit `timeout`
+```
+
+The default fills in at **job-creation time** — the resolved value is written to the DB row and visible via the API, so operators can see exactly which timeout each running job is bound by. An explicit `task.timeout` or `flow_step.timeout` always wins, so individual tasks can override the default in either direction. The same defaults apply uniformly to retries, hooks, and `type: task` sub-jobs. Changing the config affects jobs created after the change, not in-flight ones.
+
+To opt one task out of the global default — i.e., to make it genuinely unbounded — set its `timeout` to the maximum (`24h` for a step, `7d` for a task). Omit `default_step_timeout` / `default_job_timeout` entirely (or set them to `null`) to retain the original behaviour where timeouts are opt-in only.
+
 ### Handling step failures
 
 By default, when a step fails, all downstream steps that depend on it are automatically **skipped**. The job is marked as `failed` once all steps reach a terminal state.

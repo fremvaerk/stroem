@@ -144,6 +144,38 @@ export interface PaginatedResponse<T> {
   total: number;
 }
 
+export interface RecentDuration {
+  job_id: string;
+  duration_ms: number;
+  completed_at: string;
+}
+
+export interface TaskDurationStats {
+  sample_size: number;
+  avg_ms: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  min_ms: number | null;
+  max_ms: number | null;
+  recent: RecentDuration[];
+}
+
+export interface StepDurationStats {
+  step_name: string;
+  sample_size: number;
+  avg_ms: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  min_ms: number | null;
+  max_ms: number | null;
+}
+
+export interface TaskStatsResponse {
+  window: number;
+  task: TaskDurationStats;
+  steps: StepDurationStats[];
+}
+
 export interface WorkerListItem {
   worker_id: string;
   name: string;

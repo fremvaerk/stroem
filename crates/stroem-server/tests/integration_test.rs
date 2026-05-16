@@ -16,8 +16,8 @@ use stroem_db::{
 };
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
-    AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, RetentionConfig, ServerConfig,
-    WorkspaceSourceDef,
+    AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, RetentionConfig,
+    ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::job_creator::create_job_for_task;
 use stroem_server::log_storage::LogStorage;
@@ -1160,6 +1160,8 @@ async fn setup() -> Result<(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = test_workspace();
@@ -2269,6 +2271,8 @@ async fn test_task_detail_connections() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     // Build a workspace with connections
@@ -4444,6 +4448,8 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -4709,6 +4715,8 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -4944,6 +4952,8 @@ async fn setup_with_auth() -> Result<(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     // Seed initial user
@@ -7108,6 +7118,8 @@ async fn setup_multi_workspace() -> Result<(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let ws_default = test_workspace();
@@ -7507,6 +7519,8 @@ async fn test_workspace_tarball_download() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7676,6 +7690,8 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7763,6 +7779,8 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -7866,6 +7884,8 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -8004,6 +8024,8 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::new(
@@ -8451,6 +8473,7 @@ async fn test_create_job_for_task_trigger_source() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -8493,6 +8516,7 @@ async fn test_create_job_for_task_multi_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -8529,6 +8553,7 @@ async fn test_create_job_for_task_missing_task() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await;
 
@@ -8599,6 +8624,7 @@ async fn test_create_job_for_task_missing_action() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await;
 
@@ -8825,6 +8851,8 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = test_workspace();
@@ -8911,6 +8939,8 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = test_workspace();
@@ -8981,6 +9011,8 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = test_workspace();
@@ -9173,6 +9205,8 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
@@ -9247,6 +9281,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -9366,6 +9401,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -9552,6 +9588,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -9666,6 +9703,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -9810,6 +9848,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -9930,6 +9969,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -10053,6 +10093,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -10425,6 +10466,7 @@ async fn test_task_action_creates_child_job() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -10479,6 +10521,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -10516,8 +10559,14 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
     orchestrator::on_step_completed(&pool, parent_job_id, "build", task, None).await?;
 
     // Now handle_task_steps should dispatch the cleanup step
-    stroem_server::job_creator::handle_task_steps(&pool, &workspace, "default", parent_job_id)
-        .await?;
+    stroem_server::job_creator::handle_task_steps(
+        &pool,
+        &workspace,
+        "default",
+        parent_job_id,
+        JobDefaults::default(),
+    )
+    .await?;
 
     // Cleanup step should now be running
     let steps_after = JobStepRepo::get_steps_for_job(&pool, parent_job_id).await?;
@@ -10758,6 +10807,7 @@ async fn test_task_action_input_rendered() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -10838,6 +10888,7 @@ async fn test_task_action_in_hook() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -11048,6 +11099,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -11145,6 +11197,8 @@ async fn setup_recovery() -> Result<(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = test_workspace();
@@ -11248,6 +11302,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -11304,6 +11359,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -11397,6 +11453,8 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = task_action_test_workspace();
@@ -11416,6 +11474,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -11441,8 +11500,14 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
     .await?;
 
     // Handle task steps (creates child job)
-    stroem_server::job_creator::handle_task_steps(&pool, &workspace, "default", parent_job_id)
-        .await?;
+    stroem_server::job_creator::handle_task_steps(
+        &pool,
+        &workspace,
+        "default",
+        parent_job_id,
+        JobDefaults::default(),
+    )
+    .await?;
 
     // Find child job
     let child_jobs: Vec<(uuid::Uuid,)> =
@@ -13163,6 +13228,8 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mut workspace = WorkspaceConfig::default();
@@ -13519,6 +13586,8 @@ async fn setup_sync_webhook() -> Result<(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -14075,6 +14144,8 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -14161,6 +14232,8 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -14229,6 +14302,8 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -14303,6 +14378,8 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -14695,6 +14772,8 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr =
@@ -14940,6 +15019,8 @@ async fn setup_recovery_with_unmatched_timeout(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = test_workspace();
@@ -14992,6 +15073,7 @@ async fn test_recovery_fails_unmatched_ready_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15045,6 +15127,7 @@ async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15086,6 +15169,7 @@ async fn test_recovery_does_not_fail_recent_unmatched_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15122,6 +15206,7 @@ async fn test_recovery_fails_unmatched_step_with_no_workers() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15167,6 +15252,7 @@ async fn test_recovery_fails_unmatched_step_with_inactive_worker() -> Result<()>
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15240,6 +15326,7 @@ async fn test_recovery_does_not_fail_empty_tags_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15381,6 +15468,7 @@ async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15443,6 +15531,7 @@ async fn test_create_job_for_task_root_when_true_becomes_ready() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15626,6 +15715,7 @@ async fn test_create_job_for_task_step_type_task_with_when_false_is_skipped() ->
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -15713,6 +15803,7 @@ async fn test_job_detail_api_exposes_when_condition() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -16262,6 +16353,8 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let sched_log_storage = LogStorage::new(&sched_config.log_storage.local_dir);
     let sched_state = AppState::new(
@@ -16450,6 +16543,8 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let src: Arc<dyn stroem_server::workspace::WorkspaceSource> =
@@ -16545,6 +16640,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
         Some("test-rev"),
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -16657,6 +16753,7 @@ async fn test_sub_job_inherits_revision_via_orchestration() -> Result<()> {
         Some("test-rev"),
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -17097,6 +17194,8 @@ async fn setup_with_workspace(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -17947,6 +18046,8 @@ async fn setup_event_source() -> Result<(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = event_source_workspace();
@@ -18457,6 +18558,8 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let workspace = disabled_event_source_workspace();
@@ -18587,6 +18690,8 @@ async fn setup_event_source_with_workspace(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
 
     let mgr = WorkspaceManager::from_config("default", workspace);
@@ -18899,6 +19004,7 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -18982,6 +19088,7 @@ async fn test_step_retry_exhausted_fails_job() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -19092,6 +19199,7 @@ async fn test_step_retry_claim_respects_retry_at() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -19324,6 +19432,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -19567,6 +19676,7 @@ async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -19655,6 +19765,7 @@ async fn test_task_retry_exhausted_fires_hooks() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -19928,6 +20039,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -20016,6 +20128,7 @@ async fn test_retry_edge_zero_max_retries_no_retry_job() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -20097,6 +20210,7 @@ async fn test_step_retry_success_on_second_attempt() -> Result<()> {
         None,
         None,
         None, // source_job_id
+        JobDefaults::default(),
     )
     .await?;
 
@@ -20177,6 +20291,466 @@ async fn test_step_retry_success_on_second_attempt() -> Result<()> {
     // Job should be completed now.
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed", "job should be completed");
+
+    Ok(())
+}
+
+// ─── Default timeouts (server-level defaults applied at job creation) ──────
+
+/// Server-level defaults must be written into the DB rows so the recovery
+/// sweep enforces them. `test_workspace()` has no explicit timeouts, so the
+/// defaults flow through unchanged.
+#[tokio::test]
+async fn test_defaults_apply_when_task_has_no_timeout() -> Result<()> {
+    use stroem_common::duration::HumanDuration as _HD;
+    let _ = _HD(1); // silence unused-import warning when this file compiles
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+    let defaults = JobDefaults {
+        step_timeout_secs: Some(300),
+        job_timeout_secs: Some(600),
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.timeout_secs,
+        Some(600),
+        "job should inherit default_job_timeout"
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(
+        steps[0].timeout_secs,
+        Some(300),
+        "step should inherit default_step_timeout"
+    );
+
+    Ok(())
+}
+
+/// Backward compat: when defaults are `None` and the task has no timeout,
+/// the DB columns stay `NULL` (i.e. unbounded — existing behaviour).
+#[tokio::test]
+async fn test_no_defaults_yields_null_timeout_columns() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert!(
+        job.timeout_secs.is_none(),
+        "job timeout should be NULL when no default and no task.timeout"
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert!(
+        steps[0].timeout_secs.is_none(),
+        "step timeout should be NULL when no default and no flow_step.timeout"
+    );
+
+    Ok(())
+}
+
+/// Explicit per-task timeout must win over the server default — the default
+/// only fills in when the task is silent.
+#[tokio::test]
+async fn test_explicit_task_timeout_overrides_default() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = test_workspace();
+    // Set an explicit task timeout that is NOT the same as the default below.
+    workspace.tasks.get_mut("hello-world").unwrap().timeout = Some(HumanDuration(180));
+
+    let defaults = JobDefaults {
+        step_timeout_secs: None,
+        job_timeout_secs: Some(600),
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.timeout_secs,
+        Some(180),
+        "explicit task.timeout must win over default_job_timeout"
+    );
+
+    Ok(())
+}
+
+/// Explicit per-step timeout must win over the server default.
+#[tokio::test]
+async fn test_explicit_step_timeout_overrides_default() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = test_workspace();
+    // Mutate the existing `greet` flow step to set a timeout.
+    let task = workspace.tasks.get_mut("hello-world").unwrap();
+    let step = task.flow.get_mut("greet").unwrap();
+    step.timeout = Some(HumanDuration(120));
+
+    let defaults = JobDefaults {
+        step_timeout_secs: Some(300),
+        job_timeout_secs: None,
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].timeout_secs,
+        Some(120),
+        "explicit flow_step.timeout must win over default_step_timeout"
+    );
+
+    Ok(())
+}
+
+/// Asymmetric defaults: only the step default is set. The step row must carry
+/// the default; the job row's `timeout_secs` must stay NULL. Guards against a
+/// regression that couples the two fields together.
+#[tokio::test]
+async fn test_only_step_default_set_job_timeout_is_null() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+    let defaults = JobDefaults {
+        step_timeout_secs: Some(300),
+        job_timeout_secs: None,
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert!(
+        job.timeout_secs.is_none(),
+        "job.timeout_secs must stay NULL when only step default is set"
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps[0].timeout_secs, Some(300));
+
+    Ok(())
+}
+
+/// Opt-out pattern: a task that sets a very large explicit `timeout` must
+/// win over a smaller server default. Catches a regression where `min()`
+/// is used instead of `or()`.
+#[tokio::test]
+async fn test_explicit_larger_task_timeout_beats_smaller_default() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::validation::MAX_JOB_TIMEOUT_SECS;
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = test_workspace();
+    workspace.tasks.get_mut("hello-world").unwrap().timeout =
+        Some(HumanDuration(MAX_JOB_TIMEOUT_SECS));
+
+    let defaults = JobDefaults {
+        step_timeout_secs: None,
+        job_timeout_secs: Some(300),
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.timeout_secs,
+        Some(MAX_JOB_TIMEOUT_SECS as i32),
+        "explicit larger task.timeout must win"
+    );
+
+    Ok(())
+}
+
+/// Mirror of the larger-explicit test for the step side and the smaller
+/// direction: an explicit `1s` step timeout must win over a `1h` server
+/// default. Catches a regression where `max()` is used instead of `or()`.
+#[tokio::test]
+async fn test_explicit_smaller_step_timeout_beats_larger_default() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = test_workspace();
+    workspace
+        .tasks
+        .get_mut("hello-world")
+        .unwrap()
+        .flow
+        .get_mut("greet")
+        .unwrap()
+        .timeout = Some(HumanDuration(1));
+
+    let defaults = JobDefaults {
+        step_timeout_secs: Some(3600),
+        job_timeout_secs: None,
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].timeout_secs,
+        Some(1),
+        "explicit smaller flow_step.timeout must win"
+    );
+
+    Ok(())
+}
+
+/// `for_each` instance rows inherit `timeout_secs` from the placeholder,
+/// which itself gets the default. Verify the full chain end-to-end so a
+/// future refactor that drops the placeholder's timeout doesn't silently
+/// give every instance a NULL timeout.
+#[tokio::test]
+async fn test_for_each_instances_inherit_step_default() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = test_workspace();
+    // Mutate the `greet` step into a for_each placeholder with a literal array.
+    let task = workspace.tasks.get_mut("hello-world").unwrap();
+    let step = task.flow.get_mut("greet").unwrap();
+    step.for_each = Some(json!(["one", "two", "three"]));
+
+    let defaults = JobDefaults {
+        step_timeout_secs: Some(120),
+        job_timeout_secs: None,
+    };
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    // Expect 1 placeholder + 3 instances. All carry the default.
+    assert_eq!(steps.len(), 4, "placeholder + 3 instances");
+    for s in &steps {
+        assert_eq!(
+            s.timeout_secs,
+            Some(120),
+            "step {} should inherit default_step_timeout (placeholder and instances)",
+            s.step_name
+        );
+    }
+
+    Ok(())
+}
+
+/// The retry path at `job_recovery.rs:847` calls `create_job_for_task` with
+/// `source_type = "retry"`. Simulate it directly to verify the retry job
+/// carries the server default — guards the future refactor risk that the
+/// retry branch derives defaults from a different source.
+#[tokio::test]
+async fn test_retry_job_inherits_defaults() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let workspace = test_workspace();
+    let defaults = JobDefaults {
+        step_timeout_secs: None,
+        job_timeout_secs: Some(90),
+    };
+
+    let retry_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "hello-world",
+        json!({"name": "alice"}),
+        "retry",
+        Some("00000000-0000-0000-0000-000000000abc"),
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let job = JobRepo::get(&pool, retry_job_id).await?.unwrap();
+    assert_eq!(job.source_type, "retry");
+    assert_eq!(
+        job.timeout_secs,
+        Some(90),
+        "retry job should inherit default_job_timeout"
+    );
+
+    Ok(())
+}
+
+/// Sub-task jobs (`type: task` action) inherit the same defaults — operators
+/// configure one timeout number and every job in the system (main, retry,
+/// hook, sub-task) respects it.
+///
+/// `task_action_test_workspace` defines a parent task whose flow has a
+/// `type: task` step pointing at `cleanup`. After `handle_task_steps`
+/// dispatches the child, the child job should carry the default.
+#[tokio::test]
+async fn test_sub_task_inherits_defaults() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let mut workspace = task_action_test_workspace();
+    // Make the `cleanup` task-action step ready immediately by dropping the
+    // dependency on `build` — keeps the test focused on default inheritance.
+    workspace
+        .tasks
+        .get_mut("deploy")
+        .unwrap()
+        .flow
+        .get_mut("cleanup")
+        .unwrap()
+        .depends_on
+        .clear();
+
+    let defaults = JobDefaults {
+        step_timeout_secs: Some(45),
+        job_timeout_secs: Some(90),
+    };
+
+    let parent_job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        defaults,
+    )
+    .await?;
+
+    let parent_job = JobRepo::get(&pool, parent_job_id).await?.unwrap();
+    assert_eq!(parent_job.timeout_secs, Some(90), "parent inherits default");
+
+    // Trigger sub-job creation
+    stroem_server::job_creator::handle_task_steps(
+        &pool,
+        &workspace,
+        "default",
+        parent_job_id,
+        defaults,
+    )
+    .await?;
+
+    // The child job is the one whose parent_job_id matches.
+    let children = JobRepo::get_child_jobs(&pool, parent_job_id).await?;
+    assert_eq!(children.len(), 1, "exactly one child job should be created");
+    assert_eq!(
+        children[0].timeout_secs,
+        Some(90),
+        "child job should also inherit default_job_timeout"
+    );
 
     Ok(())
 }

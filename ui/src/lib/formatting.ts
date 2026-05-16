@@ -53,6 +53,23 @@ export function formatRelativeTime(dateStr: string | null): string {
 }
 
 /**
+ * Formats a millisecond duration as a compact string: "240ms", "5.2s", "2m 30s", "1h 5m".
+ * Sub-second values fall back to ms; sub-minute use one decimal place of seconds.
+ */
+export function formatDurationMs(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const totalSecs = Math.floor(seconds);
+  const minutes = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  if (minutes < 60) return `${minutes}m ${secs}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+/**
  * Formats a future ISO date string as a human-readable countdown: "in 5m", "in 3h 10m", "in 2d 4h".
  * Returns "past" when the date is in the past.
  */

@@ -154,8 +154,14 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
     }
 
     // Handle any newly-promoted type: task steps (including loop instances)
-    if let Err(e) =
-        crate::job_creator::handle_task_steps(&state.pool, &workspace, &job.workspace, job_id).await
+    if let Err(e) = crate::job_creator::handle_task_steps(
+        &state.pool,
+        &workspace,
+        &job.workspace,
+        job_id,
+        crate::config::JobDefaults::from(state.config.as_ref()),
+    )
+    .await
     {
         tracing::error!("Failed to handle task steps for job {}: {:#}", job_id, e);
         state
@@ -490,6 +496,7 @@ async fn propagate_to_parent(
                 &parent_ws,
                 &parent_job.workspace,
                 parent_job_id,
+                crate::config::JobDefaults::from(state.config.as_ref()),
             )
             .await?;
 
@@ -848,6 +855,7 @@ async fn try_retry_job(
         failed_job.revision.as_deref(),
         None, // source_job_id: automatic retries don't prefill from source
         None,
+        crate::config::JobDefaults::from(state.config.as_ref()),
     )
     .await
     .context("Failed to create retry job")?;

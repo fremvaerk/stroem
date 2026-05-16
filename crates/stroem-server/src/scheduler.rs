@@ -394,6 +394,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         revision.as_deref(),
         None,
         app_state.config.agents.as_ref(),
+        crate::config::JobDefaults::from(app_state.config.as_ref()),
     )
     .await
     {
@@ -869,6 +870,8 @@ mod tests {
             mcp: None,
             agents: None,
             state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
         };
         let log_storage = LogStorage::new(&config.log_storage.local_dir);
         let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();

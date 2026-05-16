@@ -64,6 +64,8 @@ fn setup_state(
         mcp: None,
         agents: None,
         state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace_config);
     let log_storage = LogStorage::new(log_dir);
