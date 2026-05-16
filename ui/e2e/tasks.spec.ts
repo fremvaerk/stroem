@@ -141,7 +141,10 @@ test.describe("Tasks", () => {
     const tagsTrigger = page.getByLabel(/tags/i);
     await tagsTrigger.click();
     await page.getByPlaceholder("Search or type a value...").fill("hotfix");
-    await page.getByRole("option", { name: /Add "hotfix"/ }).click();
+    // Component renders curly quotes (&ldquo;/&rdquo;); tolerate either curly or straight.
+    await page
+      .getByRole("option", { name: /Add ["“]hotfix["”]/ })
+      .click();
     await page.keyboard.press("Escape");
     await expect(tagsTrigger).toContainText("hotfix");
 
