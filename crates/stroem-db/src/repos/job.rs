@@ -1002,14 +1002,18 @@ impl JobRepo {
         task_name: &str,
         limit: i64,
     ) -> Result<DurationStatsRow> {
+        // NOTE: `EXTRACT(EPOCH FROM ...)` returns `numeric` in PostgreSQL 14+
+        // (it was `double precision` in older versions). sqlx maps the row to
+        // `Option<f64>`, so we explicitly cast each percentile expression to
+        // `double precision` to keep the decode happy across PG versions.
         let row = sqlx::query_as::<_, DurationStatsRow>(
             "SELECT \
                COUNT(*)::BIGINT AS sample_size, \
-               EXTRACT(EPOCH FROM AVG(d)) * 1000.0 AS avg_ms, \
-               EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY d)) * 1000.0 AS p50_ms, \
-               EXTRACT(EPOCH FROM percentile_cont(0.95) WITHIN GROUP (ORDER BY d)) * 1000.0 AS p95_ms, \
-               EXTRACT(EPOCH FROM MIN(d)) * 1000.0 AS min_ms, \
-               EXTRACT(EPOCH FROM MAX(d)) * 1000.0 AS max_ms \
+               (EXTRACT(EPOCH FROM AVG(d)) * 1000.0)::double precision AS avg_ms, \
+               (EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY d)) * 1000.0)::double precision AS p50_ms, \
+               (EXTRACT(EPOCH FROM percentile_cont(0.95) WITHIN GROUP (ORDER BY d)) * 1000.0)::double precision AS p95_ms, \
+               (EXTRACT(EPOCH FROM MIN(d)) * 1000.0)::double precision AS min_ms, \
+               (EXTRACT(EPOCH FROM MAX(d)) * 1000.0)::double precision AS max_ms \
              FROM ( \
                SELECT (completed_at - started_at) AS d \
                FROM job \
@@ -1041,9 +1045,10 @@ impl JobRepo {
         task_name: &str,
         limit: i64,
     ) -> Result<Vec<RecentDurationRow>> {
+        // See cast note in `get_task_duration_stats` above.
         let rows = sqlx::query_as::<_, RecentDurationRow>(
             "SELECT job_id, \
-                    EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000.0 AS duration_ms, \
+                    (EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000.0)::double precision AS duration_ms, \
                     completed_at \
              FROM job \
              WHERE workspace = $1 AND task_name = $2 \

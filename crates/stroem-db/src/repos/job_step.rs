@@ -1081,6 +1081,11 @@ impl JobStepRepo {
         task_name: &str,
         job_limit: i64,
     ) -> Result<Vec<StepDurationStatsRow>> {
+        // `EXTRACT(EPOCH FROM ...)` returns `numeric` in PostgreSQL 14+, but
+        // the row type (`StepDurationStatsRow`) decodes the aggregates as
+        // `Option<f64>`. Cast each expression to `double precision` so sqlx
+        // accepts the value across PG versions. The ORDER BY uses NUMERIC
+        // directly — no cast needed there because we're not extracting it.
         let rows = sqlx::query_as::<_, StepDurationStatsRow>(
             "WITH recent_jobs AS ( \
                SELECT job_id, started_at AS job_started_at FROM job \
@@ -1091,11 +1096,11 @@ impl JobStepRepo {
              ) \
              SELECT s.step_name, \
                     COUNT(*)::BIGINT AS sample_size, \
-                    EXTRACT(EPOCH FROM AVG(s.completed_at - s.started_at)) * 1000.0 AS avg_ms, \
-                    EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY s.completed_at - s.started_at)) * 1000.0 AS p50_ms, \
-                    EXTRACT(EPOCH FROM percentile_cont(0.95) WITHIN GROUP (ORDER BY s.completed_at - s.started_at)) * 1000.0 AS p95_ms, \
-                    EXTRACT(EPOCH FROM MIN(s.completed_at - s.started_at)) * 1000.0 AS min_ms, \
-                    EXTRACT(EPOCH FROM MAX(s.completed_at - s.started_at)) * 1000.0 AS max_ms \
+                    (EXTRACT(EPOCH FROM AVG(s.completed_at - s.started_at)) * 1000.0)::double precision AS avg_ms, \
+                    (EXTRACT(EPOCH FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY s.completed_at - s.started_at)) * 1000.0)::double precision AS p50_ms, \
+                    (EXTRACT(EPOCH FROM percentile_cont(0.95) WITHIN GROUP (ORDER BY s.completed_at - s.started_at)) * 1000.0)::double precision AS p95_ms, \
+                    (EXTRACT(EPOCH FROM MIN(s.completed_at - s.started_at)) * 1000.0)::double precision AS min_ms, \
+                    (EXTRACT(EPOCH FROM MAX(s.completed_at - s.started_at)) * 1000.0)::double precision AS max_ms \
              FROM job_step s \
              JOIN recent_jobs r ON s.job_id = r.job_id \
              WHERE s.status = 'completed' \
