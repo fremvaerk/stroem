@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     let config: ServerConfig = stroem_server::config::load_config(&config_path)?;
 
     tracing::info!("Config loaded successfully");
+    stroem_server::config::log_ha_diagnostics(&config);
 
     // Create database pool
     tracing::info!("Connecting to database...");
@@ -225,7 +226,17 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Build application state
+    // Build application state. The HA primitives (LeaderElection and
+    // EventBus) are created next; AppState starts with no-op defaults so we
+    // can spawn the leader/listener tasks below, then swap them in.
+    let cancel_token = CancellationToken::new();
+    let replica_id = uuid::Uuid::new_v4();
+    tracing::info!("Server replica id: {}", replica_id);
+
+    let (leader, _leader_handle) =
+        stroem_server::leader::LeaderElection::start(config.db.url.clone(), cancel_token.clone());
+    let event_bus = stroem_server::events::EventBus::new(pool.clone(), replica_id);
+
     let state = AppState::new(
         pool,
         workspace_manager,
@@ -233,11 +244,22 @@ async fn main() -> Result<()> {
         log_storage,
         oidc_providers,
         state_storage,
+    )
+    .with_leader(leader)
+    .with_event_bus(event_bus);
+
+    // Spawn the cross-replica NOTIFY listener now that AppState carries the
+    // EventBus (the listener filters its own messages by replica_id).
+    let _event_listener = stroem_server::events::start_listener(
+        config.db.url.clone(),
+        state.clone(),
+        cancel_token.clone(),
     );
 
     // Start background tasks
-    let cancel_token = CancellationToken::new();
-    state.workspaces.start_watchers(cancel_token.clone());
+    state
+        .workspaces
+        .start_watchers(cancel_token.clone(), Some(state.event_bus.clone()));
     let _scheduler = stroem_server::scheduler::start(state.clone(), cancel_token.clone());
     let _recovery = stroem_server::recovery::start(state.clone(), cancel_token.clone());
     let _event_source = stroem_server::event_source::start(state.clone(), cancel_token.clone());

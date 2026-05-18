@@ -429,7 +429,16 @@ impl WorkspaceManager {
     /// Uses each source's `poll_interval_secs()` for the polling frequency.
     /// Errored workspaces retry `load()` on each poll cycle until they recover.
     /// Watchers stop cleanly when `cancel_token` is cancelled.
-    pub fn start_watchers(&self, cancel_token: CancellationToken) {
+    ///
+    /// When `event_bus` is provided, the watcher emits
+    /// [`crate::events::CHANNEL_WORKSPACE_RELOADED`] every time the source
+    /// revision changes so peer replicas can refresh their cached config
+    /// without waiting for their own poll tick.
+    pub fn start_watchers(
+        &self,
+        cancel_token: CancellationToken,
+        event_bus: Option<crate::events::EventBus>,
+    ) {
         for (name, entry) in &self.entries {
             let config_lock = entry.config.clone();
             let source = entry.source.clone();
@@ -440,6 +449,7 @@ impl WorkspaceManager {
             let load_error = entry.load_error.clone();
             let load_warnings = entry.load_warnings.clone();
             let needs_initial_load = !entry.is_healthy();
+            let bus = event_bus.clone();
 
             tokio::spawn(async move {
                 tracing::info!(
@@ -516,26 +526,43 @@ impl WorkspaceManager {
                             }
 
                             let new_revision = source.revision();
-                            let mut config = config_lock.write().await;
-                            *config = Arc::new(new_config);
-
-                            let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
-                            if err.is_some() {
-                                tracing::info!("Workspace '{}' recovered from load error", ws_name);
-                            } else {
-                                tracing::info!(
-                                    "Workspace '{}' reloaded (revision: {:?} -> {:?})",
-                                    ws_name,
-                                    last_revision.as_deref().map(|s| &s[..8.min(s.len())]),
-                                    new_revision.as_deref().map(|s| &s[..8.min(s.len())]),
-                                );
+                            {
+                                let mut config = config_lock.write().await;
+                                *config = Arc::new(new_config);
                             }
-                            *err = None;
-                            drop(err);
 
-                            let mut warnings =
-                                load_warnings.write().unwrap_or_else(|e| e.into_inner());
-                            *warnings = new_warnings;
+                            // Scope the std::sync lock guards so they don't
+                            // straddle the publish_workspace_reloaded().await
+                            // below — std::sync::RwLockWriteGuard is !Send.
+                            {
+                                let mut err = load_error.write().unwrap_or_else(|e| e.into_inner());
+                                if err.is_some() {
+                                    tracing::info!(
+                                        "Workspace '{}' recovered from load error",
+                                        ws_name
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "Workspace '{}' reloaded (revision: {:?} -> {:?})",
+                                        ws_name,
+                                        last_revision.as_deref().map(|s| &s[..8.min(s.len())]),
+                                        new_revision.as_deref().map(|s| &s[..8.min(s.len())]),
+                                    );
+                                }
+                                *err = None;
+                            }
+                            {
+                                let mut warnings =
+                                    load_warnings.write().unwrap_or_else(|e| e.into_inner());
+                                *warnings = new_warnings;
+                            }
+
+                            // Notify peer replicas that this workspace
+                            // changed, so they don't have to wait for their
+                            // own next poll tick to converge.
+                            if let Some(bus) = &bus {
+                                bus.publish_workspace_reloaded(&ws_name).await;
+                            }
                             last_revision = new_revision;
                         }
                         Err(e) => {
@@ -547,6 +574,8 @@ impl WorkspaceManager {
                             let mut warnings =
                                 load_warnings.write().unwrap_or_else(|e| e.into_inner());
                             *warnings = Vec::new();
+                            // No event_bus publish on error: each replica polls its own source and
+                            // reports its own load_error. There's no peer state to converge.
                         }
                     }
                 }
@@ -1750,7 +1779,7 @@ tasks:
 
         // Spawn watcher tasks with a long poll interval so they don't fire
         // during the test; we only care that they respond to cancellation.
-        mgr.start_watchers(cancel_token.clone());
+        mgr.start_watchers(cancel_token.clone(), None);
 
         // Cancel immediately and give the tasks a moment to observe it.
         cancel_token.cancel();
@@ -1877,7 +1906,7 @@ tasks:
 
         // Start watchers — errored entry should retry immediately (no first-tick skip)
         let cancel_token = CancellationToken::new();
-        mgr.start_watchers(cancel_token.clone());
+        mgr.start_watchers(cancel_token.clone(), None);
 
         // Wait for the watcher to pick up the fix (folder poll is 30s default,
         // but errored entries don't skip the first tick, so it fires right away)
@@ -1935,7 +1964,7 @@ tasks:
         // Start watchers.  The entry is errored, so the watcher retries
         // immediately without waiting for a full poll interval.
         let cancel_token = CancellationToken::new();
-        mgr.start_watchers(cancel_token.clone());
+        mgr.start_watchers(cancel_token.clone(), None);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         cancel_token.cancel();
 
@@ -1973,7 +2002,7 @@ tasks:
         // Start watchers — the errored entry will retry immediately, fail again,
         // and update (or keep) the error message.
         let cancel_token = CancellationToken::new();
-        mgr.start_watchers(cancel_token.clone());
+        mgr.start_watchers(cancel_token.clone(), None);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         cancel_token.cancel();
 

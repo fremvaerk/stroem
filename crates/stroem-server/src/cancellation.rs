@@ -80,7 +80,8 @@ pub async fn cancel_job(state: &AppState, job_id: Uuid) -> Result<CancelResult> 
     let has_running_steps = !running_steps.is_empty();
 
     if has_running_steps {
-        // Add to cancelled_jobs set so workers can detect it via polling
+        // Add to cancelled_jobs set so workers polling this replica detect
+        // the cancellation immediately.
         state
             .cancelled_jobs
             .write()
@@ -91,6 +92,12 @@ pub async fn cancel_job(state: &AppState, job_id: Uuid) -> Result<CancelResult> 
             job_id,
             running_steps.len()
         );
+
+        // Propagate to peer replicas so workers polling any other server see
+        // the cancellation without waiting for their next sweep cycle.
+        // Best-effort: DB is the source of truth; recovery sweeper will
+        // catch stragglers if NOTIFY fails.
+        state.event_bus.publish_job_cancelled(job_id).await;
     }
 
     // Log cancellation

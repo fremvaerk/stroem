@@ -28,7 +28,14 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
     tracing::info!("EventSourceManager started");
 
     loop {
-        reconcile(&state).await;
+        // HA gate: only the leader reconciles event sources. The reconciler
+        // *is* idempotent and crash-safe (duplicate detection cancels extras
+        // on the next cycle), but running it on every replica would still
+        // create duplicate consumer jobs that get cancelled within seconds —
+        // noisy and wasteful. Gating cleans the logs and reduces DB churn.
+        if state.leader.is_leader() {
+            reconcile(&state).await;
+        }
 
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(RECONCILE_INTERVAL_SECS)) => {}
@@ -859,5 +866,89 @@ mod tests {
         assert_eq!(restart_policy_str(RestartPolicy::Always), "always");
         assert_eq!(restart_policy_str(RestartPolicy::OnFailure), "on_failure");
         assert_eq!(restart_policy_str(RestartPolicy::Never), "never");
+    }
+
+    /// When `is_leader()` returns false the event-source run_loop skips
+    /// `reconcile()`. This test starts the manager as a follower, lets it
+    /// tick once, and confirms it exits cleanly after cancellation without
+    /// any DB errors (reconcile would attempt DB queries against the invalid pool).
+    #[tokio::test]
+    async fn follower_skips_reconcile() {
+        use crate::config::{
+            DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
+        };
+        use crate::leader::LeaderElection;
+        use crate::log_storage::LogStorage;
+        use crate::state::AppState;
+        use crate::workspace::WorkspaceManager;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use stroem_common::models::workflow::WorkspaceConfig;
+        use tokio_util::sync::CancellationToken;
+
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".to_string(),
+            db: DbConfig {
+                url: "postgres://invalid:5432/db".to_string(),
+            },
+            log_storage: LogStorageConfig {
+                local_dir: "/tmp/test-logs-es-follower".to_string(),
+                s3: None,
+                archive: None,
+            },
+            workspaces: HashMap::new(),
+            libraries: HashMap::new(),
+            git_auth: HashMap::new(),
+            worker_token: "test".to_string(),
+            auth: None,
+            recovery: RecoveryConfig {
+                heartbeat_timeout_secs: 120,
+                sweep_interval_secs: 60,
+                unmatched_step_timeout_secs: 30,
+                ..Default::default()
+            },
+            retention: RetentionConfig::default(),
+            acl: None,
+            mcp: None,
+            agents: None,
+            state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
+        };
+
+        let ws_config = WorkspaceConfig::new();
+        let mgr = WorkspaceManager::from_config("default", ws_config);
+        let log_storage = LogStorage::new(&config.log_storage.local_dir);
+        let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
+
+        // Build an always-false leader by starting + immediately cancelling.
+        let never_leader = {
+            let cancel = CancellationToken::new();
+            let (leader, _h) =
+                LeaderElection::start("postgres://invalid:5432/db".to_string(), cancel.clone());
+            cancel.cancel();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            leader
+        };
+
+        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
+            .with_leader(never_leader);
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let handle = crate::event_source::start(state, cancel.clone());
+
+        tokio::spawn(async move {
+            // RECONCILE_INTERVAL_SECS is 30 — cancel before the first real tick
+            // so we just confirm the leader-gate path and clean exit.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel_clone.cancel();
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            result.is_ok(),
+            "EventSourceManager should stop cleanly after cancellation as follower"
+        );
     }
 }

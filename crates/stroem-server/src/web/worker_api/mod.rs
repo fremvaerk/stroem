@@ -17,8 +17,10 @@ use axum::{
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-/// Middleware to check worker authentication token
-async fn auth_middleware(
+/// Middleware to check worker authentication token.
+///
+/// Used both by the worker API routes and the `/healthz/detail` endpoint.
+pub(crate) async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,

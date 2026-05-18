@@ -19,12 +19,21 @@ server:
     repository: ghcr.io/fremvaerk/stroem-server
     tag: ""
     pullPolicy: IfNotPresent
-  replicas: 1
-  strategy: {}
-  #  type: RollingUpdate
-  #  rollingUpdate:
-  #    maxSurge: 1
-  #    maxUnavailable: 0
+  # Default to 2 replicas for HA. Background tasks (scheduler, event-source
+  # manager, recovery sweeper) are leader-elected via Postgres advisory
+  # locks; cross-replica state propagates via Postgres LISTEN/NOTIFY. See
+  # docs/operations/high-availability.md for the full HA model.
+  #
+  # When replicas > 1 you MUST set auth.jwt_secret and auth.refresh_secret
+  # explicitly (via extraSecretEnv below) so refresh tokens minted on one
+  # pod validate on the other.
+  replicas: 2
+  # RollingUpdate that never drops below the configured replica count.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   podAnnotations: {}
   podLabels: {}
   podSecurityContext: {}
@@ -37,13 +46,25 @@ server:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  topologySpreadConstraints: []
+  # By default, spread replicas across nodes/zones so one Spot eviction
+  # doesn't take both pods down at once. Tune to your topology.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
   priorityClassName: ""
-  # terminationGracePeriodSeconds:  # omit = k8s default 30s
-  lifecycle: {}
-  #  preStop:
-  #    exec:
-  #      command: [sleep, "5"]
+  # Long enough to drain in-flight HTTP + WebSocket connections during a
+  # Spot interruption (Spot gives ~120s warning).
+  terminationGracePeriodSeconds: 60
+  # preStop sleep lets the load balancer's endpoint controller deregister
+  # this pod before SIGTERM. 10s covers most Ingress controllers.
+  lifecycle:
+    preStop:
+      exec:
+        command: ["/bin/sh", "-c", "sleep 10"]
   initContainers: []
   extraContainers: []
   logLevel: info
@@ -80,7 +101,10 @@ server:
       accessModes:
         - ReadWriteOnce
   podDisruptionBudget:
-    enabled: false
+    # Enabled by default to guarantee at least one server pod stays up during
+    # voluntary disruptions (node drains, rolling updates). Disable only if
+    # you run server.replicas: 1.
+    enabled: true
     minAvailable: 1
     # maxUnavailable: 1
   service:
@@ -110,12 +134,17 @@ server:
     #     type: folder
     #     path: /workspace
     worker_token: "change-me-in-production"
-  # Extra env vars injected as a Secret (for STROEM__ overrides of sensitive values)
+  # Extra env vars injected as a Secret (for STROEM__ overrides of sensitive values).
+  # REQUIRED when replicas > 1 and auth is enabled — all pods must load the same
+  # STROEM__AUTH__JWT_SECRET and STROEM__AUTH__REFRESH_SECRET, otherwise refresh
+  # tokens minted on one pod are rejected by every other pod (silent split-brain).
+  # helm template / helm install will fail with a clear error if this requirement
+  # is not met. See docs/operations/high-availability.md.
   extraSecretEnv: {}
   #  STROEM__DB__URL: "postgres://real-user:real-pass@rds:5432/stroem"
   #  STROEM__WORKER_TOKEN: "production-secret"
-  #  STROEM__AUTH__JWT_SECRET: "jwt-secret"
-  #  STROEM__AUTH__REFRESH_SECRET: "refresh-secret"
+  #  STROEM__AUTH__JWT_SECRET: "jwt-secret"          # required when replicas > 1
+  #  STROEM__AUTH__REFRESH_SECRET: "refresh-secret"  # required when replicas > 1
   # Extra plain env vars
   extraEnv: {}
   # Extra volumes and mounts (e.g., for SSH deploy keys)

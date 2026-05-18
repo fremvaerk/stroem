@@ -35,7 +35,7 @@ Last updated: 2026-03-13.
 - [x] `blocking_read()` in async fn fixed — uses async `read().await`
 - [x] `block_in_place` in spawned tasks — uses `spawn_blocking`
 - [x] Multi-language inline scripts: `type: shell` → `type: script` with `language`, `dependencies`, `interpreter` fields (Python, JS, TS, Go)
-- [ ] Single-server bottleneck: scheduler, recovery, log broadcast in-process — no leader election
+- [x] Single-server bottleneck: leader election via pg advisory locks (`leader.rs`); cross-replica events via LISTEN/NOTIFY (`events.rs`) for cancellation, log fan-out, workspace cache invalidation; `/healthz` leader-aware; Helm defaults `replicas: 2` + PDB + preStop + topology spread. See `docs/src/content/docs/operations/high-availability.md`. Remaining for full live-tail HA: shared log volume (RWX EFS/NFS) so log chunks > 7 KB stream cross-replica.
 - [ ] No metrics/Prometheus endpoint — capacity planning blind
 - [x] No proper health check — `GET /healthz` with DB ping + scheduler/recovery liveness via `BackgroundTasks` atomic flags
 - [x] Log retention: local JSONL grows unbounded; no cleanup after S3 upload — `retention_cleanup` in `recovery.rs` deletes local logs and S3 archives for terminal jobs older than `log_retention_days`
@@ -765,7 +765,7 @@ Last updated: 2026-03-13.
 - [x] MCP per-tool ACL enforcement (Phase 7a follow-up)
 - [x] Event source triggers (Phase 5e): `type: event_source` trigger with stdout JSON-line protocol, exponential backoff restart policy, backpressure via `max_in_flight`, EventSourceManager background task
 - [ ] Structured `ask_user` input: allow agent to pass a JSON schema with `ask_user` so the UI renders form fields instead of free-text (same pattern as approval gate `approval_fields`)
-- [ ] Leader election via pg advisory locks for scheduler/recovery
+- [x] Leader election via pg advisory locks for scheduler/recovery — implemented in `leader.rs` + `events.rs` (LISTEN/NOTIFY event bus); `/healthz` is now leader-aware; see operations/high-availability.md.
 - [ ] Generate OpenAPI spec with `utoipa`
 - [ ] S3 as primary log store (eliminate local file dependency)
 - [ ] Server push to workers (replace polling)
@@ -1198,3 +1198,59 @@ Three review agents (rust code review, rust patterns, qa-expert) checked the fea
 - No borrow-across-await: `state.config.as_ref()` produces a `Copy` value synchronously before any `.await`.
 - Single-step (non-task) hook jobs intentionally do NOT inherit `default_step_timeout`; consistent with existing design where hook steps never had per-step timeouts. Task-type hooks go through `create_job_for_task` and do inherit.
 - Operator UX risk of tiny defaults (`1s`) — addressed by the existing docs noting the opt-out via the per-task max value.
+
+## Review: HA / Multi-Replica Server (2026-05-17)
+
+5-agent review (rust-engineer, code-reviewer, security-auditor, database-optimizer, qa-expert) of `leader.rs`, `events.rs`, scheduler/recovery/event_source gates, `cancellation.rs` + `worker_api/jobs.rs` + `workspace/mod.rs` publishers, `web/health.rs`, `config::log_ha_diagnostics`, `helm/stroem/values.yaml`, and `tests/ha_test.rs`.
+
+### Critical (must fix)
+- [x] `crates/stroem-server/src/leader.rs:137` — `PgConnection::connect(db_url)` has no timeout. During an RDS Multi-AZ failover the leader's reconnect attempts can block for the OS TCP timeout (~2 min), `try_acquire` doesn't return, the outer `tokio::select!` doesn't fire, cancellation is also blocked. Fix: append `?connect_timeout=5` to the URL or build via `PgConnectOptions::connect_timeout(Duration::from_secs(5))`.
+- [x] `crates/stroem-server/src/web/hooks.rs:70` — webhook `force_refresh: true` calls `workspaces.reload()` but does NOT publish `stroem_workspace_reloaded`. Replica B keeps serving stale revision until its own 30s poll. Fix: emit `state.event_bus.publish_workspace_reloaded(&wh.ws_name).await` after `reload()` succeeds.
+- [x] `crates/stroem-server/src/scheduler.rs:284` — same bug for cron `force_refresh`. New-leader-after-failover could fire triggers with a stale revision. Same fix.
+- [x] `crates/stroem-server/src/state.rs:128-141` — `append_server_log` broadcasts locally but never `publish_log_chunk()`. WS viewers on followers miss `[recovery]`, `[hooks]`, orchestration error lines (all written by leader-only code). Fix: append `self.event_bus.publish_log_chunk(job_id, &chunk).await;` after the local broadcast.
+- [x] `crates/stroem-server/src/config.rs:479-497` (`log_ha_diagnostics`) — 4-byte SHA-256 prefix of `jwt_secret`/`refresh_secret` at INFO turns "guess a weak secret" into an offline confirmable oracle when logs ship to multi-tenant SIEMs / Loki / support bundles. Especially risky given the README suggests `"placeholder"` as a default. Fix: drop the fingerprint; replace with a boolean `"HA: jwt_secret loaded, len=N"` or expose parity via an authed `/internal/secret-parity` endpoint.
+
+### Important (should fix)
+- [x] `crates/stroem-server/src/web/health.rs:34-85` — unauthenticated `/healthz` discloses `is_leader: bool` and `"follower"` vs `"ok"` per-task strings, enabling external scanners to deterministically target the leader pod for DoS. Fix: keep `/healthz` minimal (200 if DB+process alive); move leader/role detail to authed `/healthz/detail` or strip `/healthz` from public ingress.
+- [x] Helm has no auto-generated `auth.jwt_secret` — `helm/stroem/values.yaml:27-30` defaults `replicas: 2`. Users who don't manually pin `STROEM__AUTH__JWT_SECRET` (or who templated it with `randAlphaNum`) silently split-brain on every `helm install`. Fix: add `templates/secret.yaml` using `lookup` for idempotent secret create, or fail `helm template` when `replicas > 1 && auth enabled && jwt_secret unset`.
+- [x] `crates/stroem-server/src/leader.rs:107` — `is_leader()` lags up to 5s after primary loss because `SELECT 1` ping uses the same `RETRY_INTERVAL`. Old leader keeps gating background tasks during the window. Fix: document the bound explicitly, or run the ping on a separate faster cadence (e.g. 1s).
+- [x] `crates/stroem-server/src/events.rs:182-185` — doc-comment is misleading. `PgListener::recv()` actually has internal auto-reconnect (sqlx 0.8 `eager_reconnect=true` default); our outer `ListenerExit::Disconnected` loop only fires on fatal errors. Either reword the comment, or drop the outer wrapper and rely entirely on the inner reconnect.
+
+### Minor
+- [x] `crates/stroem-server/src/recovery.rs:282-291` — `last_retention_run: AtomicI64` is no longer cross-replica coordinating (each replica has its own counter). A leader flip resets the rate-limit, causing one extra (idempotent) retention run after failover. Document or remove the atomic.
+- [x] `crates/stroem-server/src/leader.rs:29` — `LEADER_LOCK_KEY` shares the global `pg_advisory_lock` namespace with any co-tenant app on the same Postgres user. Co-tenant could maliciously hold the key (liveness-only impact). Document in HA guide: "use a dedicated Postgres role for Strøm".
+- [x] HA adds 4 always-on connections outside the pool (1 leader + 1 listener × 2 replicas). Document the per-replica connection-count formula (`replicas × ~22` worst case) in `docs/src/content/docs/operations/high-availability.md`.
+- [x] Missing `#[tracing::instrument]` on `events.rs` public async fns and `leader.rs::start`/`try_acquire` (CLAUDE.md convention).
+- [x] `crates/stroem-server/tests/ha_test.rs:70` — `RecoveryConfig` constructed without `..Default::default()`; fragile if fields are added. Confirmed: line did not have the splat; added `..Default::default()`.
+- [x] `crates/stroem-server/src/workspace/mod.rs:568-577` — watcher's Err branch (load failed) doesn't publish a "workspace_errored" event. Peers may show healthy state for a workspace that's broken on the watcher's replica. Low priority; document as known behaviour or add a new channel.
+
+### Missing tests — Must
+- [x] `cancel_job_with_no_running_steps_does_not_publish_notify` (tests/ha_test.rs) — verify the conditional `if has_running_steps` publish branch in `cancellation.rs:82-100`.
+- [x] `notify_workspace_reloaded_propagates_and_triggers_reload` (tests/ha_test.rs) — channel is wired in `events.rs::dispatch` but has zero integration test.
+- [x] `healthz_leader_reports_stopped_when_scheduler_guard_dropped` (tests/ha_test.rs) — leader path must return 503 + `checks.scheduler == "stopped"` when scheduler guard drops.
+- [x] `healthz_follower_reports_follower_not_503` (tests/ha_test.rs) — follower must return 200 + `checks.scheduler == "follower"` when scheduler guard drops.
+- [x] `follower_skips_sweep_each_tick` (in-module `recovery.rs`) — drive `run_loop` with `is_leader() == false`; assert no DB sweep calls.
+
+### Missing tests — Should
+- [x] `listener_reconnects_after_disconnect` (tests/ha_test.rs) — `pg_terminate_backend` the listener PID, assert recovery and post-reconnect delivery.
+- [x] `follower_skips_reconcile` (in-module `event_source.rs`) — same pattern as recovery.
+- [x] `follower_advances_last_run_and_next_run_without_firing` (in-module `scheduler.rs`) — implemented. Extracted the per-tick state advance into `pub(crate) fn advance_state_after_tick` shared by both the leader and follower branches in `run_loop`; made `TriggerState` `pub(crate)` so the test can build a due fixture directly. Test asserts `last_run` moves to `now` and `next_run` recomputes into the future within the cron's interval.
+- [x] `log_ha_diagnostics_fingerprint_changes_with_different_secrets` — replaced per instructions by `log_ha_diagnostics_logs_presence_no_secret_bytes` (config.rs in-module): asserts `len=` appears and raw secret bytes do not.
+
+### Missing tests — Nice-to-have
+- [x] `worker_log_post_reaches_ws_viewer_on_peer_replica` (tests/ha_test.rs) — implemented. Builds replica A's full router via `build_router`, POSTs a worker log payload through the real auth middleware + handler stack, asserts a `log_broadcast` subscriber on replica B (the same channel the WS handler reads after backfill) receives the chunk via the NOTIFY → dispatch → broadcast path. Validates JSONL shape (step + stream fields) to catch chunk-format regressions.
+- [x] `leader_connection_lost_triggers_reflag_to_follower` (tests/ha_test.rs) — forcibly terminate the leader's advisory-lock connection via `pg_terminate_backend`, assert `is_leader()` returns `false` within one retry interval.
+- [x] `double_leader_race_both_attempt_simultaneously` (tests/ha_test.rs) — start 3 replicas at the same tick, assert exactly one leader after 3s.
+- [x] `log_ha_diagnostics_no_op_when_auth_absent` (in-module `config.rs`) — `auth: None` produces no panic and no fingerprint emission.
+
+### Cleared by review (non-issues — recording so future reviews don't re-flag)
+- `leader.rs` `PgConnection` does NOT silently auto-reconnect (verified against sqlx source). The `SELECT 1` ping correctly detects connection death and flips `is_leader` to false.
+- `leader.rs` Drop ordering on cancellation is correct — `is_leader.store(false)` happens before `conn` is dropped, no await between, lock released by Postgres on TCP close.
+- `pg_try_advisory_lock` is non-blocking per Postgres docs; no live-lock risk when both replicas race on startup.
+- `cancellation.rs:82-100` does NOT hold a std::sync RwLock across `.await` — guard scope ends at the `if` block.
+- `workspace/mod.rs` block-scoped guards correctly satisfy Send; `last_revision = new_revision` after publish preserves sequencing for peer reloads.
+- `pg_notify($1, $2)` via bind parameters is SQL-injection safe; payload JSON is typed-deserialized on the receiver and broadcast keyed by `job_id` which is already ACL-gated in the WS subscribe path (`web/api/ws.rs:76-125`).
+- Replica-ID spoofing requires DB write access (already full compromise); no new privilege escalation.
+- `start_watchers` signature change has only 5 call sites, all updated (`main.rs` + 4 tests in `workspace/mod.rs`).
+- AliveGuard semantics preserved on followers: loops still spawn the guard, so `health.rs` reports `"ok"` for the loop running (just not doing work).
+- No new DB migrations needed — advisory locks and LISTEN/NOTIFY are session-level, not schema.

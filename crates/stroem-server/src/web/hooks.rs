@@ -73,6 +73,13 @@ async fn webhook_handler(
                 name,
                 e
             );
+        } else {
+            // Notify peer replicas that the workspace has been refreshed so
+            // they converge without waiting for their own poll tick.
+            state
+                .event_bus
+                .publish_workspace_reloaded(&wh.ws_name)
+                .await;
         }
     }
 

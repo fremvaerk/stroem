@@ -12,24 +12,36 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Key that uniquely identifies a trigger: "{workspace}/{trigger_name}"
-type TriggerKey = String;
+pub(crate) type TriggerKey = String;
 
-/// State tracked for each active trigger
-struct TriggerState {
-    cron: Cron,
-    cron_expr: String,
-    workspace: String,
-    task: String,
-    input: HashMap<String, serde_json::Value>,
-    trigger_name: String,
-    concurrency: ConcurrencyPolicy,
+/// State tracked for each active trigger. `pub(crate)` so the in-module
+/// tests can construct one directly to exercise per-tick state transitions.
+pub(crate) struct TriggerState {
+    pub(crate) cron: Cron,
+    pub(crate) cron_expr: String,
+    pub(crate) workspace: String,
+    pub(crate) task: String,
+    pub(crate) input: HashMap<String, serde_json::Value>,
+    pub(crate) trigger_name: String,
+    pub(crate) concurrency: ConcurrencyPolicy,
     /// Parsed IANA timezone. None means UTC.
-    timezone: Option<Tz>,
+    pub(crate) timezone: Option<Tz>,
     /// The raw timezone string from config (for hot-reload comparison).
-    timezone_str: Option<String>,
-    force_refresh: bool,
-    last_run: Option<DateTime<Utc>>,
-    next_run: Option<DateTime<Utc>>,
+    pub(crate) timezone_str: Option<String>,
+    pub(crate) force_refresh: bool,
+    pub(crate) last_run: Option<DateTime<Utc>>,
+    pub(crate) next_run: Option<DateTime<Utc>>,
+}
+
+/// Advance trigger state after a tick — set `last_run = now` and recompute
+/// `next_run` from the cron expression. Called for every due trigger in
+/// `run_loop`, whether or not the leader actually fired (followers advance
+/// the same way so a new leader after failover doesn't backfire every cron
+/// tick the old leader missed). Pulled out so unit tests can exercise the
+/// state transition without needing a live `AppState`.
+pub(crate) fn advance_state_after_tick(tstate: &mut TriggerState, now: DateTime<Utc>) {
+    tstate.last_run = Some(now);
+    tstate.next_run = compute_next_run(&tstate.cron, Some(now), now, tstate.timezone);
 }
 
 /// Spawn the scheduler background task.
@@ -52,6 +64,11 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
     tracing::info!("Scheduler loaded {} trigger(s)", triggers.len());
 
     loop {
+        // HA gate: only the leader replica fires triggers. Followers still
+        // hot-reload trigger state below so they can take over instantly on
+        // failover; they just don't fire.
+        let is_leader = state.leader.is_leader();
+
         let now = Utc::now();
 
         // Compute next_run for triggers that need it, and collect keys to fire
@@ -69,19 +86,22 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
             }
         }
 
-        // Fire due triggers
+        // Fire due triggers — leader only. Followers advance trigger state
+        // *as if* they fired so that when one becomes leader it doesn't
+        // backfire every cron tick that elapsed during the previous
+        // leader's lifetime.
         for key in &to_fire {
-            let tstate = triggers
-                .get(key)
-                .expect("key came from iterating the triggers map");
-            fire_trigger(&state, workspaces, tstate).await;
+            if is_leader {
+                let tstate = triggers
+                    .get(key)
+                    .expect("key came from iterating the triggers map");
+                fire_trigger(&state, workspaces, tstate).await;
+            }
 
             let tstate = triggers
                 .get_mut(key)
                 .expect("key came from iterating the triggers map");
-            let now = Utc::now();
-            tstate.last_run = Some(now);
-            tstate.next_run = compute_next_run(&tstate.cron, Some(now), now, tstate.timezone);
+            advance_state_after_tick(tstate, Utc::now());
         }
 
         // Determine sleep duration: minimum time until next trigger fires
@@ -277,6 +297,13 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                 source_id,
                 e
             );
+        } else {
+            // Notify peer replicas that the workspace has been refreshed so
+            // they converge without waiting for their own poll tick.
+            app_state
+                .event_bus
+                .publish_workspace_reloaded(&tstate.workspace)
+                .await;
         }
     }
 
@@ -423,6 +450,71 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use stroem_common::models::workflow::WorkspaceConfig;
+
+    /// Helper: minimal `TriggerState` with the requested cron expression and
+    /// a past `next_run`, so the per-tick code path treats it as due.
+    fn due_trigger(cron_expr: &str, past_next_run: DateTime<Utc>) -> TriggerState {
+        let cron = CronParser::builder()
+            .seconds(Seconds::Optional)
+            .build()
+            .parse(cron_expr)
+            .unwrap();
+        TriggerState {
+            cron,
+            cron_expr: cron_expr.to_string(),
+            workspace: "default".to_string(),
+            task: "noop".to_string(),
+            input: HashMap::new(),
+            trigger_name: "test".to_string(),
+            concurrency: ConcurrencyPolicy::Allow,
+            timezone: None,
+            timezone_str: None,
+            force_refresh: false,
+            last_run: None,
+            next_run: Some(past_next_run),
+        }
+    }
+
+    /// HA: when this replica is a follower, `run_loop` still advances trigger
+    /// state for every due trigger so a new leader after failover doesn't
+    /// backfire every cron tick the old leader missed. The advance logic
+    /// itself is extracted into [`advance_state_after_tick`] (used by both
+    /// the leader and follower branches), so the assertion below is the same
+    /// shape exercised in production for both roles.
+    #[test]
+    fn follower_advances_last_run_and_next_run_without_firing() {
+        // Pretend "now" is well after a once-per-minute cron's last scheduled
+        // tick. Without an advance, the next loop iteration would keep
+        // re-pushing this key into to_fire forever.
+        let now = Utc::now();
+        let due_at = now - chrono::Duration::seconds(30);
+        let mut t = due_trigger("* * * * *", due_at);
+
+        assert!(
+            t.next_run.unwrap() < now,
+            "test precondition: trigger must be due"
+        );
+        assert!(
+            t.last_run.is_none(),
+            "test precondition: no prior run on file"
+        );
+
+        // This is the exact call the follower branch in `run_loop` makes
+        // (and so does the leader, after `fire_trigger`).
+        advance_state_after_tick(&mut t, now);
+
+        assert_eq!(t.last_run, Some(now), "last_run must move forward to `now`");
+        let new_next = t.next_run.expect("next_run must be recomputed");
+        assert!(
+            new_next > now,
+            "next_run must be strictly in the future after the tick (got {new_next:?}, now={now:?})"
+        );
+        // For every-minute cron, next_run should be within ~60s of now.
+        assert!(
+            (new_next - now) <= chrono::Duration::seconds(61),
+            "next_run for `* * * * *` should fire within the next minute"
+        );
+    }
 
     #[test]
     fn test_cron_parse_standard() {

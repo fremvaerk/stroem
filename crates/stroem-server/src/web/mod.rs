@@ -61,12 +61,23 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
             .allow_headers(Any),
     };
 
+    // /healthz — unauthenticated, k8s-probe-compatible (no leader/task fields).
+    // /healthz/detail — worker-token auth required; full HA diagnostics.
     let health_route = Router::new()
         .route("/healthz", get(health::healthz))
         .with_state(state.clone());
 
+    let health_detail_route = Router::new()
+        .route("/healthz/detail", get(health::healthz_detail))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            worker_api::auth_middleware,
+        ))
+        .with_state(state.clone());
+
     let mut router = Router::new()
         .merge(health_route)
+        .merge(health_detail_route)
         .nest("/api", api::build_api_routes(state.clone()))
         .nest(
             "/worker",

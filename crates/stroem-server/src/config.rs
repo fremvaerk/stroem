@@ -470,6 +470,27 @@ impl ServerConfig {
     }
 }
 
+/// Log HA-relevant diagnostics at startup.
+///
+/// Emits presence-only information about JWT secrets to confirm they are
+/// loaded, without logging any value that could serve as an offline oracle
+/// for guessing weak secrets in multi-tenant SIEM environments.
+/// No-op when auth isn't configured.
+pub fn log_ha_diagnostics(config: &ServerConfig) {
+    if let Some(auth) = &config.auth {
+        tracing::info!(
+            "HA: auth.jwt_secret loaded (len={}). All replicas MUST share this value — verify via your secret-management workflow.",
+            auth.jwt_secret.len()
+        );
+        tracing::info!(
+            "HA: auth.refresh_secret loaded (len={}). Same: must match across replicas.",
+            auth.refresh_secret.len()
+        );
+    } else {
+        tracing::info!("HA: auth disabled — no JWT secrets to synchronize across replicas");
+    }
+}
+
 /// Load server config from a YAML file with STROEM__ env var overrides.
 pub fn load_config(path: &str) -> anyhow::Result<ServerConfig> {
     use anyhow::Context;
@@ -2139,5 +2160,112 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let d = JobDefaults::default();
         assert!(d.step_timeout_secs.is_none());
         assert!(d.job_timeout_secs.is_none());
+    }
+
+    /// `log_ha_diagnostics` must not emit secret bytes.
+    ///
+    /// We set up a tracing subscriber that captures log output, call
+    /// `log_ha_diagnostics` with a known JWT secret, and assert:
+    ///   1. The output contains "len=" (confirming the length was logged).
+    ///   2. The actual secret string does NOT appear in the output.
+    ///
+    /// This replaces the previously-planned fingerprint test (the fingerprint
+    /// was removed as a security fix per the HA review).
+    #[test]
+    fn log_ha_diagnostics_logs_presence_no_secret_bytes() {
+        use std::sync::{Arc, Mutex};
+        use tracing::subscriber::with_default;
+        use tracing_subscriber::fmt::MakeWriter;
+
+        // A simple writer that captures output into a Vec<u8>.
+        #[derive(Clone)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> MakeWriter<'a> for CaptureWriter {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let secret = "the-quick-brown-fox-needs-32-chars!";
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = CaptureWriter(buf.clone());
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        with_default(subscriber, || {
+            let mut config = minimal_config();
+            config.auth = Some(AuthConfig {
+                jwt_secret: secret.to_string(),
+                refresh_secret: "another-secret-for-refresh-32-ch".to_string(),
+                base_url: None,
+                initial_user: None,
+                providers: std::collections::HashMap::new(),
+            });
+            log_ha_diagnostics(&config);
+        });
+
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+
+        assert!(
+            output.contains("len="),
+            "log output must contain 'len=' to show secret was loaded; got: {output}"
+        );
+        assert!(
+            !output.contains(secret),
+            "log output must NOT contain the raw secret value; got: {output}"
+        );
+    }
+
+    /// `log_ha_diagnostics` must be a no-op (no panic, no crash) when auth
+    /// is not configured.
+    #[test]
+    fn log_ha_diagnostics_no_op_when_auth_absent() {
+        let mut config = minimal_config();
+        config.auth = None;
+        // Must not panic.
+        log_ha_diagnostics(&config);
+    }
+
+    /// Minimal valid `ServerConfig` for tests that don't need real workspaces.
+    fn minimal_config() -> ServerConfig {
+        ServerConfig {
+            listen: "127.0.0.1:0".to_string(),
+            db: DbConfig {
+                url: "postgres://invalid:5432/db".to_string(),
+            },
+            log_storage: LogStorageConfig {
+                local_dir: "/tmp".to_string(),
+                s3: None,
+                archive: None,
+            },
+            workspaces: std::collections::HashMap::new(),
+            libraries: std::collections::HashMap::new(),
+            git_auth: std::collections::HashMap::new(),
+            worker_token: "test-token-must-be-long-enough-32".to_string(),
+            auth: None,
+            recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
+            acl: None,
+            mcp: None,
+            agents: None,
+            state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
+        }
     }
 }

@@ -1,6 +1,8 @@
 use crate::acl::AclEvaluator;
 use crate::config::ServerConfig;
+use crate::events::EventBus;
 use crate::job_completion::JobCompletionNotifier;
+use crate::leader::LeaderElection;
 use crate::log_broadcast::LogBroadcast;
 use crate::log_storage::LogStorage;
 use crate::oidc::OidcProvider;
@@ -79,6 +81,13 @@ pub struct AppState {
     pub last_retention_run: Arc<AtomicI64>,
     /// Optional task state snapshot storage (None when feature is not configured).
     pub state_storage: Option<Arc<StateStorage>>,
+    /// Leader-election handle. Background tasks gate themselves on
+    /// `leader.is_leader()`. Defaults to an always-leader for tests and
+    /// single-replica deployments; real HA wiring happens in `main.rs`.
+    pub leader: Arc<LeaderElection>,
+    /// Cross-replica event publisher (NOTIFY). Tests get a no-op bus that
+    /// silently discards publishes.
+    pub event_bus: EventBus,
 }
 
 impl AppState {
@@ -112,7 +121,23 @@ impl AppState {
             background_tasks: BackgroundTasks::new(),
             last_retention_run: Arc::new(AtomicI64::new(0)),
             state_storage: state_storage.map(Arc::new),
+            leader: LeaderElection::always(),
+            event_bus: EventBus::noop(),
         }
+    }
+
+    /// Replace the leader handle. Used by `main.rs` after spawning the HA
+    /// election loop. Test/single-replica builds use the default always-leader.
+    pub fn with_leader(mut self, leader: Arc<LeaderElection>) -> Self {
+        self.leader = leader;
+        self
+    }
+
+    /// Replace the event bus. Used by `main.rs` after constructing the
+    /// publisher with the shared `PgPool`. Tests use the default no-op bus.
+    pub fn with_event_bus(mut self, bus: EventBus) -> Self {
+        self.event_bus = bus;
+        self
     }
 
     /// Get the workspace config for a given workspace name
@@ -137,7 +162,10 @@ impl AppState {
             tracing::warn!("Failed to write server log for job {}: {:#}", job_id, e);
             return;
         }
-        self.log_broadcast.broadcast(job_id, chunk).await;
+        self.log_broadcast.broadcast(job_id, chunk.clone()).await;
+        // Forward to peer replicas so WS viewers on followers see server-side
+        // errors (recovery, hooks, orchestration) live, not just on this replica.
+        self.event_bus.publish_log_chunk(job_id, &chunk).await;
     }
 }
 

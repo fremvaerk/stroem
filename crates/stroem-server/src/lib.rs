@@ -3,11 +3,12 @@ pub mod auth;
 pub mod cancellation;
 pub mod config;
 pub mod event_source;
+pub mod events;
 pub mod hooks;
-
 pub mod job_completion;
 pub mod job_creator;
 pub mod job_recovery;
+pub mod leader;
 pub mod log_broadcast;
 pub mod log_storage;
 #[cfg(feature = "mcp")]

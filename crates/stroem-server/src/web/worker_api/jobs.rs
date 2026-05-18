@@ -749,10 +749,18 @@ pub async fn append_log(
         tracing::warn!("Failed to update log path: {:#}", e);
     }
 
-    // Broadcast to WebSocket subscribers
+    // Broadcast to WebSocket subscribers on this replica.
     state
         .log_broadcast
         .broadcast(job_id, jsonl_chunk.clone())
+        .await;
+
+    // Forward to peer replicas so WS viewers connected elsewhere see the
+    // live tail. Payloads above NOTIFY_MAX_BYTES degrade to a signal-only
+    // event (peers know new content exists but can't render it live).
+    state
+        .event_bus
+        .publish_log_chunk(job_id, &jsonl_chunk)
         .await;
 
     Ok(Json(json!({"status": "ok"})))

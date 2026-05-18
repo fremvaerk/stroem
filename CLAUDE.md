@@ -355,6 +355,20 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Config: `heartbeat_timeout_secs` (120), `sweep_interval_secs` (60), `unmatched_step_timeout_secs` (30)
 - Data retention: optional `retention` section with `worker_hours`, `job_days`
 - Strategy: fail, don't retry — avoids non-idempotent side effects
+- HA: gated on `state.leader.is_leader()`. Followers run the loop but skip sweeps.
+
+### High Availability (multi-replica server)
+- **Leader election**: `leader.rs` — one server replica holds a Postgres advisory lock (`pg_try_advisory_lock(0x5354524D4C445201)` = "STRMLDR" + version byte). Lock is held on a dedicated `PgConnection`, released automatically when the connection drops (pod restart, network partition, DB restart). `AppState.leader.is_leader()` is checked at the top of `scheduler.rs`, `event_source.rs`, `recovery.rs` ticks. Default for tests/single-replica: `LeaderElection::always()`.
+- **Cross-replica event bus**: `events.rs` — Postgres `LISTEN/NOTIFY` over `sqlx::postgres::PgListener`. Three channels: `stroem_job_cancelled` (job cancel → all replicas' `cancelled_jobs` cache), `stroem_workspace_reloaded` (revision change → peers re-read workspace cache), `stroem_job_log_chunk` (worker log push → peer WS subscribers). Payloads carry the originating replica's UUID; listeners drop self-emitted messages to avoid duplicate broadcasts.
+- **Publishers** (one-line each, all best-effort, DB is source of truth):
+  - `cancellation.rs` cancel_job — publishes `stroem_job_cancelled` after local insert.
+  - `web/worker_api/jobs.rs` append_log — publishes `stroem_job_log_chunk` after local broadcast. Lines > `NOTIFY_MAX_BYTES` (7000) degrade to signal-only.
+  - `workspace/mod.rs` watcher — publishes `stroem_workspace_reloaded` when source revision changes. `start_watchers(cancel, Some(event_bus))` opts in.
+- **`/healthz`**: `web/health.rs` — leader-aware. Process + DB checks always required. Scheduler/recovery/event_source liveness only failure-eligible on the leader; followers report `"follower"` and return 200. Adds `checks.leader: bool`.
+- **Replica id**: generated per-process (UUID v4) in `main.rs`, passed into `EventBus::new` for self-filtering.
+- **Config**: `config::log_ha_diagnostics()` logs SHA-256 fingerprints of `auth.jwt_secret` + `auth.refresh_secret` at startup so operators can verify both pods loaded the same value.
+- **Helm**: defaults at `server.replicas: 2`, `RollingUpdate` with `maxUnavailable: 0`, `terminationGracePeriodSeconds: 60`, `preStop sleep 10`, PodDisruptionBudget `minAvailable: 1`, topologySpreadConstraints by hostname. See `docs/src/content/docs/operations/high-availability.md`.
+- Integration tests: `crates/stroem-server/tests/ha_test.rs` (leader uniqueness, failover, NOTIFY roundtrip per channel, oversize fallback, self-filter).
 
 ### React UI
 - Pages: Login, Dashboard, Tasks, Task Detail, Jobs, Job Detail, Settings

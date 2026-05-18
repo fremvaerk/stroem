@@ -16457,33 +16457,48 @@ async fn test_webhook_triggered_job_stores_revision() -> Result<()> {
 async fn test_healthz_returns_structured_json() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup().await?;
 
-    let response = router.oneshot(api_get("/healthz")).await?;
-
-    // Background tasks are not started in the test harness, so the endpoint
-    // should return 503 with status "degraded" (db ok, tasks stopped).
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-
+    // GET /healthz is now the unauthenticated k8s probe: returns only
+    // {"status": "ok"|"unhealthy", "db": "ok"|"error"} — no leader/task detail.
+    let response = router.clone().oneshot(api_get("/healthz")).await?;
+    assert_eq!(response.status(), StatusCode::OK);
     let body = body_json(response).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["db"], "ok");
+
+    // GET /healthz/detail requires worker-token auth and returns the full shape.
+    // Background tasks are not started in the test harness, so the endpoint
+    // returns 503 with status "degraded" (db ok, tasks stopped).
+    let detail_response = router
+        .oneshot(worker_request(
+            "GET",
+            "/healthz/detail",
+            serde_json::json!({}),
+        ))
+        .await?;
+
+    assert_eq!(detail_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let detail_body = body_json(detail_response).await;
 
     // The JSON must have a "status" and a "checks" object.
     assert!(
-        body["status"].is_string(),
+        detail_body["status"].is_string(),
         "response must include a string 'status' field"
     );
     assert!(
-        body["checks"].is_object(),
+        detail_body["checks"].is_object(),
         "response must include a 'checks' object"
     );
 
     // Database is reachable in the test environment.
-    assert_eq!(body["checks"]["db"], "ok");
+    assert_eq!(detail_body["checks"]["db"], "ok");
 
     // Background tasks are not running, so their checks must reflect that.
-    assert_eq!(body["checks"]["scheduler"], "stopped");
-    assert_eq!(body["checks"]["recovery"], "stopped");
+    assert_eq!(detail_body["checks"]["scheduler"], "stopped");
+    assert_eq!(detail_body["checks"]["recovery"], "stopped");
 
     // With db ok but tasks stopped, overall status is "degraded".
-    assert_eq!(body["status"], "degraded");
+    assert_eq!(detail_body["status"], "degraded");
 
     Ok(())
 }

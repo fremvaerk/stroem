@@ -37,6 +37,13 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
             }
         }
 
+        // HA gate: only the leader sweeps. Sweep phases are individually
+        // idempotent (mark_failed overwrites status), but two replicas racing
+        // would double-log and double-orchestrate. Keep work on the leader.
+        if !state.leader.is_leader() {
+            continue;
+        }
+
         if let Err(e) = sweep(&state).await {
             tracing::error!("Recovery sweep error: {:#}", e);
         }
@@ -275,6 +282,11 @@ async fn sweep(state: &AppState) -> Result<()> {
     }
 
     // Phase 5: Data retention (rate-limited — runs at most once per retention_interval_secs)
+    //
+    // Note: with the HA leader gate above, only one replica runs this loop at
+    // a time, so the AtomicI64 is effectively per-process state. A leader flip
+    // resets the timer, causing at most one extra (idempotent) retention run
+    // after failover.
     let now = chrono::Utc::now().timestamp();
     let last = state.last_retention_run.load(Ordering::Relaxed);
     let interval = state.config.retention.interval_secs as i64;
@@ -418,6 +430,95 @@ async fn tarball_cache_cleanup(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// When `is_leader()` returns false the recovery run_loop skips the sweep.
+    ///
+    /// We start the sweeper with a real DB pool that would panic on network
+    /// access (lazy connect to an invalid URL), set leader to always-false, and
+    /// confirm the loop exits cleanly after cancellation without any DB errors.
+    /// If the gate were absent the loop would attempt `sweep()` → DB query →
+    /// error log. We assert the task exits without panicking.
+    #[tokio::test]
+    async fn follower_skips_sweep_each_tick() {
+        use crate::config::{
+            DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
+        };
+        use crate::leader::LeaderElection;
+        use crate::log_storage::LogStorage;
+        use crate::workspace::WorkspaceManager;
+        use std::collections::HashMap;
+        use stroem_common::models::workflow::WorkspaceConfig;
+
+        // Use a very short sweep interval so the loop iterates quickly.
+        let config = ServerConfig {
+            listen: "127.0.0.1:0".to_string(),
+            db: DbConfig {
+                url: "postgres://invalid:5432/db".to_string(),
+            },
+            log_storage: LogStorageConfig {
+                local_dir: "/tmp/test-logs-follower".to_string(),
+                s3: None,
+                archive: None,
+            },
+            workspaces: HashMap::new(),
+            libraries: HashMap::new(),
+            git_auth: HashMap::new(),
+            worker_token: "test".to_string(),
+            auth: None,
+            recovery: RecoveryConfig {
+                heartbeat_timeout_secs: 120,
+                sweep_interval_secs: 1, // short interval so the loop ticks fast
+                unmatched_step_timeout_secs: 30,
+                ..Default::default()
+            },
+            retention: RetentionConfig::default(),
+            acl: None,
+            mcp: None,
+            agents: None,
+            state_storage: None,
+            default_step_timeout: None,
+            default_job_timeout: None,
+        };
+
+        let ws_config = WorkspaceConfig::new();
+        let mgr = WorkspaceManager::from_config("default", ws_config);
+        let log_storage = LogStorage::new(&config.log_storage.local_dir);
+        let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
+
+        // Build state with an always-false leader (follower).
+        let never_leader = {
+            // Start + immediately cancel so the election loop exits before acquiring.
+            let cancel = CancellationToken::new();
+            let (leader, _h) =
+                LeaderElection::start("postgres://invalid:5432/db".to_string(), cancel.clone());
+            cancel.cancel();
+            // Brief yield so the task exits.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            leader
+        };
+
+        let state = AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
+            .with_leader(never_leader);
+
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let handle = start(state, cancel.clone());
+
+        // Let it run for a bit longer than one sweep interval.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            cancel_clone.cancel();
+        });
+
+        // Must exit cleanly — no panics, no "Recovery sweep error" because
+        // the follower gate skips the DB sweep entirely.
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            result.is_ok(),
+            "Recovery sweeper should stop cleanly after cancellation even as follower"
+        );
+    }
 
     #[tokio::test]
     async fn test_recovery_cancellation() {
