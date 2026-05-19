@@ -36,7 +36,7 @@ Last updated: 2026-03-13.
 - [x] `block_in_place` in spawned tasks — uses `spawn_blocking`
 - [x] Multi-language inline scripts: `type: shell` → `type: script` with `language`, `dependencies`, `interpreter` fields (Python, JS, TS, Go)
 - [x] Single-server bottleneck: leader election via pg advisory locks (`leader.rs`); cross-replica events via LISTEN/NOTIFY (`events.rs`) for cancellation, log fan-out, workspace cache invalidation; `/healthz` leader-aware; Helm defaults `replicas: 2` + PDB + preStop + topology spread. See `docs/src/content/docs/operations/high-availability.md`. Remaining for full live-tail HA: shared log volume (RWX EFS/NFS) so log chunks > 7 KB stream cross-replica.
-- [ ] No metrics/Prometheus endpoint — capacity planning blind
+- [x] No metrics/Prometheus endpoint — implemented in v0.15.12. Lean inventory (9 metrics: HTTP RED on `/api/*`, jobs created/completed counters, leader/workers/in-flight/ready/bg-task gauges). Hybrid recording (counters inline via `metrics` facade; gauges sampled at scrape time with 2s timeout per query, queries parallelized via `tokio::join!`). `metrics-exporter-prometheus = "0.18"` no-default-features. Default auth: worker-token Bearer; opt-out via `metrics: { public: true }`. Helm `serviceMonitor.enabled`. See `docs/src/content/docs/operations/metrics.md` and `docs/superpowers/specs/2026-05-19-prometheus-metrics-design.md`.
 - [x] No proper health check — `GET /healthz` with DB ping + scheduler/recovery liveness via `BackgroundTasks` atomic flags
 - [x] Log retention: local JSONL grows unbounded; no cleanup after S3 upload — `retention_cleanup` in `recovery.rs` deletes local logs and S3 archives for terminal jobs older than `log_retention_days`
 - [ ] No API versioning (`/api/` with no version prefix)
@@ -1254,3 +1254,25 @@ Three review agents (rust code review, rust patterns, qa-expert) checked the fea
 - `start_watchers` signature change has only 5 call sites, all updated (`main.rs` + 4 tests in `workspace/mod.rs`).
 - AliveGuard semantics preserved on followers: loops still spawn the guard, so `health.rs` reports `"ok"` for the loop running (just not doing work).
 - No new DB migrations needed — advisory locks and LISTEN/NOTIFY are session-level, not schema.
+
+## Review: Prometheus Metrics (2026-05-19)
+
+Initial implementation:
+- Spec: `docs/superpowers/specs/2026-05-19-prometheus-metrics-design.md`
+- Plan: `docs/superpowers/plans/2026-05-19-prometheus-metrics.md`
+- Commits: T1–T12 (server + tests), T13–T16 (helm + docs + CI + tracking)
+
+### Important findings raised during review (all resolved)
+- [x] Task 4 missed propagating `metrics: None` to 41 `ServerConfig` literals in `crates/stroem-server/tests/` — fixed in follow-up commit
+- [x] Task 8 sequential DB queries diverged from spec — refactored to `tokio::join!` so worst-case scrape latency stays at 2s (not 6s)
+- [x] Task 9 reviewer mis-identified `MatchedPath` behaviour under `nest`; the fix-up commit instead documented the Axum 0.8 behaviour and added an assertion locking in the `/api/*` prefix
+- [x] Task 11 counter placement was in the wrong function (`handle_job_terminal` only covers ~20% of terminal transitions). Relocated to `run_terminal_job_actions` which is the actual shared funnel called by `orchestrate_after_step`, `propagate_to_parent`, and `handle_job_terminal`.
+- [x] Task 12 jobs_in_flight assertions weren't scoped to the right metric — tightened to `lines().find(|l| starts_with(METRIC) && contains(label))`
+
+### Deferred / out of scope for v1
+- [ ] Per-workspace and per-task labels (cardinality risk; opt-in mechanism TBD)
+- [ ] Worker-side `/metrics` endpoint (separate scope decision)
+- [ ] NOTIFY publish/receive counters (medium-tier metric inventory)
+- [ ] Step counters by `action_type` (medium-tier)
+- [ ] OpenTelemetry exporter (use `metrics` facade swap if/when needed)
+- [ ] Grafana dashboard JSON shipped in-tree

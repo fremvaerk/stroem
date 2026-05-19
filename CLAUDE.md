@@ -246,6 +246,18 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - 8 tools: `list_workspaces`, `list_tasks`, `get_task`, `execute_task`, `get_job_status`, `get_job_logs`, `list_jobs`, `cancel_job`
 - Auth: Bearer token (API key or JWT) via `tokio::task_local!`. Per-tool ACL checks.
 
+### Prometheus Metrics
+- `crates/stroem-server/src/metrics.rs` — recorder install + `gather_gauges` + metric name constants (`STROEM_*`) + RED tower middleware (`track_http_metrics`)
+- `crates/stroem-server/src/web/metrics.rs` — `GET /metrics` handler
+- Always enabled. Optional config: `metrics: { public: bool }` (default `false` → requires `worker_token` Bearer, same auth posture as `/healthz/detail`).
+- Hybrid recording: counters/histograms inline at event sites via `metrics::counter!` / `metrics::histogram!`; gauges sampled at scrape time in `gather_gauges` (2s timeout per DB query via `tokio::time::timeout`, errors logged + skipped, NOT zeroed — Prometheus treats absence as stale).
+- DB queries inside `gather_gauges` run concurrently via `tokio::join!` so worst-case scrape latency is bounded at 2s, not 6s.
+- RED middleware applied to `/api/*` only. `/worker`, `/hooks`, `/mcp` deliberately excluded (worker traffic would swamp user-facing signal).
+- Job-completion counter lives in `run_terminal_job_actions` (not `handle_job_terminal`) — that's the single funnel called by `orchestrate_after_step`, `propagate_to_parent`, AND `handle_job_terminal`.
+- Global `replica_id` label added at recorder install — keeps multi-replica scrapes from collapsing into one series.
+- Helm: `serviceMonitor.enabled: true` renders `templates/servicemonitor.yaml`; uses `bearerTokenSecret` when `metrics.public: false`.
+- New metrics: add a `pub const` in `metrics.rs`, add the recording site, add an integration test in `crates/stroem-server/tests/metrics_test.rs`, document in `docs/src/content/docs/operations/metrics.md`.
+
 ### Webhook Triggers
 - `TriggerDef` tagged enum: `Scheduler`, `Webhook`, and `EventSource` variants
 - Handler at `/hooks/{name}` (not under `/api/`). Auth: optional `secret` field (query param or Bearer header)
