@@ -180,3 +180,66 @@ async fn metrics_with_valid_token_returns_text_format() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn leader_gauge_is_one_for_always_leader() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    let body = scrape(&router).await?;
+    // Prometheus output includes global labels: `stroem_leader_status{replica_id="..."} 1`
+    // so we check that the metric name appears followed by `} 1` on the same line.
+    assert!(
+        body.lines().any(|line| {
+            line.starts_with(stroem_server::metrics::STROEM_LEADER_STATUS) && line.ends_with("} 1")
+        }),
+        "expected leader gauge = 1 in:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workers_active_gauge_reflects_db() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    sqlx::query(
+        "INSERT INTO worker (worker_id, name, tags, status, last_heartbeat) \
+         VALUES ($1, 'w1', '[]'::jsonb, 'active', NOW()), \
+                ($2, 'w2', '[]'::jsonb, 'active', NOW()), \
+                ($3, 'w3', '[]'::jsonb, 'inactive', NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .execute(&h.pool)
+    .await?;
+
+    let body = scrape(&router).await?;
+    // Prometheus output includes global labels: `stroem_workers_active{replica_id="..."} 2`
+    // so we check that the metric name appears followed by `} 2` on the same line.
+    assert!(
+        body.lines().any(|line| {
+            line.starts_with(stroem_server::metrics::STROEM_WORKERS_ACTIVE) && line.ends_with("} 2")
+        }),
+        "expected 2 active workers in:\n{body}"
+    );
+    Ok(())
+}
+
+// Helper shared by T8 onward.
+async fn scrape(router: &axum::Router) -> Result<String> {
+    let response = router
+        .clone()
+        .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await?.to_bytes();
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}

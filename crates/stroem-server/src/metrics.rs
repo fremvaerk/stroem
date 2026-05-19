@@ -31,8 +31,13 @@ pub const STROEM_STEPS_READY: &str = "stroem_steps_ready";
 pub const STROEM_BACKGROUND_TASK_ALIVE: &str = "stroem_background_task_alive";
 
 use anyhow::{Context, Result};
+use metrics::gauge;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 use uuid::Uuid;
+
+const GAUGE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Histogram buckets for `stroem_http_request_duration_seconds`.
 /// Prometheus client-library standard buckets.
@@ -63,12 +68,84 @@ use crate::state::AppState;
 /// Sample pull-mode gauges (leader, workers, queue depth, background tasks)
 /// at scrape time. Errors are logged and the affected gauge is skipped, not
 /// fabricated as zero — Prometheus treats absent samples as stale.
-///
-/// Real implementation lands in Task 8. This placeholder lets the route
-/// compile end-to-end.
-#[tracing::instrument(skip(_state))]
-pub async fn gather_gauges(_state: &AppState) {
-    // Implementation in Task 8.
+#[tracing::instrument(skip(state))]
+pub async fn gather_gauges(state: &AppState) {
+    // --- Synchronous gauges (no DB) ---
+
+    gauge!(STROEM_LEADER_STATUS).set(if state.leader.is_leader() { 1.0 } else { 0.0 });
+
+    let bg = &state.background_tasks;
+    gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "scheduler")
+        .set(bool_to_f64(bg.scheduler_alive.load(Ordering::Relaxed)));
+    gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "recovery")
+        .set(bool_to_f64(bg.recovery_alive.load(Ordering::Relaxed)));
+    gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "event_source")
+        .set(bool_to_f64(bg.event_source_alive.load(Ordering::Relaxed)));
+
+    // --- DB-backed gauges (each bounded by GAUGE_QUERY_TIMEOUT) ---
+
+    sample_workers_active(state).await;
+    sample_jobs_in_flight(state).await;
+    sample_steps_ready(state).await;
+}
+
+fn bool_to_f64(b: bool) -> f64 {
+    if b { 1.0 } else { 0.0 }
+}
+
+async fn sample_workers_active(state: &AppState) {
+    let query = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM worker WHERE status = 'active'",
+    )
+    .fetch_one(&state.pool);
+
+    match tokio::time::timeout(GAUGE_QUERY_TIMEOUT, query).await {
+        Ok(Ok(count)) => gauge!(STROEM_WORKERS_ACTIVE).set(count as f64),
+        Ok(Err(e)) => tracing::warn!(error = %e, "metrics: workers_active query failed"),
+        Err(_) => tracing::warn!("metrics: workers_active query timed out"),
+    }
+}
+
+async fn sample_jobs_in_flight(state: &AppState) {
+    let query = sqlx::query_as::<_, (String, i64)>(
+        "SELECT status, COUNT(*)::BIGINT FROM job \
+         WHERE status IN ('pending', 'running') GROUP BY status",
+    )
+    .fetch_all(&state.pool);
+
+    match tokio::time::timeout(GAUGE_QUERY_TIMEOUT, query).await {
+        Ok(Ok(rows)) => {
+            // Always emit both labels so dashboards don't go blank when one
+            // bucket is empty.
+            let mut pending = 0_i64;
+            let mut running = 0_i64;
+            for (status, count) in rows {
+                match status.as_str() {
+                    "pending" => pending = count,
+                    "running" => running = count,
+                    _ => {}
+                }
+            }
+            gauge!(STROEM_JOBS_IN_FLIGHT, "status" => "pending").set(pending as f64);
+            gauge!(STROEM_JOBS_IN_FLIGHT, "status" => "running").set(running as f64);
+        }
+        Ok(Err(e)) => tracing::warn!(error = %e, "metrics: jobs_in_flight query failed"),
+        Err(_) => tracing::warn!("metrics: jobs_in_flight query timed out"),
+    }
+}
+
+async fn sample_steps_ready(state: &AppState) {
+    let query = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM job_step \
+         WHERE status = 'ready' AND (retry_at IS NULL OR retry_at <= NOW())",
+    )
+    .fetch_one(&state.pool);
+
+    match tokio::time::timeout(GAUGE_QUERY_TIMEOUT, query).await {
+        Ok(Ok(count)) => gauge!(STROEM_STEPS_READY).set(count as f64),
+        Ok(Err(e)) => tracing::warn!(error = %e, "metrics: steps_ready query failed"),
+        Err(_) => tracing::warn!("metrics: steps_ready query timed out"),
+    }
 }
 
 #[cfg(test)]
