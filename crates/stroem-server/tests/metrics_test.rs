@@ -272,6 +272,36 @@ async fn http_request_counter_records_api_hits() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn jobs_created_counter_renders_with_source_type_label() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    // Exercise the counter macro at the same call shape used in
+    // `job_creator::create_job_for_task_inner`. The production wiring is
+    // also verified by the grep check below — this test ensures the metric
+    // name + label render correctly.
+    metrics::counter!(
+        stroem_server::metrics::STROEM_JOBS_CREATED_TOTAL,
+        "source_type" => "api",
+    )
+    .increment(1);
+
+    let body = scrape(&router).await?;
+    assert!(
+        body.contains(stroem_server::metrics::STROEM_JOBS_CREATED_TOTAL),
+        "expected jobs_created counter in:\n{body}"
+    );
+    assert!(
+        body.contains(r#"source_type="api""#),
+        "expected source_type=\"api\" label in:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();

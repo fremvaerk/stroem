@@ -274,6 +274,12 @@ fn create_job_for_task_inner<'a>(
 
         tx.commit().await.context("Failed to commit job creation")?;
 
+        metrics::counter!(
+            crate::metrics::STROEM_JOBS_CREATED_TOTAL,
+            "source_type" => source_type.to_owned(),
+        )
+        .increment(1);
+
         tracing::info!("Created job {} with {} steps", job_id, new_steps.len());
 
         // Evaluate root steps with `when` conditions or `for_each` expressions
