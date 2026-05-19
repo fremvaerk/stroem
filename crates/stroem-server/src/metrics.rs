@@ -31,7 +31,10 @@ pub const STROEM_STEPS_READY: &str = "stroem_steps_ready";
 pub const STROEM_BACKGROUND_TASK_ALIVE: &str = "stroem_background_task_alive";
 
 use anyhow::{Context, Result};
-use metrics::gauge;
+use axum::extract::{MatchedPath, Request};
+use axum::middleware::Next;
+use axum::response::Response;
+use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -148,6 +151,40 @@ async fn sample_steps_ready(state: &AppState) {
         Ok(Err(e)) => tracing::warn!(error = %e, "metrics: steps_ready query failed"),
         Err(_) => tracing::warn!("metrics: steps_ready query timed out"),
     }
+}
+
+/// Tower middleware that records `stroem_http_requests_total` and
+/// `stroem_http_request_duration_seconds` for each request that passes
+/// through it.
+///
+/// Apply only to the `/api/*` subtree — see spec §HTTP middleware scope.
+/// `/worker/*`, `/hooks/*`, and `/mcp/*` are deliberately excluded.
+pub async fn track_http_metrics(request: Request, next: Next) -> Response {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let response = next.run(request).await;
+
+    let status = response.status().as_u16().to_string();
+    let elapsed = start.elapsed().as_secs_f64();
+
+    counter!(
+        STROEM_HTTP_REQUESTS_TOTAL,
+        "method" => method.to_string(),
+        "route" => route.clone(),
+        "status" => status,
+    )
+    .increment(1);
+    histogram!(STROEM_HTTP_REQUEST_DURATION_SECONDS, "route" => route).record(elapsed);
+
+    response
 }
 
 #[cfg(test)]

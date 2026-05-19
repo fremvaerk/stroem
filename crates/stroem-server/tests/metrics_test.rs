@@ -242,3 +242,67 @@ async fn scrape(router: &axum::Router) -> Result<String> {
     let bytes = response.into_body().collect().await?.to_bytes();
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_request_counter_records_api_hits() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    // Hit any /api/* endpoint a few times.
+    for _ in 0..3 {
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces")
+                    .body(Body::empty())?,
+            )
+            .await?;
+    }
+
+    let body = scrape(&router).await?;
+    assert!(
+        body.contains(stroem_server::metrics::STROEM_HTTP_REQUESTS_TOTAL),
+        "expected http counter present in:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    // Hit the same parameterised route with two different UUIDs.
+    for _ in 0..2 {
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/jobs/{}", Uuid::new_v4()))
+                    .body(Body::empty())?,
+            )
+            .await?;
+    }
+
+    let body = scrape(&router).await?;
+    // Match `route="<value>"` and check that the value itself does not
+    // contain a raw UUID. We deliberately skip `replica_id` (which is a
+    // UUID by design) by extracting only the route label value.
+    let route_uuid_re = regex_lite::Regex::new(
+        r#"route="[^"]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[^"]*""#,
+    )
+    .unwrap();
+    let uuid_in_route = body
+        .lines()
+        .filter(|l| l.starts_with(stroem_server::metrics::STROEM_HTTP_REQUESTS_TOTAL))
+        .any(|l| route_uuid_re.is_match(l));
+    assert!(!uuid_in_route, "raw UUIDs leaked into route label:\n{body}");
+    Ok(())
+}

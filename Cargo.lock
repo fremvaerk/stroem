@@ -5548,6 +5548,7 @@ dependencies = [
  "notify",
  "openidconnect",
  "rand 0.8.6",
+ "regex-lite",
  "reqwest 0.13.3",
  "rmcp",
  "rust-embed",

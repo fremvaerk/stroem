@@ -101,7 +101,11 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
         .merge(health_route)
         .merge(health_detail_route)
         .merge(metrics_route)
-        .nest("/api", api::build_api_routes(state.clone()))
+        .nest(
+            "/api",
+            api::build_api_routes(state.clone())
+                .layer(axum::middleware::from_fn(crate::metrics::track_http_metrics)),
+        )
         .nest(
             "/worker",
             worker_api::build_worker_api_routes(state.clone()),
