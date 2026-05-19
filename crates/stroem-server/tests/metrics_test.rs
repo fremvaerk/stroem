@@ -439,17 +439,21 @@ async fn jobs_in_flight_emits_both_status_labels_even_when_empty() -> Result<()>
 
     let body = scrape(&router).await?;
     // Empty DB still emits 0 for both buckets so dashboards don't go blank.
+    let pending_line = body.lines().find(|l| {
+        l.starts_with(stroem_server::metrics::STROEM_JOBS_IN_FLIGHT)
+            && l.contains(r#"status="pending""#)
+    });
+    let running_line = body.lines().find(|l| {
+        l.starts_with(stroem_server::metrics::STROEM_JOBS_IN_FLIGHT)
+            && l.contains(r#"status="running""#)
+    });
     assert!(
-        body.contains(stroem_server::metrics::STROEM_JOBS_IN_FLIGHT),
-        "missing in_flight metric in:\n{body}"
+        pending_line.is_some(),
+        "missing stroem_jobs_in_flight pending bucket in:\n{body}"
     );
     assert!(
-        body.contains(r#"status="pending""#),
-        "missing status=\"pending\" bucket in:\n{body}"
-    );
-    assert!(
-        body.contains(r#"status="running""#),
-        "missing status=\"running\" bucket in:\n{body}"
+        running_line.is_some(),
+        "missing stroem_jobs_in_flight running bucket in:\n{body}"
     );
     Ok(())
 }
