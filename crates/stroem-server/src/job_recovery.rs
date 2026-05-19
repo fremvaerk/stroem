@@ -10,6 +10,19 @@ use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use uuid::Uuid;
 
+/// Increment the `stroem_jobs_completed_total` counter for a job that has
+/// reached terminal state. Called at the earliest safe point in each of the
+/// three terminal-state code paths so it fires unconditionally, even when
+/// downstream workspace/task lookups fail (e.g. workspace deleted while job
+/// was in flight).
+fn record_job_completed(job: &stroem_db::JobRow) {
+    metrics::counter!(
+        crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
+        "status" => job.status.clone(),
+    )
+    .increment(1);
+}
+
 /// Build a `JobLogMeta` from a `JobRow`.
 fn meta_from_job(job: &JobRow) -> JobLogMeta {
     JobLogMeta {
@@ -246,6 +259,12 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 | Some(JobStatus::Cancelled)
                 | Some(JobStatus::Skipped)
         ) {
+            // Emit the counter at terminal-state detection. Workspace was already
+            // resolved at the top of this function, so this is the earliest safe point.
+            // Note: the workspace guard is before this block, not after, so the counter
+            // fires for all terminal jobs regardless of subsequent workspace/task failures.
+            record_job_completed(&job_after);
+
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
                 (job_after.parent_job_id, &job_after.parent_step_name)
@@ -574,6 +593,15 @@ async fn propagate_to_parent(
                         | Some(JobStatus::Cancelled)
                         | Some(JobStatus::Skipped)
                 ) {
+                    // Emit the counter at terminal-state detection, as early as possible.
+                    // Note: the workspace guard (`if let Some(ref parent_ws)`) is above this
+                    // block at the `propagate_to_parent` function level — the counter is inside
+                    // that guard and cannot be moved before it without structural refactoring.
+                    // This is still a net improvement over the old behavior: workspace-missing
+                    // jobs in handle_job_terminal are now counted unconditionally, and here we
+                    // fire before run_terminal_job_actions and any of its own failure modes.
+                    record_job_completed(&parent_after);
+
                     // Propagate up the chain if parent is also a child
                     if let (Some(grandparent_id), Some(ref grandparent_step)) =
                         (parent_after.parent_job_id, &parent_after.parent_step_name)
@@ -618,6 +646,11 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         }
         _ => return Ok(()),
     };
+
+    // Emit the counter unconditionally at the earliest terminal-state confirmation
+    // point, before any workspace/task lookups that may fail (e.g. workspace deleted
+    // while the job was in flight).
+    record_job_completed(&job);
 
     // Remove from the in-memory cancelled set to prevent unbounded growth.
     // Safe to call unconditionally — no-op if not present.
@@ -680,12 +713,6 @@ async fn run_terminal_job_actions(
     workspace: &WorkspaceConfig,
     task: &TaskDef,
 ) {
-    metrics::counter!(
-        crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
-        "status" => job.status.clone(),
-    )
-    .increment(1);
-
     let job_id = job.job_id;
 
     // Fire hooks (best-effort)
