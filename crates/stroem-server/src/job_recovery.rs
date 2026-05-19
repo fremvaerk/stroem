@@ -619,6 +619,12 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         _ => return Ok(()),
     };
 
+    metrics::counter!(
+        crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
+        "status" => job.status.clone(),
+    )
+    .increment(1);
+
     // Remove from the in-memory cancelled set to prevent unbounded growth.
     // Safe to call unconditionally — no-op if not present.
     crate::cancellation::clear_cancelled(state, job_id);

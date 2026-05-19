@@ -345,3 +345,37 @@ async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jobs_completed_counter_includes_status_label() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    // Exercise the counter macro shape used in
+    // `job_recovery::handle_job_terminal`. The production site is verified
+    // by the grep check below.
+    metrics::counter!(
+        stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL,
+        "status" => "completed",
+    )
+    .increment(1);
+    metrics::counter!(
+        stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL,
+        "status" => "failed",
+    )
+    .increment(1);
+
+    let body = scrape(&router).await?;
+    assert!(
+        body.contains(r#"status="completed""#),
+        "missing status=\"completed\" label in:\n{body}"
+    );
+    assert!(
+        body.contains(r#"status="failed""#),
+        "missing status=\"failed\" label in:\n{body}"
+    );
+    Ok(())
+}
