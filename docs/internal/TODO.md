@@ -1276,3 +1276,30 @@ Initial implementation:
 - [ ] Step counters by `action_type` (medium-tier)
 - [ ] OpenTelemetry exporter (use `metrics` facade swap if/when needed)
 - [ ] Grafana dashboard JSON shipped in-tree
+
+### Post-merge review findings (2026-05-19, 5-agent /review)
+
+#### Critical (needs code-trace verification, then fix)
+- [ ] **Double-count of `stroem_jobs_completed_total` on cascading cancel** — code-reviewer flagged (conf 90) the scenario: `cancel_job(parent)` → recursively calls `cancel_job(child)` → child's terminal handler enters `propagate_to_parent(child)` which finds the parent now terminal and fires `record_job_completed(parent)`, then control returns to `cancel_job(parent)` which calls `handle_job_terminal(parent)` → fires the counter again. Trace the cancellation path through `crates/stroem-server/src/cancellation.rs` + `job_recovery.rs` to confirm, then either gate the counter on "first transition to terminal" via DB CAS or relocate to a single funnel that's reachable exactly once per terminal transition. Note: T11's earlier counter-relocation fix put it in `run_terminal_job_actions` first, then moved to `record_job_completed` at 3 sites — this scenario may have regressed.
+
+#### Important (should fix before next release)
+- [ ] **`stroem_leader_status` re-exposes leader identity in public mode** (security, conf 85) — inconsistent with the HA-review-2026-05-17 decision to strip leader/follower role from unauthenticated `/healthz`. In `metrics.public: true` mode, anyone can scrape every replica and identify the leader by `replica_id`. Options: (a) omit `stroem_leader_status` when `metrics.public: true`, (b) strip `replica_id` global label in public mode, (c) document as an intentional trade-off in `operations/metrics.md`.
+- [ ] **`worker_token` credential reuse for Prometheus scrapes** (security, conf 80) — the scraper credential carries full worker-API privileges (register workers, claim jobs, push logs, read state). Add a separate optional `metrics_token` config field so operators can rotate/scope scraper credentials independently of worker credentials. Fall back to `worker_token` when absent for backward compatibility.
+- [ ] **Counter call sites tested only via in-test macro injection, not production paths** (qa, conf 95) — `jobs_created_counter_renders_with_source_type_label` and `jobs_completed_counter_includes_status_label` would pass even if `record_job_completed` + the `job_creator.rs` counter site were deleted. Add a full lifecycle test in `tests/metrics_test.rs`: create job via API → complete → scrape → assert both counters incremented exactly once.
+- [ ] **`record_job_completed` `propagate_to_parent` call site uncovered** (qa, conf 90) — no test exercises the child-terminal → parent-also-terminal cascade. Adding the cancellation-cascade test above would close both this and the Critical finding.
+- [ ] **`track_http_metrics` 5xx status label untested** (qa, conf 85) — middleware records `status` from `response.status()`; verify a 500-returning endpoint produces `stroem_http_requests_total{...,status="500"}` (might need a synthetic always-500 route or trigger an `AppError::Internal` via a malformed request).
+- [ ] **Auth/error responses on `/metrics` return `application/json`** (api-design, conf 85) — `AppError::IntoResponse` returns JSON; Prometheus expects text. Override the metrics handler's error path to render `text/plain` so scrape-failure diagnostics aren't misleading.
+- [ ] **No `Cache-Control: no-store` header on `/metrics`** (api-design, conf 80) — intervening proxies (nginx, ALB) could cache stale exposition. Add `Cache-Control: no-store` (and probably `Pragma: no-cache` for HTTP/1.0 path) in `web/metrics.rs`.
+
+#### Minor
+- [ ] **`match status.as_str()` uses string literals** (`metrics.rs::sample_jobs_in_flight`) — project convention uses `JobStatus` enum; if variants are renamed, the gauge silently stops updating. Replace `"pending"` / `"running"` with `JobStatus::Pending.as_ref()` / `JobStatus::Running.as_ref()`.
+- [ ] **`bool_to_f64` helper** — replace with `f64::from(b)` (stable, idiomatic) at the two call sites and delete the helper.
+- [ ] **Helm `worker_token: "change-me-in-production"` plaintext default** — operators who forget to override deploy with the well-known token. Add a startup warn-log when `worker_token` matches the documented default, or a Helm `required` guard.
+- [ ] **`replica_id` UUID visible in public-mode scrape** — minor pod-identity leak; document as accepted trade-off in `operations/metrics.md` public-mode section.
+- [ ] **Doc note on multi-replica `delta(stroem_steps_ready)`** — `operations/metrics.md` alert example doesn't note that the gauge resets on replica restart; multi-replica deployments should `max()` or `sum()` across replicas before applying `delta()`.
+- [ ] **Auth edge cases on `/metrics`** — add tests for `Authorization: Bearer ` with no token after the space, with extra whitespace, with lowercase `bearer`, with non-ASCII.
+- [ ] **`route="unknown"` fallback untested** — no test exercises a request that doesn't match any registered route; should verify the fallback label appears (or that 404 paths don't get counted at all, depending on intent).
+- [ ] **`_ => {}` catch-all in `sample_jobs_in_flight`** — bounded today by `WHERE status IN ('pending', 'running')` filter, but a tracing warn here would catch future query-vs-match drift.
+- [ ] **Duplicate `Router::new()` in `web/mod.rs::build_router` metrics branch** — extract once, conditionally `.layer()` for the auth case.
+- [ ] **`#[tracing::instrument]` on `install_recorder`** — synchronous one-shot startup function; the instrument span adds no value. Consider removing.
+- [ ] **`source_type.to_owned()` in `job_creator.rs` counter** — allocation per job creation. Acceptable today; if metrics-rs ever accepts `Arc<str>` labels, switch.
