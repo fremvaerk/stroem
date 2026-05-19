@@ -379,3 +379,99 @@ async fn jobs_completed_counter_includes_status_label() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn steps_ready_gauge_reflects_db_state() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    // Insert one job + 3 ready steps + 1 ready-but-retry-future step (which
+    // must NOT be counted because its retry_at is in the future).
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, created_at) \
+         VALUES ($1, 'ws', 't', 'pending', 'api', NOW())",
+    )
+    .bind(job_id)
+    .execute(&h.pool)
+    .await?;
+
+    for i in 0..3 {
+        sqlx::query(
+            "INSERT INTO job_step (job_id, step_name, action_name, status, action_type, required_tags) \
+             VALUES ($1, $2, 'noop', 'ready', 'script', '[]'::jsonb)",
+        )
+        .bind(job_id)
+        .bind(format!("s{i}"))
+        .execute(&h.pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, status, action_type, required_tags, retry_at) \
+         VALUES ($1, 'future', 'noop', 'ready', 'script', '[]'::jsonb, NOW() + INTERVAL '1 hour')",
+    )
+    .bind(job_id)
+    .execute(&h.pool)
+    .await?;
+
+    let body = scrape(&router).await?;
+    let expected = format!("{} 3", stroem_server::metrics::STROEM_STEPS_READY);
+    let has_three = body
+        .lines()
+        .any(|l| l.starts_with(stroem_server::metrics::STROEM_STEPS_READY) && l.ends_with("} 3"));
+    assert!(
+        has_three,
+        "expected 3 ready steps (line ending '}} 3' for {expected}) in:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jobs_in_flight_emits_both_status_labels_even_when_empty() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    let body = scrape(&router).await?;
+    // Empty DB still emits 0 for both buckets so dashboards don't go blank.
+    assert!(
+        body.contains(stroem_server::metrics::STROEM_JOBS_IN_FLIGHT),
+        "missing in_flight metric in:\n{body}"
+    );
+    assert!(
+        body.contains(r#"status="pending""#),
+        "missing status=\"pending\" bucket in:\n{body}"
+    );
+    assert!(
+        body.contains(r#"status="running""#),
+        "missing status=\"running\" bucket in:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    let body = scrape(&router).await?;
+    // All flags default to false at boot since no background loops are
+    // spawned by the test harness → all bg-task gauges should be 0.
+    let has_scheduler_zero = body
+        .lines()
+        .any(|l| {
+            l.starts_with(stroem_server::metrics::STROEM_BACKGROUND_TASK_ALIVE)
+                && l.contains(r#"task="scheduler""#)
+                && l.ends_with("} 0")
+        });
+    assert!(has_scheduler_zero, "expected scheduler=0 in:\n{body}");
+    Ok(())
+}
