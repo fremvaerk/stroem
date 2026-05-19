@@ -304,5 +304,14 @@ async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
         .filter(|l| l.starts_with(stroem_server::metrics::STROEM_HTTP_REQUESTS_TOTAL))
         .any(|l| route_uuid_re.is_match(l));
     assert!(!uuid_in_route, "raw UUIDs leaked into route label:\n{body}");
+
+    // Verify the /api prefix is preserved in the route label so Grafana
+    // dashboards filtering on `/api/jobs/*` get matches.
+    assert!(
+        body.lines()
+            .filter(|l| l.starts_with(stroem_server::metrics::STROEM_HTTP_REQUESTS_TOTAL))
+            .any(|l| l.contains(r#"route="/api/jobs/"#)),
+        "expected /api/jobs/* prefix in route label, got:\n{body}"
+    );
     Ok(())
 }

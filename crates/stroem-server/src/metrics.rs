@@ -164,6 +164,14 @@ pub async fn track_http_metrics(request: Request, next: Next) -> Response {
 
     let start = Instant::now();
     let method = request.method().clone();
+    // This middleware is applied to the `/api` subtree via `.layer()` on
+    // the inner router passed to `.nest("/api", ...)` (see `web/mod.rs`).
+    // In Axum 0.8 the `MatchedPath` extension is set to the *full* matched
+    // path (including the nest prefix), so we get `/api/jobs/{id}` — not
+    // the stripped `/jobs/{id}`. No prefix manipulation is needed.
+    //
+    // NOTE: if this middleware is ever applied to additional subtrees,
+    // verify that MatchedPath still returns the full external path.
     let route = request
         .extensions()
         .get::<MatchedPath>()
@@ -191,8 +199,12 @@ pub async fn track_http_metrics(request: Request, next: Next) -> Response {
 mod tests {
     use super::*;
 
-    /// Helper: install a private recorder for this single test (using
-    /// `build_recorder` to avoid colliding with other tests' global recorder).
+    /// Helper: build an uninstalled `PrometheusRecorder` and return its
+    /// handle. Calling `handle.render()` reads only from this local
+    /// recorder's registry. NOTE: the `metrics::counter!` / `histogram!`
+    /// macros always route to the globally installed recorder — they will
+    /// NOT appear in this handle's output. Use only for smoke-testing
+    /// `render()`-on-empty-registry, not for verifying macro recording.
     fn local_handle() -> PrometheusHandle {
         let recorder = PrometheusBuilder::new()
             .add_global_label("replica_id", "test")
