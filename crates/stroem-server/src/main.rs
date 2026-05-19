@@ -233,6 +233,9 @@ async fn main() -> Result<()> {
     let replica_id = uuid::Uuid::new_v4();
     tracing::info!("Server replica id: {}", replica_id);
 
+    let metrics_handle = stroem_server::metrics::install_recorder(replica_id)
+        .context("installing prometheus metrics recorder")?;
+
     let (leader, _leader_handle) =
         stroem_server::leader::LeaderElection::start(config.db.url.clone(), cancel_token.clone());
     let event_bus = stroem_server::events::EventBus::new(pool.clone(), replica_id);
@@ -265,7 +268,8 @@ async fn main() -> Result<()> {
     let _event_source = stroem_server::event_source::start(state.clone(), cancel_token.clone());
 
     // Build router
-    let app = stroem_server::web::build_router(state, cancel_token.clone());
+    let app = stroem_server::web::build_router(state, cancel_token.clone())
+        .layer(axum::Extension(metrics_handle));
 
     // Start server with graceful shutdown
     let listener = tokio::net::TcpListener::bind(&config.listen)
