@@ -84,9 +84,11 @@ pub async fn gather_gauges(state: &AppState) {
 
     // --- DB-backed gauges (each bounded by GAUGE_QUERY_TIMEOUT) ---
 
-    sample_workers_active(state).await;
-    sample_jobs_in_flight(state).await;
-    sample_steps_ready(state).await;
+    tokio::join!(
+        sample_workers_active(state),
+        sample_jobs_in_flight(state),
+        sample_steps_ready(state),
+    );
 }
 
 fn bool_to_f64(b: bool) -> f64 {
@@ -151,7 +153,6 @@ async fn sample_steps_ready(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use metrics::counter;
 
     /// Helper: install a private recorder for this single test (using
     /// `build_recorder` to avoid colliding with other tests' global recorder).
@@ -190,7 +191,5 @@ mod tests {
         let rendered = handle.render();
         // Empty registry → empty string is expected and valid.
         assert!(rendered.is_empty(), "expected empty render for empty registry, got: {rendered}");
-        // Verify the `metrics` macro is importable (compile-time check).
-        let _ = counter!("dummy");
     }
 }
