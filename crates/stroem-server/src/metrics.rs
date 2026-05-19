@@ -43,6 +43,7 @@ const HTTP_DURATION_BUCKETS: &[f64] = &[
 /// Install the Prometheus recorder for this process. Must be called exactly
 /// once at startup. Subsequent calls (e.g. in tests) will return a handle
 /// that does not actually receive new metrics — set the recorder up once.
+#[tracing::instrument]
 pub fn install_recorder(replica_id: Uuid) -> Result<PrometheusHandle> {
     let builder = PrometheusBuilder::new()
         .add_global_label("replica_id", replica_id.to_string())
@@ -89,14 +90,17 @@ mod tests {
     }
 
     #[test]
-    fn render_includes_replica_id_global_label() {
-        // Use a process-local recorder to render output without depending on
-        // the global one. We don't assert specific counts — just shape.
+    fn local_handle_renders_without_panic() {
+        // Smoke test: a freshly built (uninstalled) recorder produces a
+        // handle whose render() returns successfully. The actual global-label
+        // behaviour is exercised end-to-end by the integration tests in
+        // `tests/metrics_test.rs` (added in Task 7), which scrape /metrics
+        // from a fully booted server.
         let handle = local_handle();
         let rendered = handle.render();
-        // An empty registry renders an empty string — that's fine. We just
-        // assert the helper compiles and runs.
-        assert!(rendered.is_empty() || rendered.contains("replica_id"));
-        let _ = counter!("dummy"); // verify the metrics macro is importable
+        // Empty registry → empty string is expected and valid.
+        assert!(rendered.is_empty(), "expected empty render for empty registry, got: {rendered}");
+        // Verify the `metrics` macro is importable (compile-time check).
+        let _ = counter!("dummy");
     }
 }
