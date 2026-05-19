@@ -58,6 +58,19 @@ pub fn install_recorder(replica_id: Uuid) -> Result<PrometheusHandle> {
     Ok(handle)
 }
 
+use crate::state::AppState;
+
+/// Sample pull-mode gauges (leader, workers, queue depth, background tasks)
+/// at scrape time. Errors are logged and the affected gauge is skipped, not
+/// fabricated as zero — Prometheus treats absent samples as stale.
+///
+/// Real implementation lands in Task 8. This placeholder lets the route
+/// compile end-to-end.
+#[tracing::instrument(skip(_state))]
+pub async fn gather_gauges(_state: &AppState) {
+    // Implementation in Task 8.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

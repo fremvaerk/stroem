@@ -1,6 +1,7 @@
 pub mod api;
 pub mod error;
 pub mod health;
+pub mod metrics;
 pub mod hooks;
 pub mod worker_api;
 
@@ -75,9 +76,31 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
         ))
         .with_state(state.clone());
 
+    // /metrics — Prometheus scrape endpoint.
+    // Auth: gated by worker_token unless `metrics.public: true`.
+    let metrics_public = state
+        .config
+        .metrics
+        .as_ref()
+        .is_some_and(|m| m.public);
+    let metrics_route = if metrics_public {
+        Router::new()
+            .route("/metrics", get(metrics::metrics_handler))
+            .with_state(state.clone())
+    } else {
+        Router::new()
+            .route("/metrics", get(metrics::metrics_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                worker_api::auth_middleware,
+            ))
+            .with_state(state.clone())
+    };
+
     let mut router = Router::new()
         .merge(health_route)
         .merge(health_detail_route)
+        .merge(metrics_route)
         .nest("/api", api::build_api_routes(state.clone()))
         .nest(
             "/worker",
