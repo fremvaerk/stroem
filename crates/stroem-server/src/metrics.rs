@@ -6,8 +6,7 @@
 pub const STROEM_HTTP_REQUESTS_TOTAL: &str = "stroem_http_requests_total";
 
 /// `histogram` — `/api/*` request duration in seconds. Label: route.
-pub const STROEM_HTTP_REQUEST_DURATION_SECONDS: &str =
-    "stroem_http_request_duration_seconds";
+pub const STROEM_HTTP_REQUEST_DURATION_SECONDS: &str = "stroem_http_request_duration_seconds";
 
 /// `counter` — jobs created. Label: source_type.
 pub const STROEM_JOBS_CREATED_TOTAL: &str = "stroem_jobs_created_total";
@@ -95,14 +94,17 @@ pub async fn gather_gauges(state: &AppState) {
 }
 
 fn bool_to_f64(b: bool) -> f64 {
-    if b { 1.0 } else { 0.0 }
+    if b {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 async fn sample_workers_active(state: &AppState) {
-    let query = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT FROM worker WHERE status = 'active'",
-    )
-    .fetch_one(&state.pool);
+    let query =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM worker WHERE status = 'active'")
+            .fetch_one(&state.pool);
 
     match tokio::time::timeout(GAUGE_QUERY_TIMEOUT, query).await {
         Ok(Ok(count)) => gauge!(STROEM_WORKERS_ACTIVE).set(count as f64),
@@ -239,6 +241,9 @@ mod tests {
         let handle = local_handle();
         let rendered = handle.render();
         // Empty registry → empty string is expected and valid.
-        assert!(rendered.is_empty(), "expected empty render for empty registry, got: {rendered}");
+        assert!(
+            rendered.is_empty(),
+            "expected empty render for empty registry, got: {rendered}"
+        );
     }
 }

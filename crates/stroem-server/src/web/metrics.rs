@@ -17,9 +17,5 @@ pub async fn metrics_handler(
 ) -> Result<Response, AppError> {
     crate::metrics::gather_gauges(&state).await;
     let body = handle.render();
-    Ok((
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        body,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response())
 }

@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::Extension;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use serial_test::serial;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -92,8 +93,7 @@ fn global_test_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
     HANDLE
         .get_or_init(|| {
-            stroem_server::metrics::install_recorder(Uuid::new_v4())
-                .expect("install recorder once")
+            stroem_server::metrics::install_recorder(Uuid::new_v4()).expect("install recorder once")
         })
         .clone()
 }
@@ -181,6 +181,7 @@ async fn metrics_with_valid_token_returns_text_format() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn leader_gauge_is_one_for_always_leader() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
@@ -201,6 +202,7 @@ async fn leader_gauge_is_one_for_always_leader() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn workers_active_gauge_reflects_db() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
@@ -381,6 +383,7 @@ async fn jobs_completed_counter_includes_status_label() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn steps_ready_gauge_reflects_db_state() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
@@ -430,6 +433,7 @@ async fn steps_ready_gauge_reflects_db_state() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn jobs_in_flight_emits_both_status_labels_even_when_empty() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
@@ -459,6 +463,7 @@ async fn jobs_in_flight_emits_both_status_labels_even_when_empty() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
@@ -469,13 +474,11 @@ async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
     let body = scrape(&router).await?;
     // All flags default to false at boot since no background loops are
     // spawned by the test harness → all bg-task gauges should be 0.
-    let has_scheduler_zero = body
-        .lines()
-        .any(|l| {
-            l.starts_with(stroem_server::metrics::STROEM_BACKGROUND_TASK_ALIVE)
-                && l.contains(r#"task="scheduler""#)
-                && l.ends_with("} 0")
-        });
+    let has_scheduler_zero = body.lines().any(|l| {
+        l.starts_with(stroem_server::metrics::STROEM_BACKGROUND_TASK_ALIVE)
+            && l.contains(r#"task="scheduler""#)
+            && l.ends_with("} 0")
+    });
     assert!(has_scheduler_zero, "expected scheduler=0 in:\n{body}");
     Ok(())
 }

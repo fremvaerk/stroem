@@ -1,8 +1,8 @@
 pub mod api;
 pub mod error;
 pub mod health;
-pub mod metrics;
 pub mod hooks;
+pub mod metrics;
 pub mod worker_api;
 
 use crate::state::AppState;
@@ -78,11 +78,7 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
 
     // /metrics — Prometheus scrape endpoint.
     // Auth: gated by worker_token unless `metrics.public: true`.
-    let metrics_public = state
-        .config
-        .metrics
-        .as_ref()
-        .is_some_and(|m| m.public);
+    let metrics_public = state.config.metrics.as_ref().is_some_and(|m| m.public);
     let metrics_route = if metrics_public {
         Router::new()
             .route("/metrics", get(metrics::metrics_handler))
@@ -103,8 +99,9 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
         .merge(metrics_route)
         .nest(
             "/api",
-            api::build_api_routes(state.clone())
-                .layer(axum::middleware::from_fn(crate::metrics::track_http_metrics)),
+            api::build_api_routes(state.clone()).layer(axum::middleware::from_fn(
+                crate::metrics::track_http_metrics,
+            )),
         )
         .nest(
             "/worker",
