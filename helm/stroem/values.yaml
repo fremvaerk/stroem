@@ -258,20 +258,26 @@ ingress:
   #    hosts:
   #      - stroem.example.com
 
+# Strøm exposes /metrics on the main HTTP port. Enable the ServiceMonitor
+# if you run Prometheus Operator. When metrics.public is false (default),
+# the ServiceMonitor uses bearerTokenSecret to authenticate scrapes with
+# the same worker token configured via STROEM__WORKER_TOKEN.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels: {}
+  # Name of the secret containing the worker token. Required when
+  # `metrics.public` is false (the default). Override only if you store
+  # the worker token in a secret with a non-default name/key.
+  bearerTokenSecret:
+    name: ""    # e.g. "stroem-worker-token" — must be set when metrics.public=false
+    key: "token"
+
+metrics:
+  # If true, /metrics requires no authentication. Default false (worker token).
+  public: false
+
 # Arbitrary extra manifests rendered with full Helm context.
-# Useful for ServiceMonitor, NetworkPolicy, CronJob, etc.
+# Useful for NetworkPolicy, CronJob, etc.
 extraManifests: []
-# - |
-#   apiVersion: monitoring.coreos.com/v1
-#   kind: ServiceMonitor
-#   metadata:
-#     name: {{ include "stroem.fullname" . }}
-#     labels:
-#       {{- include "stroem.labels" . | nindent 6 }}
-#   spec:
-#     endpoints:
-#       - port: http
-#         path: /metrics
-#     selector:
-#       matchLabels:
-#         app.kubernetes.io/component: server

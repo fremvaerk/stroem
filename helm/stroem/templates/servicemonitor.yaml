@@ -1,0 +1,29 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if and (not .Values.metrics.public) (not .Values.serviceMonitor.bearerTokenSecret.name) }}
+{{- fail "serviceMonitor.bearerTokenSecret.name must be set when metrics.public is false" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "stroem.fullname" . }}
+  labels:
+    {{- include "stroem.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "stroem.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | default "10s" }}
+      {{- if not .Values.metrics.public }}
+      bearerTokenSecret:
+        name: {{ .Values.serviceMonitor.bearerTokenSecret.name }}
+        key: {{ .Values.serviceMonitor.bearerTokenSecret.key | default "token" }}
+      {{- end }}
+{{- end }}
