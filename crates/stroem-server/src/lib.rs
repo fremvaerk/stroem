@@ -13,6 +13,7 @@ pub mod log_broadcast;
 pub mod log_storage;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod metrics;
 pub mod oidc;
 pub mod orchestrator;
 pub mod recovery;
