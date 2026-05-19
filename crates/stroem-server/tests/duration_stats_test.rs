@@ -166,6 +166,7 @@ async fn setup() -> Result<(
         retention: RetentionConfig::default(),
         acl: None,
         mcp: None,
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,

@@ -83,6 +83,7 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
         retention: RetentionConfig::default(),
         acl: None,
         mcp: None,
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,

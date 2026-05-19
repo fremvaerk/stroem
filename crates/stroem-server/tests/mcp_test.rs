@@ -295,6 +295,7 @@ async fn setup_with_mcp() -> Result<(
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        metrics: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -348,6 +349,7 @@ async fn setup_mcp_disabled() -> Result<(
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        metrics: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -410,6 +412,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        metrics: None,
     };
 
     // Seed initial user
@@ -1179,6 +1182,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
+        metrics: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);

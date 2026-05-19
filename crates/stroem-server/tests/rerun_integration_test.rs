@@ -233,6 +233,7 @@ async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Res
         retention: RetentionConfig::default(),
         acl: None,
         mcp: None,
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,
