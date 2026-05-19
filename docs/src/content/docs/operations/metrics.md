@@ -97,12 +97,13 @@ groups:
           summary: "No active Strøm workers — jobs will not be claimed"
 
       - alert: StroemQueueGrowing
-        expr: |
-          rate(stroem_steps_ready[5m])
-          > rate(stroem_jobs_completed_total[5m])
+        # `stroem_steps_ready` is a gauge — use `delta()` not `rate()`.
+        # Fires when ready-step count grew by >0 over 10m, indicating
+        # workers can't keep up with new step arrivals.
+        expr: delta(stroem_steps_ready[10m]) > 0 and stroem_steps_ready > 10
         for: 10m
         annotations:
-          summary: "Strøm step queue growing faster than completion rate"
+          summary: "Strøm step queue growing — workers not keeping up"
 ```
 
 ## Notes
