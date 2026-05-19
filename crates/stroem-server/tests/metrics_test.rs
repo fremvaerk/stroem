@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+const WORKER_TOKEN: &str = "test-token-must-be-long-enough-32";
+
 struct Harness {
     _container: testcontainers::ContainerAsync<Postgres>,
     pool: PgPool,
@@ -61,7 +63,7 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
         workspaces: HashMap::new(),
         libraries: HashMap::new(),
         git_auth: HashMap::new(),
-        worker_token: "test-token-must-be-long-enough-32".to_string(),
+        worker_token: WORKER_TOKEN.to_string(),
         auth: None,
         recovery: RecoveryConfig {
             heartbeat_timeout_secs: 120,
@@ -115,11 +117,6 @@ async fn build_router_with(h: &Harness, config: ServerConfig) -> axum::Router {
     build_router(state, cancel).layer(Extension(handle))
 }
 
-async fn body_string(response: axum::response::Response) -> String {
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    String::from_utf8_lossy(&bytes).to_string()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_public_endpoint_no_auth() -> Result<()> {
     let h = boot().await?;
@@ -131,14 +128,20 @@ async fn metrics_public_endpoint_no_auth() -> Result<()> {
     let response = router
         .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
         .await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    let ct = response
-        .headers()
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let _body = body_string(response).await;
-    assert_eq!(ct.as_deref(), Some("text/plain; version=0.0.4"));
+
+    let (parts, body) = response.into_parts();
+    assert_eq!(parts.status, StatusCode::OK);
+    assert_eq!(
+        parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/plain; version=0.0.4")
+    );
+    let bytes = body.collect().await?.to_bytes();
+    let _body = String::from_utf8_lossy(&bytes).to_string();
+    // Empty registry renders empty body — that's fine. We just verified
+    // status + content-type for the public auth-less path.
     Ok(())
 }
 
@@ -169,7 +172,7 @@ async fn metrics_with_valid_token_returns_text_format() -> Result<()> {
                 .uri("/metrics")
                 .header(
                     http::header::AUTHORIZATION,
-                    "Bearer test-token-must-be-long-enough-32",
+                    format!("Bearer {WORKER_TOKEN}"),
                 )
                 .body(Body::empty())?,
         )
