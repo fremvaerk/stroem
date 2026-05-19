@@ -291,11 +291,11 @@ async fn setup_with_mcp() -> Result<(
         retention: RetentionConfig::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
-        metrics: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -345,11 +345,11 @@ async fn setup_mcp_disabled() -> Result<(
         retention: RetentionConfig::default(),
         acl: None,
         mcp: None, // MCP disabled
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
-        metrics: None,
     };
 
     let workspace = mcp_test_workspace();
@@ -408,11 +408,11 @@ async fn setup_with_auth_and_mcp() -> Result<(
         retention: RetentionConfig::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
-        metrics: None,
     };
 
     // Seed initial user
@@ -1178,11 +1178,11 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         retention: RetentionConfig::default(),
         acl: None,
         mcp: Some(McpConfig { enabled: true }),
+        metrics: None,
         agents: None,
         state_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
-        metrics: None,
     };
     let mgr = WorkspaceManager::from_config("default", workspace.clone());
     let log_storage = LogStorage::new(&config.log_storage.local_dir);

@@ -2314,4 +2314,19 @@ metrics:
         let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.metrics.as_ref().map(|m| m.public), Some(true));
     }
+
+    #[test]
+    fn metrics_empty_block_yields_some_with_default_public_false() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: "/tmp"
+worker_token: "tok"
+metrics: {}
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.metrics.as_ref().map(|m| m.public), Some(false));
+    }
 }
