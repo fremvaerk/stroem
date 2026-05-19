@@ -61,6 +61,7 @@ export default defineConfig({
             { label: "Authorization", slug: "operations/authorization" },
             { label: "High Availability", slug: "operations/high-availability" },
             { label: "Log Storage", slug: "operations/log-storage" },
+            { label: "Metrics", slug: "operations/metrics" },
             { label: "Recovery", slug: "operations/recovery" },
             { label: "Startup Scripts", slug: "operations/startup-scripts" },
           ],

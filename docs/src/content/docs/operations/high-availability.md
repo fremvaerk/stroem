@@ -155,3 +155,10 @@ kubectl exec <surviving-pod> -- wget -qO- \
   - `stroem_workspace_reloaded`: The receiving replica's own poll cycle (default 30s) re-converges to the new revision.
   - `stroem_job_log_chunk`: A missed line is lost from live tail; backfill from disk or archive recovers it after job completion.
 - **Rate limiter (Tower Governor) is per-replica.** Login / refresh / signup limits are enforced per pod, so effective cluster-wide limits are roughly `replicas × per-pod-limit`. Acceptable for current security posture; if you need exact global limits, terminate at the Ingress layer or front the cluster with a CDN-level rate limiter.
+
+## Monitoring leader flips
+
+Each replica exposes `stroem_leader_status` (1 on the leader, 0 on followers)
+via the [Metrics endpoint](./metrics). A `max(stroem_leader_status) == 0`
+alert catches a stuck-no-leader situation; rapid changes in
+`changes(stroem_leader_status[5m])` indicate flapping.
