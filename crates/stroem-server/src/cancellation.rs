@@ -193,6 +193,7 @@ mod tests {
             retention: RetentionConfig::default(),
             acl: None,
             mcp: None,
+            metrics: None,
             agents: None,
             state_storage: None,
             default_step_timeout: None,

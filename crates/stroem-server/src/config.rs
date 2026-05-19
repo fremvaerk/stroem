@@ -254,6 +254,18 @@ pub struct McpConfig {
     pub enabled: bool,
 }
 
+/// Prometheus `/metrics` endpoint configuration.
+///
+/// When absent, the endpoint is enabled and requires a worker-token Bearer
+/// header (same auth posture as `/healthz/detail`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// If true, `/metrics` requires no authentication. Default false.
+    #[serde(default)]
+    pub public: bool,
+}
+
 /// Recovery configuration for detecting stale workers and recovering stuck steps
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -347,6 +359,9 @@ pub struct ServerConfig {
     pub acl: Option<AclConfig>,
     /// MCP server endpoint configuration (optional)
     pub mcp: Option<McpConfig>,
+    /// Prometheus /metrics endpoint configuration (optional)
+    #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
     /// Agent provider configuration (optional)
     pub agents: Option<AgentsConfig>,
     /// Task state snapshot configuration (optional — defaults to log archive backend)
@@ -2263,9 +2278,40 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             acl: None,
             mcp: None,
             agents: None,
+            metrics: None,
             state_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
         }
+    }
+
+    #[test]
+    fn metrics_block_absent_yields_none() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: "/tmp"
+worker_token: "tok"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.metrics.is_none());
+    }
+
+    #[test]
+    fn metrics_public_parses() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: "/tmp"
+worker_token: "tok"
+metrics:
+  public: true
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.metrics.as_ref().map(|m| m.public), Some(true));
     }
 }
