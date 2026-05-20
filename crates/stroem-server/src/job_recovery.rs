@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// The UPDATE is best-effort: if it fails (e.g. pool exhausted), we log a
 /// warning and skip incrementing rather than double-counting.
 async fn record_job_completed(pool: &sqlx::PgPool, job: &stroem_db::JobRow) {
-    match sqlx::query_scalar::<_, Option<uuid::Uuid>>(
+    match sqlx::query_scalar::<_, uuid::Uuid>(
         "UPDATE job SET metrics_recorded_at = NOW() \
          WHERE job_id = $1 AND metrics_recorded_at IS NULL \
          RETURNING job_id",
