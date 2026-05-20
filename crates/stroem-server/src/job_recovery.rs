@@ -11,16 +11,47 @@ use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use uuid::Uuid;
 
 /// Increment the `stroem_jobs_completed_total` counter for a job that has
-/// reached terminal state. Called at the earliest safe point in each of the
-/// three terminal-state code paths so it fires unconditionally, even when
-/// downstream workspace/task lookups fail (e.g. workspace deleted while job
-/// was in flight).
-fn record_job_completed(job: &stroem_db::JobRow) {
-    metrics::counter!(
-        crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
-        "status" => job.status.clone(),
+/// reached terminal state. Uses a DB-level CAS guard (`metrics_recorded_at`)
+/// to ensure the counter fires exactly once per job, regardless of how many
+/// code paths converge on terminal detection (orchestrate_after_step,
+/// propagate_to_parent, handle_job_terminal, cancel_job cascade).
+///
+/// The UPDATE is best-effort: if it fails (e.g. pool exhausted), we log a
+/// warning and skip incrementing rather than double-counting.
+async fn record_job_completed(pool: &sqlx::PgPool, job: &stroem_db::JobRow) {
+    match sqlx::query_scalar::<_, Option<uuid::Uuid>>(
+        "UPDATE job SET metrics_recorded_at = NOW() \
+         WHERE job_id = $1 AND metrics_recorded_at IS NULL \
+         RETURNING job_id",
     )
-    .increment(1);
+    .bind(job.job_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(_)) => {
+            // We won the CAS race — increment the counter exactly once.
+            metrics::counter!(
+                crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
+                "status" => job.status.clone(),
+            )
+            .increment(1);
+        }
+        Ok(None) => {
+            // Another code path already recorded this job — skip to avoid
+            // double-counting.
+            tracing::debug!(
+                job_id = %job.job_id,
+                "record_job_completed: metrics_recorded_at already set, skipping"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                job_id = %job.job_id,
+                error = %e,
+                "record_job_completed: CAS update failed, counter not incremented"
+            );
+        }
+    }
 }
 
 /// Build a `JobLogMeta` from a `JobRow`.
@@ -259,11 +290,11 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 | Some(JobStatus::Cancelled)
                 | Some(JobStatus::Skipped)
         ) {
-            // Emit the counter at terminal-state detection. Workspace was already
-            // resolved at the top of this function, so this is the earliest safe point.
-            // Note: the workspace guard is before this block, not after, so the counter
-            // fires for all terminal jobs regardless of subsequent workspace/task failures.
-            record_job_completed(&job_after);
+            // Emit the counter at terminal-state detection. The CAS guard inside
+            // record_job_completed ensures it fires exactly once per job even when
+            // multiple code paths (orchestrate_after_step, propagate_to_parent,
+            // handle_job_terminal, cancel_job cascade) race to this point.
+            record_job_completed(&state.pool, &job_after).await;
 
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
@@ -593,14 +624,9 @@ async fn propagate_to_parent(
                         | Some(JobStatus::Cancelled)
                         | Some(JobStatus::Skipped)
                 ) {
-                    // Emit the counter at terminal-state detection, as early as possible.
-                    // Note: the workspace guard (`if let Some(ref parent_ws)`) is above this
-                    // block at the `propagate_to_parent` function level — the counter is inside
-                    // that guard and cannot be moved before it without structural refactoring.
-                    // This is still a net improvement over the old behavior: workspace-missing
-                    // jobs in handle_job_terminal are now counted unconditionally, and here we
-                    // fire before run_terminal_job_actions and any of its own failure modes.
-                    record_job_completed(&parent_after);
+                    // Emit the counter via CAS guard — exactly-once even when
+                    // cancel_job cascade and this path both observe terminal state.
+                    record_job_completed(&state.pool, &parent_after).await;
 
                     // Propagate up the chain if parent is also a child
                     if let (Some(grandparent_id), Some(ref grandparent_step)) =
@@ -647,10 +673,9 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         _ => return Ok(()),
     };
 
-    // Emit the counter unconditionally at the earliest terminal-state confirmation
-    // point, before any workspace/task lookups that may fail (e.g. workspace deleted
-    // while the job was in flight).
-    record_job_completed(&job);
+    // Emit the counter via CAS guard — exactly-once even when cancel_job cascade
+    // and propagate_to_parent both converge on the same terminal job.
+    record_job_completed(&state.pool, &job).await;
 
     // Remove from the in-memory cancelled set to prevent unbounded growth.
     // Safe to call unconditionally — no-op if not present.
