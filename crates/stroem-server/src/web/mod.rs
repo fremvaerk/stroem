@@ -79,19 +79,14 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
     // /metrics — Prometheus scrape endpoint.
     // Auth: gated by worker_token unless `metrics.public: true`.
     let metrics_public = state.config.metrics.as_ref().is_some_and(|m| m.public);
-    let metrics_route = if metrics_public {
-        Router::new()
-            .route("/metrics", get(metrics::metrics_handler))
-            .with_state(state.clone())
-    } else {
-        Router::new()
-            .route("/metrics", get(metrics::metrics_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                metrics::metrics_auth_middleware,
-            ))
-            .with_state(state.clone())
-    };
+    let mut metrics_route = Router::new().route("/metrics", get(metrics::metrics_handler));
+    if !metrics_public {
+        metrics_route = metrics_route.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics::metrics_auth_middleware,
+        ));
+    }
+    let metrics_route = metrics_route.with_state(state.clone());
 
     let mut router = Router::new()
         .merge(health_route)

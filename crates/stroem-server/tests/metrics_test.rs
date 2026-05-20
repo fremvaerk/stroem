@@ -121,7 +121,7 @@ async fn metrics_public_endpoint_no_auth() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     let response = router
@@ -185,11 +185,11 @@ async fn metrics_with_valid_token_returns_text_format() -> Result<()> {
 async fn leader_gauge_is_one_for_always_leader() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
-    let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    // Use public: false (default authenticated mode) so leader_status IS emitted.
+    let config = empty_config(&h.url, &log_dir);
     let router = build_router_with(&h, config).await;
 
-    let body = scrape(&router).await?;
+    let body = scrape_authenticated(&router).await?;
     // Prometheus output includes global labels: `stroem_leader_status{replica_id="..."} 1`
     // so we check that the metric name appears followed by `} 1` on the same line.
     assert!(
@@ -203,11 +203,28 @@ async fn leader_gauge_is_one_for_always_leader() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
+async fn leader_status_omitted_in_public_mode() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    let router = build_router_with(&h, config).await;
+
+    let body = scrape(&router).await?;
+    assert!(
+        !body.lines().any(|l| l.starts_with(stroem_server::metrics::STROEM_LEADER_STATUS)),
+        "stroem_leader_status must be absent in public mode to avoid leader-pod fingerprinting; body:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn workers_active_gauge_reflects_db() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     sqlx::query(
@@ -234,11 +251,30 @@ async fn workers_active_gauge_reflects_db() -> Result<()> {
     Ok(())
 }
 
-// Helper shared by T8 onward.
+// Helper shared by T8 onward. Assumes public mode (no auth token).
 async fn scrape(router: &axum::Router) -> Result<String> {
     let response = router
         .clone()
         .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await?.to_bytes();
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+// Scrape helper for authenticated (non-public) mode using the worker token.
+async fn scrape_authenticated(router: &axum::Router) -> Result<String> {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(
+                    http::header::AUTHORIZATION,
+                    format!("Bearer {WORKER_TOKEN}"),
+                )
+                .body(Body::empty())?,
+        )
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await?.to_bytes();
@@ -250,7 +286,7 @@ async fn http_request_counter_records_api_hits() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     // Hit any /api/* endpoint a few times.
@@ -278,7 +314,7 @@ async fn jobs_created_counter_renders_with_source_type_label() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     // Exercise the counter macro at the same call shape used in
@@ -308,7 +344,7 @@ async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     // Hit the same parameterised route with two different UUIDs.
@@ -353,7 +389,7 @@ async fn jobs_completed_counter_includes_status_label() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     // Exercise the counter macro shape used in
@@ -388,7 +424,7 @@ async fn steps_ready_gauge_reflects_db_state() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     // Insert one job + 3 ready steps + 1 ready-but-retry-future step (which
@@ -438,7 +474,7 @@ async fn jobs_in_flight_emits_both_status_labels_even_when_empty() -> Result<()>
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     let body = scrape(&router).await?;
@@ -468,7 +504,7 @@ async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     let body = scrape(&router).await?;
@@ -512,7 +548,7 @@ async fn metrics_success_response_has_cache_control_no_store() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
     let router = build_router_with(&h, config).await;
 
     let response = router
@@ -546,7 +582,7 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true });
+    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
 
     // Build the state explicitly so we can reuse it both for cancel_job and
     // for the metrics router (AppState is Clone).
@@ -639,6 +675,116 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
         delta, 2,
         "expected exactly 2 cancelled-job counts (1 parent + 1 child), got {delta}\n\
          body_before:\n{body_before}\nbody_after:\n{body_after}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// F5.4: metrics_token auth edge-case tests
+// ---------------------------------------------------------------------------
+
+/// "Bearer " with no token after the prefix — the empty string should not
+/// match the configured worker_token.
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_auth_rejects_bearer_with_empty_token() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let config = empty_config(&h.url, &log_dir);
+    let router = build_router_with(&h, config).await;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(http::header::AUTHORIZATION, "Bearer ")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "empty token after 'Bearer ' should be rejected"
+    );
+    Ok(())
+}
+
+/// "bearer <token>" with lowercase 'b' — strip_prefix is case-sensitive so
+/// this must be rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_auth_rejects_lowercase_bearer() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let config = empty_config(&h.url, &log_dir);
+    let router = build_router_with(&h, config).await;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(
+                    http::header::AUTHORIZATION,
+                    format!("bearer {WORKER_TOKEN}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "lowercase 'bearer' scheme should be rejected"
+    );
+    Ok(())
+}
+
+/// When `metrics.token` is set it overrides `worker_token` for `/metrics`
+/// authentication. The worker_token alone should then be rejected, and the
+/// dedicated metrics token should be accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_token_overrides_worker_token() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig {
+        public: false,
+        token: Some("dedicated-metrics-token-32-chars!".into()),
+    });
+    let router = build_router_with(&h, config).await;
+
+    // worker_token must NOT grant access when a dedicated metrics token is set.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(
+                    http::header::AUTHORIZATION,
+                    format!("Bearer {WORKER_TOKEN}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "worker_token should be rejected when metrics.token is configured"
+    );
+
+    // The dedicated metrics token must be accepted.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(
+                    http::header::AUTHORIZATION,
+                    "Bearer dedicated-metrics-token-32-chars!",
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "dedicated metrics token should be accepted"
     );
     Ok(())
 }

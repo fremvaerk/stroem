@@ -37,6 +37,7 @@ use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use stroem_common::models::job::JobStatus;
 use uuid::Uuid;
 
 const GAUGE_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -50,7 +51,6 @@ const HTTP_DURATION_BUCKETS: &[f64] = &[
 /// Install the Prometheus recorder for this process. Must be called exactly
 /// once at startup. Subsequent calls (e.g. in tests) will return a handle
 /// that does not actually receive new metrics — set the recorder up once.
-#[tracing::instrument]
 pub fn install_recorder(replica_id: Uuid) -> Result<PrometheusHandle> {
     let builder = PrometheusBuilder::new()
         .add_global_label("replica_id", replica_id.to_string())
@@ -74,15 +74,21 @@ use crate::state::AppState;
 pub async fn gather_gauges(state: &AppState) {
     // --- Synchronous gauges (no DB) ---
 
-    gauge!(STROEM_LEADER_STATUS).set(if state.leader.is_leader() { 1.0 } else { 0.0 });
+    // Leader-pod identity is sensitive: omit in public mode to avoid
+    // fingerprinting which replica holds the HA lock from an unauthenticated
+    // scrape endpoint (mirrors the decision made for /healthz).
+    let metrics_public = state.config.metrics.as_ref().is_some_and(|m| m.public);
+    if !metrics_public {
+        gauge!(STROEM_LEADER_STATUS).set(f64::from(state.leader.is_leader()));
+    }
 
     let bg = &state.background_tasks;
     gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "scheduler")
-        .set(bool_to_f64(bg.scheduler_alive.load(Ordering::Relaxed)));
+        .set(f64::from(bg.scheduler_alive.load(Ordering::Relaxed)));
     gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "recovery")
-        .set(bool_to_f64(bg.recovery_alive.load(Ordering::Relaxed)));
+        .set(f64::from(bg.recovery_alive.load(Ordering::Relaxed)));
     gauge!(STROEM_BACKGROUND_TASK_ALIVE, "task" => "event_source")
-        .set(bool_to_f64(bg.event_source_alive.load(Ordering::Relaxed)));
+        .set(f64::from(bg.event_source_alive.load(Ordering::Relaxed)));
 
     // --- DB-backed gauges (each bounded by GAUGE_QUERY_TIMEOUT) ---
 
@@ -91,14 +97,6 @@ pub async fn gather_gauges(state: &AppState) {
         sample_jobs_in_flight(state),
         sample_steps_ready(state),
     );
-}
-
-fn bool_to_f64(b: bool) -> f64 {
-    if b {
-        1.0
-    } else {
-        0.0
-    }
 }
 
 async fn sample_workers_active(state: &AppState) {
@@ -127,10 +125,15 @@ async fn sample_jobs_in_flight(state: &AppState) {
             let mut pending = 0_i64;
             let mut running = 0_i64;
             for (status, count) in rows {
-                match status.as_str() {
-                    "pending" => pending = count,
-                    "running" => running = count,
-                    _ => {}
+                if status == JobStatus::Pending.as_ref() {
+                    pending = count;
+                } else if status == JobStatus::Running.as_ref() {
+                    running = count;
+                } else {
+                    tracing::warn!(
+                        status = status.as_str(),
+                        "metrics: sample_jobs_in_flight got unexpected status — query/match drift?"
+                    );
                 }
             }
             gauge!(STROEM_JOBS_IN_FLIGHT, "status" => "pending").set(pending as f64);
