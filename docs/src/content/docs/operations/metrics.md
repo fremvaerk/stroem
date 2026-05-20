@@ -16,6 +16,13 @@ Strøm exposes a Prometheus-compatible `/metrics` endpoint on every server repli
 When running multiple replicas (see [High Availability](./high-availability)),
 every metric carries a `replica_id` label so per-pod series don't collide.
 
+When running with `metrics.public: true`, anyone who can reach the endpoint can read the
+`replica_id` global label, a UUID stable for the lifetime of each pod. Combined with
+network-level observability, this lets a scraper correlate metric series to specific
+pods. The UUID itself carries no secrets, but if pod identity is sensitive in your
+environment, keep `metrics.public: false` (the default) and authenticate scrapes with
+the worker token.
+
 ## Metric Reference
 
 ### Counters
@@ -105,6 +112,13 @@ groups:
         annotations:
           summary: "Strøm step queue growing — workers not keeping up"
 ```
+
+**Multi-replica note:** `stroem_steps_ready` is sampled at scrape time from the same shared
+Postgres for every replica, so all replicas should observe the same value. However,
+`delta()` over a per-replica time series can show artifacts if a replica restarts mid-window
+(the new `replica_id` starts a fresh time series). For HA deployments, prefer
+`delta(max(stroem_steps_ready) without (replica_id) [10m])` to aggregate before computing
+the delta.
 
 ## Notes
 

@@ -413,6 +413,12 @@ impl ServerConfig {
         if self.worker_token.len() < 32 {
             anyhow::bail!("worker_token must be at least 32 characters");
         }
+        if self.worker_token == "change-me-in-production" {
+            tracing::warn!(
+                "worker_token is set to the default placeholder value \
+                 — replace it with a random secret before running in production"
+            );
+        }
         if let Some(ref auth) = self.auth {
             if auth.jwt_secret.len() < 32 {
                 anyhow::bail!("jwt_secret must be at least 32 characters");
