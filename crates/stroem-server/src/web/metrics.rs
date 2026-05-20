@@ -33,10 +33,13 @@ pub(crate) async fn metrics_auth_middleware(
         }
     };
 
-    let valid: bool = token
-        .as_bytes()
-        .ct_eq(state.config.worker_token.as_bytes())
-        .into();
+    let expected = state
+        .config
+        .metrics
+        .as_ref()
+        .and_then(|m| m.token.as_deref())
+        .unwrap_or(state.config.worker_token.as_str());
+    let valid: bool = token.as_bytes().ct_eq(expected.as_bytes()).into();
     if !valid {
         return text_plain(StatusCode::UNAUTHORIZED, "Invalid token\n");
     }

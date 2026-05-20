@@ -258,12 +258,18 @@ pub struct McpConfig {
 ///
 /// When absent, the endpoint is enabled and requires a worker-token Bearer
 /// header (same auth posture as `/healthz/detail`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     /// If true, `/metrics` requires no authentication. Default false.
     #[serde(default)]
     pub public: bool,
+    /// Optional separate Bearer token for scraping `/metrics`. Falls back
+    /// to `worker_token` when unset, preserving backward compatibility.
+    /// Set this to a different value to rotate scraper credentials
+    /// independently of worker credentials.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 /// Recovery configuration for detecting stale workers and recovering stuck steps

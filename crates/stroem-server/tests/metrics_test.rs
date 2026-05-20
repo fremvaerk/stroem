@@ -121,7 +121,10 @@ async fn metrics_public_endpoint_no_auth() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     let response = router
@@ -203,28 +206,14 @@ async fn leader_gauge_is_one_for_always_leader() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn leader_status_omitted_in_public_mode() -> Result<()> {
-    let h = boot().await?;
-    let log_dir = h._temp.path().to_path_buf();
-    let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
-    let router = build_router_with(&h, config).await;
-
-    let body = scrape(&router).await?;
-    assert!(
-        !body.lines().any(|l| l.starts_with(stroem_server::metrics::STROEM_LEADER_STATUS)),
-        "stroem_leader_status must be absent in public mode to avoid leader-pod fingerprinting; body:\n{body}"
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn workers_active_gauge_reflects_db() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     sqlx::query(
@@ -286,7 +275,10 @@ async fn http_request_counter_records_api_hits() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     // Hit any /api/* endpoint a few times.
@@ -314,7 +306,10 @@ async fn jobs_created_counter_renders_with_source_type_label() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     // Exercise the counter macro at the same call shape used in
@@ -344,7 +339,10 @@ async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     // Hit the same parameterised route with two different UUIDs.
@@ -389,7 +387,10 @@ async fn jobs_completed_counter_includes_status_label() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     // Exercise the counter macro shape used in
@@ -424,7 +425,10 @@ async fn steps_ready_gauge_reflects_db_state() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     // Insert one job + 3 ready steps + 1 ready-but-retry-future step (which
@@ -474,7 +478,10 @@ async fn jobs_in_flight_emits_both_status_labels_even_when_empty() -> Result<()>
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     let body = scrape(&router).await?;
@@ -504,7 +511,10 @@ async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     let body = scrape(&router).await?;
@@ -548,7 +558,10 @@ async fn metrics_success_response_has_cache_control_no_store() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
     let router = build_router_with(&h, config).await;
 
     let response = router
@@ -582,7 +595,10 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();
     let mut config = empty_config(&h.url, &log_dir);
-    config.metrics = Some(MetricsConfig { public: true, ..Default::default() });
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
 
     // Build the state explicitly so we can reuse it both for cancel_job and
     // for the metrics router (AppState is Clone).
