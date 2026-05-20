@@ -88,7 +88,7 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
             .route("/metrics", get(metrics::metrics_handler))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
-                worker_api::auth_middleware,
+                metrics::metrics_auth_middleware,
             ))
             .with_state(state.clone())
     };

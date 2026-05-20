@@ -482,3 +482,48 @@ async fn background_task_alive_reflects_atomic_flag() -> Result<()> {
     assert!(has_scheduler_zero, "expected scheduler=0 in:\n{body}");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_unauthorized_response_is_text_plain() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let config = empty_config(&h.url, &log_dir);
+    let router = build_router_with(&h, config).await;
+
+    let response = router
+        .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let ct = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        ct.starts_with("text/plain"),
+        "expected text/plain on unauth response, got: {ct}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_success_response_has_cache_control_no_store() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+    let router = build_router_with(&h, config).await;
+
+    let response = router
+        .oneshot(Request::builder().uri("/metrics").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cache = response
+        .headers()
+        .get(http::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned());
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    Ok(())
+}
