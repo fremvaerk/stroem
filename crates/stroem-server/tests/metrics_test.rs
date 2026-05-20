@@ -527,3 +527,118 @@ async fn metrics_success_response_has_cache_control_no_store() -> Result<()> {
     assert_eq!(cache.as_deref(), Some("no-store"));
     Ok(())
 }
+
+/// Verify the cascading-cancel path counts the parent job exactly once.
+///
+/// Before the DB CAS guard fix, `cancel_job(parent)` would increment
+/// `stroem_jobs_completed_total` for the parent TWICE:
+///
+/// 1. Via `propagate_to_parent(child → parent)` inside `handle_job_terminal(child)`.
+/// 2. Via `handle_job_terminal(parent)` called directly at the end of `cancel_job(parent)`.
+///
+/// With the fix, both callers race on:
+///   UPDATE job SET metrics_recorded_at = NOW()
+///   WHERE job_id = $1 AND metrics_recorded_at IS NULL
+/// and only the winner increments.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig { public: true });
+
+    // Build the state explicitly so we can reuse it both for cancel_job and
+    // for the metrics router (AppState is Clone).
+    let mgr = WorkspaceManager::from_config("default", WorkspaceConfig::new());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(
+        h.pool.clone(),
+        mgr,
+        config,
+        log_storage,
+        HashMap::new(),
+        None,
+    )
+    .with_event_bus(EventBus::noop());
+
+    let cancel = CancellationToken::new();
+    let handle = global_test_handle();
+    let router = build_router(state.clone(), cancel).layer(Extension(handle));
+
+    // --- Seed: parent job (running) with one task-type step (server-managed,
+    // no worker_id), and a child job (running, no steps) linked to it. ---
+    let parent_id = Uuid::new_v4();
+    let child_id = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, created_at) \
+         VALUES ($1, 'ws', 'parent-task', 'running', 'api', NOW())",
+    )
+    .bind(parent_id)
+    .execute(&h.pool)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, created_at, \
+                          parent_job_id, parent_step_name) \
+         VALUES ($1, 'ws', 'child-task', 'running', 'task', NOW(), $2, 'invoke')",
+    )
+    .bind(child_id)
+    .bind(parent_id)
+    .execute(&h.pool)
+    .await?;
+
+    // The parent step that invoked the child. action_type='task', worker_id IS NULL
+    // so cancel_server_managed_steps will clear it immediately during cancel.
+    sqlx::query(
+        "INSERT INTO job_step \
+         (job_id, step_name, action_name, status, action_type, required_tags) \
+         VALUES ($1, 'invoke', 'invoke-child', 'running', 'task', '[]'::jsonb)",
+    )
+    .bind(parent_id)
+    .execute(&h.pool)
+    .await?;
+
+    // Record counter values BEFORE the cancel so we can compute the delta
+    // (counters accumulate across tests in the same process).
+    let body_before = scrape(&router).await?;
+    let count_before: u64 = body_before
+        .lines()
+        .filter(|l| l.starts_with(stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL))
+        .filter(|l| l.contains(r#"status="cancelled""#))
+        .filter_map(|l| {
+            l.split_whitespace()
+                .last()
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+        .sum();
+
+    // Cancel the parent — this cascades synchronously through:
+    //   cancel_job(parent) → cancel_job(child) → handle_job_terminal(child)
+    //   → propagate_to_parent(child, parent) → [parent terminal detected]
+    //   → record_job_completed(parent)  [attempt 1 — wins CAS]
+    //   back in cancel_job(parent): handle_job_terminal(parent)
+    //   → record_job_completed(parent)  [attempt 2 — CAS guard blocks it]
+    stroem_server::cancellation::cancel_job(&state, parent_id).await?;
+
+    let body_after = scrape(&router).await?;
+    let count_after: u64 = body_after
+        .lines()
+        .filter(|l| l.starts_with(stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL))
+        .filter(|l| l.contains(r#"status="cancelled""#))
+        .filter_map(|l| {
+            l.split_whitespace()
+                .last()
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+        .sum();
+
+    let delta = count_after - count_before;
+    assert_eq!(
+        delta, 2,
+        "expected exactly 2 cancelled-job counts (1 parent + 1 child), got {delta}\n\
+         body_before:\n{body_before}\nbody_after:\n{body_after}"
+    );
+    Ok(())
+}
