@@ -41,9 +41,20 @@ pub const CHANNEL_WORKSPACE_RELOADED: &str = "stroem_workspace_reloaded";
 pub const CHANNEL_JOB_LOG_CHUNK: &str = "stroem_job_log_chunk";
 
 /// Conservative payload cap for `NOTIFY`. Postgres' hard limit is 8000 bytes
-/// for the payload string; we leave headroom for JSON wrapping and the
-/// statement itself.
-pub const NOTIFY_MAX_BYTES: usize = 7000;
+/// for the **JSON-encoded** payload string. The wrapper adds ~125 bytes for
+/// UUIDs + field names. JSON string escaping expands bytes differently depending
+/// on content: `\"` and `\\` each expand 2×, common whitespace escapes (`\n`,
+/// `\r`, `\t`) expand 2×, but control bytes below 0x20 (other than `\n`, `\r`,
+/// `\t`) encode as `\u00XX` — a 6× expansion. Pathological all-control-byte
+/// content could therefore still exceed Postgres' 8 KB hard limit at 3500 raw
+/// bytes. In practice, worker stdout/stderr is human-readable text where
+/// escaping is dominated by occasional `\"` and newlines (both 2×), so 3500
+/// raw bytes stays comfortably under `3500*2 + 125 = 7125` encoded bytes.
+///
+/// This is also the per-line signal-only threshold: a single jsonl line that
+/// exceeds this cap can't be split further, so it degrades to a signal-only
+/// NOTIFY (receivers learn new content exists but get no bytes).
+pub const NOTIFY_MAX_BYTES: usize = 3500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JobCancelledPayload {
@@ -142,27 +153,90 @@ impl EventBus {
         }
     }
 
-    /// Forward a log chunk to other replicas. If the chunk doesn't fit in a
-    /// single NOTIFY payload (see [`NOTIFY_MAX_BYTES`]), a signal-only event is
-    /// sent instead — receivers know new content exists but won't see the
-    /// bytes until the next backfill / archive read.
+    /// Forward a log chunk to other replicas. Chunks larger than
+    /// [`NOTIFY_MAX_BYTES`] are split on jsonl line boundaries so multi-line
+    /// batches still cross the NOTIFY channel intact; a single line that
+    /// exceeds the cap on its own falls back to a signal-only event for that
+    /// segment (receivers know new content exists but can't render it live).
+    ///
+    /// **Cancel safety**: the inner segment loop publishes segments one at a
+    /// time, in order. This sequential ordering is load-bearing: receivers
+    /// depend on segments arriving in the same order they were produced so that
+    /// `append_log` writes are stable. Do NOT parallelize the loop (e.g. with
+    /// `join_all`) and do NOT place this future in a `select!` arm where it may
+    /// be dropped mid-iteration — doing so would leave segments partially
+    /// delivered with no recovery path.
     #[tracing::instrument(skip(self, chunk))]
     pub async fn publish_log_chunk(&self, job_id: Uuid, chunk: &str) {
         let Some(pool) = &self.inner.pool else { return };
-        let chunk_field = if chunk.len() <= NOTIFY_MAX_BYTES {
-            Some(chunk.to_string())
-        } else {
-            None
-        };
+
+        if chunk.len() <= NOTIFY_MAX_BYTES {
+            self.publish_log_segment(pool, job_id, Some(chunk.to_string()))
+                .await;
+            return;
+        }
+
+        for segment in split_jsonl_chunk(chunk, NOTIFY_MAX_BYTES) {
+            match segment {
+                ChunkSegment::Inline(bytes) => {
+                    self.publish_log_segment(pool, job_id, Some(bytes)).await;
+                }
+                ChunkSegment::SignalOnly => {
+                    self.publish_log_segment(pool, job_id, None).await;
+                }
+            }
+        }
+    }
+
+    async fn publish_log_segment(&self, pool: &PgPool, job_id: Uuid, chunk: Option<String>) {
         let payload = JobLogChunkPayload {
             replica_id: self.inner.replica_id,
             job_id,
-            chunk: chunk_field,
+            chunk,
         };
         if let Err(e) = notify(pool, CHANNEL_JOB_LOG_CHUNK, &payload).await {
             tracing::warn!("publish_log_chunk failed for {}: {:#}", job_id, e);
         }
     }
+}
+
+/// One NOTIFY-sized piece of a larger jsonl chunk.
+enum ChunkSegment {
+    /// Inline content — small enough to ride in a single NOTIFY payload.
+    Inline(String),
+    /// One jsonl line on its own exceeds the cap. Emitted as `chunk: None`
+    /// so receivers know fresh content exists without the bytes.
+    SignalOnly,
+}
+
+/// Split a jsonl chunk into NOTIFY-sized segments on `\n` boundaries.
+///
+/// Each `Inline` segment is at most `max_bytes` and ends at a jsonl line
+/// boundary. A line that is itself larger than `max_bytes` is emitted as
+/// `SignalOnly` — the receiver can fan out the "new content" signal but
+/// can't write the bytes locally for that line.
+fn split_jsonl_chunk(chunk: &str, max_bytes: usize) -> Vec<ChunkSegment> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+
+    for line in chunk.split_inclusive('\n') {
+        if line.len() > max_bytes {
+            if !current.is_empty() {
+                result.push(ChunkSegment::Inline(std::mem::take(&mut current)));
+            }
+            result.push(ChunkSegment::SignalOnly);
+            continue;
+        }
+        if current.len() + line.len() > max_bytes {
+            result.push(ChunkSegment::Inline(std::mem::take(&mut current)));
+        }
+        current.push_str(line);
+    }
+
+    if !current.is_empty() {
+        result.push(ChunkSegment::Inline(current));
+    }
+    result
 }
 
 async fn notify<T: Serialize>(pool: &PgPool, channel: &str, payload: &T) -> Result<()> {
@@ -301,16 +375,31 @@ async fn dispatch(state: &AppState, channel: &str, payload: &str) {
         }
         CHANNEL_JOB_LOG_CHUNK => match serde_json::from_str::<JobLogChunkPayload>(payload) {
             Ok(p) if p.replica_id == state.event_bus.replica_id() => {
-                // Self-emitted; local broadcast already happened on the
-                // publisher path. Re-broadcasting here would duplicate lines
-                // for any client connected to this replica.
+                // Self-emitted; local disk write + broadcast already happened
+                // on the publisher path. Mirroring or re-broadcasting here
+                // would duplicate lines for any client connected to this
+                // replica.
             }
             Ok(p) => {
                 if let Some(chunk) = p.chunk {
+                    // Mirror the chunk into this replica's local jsonl file so
+                    // REST log reads served from this pod see the same content
+                    // a viewer would. Without this, GET /api/jobs/:id/logs
+                    // returns empty whenever the load balancer routes to a
+                    // replica that didn't receive the worker's push.
+                    if let Err(e) = state.log_storage.append_log(p.job_id, &chunk).await {
+                        tracing::warn!(
+                            "Cross-replica log mirror failed for job {}: {:#}",
+                            p.job_id,
+                            e
+                        );
+                    }
                     state.log_broadcast.broadcast(p.job_id, chunk).await;
                 } else {
-                    // Oversize: we can't fan out live. Log so operators know
-                    // why a viewer on this replica missed a chunk.
+                    // Oversize single jsonl line: NOTIFY carried no bytes so we
+                    // can't mirror or fan out live. The canonical bytes live on
+                    // the publishing replica until the archive upload at job
+                    // terminal.
                     tracing::debug!(
                         "Oversize log chunk signaled for job {} (>{}B); viewers must refresh",
                         p.job_id,
@@ -376,6 +465,91 @@ mod tests {
         assert!(payload.chunk.is_none());
     }
 
+    fn jsonl_line(i: usize) -> String {
+        format!(
+            "{{\"ts\":\"2026-01-01T00:00:00Z\",\"stream\":\"stdout\",\"step\":\"s\",\"line\":\"{i}\"}}\n"
+        )
+    }
+
+    #[test]
+    fn split_jsonl_chunk_small_returns_single_segment() {
+        // A chunk under the cap should be left whole.
+        let chunk = format!("{}{}{}", jsonl_line(1), jsonl_line(2), jsonl_line(3));
+        let segments = split_jsonl_chunk(&chunk, NOTIFY_MAX_BYTES);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            ChunkSegment::Inline(bytes) => assert_eq!(bytes, &chunk),
+            ChunkSegment::SignalOnly => panic!("small chunk must not signal-only"),
+        }
+    }
+
+    #[test]
+    fn split_jsonl_chunk_splits_multi_line_on_boundary() {
+        // 200 jsonl lines well over the cap — every segment must end in '\n'
+        // and concatenate back to the original bytes.
+        let mut chunk = String::new();
+        for i in 0..200 {
+            chunk.push_str(&jsonl_line(i));
+        }
+        assert!(chunk.len() > NOTIFY_MAX_BYTES);
+
+        let segments = split_jsonl_chunk(&chunk, NOTIFY_MAX_BYTES);
+        assert!(segments.len() > 1, "must produce multiple segments");
+
+        let mut reassembled = String::new();
+        for seg in &segments {
+            match seg {
+                ChunkSegment::Inline(bytes) => {
+                    assert!(bytes.len() <= NOTIFY_MAX_BYTES);
+                    assert!(
+                        bytes.ends_with('\n'),
+                        "every inline segment must end at a line boundary"
+                    );
+                    reassembled.push_str(bytes);
+                }
+                ChunkSegment::SignalOnly => panic!("no line in this chunk is oversize"),
+            }
+        }
+        assert_eq!(reassembled, chunk);
+    }
+
+    #[test]
+    fn split_jsonl_chunk_single_huge_line_emits_signal_only() {
+        // One jsonl line larger than the cap can't be split — emit signal-only
+        // for that line, but keep the surrounding small lines as inline.
+        let small_before = jsonl_line(0);
+        let huge = format!("{}\n", "x".repeat(NOTIFY_MAX_BYTES + 1));
+        let small_after = jsonl_line(1);
+        let chunk = format!("{}{}{}", small_before, huge, small_after);
+
+        let segments = split_jsonl_chunk(&chunk, NOTIFY_MAX_BYTES);
+
+        // Expected pattern: Inline(small_before), SignalOnly, Inline(small_after)
+        assert_eq!(segments.len(), 3);
+        match &segments[0] {
+            ChunkSegment::Inline(b) => assert_eq!(b, &small_before),
+            ChunkSegment::SignalOnly => panic!("segment 0 should be inline"),
+        }
+        assert!(matches!(segments[1], ChunkSegment::SignalOnly));
+        match &segments[2] {
+            ChunkSegment::Inline(b) => assert_eq!(b, &small_after),
+            ChunkSegment::SignalOnly => panic!("segment 2 should be inline"),
+        }
+    }
+
+    #[test]
+    fn split_jsonl_chunk_handles_no_trailing_newline() {
+        // Defensive: input without a trailing '\n' still emits the tail as
+        // a single inline segment (no data lost).
+        let chunk = "a\nb\nc";
+        let segments = split_jsonl_chunk(chunk, NOTIFY_MAX_BYTES);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            ChunkSegment::Inline(b) => assert_eq!(b, chunk),
+            ChunkSegment::SignalOnly => panic!(),
+        }
+    }
+
     #[test]
     fn channels_are_distinct() {
         // Cheap guard against typos collapsing two channels into one.
@@ -387,6 +561,67 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(set.len(), 3);
+    }
+
+    // ── Splitter edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn split_jsonl_chunk_empty_input_returns_empty_vec() {
+        let segments = split_jsonl_chunk("", NOTIFY_MAX_BYTES);
+        assert!(segments.is_empty(), "empty input must produce no segments");
+    }
+
+    #[test]
+    fn split_jsonl_chunk_bare_newline_returns_single_inline() {
+        let segments = split_jsonl_chunk("\n", NOTIFY_MAX_BYTES);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            ChunkSegment::Inline(b) => assert_eq!(b, "\n"),
+            ChunkSegment::SignalOnly => panic!("bare newline is tiny — must be Inline"),
+        }
+    }
+
+    #[test]
+    fn split_jsonl_chunk_single_oversize_no_newline_emits_signal_only() {
+        // A line that exceeds the cap but has no trailing '\n' must still
+        // degrade to SignalOnly (split_inclusive emits it as a single token).
+        let big = "x".repeat(NOTIFY_MAX_BYTES + 1);
+        let segments = split_jsonl_chunk(&big, NOTIFY_MAX_BYTES);
+        assert_eq!(segments.len(), 1);
+        assert!(
+            matches!(segments[0], ChunkSegment::SignalOnly),
+            "oversize line with no trailing newline must emit SignalOnly"
+        );
+    }
+
+    #[test]
+    fn split_jsonl_chunk_two_consecutive_oversize_lines_each_signal_only() {
+        // Two consecutive lines each larger than the cap must become two
+        // separate SignalOnly segments — they must not be merged into one.
+        let big_line = format!("{}\n", "x".repeat(NOTIFY_MAX_BYTES + 1));
+        let chunk = format!("{}{}", big_line, big_line);
+        let segments = split_jsonl_chunk(&chunk, NOTIFY_MAX_BYTES);
+        assert_eq!(
+            segments.len(),
+            2,
+            "two oversize lines must produce exactly two SignalOnly segments"
+        );
+        assert!(matches!(segments[0], ChunkSegment::SignalOnly));
+        assert!(matches!(segments[1], ChunkSegment::SignalOnly));
+    }
+
+    #[test]
+    fn split_jsonl_chunk_zero_max_bytes_every_line_signals_only() {
+        // With max_bytes = 0, every line — even a bare '\n' (len 1) — exceeds
+        // the cap and must become SignalOnly.
+        let segments = split_jsonl_chunk("a\nb\n", 0);
+        assert_eq!(
+            segments.len(),
+            2,
+            "each of the two lines must become its own SignalOnly segment"
+        );
+        assert!(matches!(segments[0], ChunkSegment::SignalOnly));
+        assert!(matches!(segments[1], ChunkSegment::SignalOnly));
     }
 
     #[tokio::test]

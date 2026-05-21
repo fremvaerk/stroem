@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Tabs,
   TabsContent,
@@ -21,34 +21,51 @@ interface StepDetailProps {
 export function StepDetail({ jobId, step, onRefresh }: StepDetailProps) {
   const [logs, setLogs] = useState("");
   const [loadingLogs, setLoadingLogs] = useState(true);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const fetchLogs = useCallback(async () => {
-    try {
-      const data = await getStepLogs(jobId, step.step_name);
-      setLogs(data.logs);
-    } catch {
-      // Silently handle — logs may not exist yet
-    } finally {
-      setLoadingLogs(false);
-    }
-  }, [jobId, step.step_name]);
+  const hasLogsRef = useRef(false);
 
   useEffect(() => {
+    // Reset state for the current step (guards against same component instance
+    // being reused for a different step when parent re-renders).
+    let cancelled = false;
+    hasLogsRef.current = false;
+    setLoadingLogs(true);
+
+    async function fetchLogs() {
+      try {
+        const data = await getStepLogs(jobId, step.step_name);
+        if (cancelled) return;
+        // With multi-replica servers, a poll routed to a replica that hasn't
+        // received this job's chunks returns "". Don't clear what we already
+        // have — keep the last non-empty body until a real update arrives.
+        if (data.logs) {
+          hasLogsRef.current = true;
+          setLogs(data.logs);
+        } else if (!hasLogsRef.current) {
+          setLogs("");
+        }
+      } catch {
+        // Silently handle — logs may not exist yet
+      } finally {
+        if (!cancelled) setLoadingLogs(false);
+      }
+    }
+
     fetchLogs();
 
     // Poll while step is running
     const isActive = step.status === "running" || step.status === "ready";
     if (isActive) {
-      intervalRef.current = setInterval(fetchLogs, 2000);
+      const interval = setInterval(fetchLogs, 2000);
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
     }
 
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
+      cancelled = true;
     };
-  }, [fetchLogs, step.status]);
+  }, [jobId, step.step_name, step.status]);
 
   const isStreaming = step.status === "running";
   const isSuspendedApproval =

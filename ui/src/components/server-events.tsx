@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { LogViewer } from "@/components/log-viewer";
 import { getStepLogs } from "@/lib/api";
@@ -10,14 +10,25 @@ interface ServerEventsProps {
 
 export function ServerEvents({ jobId, jobStatus }: ServerEventsProps) {
   const [logs, setLogs] = useState("");
+  const hasLogsRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    hasLogsRef.current = false;
 
     async function fetchLogs() {
       try {
         const data = await getStepLogs(jobId, "_server");
-        if (!cancelled) setLogs(data.logs);
+        if (cancelled) return;
+        // With multi-replica servers, polls may briefly land on a replica
+        // that doesn't have this job's log file yet. Keep what we already
+        // showed so the card doesn't flash empty between successful polls.
+        if (data.logs) {
+          hasLogsRef.current = true;
+          setLogs(data.logs);
+        } else if (!hasLogsRef.current) {
+          setLogs("");
+        }
       } catch {
         // Silently ignore — no server events is the common case
       }

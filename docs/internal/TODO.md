@@ -1,7 +1,7 @@
 # Strøm TODO
 
 Consolidated from [codebase-review-2026-03-01.md](codebase-review-2026-03-01.md) and development memory.
-Last updated: 2026-03-13.
+Last updated: 2026-05-21.
 
 ---
 
@@ -1308,3 +1308,38 @@ Initial implementation:
 - [ ] Robust regression test for `stroem_leader_status` public-mode stripping — needs `metrics::with_local_recorder` per-test scoping to escape the shared global recorder's gauge persistence.
 - [ ] `track_http_metrics` 5xx status label test — needs a synthetic always-500 route gated to `#[cfg(test)]`.
 - [ ] `route="unknown"` fallback path test.
+
+## Review: HA Log Mirroring (2026-05-21)
+
+Multi-replica fix for the "Waiting for logs…" flicker and missing finished-job logs. Changes:
+- `events.rs`: split oversize `stroem_job_log_chunk` NOTIFY payloads on jsonl line boundaries; receiver dispatch now mirrors chunks into its own `log_storage.append_log` so REST reads on any replica return the same bytes.
+- `NOTIFY_MAX_BYTES` lowered 7000 → 3500 to keep JSON-encoded payload under Postgres' 8 KB hard limit with worst-case escape inflation.
+- UI: `step-detail.tsx` + `server-events.tsx` no longer overwrite already-loaded logs with `""` on a subsequent poll routed to a replica that doesn't yet have the file.
+- Docs updated; 4 new splitter unit tests + 2 new HA integration tests.
+
+### Important findings (post-merge /review, 3-agent)
+
+- [x] **Stale `hasLogsRef` across step changes** — `ui/src/components/step-detail.tsx`. Fixed: ref reset at the top of the `useEffect` body and `fetchLogs` moved inside the effect so a `let cancelled` flag can guard the in-flight `setLogs`/ref mutation against step changes and unmount.
+- [x] **`NOTIFY_MAX_BYTES` doc-comment overstates the safety guarantee** — `events.rs:43-57`. Reworded: comment now states the 2× expansion holds for typical worker stdout/stderr (where `\"` and `\n` dominate), explicitly notes that control bytes < 0x20 (other than `\n`/`\r`/`\t`) expand 6× as `\u00XX` and that pathological all-control-byte content can exceed 8 KB. Constant value left at 3500.
+- [x] **`std::fs::read_to_string` inside async `wait_for`** — `ha_test.rs`. Added a sibling `wait_for_async` helper that takes an async predicate; the two mirror tests now use `tokio::fs::read_to_string(...).await` inside it.
+- [x] **Stale `7000` references in tests** — `ha_test.rs`. `NOTIFY_MAX_BYTES` added to the `use stroem_server::events::` import; the multi-line guard now reads `> NOTIFY_MAX_BYTES`; stale `(7000)` parentheticals dropped from comments.
+
+### Minor findings
+
+- [x] **`publish_log_chunk` is not cancel-safe across segments** — `events.rs`. Added a paragraph in the doc-comment warning that the sequential loop is load-bearing for per-segment ordering on receivers and must not be parallelized or placed in a `select!` arm where the future may be dropped mid-iteration.
+- [ ] **Persistent `append_log` errors produce unrate-limited `warn!` per chunk** — `events.rs:379-385`. Acceptable; flag for cleanup only if disk-full incidents prove noisy in production logs. **Deferred — no production observation yet.**
+- [x] **`ui/src/hooks/use-job-logs.ts` has zero callers**. Deleted.
+
+### Missing tests
+
+#### High priority
+- [x] **Mixed inline + signal-only chunk on the mirror path** — added `notify_log_chunk_mixed_inline_and_signal_partial_mirrors` (ha_test.rs). Publishes `small + huge + small`; asserts B's file contains the two small lines but not the huge one.
+- [x] **Splitter edge cases** — added 4 events.rs unit tests: empty input, bare `\n`, oversize no-newline tail, two consecutive oversize lines.
+- [x] **Self-NOTIFY does not double-write publisher's own disk** — extended `notify_self_emitted_does_not_double_broadcast` to also call `append_log` before publishing and assert the file contains the line exactly once after the NOTIFY round-trip window.
+- [x] **Receiver disk-write failure path** — added `notify_log_chunk_mirror_disk_failure_does_not_break_listener`. Replica B's `log_storage.local_dir` is unwritable; the test asserts no panic, the broadcast still fires, and subsequent NOTIFYs continue to be delivered.
+
+#### Nice to have
+- [x] **`split_jsonl_chunk(_, 0)` boundary** — added `split_jsonl_chunk_zero_max_bytes_every_line_signals_only`.
+- [x] **Three-replica concurrent publishers** — added `notify_log_chunk_three_replica_fanout_no_corruption`. A and C publish 50 chunks each via `tokio::join!`; B's mirror contains all 100 unique identifiers exactly once.
+- [x] **Reconnect-window gap on `stroem_job_log_chunk`** — added `notify_log_chunk_lost_during_listener_gap_documented`. Publishes chunk-1 with listener up, kills listener, publishes chunk-2 into the gap, restarts listener, publishes chunk-3; asserts B has chunk-1 and chunk-3 but not chunk-2.
+- [x] **UI E2E flicker regression** — added `empty poll from replica does not clear displayed logs (no flicker)` in `ui/e2e/log-streaming.spec.ts`. Waits for real logs, intercepts exactly one subsequent `getStepLogs` as `{ logs: "" }`, asserts displayed content unchanged after 3 s, then unroutes and confirms normal polling resumes.

@@ -31,11 +31,11 @@ Three things need to propagate across replicas immediately, not via the next pol
 |---|---|---|
 | `stroem_job_cancelled` | API/UI cancellation on replica A | Replica B inserts into its local `cancelled_jobs` cache so workers polling B see the cancellation. |
 | `stroem_workspace_reloaded` | Watcher on replica A detects a new revision | Replica B reloads its workspace config cache (otherwise it waits up to `poll_interval_secs`, default 30s). |
-| `stroem_job_log_chunk` | Worker pushes logs to replica A | Replica B fans out to its local WebSocket viewers. |
+| `stroem_job_log_chunk` | Worker pushes logs to replica A | Replica B **mirrors the chunk into its own local jsonl file** and fans out to its local WebSocket viewers. |
 
-Every payload carries the publishing replica's UUID; receivers drop their own messages to avoid duplicate broadcasts.
+Every payload carries the publishing replica's UUID; receivers drop their own messages to avoid duplicate broadcasts and double-writes.
 
-For `stroem_job_log_chunk`, Postgres caps `NOTIFY` payloads at ~8 KB. Lines larger than ~7 KB degrade to a signal-only message — peer replicas know new content exists but can't render it live. Reload the browser tab to re-backfill from the archive once the job completes. In practice, individual log lines that large are rare; if your workloads emit them routinely, see [Known limitations](#known-limitations) below.
+For `stroem_job_log_chunk`, Postgres caps `NOTIFY` payloads at ~8 KB. Multi-line batches larger than ~3.5 KB are **split on jsonl line boundaries** into multiple NOTIFY events so every replica receives the full bytes — REST log reads (`GET /api/jobs/:id/logs`) served from any pod return the same content. A single jsonl line that is itself larger than ~3.5 KB can't be split and degrades to a signal-only NOTIFY for that one line: receivers learn fresh content exists but the bytes only live on the publishing replica until the job completes and the archive upload runs.
 
 ### Health endpoints
 
@@ -51,7 +51,7 @@ This lets Kubernetes liveness probes pass on follower pods (they're doing real w
 | Component | Requirement |
 |---|---|
 | **Postgres** | Reachable from every replica (single primary; RDS Multi-AZ recommended for prod). All HA coordination flows through it. |
-| **Log archive (S3 / EFS / local PVC mounted RWX)** | Optional but strongly recommended. Without an archive, finished-job logs only exist on the replica that received them; reading from any other pod returns empty. With S3 configured, every replica uploads and reads from the shared bucket. |
+| **Log archive (S3 / EFS / local PVC mounted RWX)** | Optional but strongly recommended for **finished-job** logs. While a job is running, the NOTIFY listener mirrors chunks onto every replica's local disk, so REST reads work from any pod. After the job ends, the local file is only uploaded to the archive on the replica that ran the job; without an archive, replicas that didn't mirror every chunk (e.g. cold-started after the job ran) return partial or empty logs. With S3 configured, every replica reads finished-job logs from the shared bucket. |
 | **Shared `auth.jwt_secret`** | If auth is enabled, the same secret value must be set on every replica. Otherwise refresh tokens minted on one pod won't validate on another. Same for `auth.refresh_secret`. The bundled Helm chart's `_validations.tpl` aborts `helm template`/`helm install` when `server.replicas > 1` and auth is enabled but no JWT secret is supplied — guard against accidental split-brain. The server also logs a `HA: auth.jwt_secret loaded (len=N)` message at startup so you can confirm the pods loaded a secret (the value itself is not logged). |
 | **PodDisruptionBudget** | The bundled Helm chart enables a PDB with `minAvailable: 1` by default (`server.podDisruptionBudget.enabled: true`). |
 
@@ -148,12 +148,12 @@ kubectl exec <surviving-pod> -- wget -qO- \
 
 ## Known limitations
 
-- **Single log line > ~7 KB** is delivered as a signal-only NOTIFY between replicas. The viewer on a non-receiving replica sees no live content until refresh — at which point the next-best source applies (disk on the receiving replica, or the archive after job completion). For workloads that emit large individual lines (e.g. JSON blobs over 7 KB), mount a shared log volume (RWX EFS / NFS) and serve all replicas from the same `log_storage.local_dir`.
+- **Single log line > ~3.5 KB** is delivered as a signal-only NOTIFY between replicas (the cap accounts for Postgres' 8 KB NOTIFY hard limit plus JSON-escape inflation on the wrapper). Multi-line batches above the cap are split on jsonl boundaries and delivered fully; only a single line that exceeds the cap on its own can't be split. The viewer on a non-receiving replica sees no live content for that line until refresh — at which point the next-best source applies (disk on the receiving replica, or the archive after job completion). For workloads that emit very large individual lines (e.g. JSON blobs over 3.5 KB), mount a shared log volume (RWX EFS / NFS) and serve all replicas from the same `log_storage.local_dir`.
 - **Postgres outage = no scheduler.** Both replicas lose leadership when the DB goes down. This is by design — workflow execution can't proceed without the DB anyway.
 - **NOTIFY message loss during listener reconnect.** The PgListener's reconnection window (up to ~2 seconds for transient blips, longer for fatal errors requiring the outer recovery loop) silently drops notifications fired during the gap. Each channel has fallback recovery:
   - `stroem_job_cancelled`: The recovery sweeper re-converges within ~60 seconds (DB as source of truth).
   - `stroem_workspace_reloaded`: The receiving replica's own poll cycle (default 30s) re-converges to the new revision.
-  - `stroem_job_log_chunk`: A missed line is lost from live tail; backfill from disk or archive recovers it after job completion.
+  - `stroem_job_log_chunk`: A missed segment is absent from the replica's mirror, so REST reads served from that pod will be short until backfill (manual `getJobLogs` refetch after the live tail catches up, or archive read after job completion). The publishing replica's local file is always complete.
 - **Rate limiter (Tower Governor) is per-replica.** Login / refresh / signup limits are enforced per pod, so effective cluster-wide limits are roughly `replicas × per-pod-limit`. Acceptable for current security posture; if you need exact global limits, terminate at the Ingress layer or front the cluster with a CDN-level rate limiter.
 
 ## Monitoring leader flips
