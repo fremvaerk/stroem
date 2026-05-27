@@ -217,6 +217,15 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
   return apiFetch<WorkspaceInfo[]>("/api/workspaces");
 }
 
+export async function refreshWorkspace(
+  workspace: string,
+): Promise<{ workspace: string; revision: string | null; refreshed: boolean }> {
+  return apiFetch(
+    `/api/workspaces/${encodeURIComponent(workspace)}/refresh`,
+    { method: "POST" },
+  );
+}
+
 // Tasks
 export async function listTasks(workspace: string): Promise<TaskListItem[]> {
   return apiFetch<TaskListItem[]>(

@@ -28,7 +28,12 @@ interface UseAsyncDataOptions {
 export function useAsyncData<T>(
   fetcher: () => Promise<T>,
   options: UseAsyncDataOptions = {},
-): { data: T | null; loading: boolean; error: string | null; refresh: () => void } {
+): {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+} {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

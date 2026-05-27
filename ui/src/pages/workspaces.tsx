@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -9,17 +10,44 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { AlertTriangle } from "lucide-react";
-import { listWorkspaces } from "@/lib/api";
+import { AlertTriangle, RefreshCw } from "lucide-react";
+import { listWorkspaces, refreshWorkspace } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useAsyncData } from "@/hooks/use-async-data";
 import type { WorkspaceInfo } from "@/lib/types";
 
 export function WorkspacesPage() {
   useTitle("Workspaces");
-  const { data, loading } = useAsyncData<WorkspaceInfo[]>(listWorkspaces);
+  const { data, loading, refresh } = useAsyncData<WorkspaceInfo[]>(listWorkspaces);
   const workspaces = data ?? [];
+  const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
+  const [refreshError, setRefreshError] = useState<Record<string, string>>({});
+
+  const handleRefresh = async (ws: string) => {
+    setRefreshing((prev) => new Set(prev).add(ws));
+    setRefreshError((prev) => {
+      const next = { ...prev };
+      delete next[ws];
+      return next;
+    });
+    try {
+      await refreshWorkspace(ws);
+      await refresh();
+    } catch (err) {
+      setRefreshError((prev) => ({
+        ...prev,
+        [ws]: err instanceof Error ? err.message : "Failed to refresh",
+      }));
+    } finally {
+      setRefreshing((prev) => {
+        const next = new Set(prev);
+        next.delete(ws);
+        return next;
+      });
+    }
+  };
 
   if (loading) {
     return <LoadingSpinner />;
@@ -51,6 +79,9 @@ export function WorkspacesPage() {
                   <TableHead>Tasks</TableHead>
                   <TableHead>Actions</TableHead>
                   <TableHead>Revision</TableHead>
+                  <TableHead className="w-24 text-right">
+                    <span className="sr-only">Refresh</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -79,6 +110,14 @@ export function WorkspacesPage() {
                             <span className="text-xs">{w}</span>
                           </div>
                         ))}
+                        {refreshError[ws.name] && (
+                          <div className="flex items-start gap-1.5 text-destructive">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span className="text-xs">
+                              Refresh failed: {refreshError[ws.name]}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -99,6 +138,22 @@ export function WorkspacesPage() {
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRefresh(ws.name)}
+                        disabled={refreshing.has(ws.name)}
+                        aria-label={`Refresh workspace ${ws.name}`}
+                      >
+                        <RefreshCw
+                          className={`h-3.5 w-3.5 ${
+                            refreshing.has(ws.name) ? "animate-spin" : ""
+                          }`}
+                        />
+                        <span className="ml-1.5">Refresh</span>
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
