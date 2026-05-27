@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use stroem_common::models::workflow::WorkspaceConfig;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
@@ -52,7 +53,49 @@ pub struct WorkspaceEntry {
     /// Per-file warnings from the last successful load (files that were skipped
     /// due to read or parse errors). Empty when the workspace has a load_error.
     pub load_warnings: Arc<std::sync::RwLock<Vec<String>>>,
+    /// Serializes concurrent reload attempts on the same workspace. The
+    /// expensive `source.load()` call (git fetch + reset --hard, or folder
+    /// re-hash) is held under this mutex along with the config write — without
+    /// it, two concurrent reloads on a `GitSource` would both perform
+    /// `reset --hard` on the same on-disk clone, corrupting the working tree.
+    /// Stores the `Instant` of the last completed (successful or failed)
+    /// reload so `reload_for_api` can enforce a cooldown.
+    pub reload_state: Arc<Mutex<ReloadState>>,
 }
+
+#[derive(Default)]
+pub struct ReloadState {
+    pub last_completed: Option<Instant>,
+}
+
+/// Outcome of `WorkspaceManager::reload_for_api`. Distinguishes the three
+/// cases the public refresh endpoint cares about so the handler can return
+/// 404 / 429 / 500 without sniffing error strings.
+#[derive(Debug)]
+pub enum ReloadApiError {
+    /// Workspace name does not exist (or is ACL-hidden — the handler chooses
+    /// when to return this).
+    NotFound,
+    /// Last reload completed less than `cooldown` ago; client should retry
+    /// after `retry_after_secs`.
+    Cooldown { retry_after_secs: u64 },
+    /// The reload was attempted and failed.
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for ReloadApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "workspace not found"),
+            Self::Cooldown { retry_after_secs } => {
+                write!(f, "refresh rate-limited; retry after {retry_after_secs}s")
+            }
+            Self::Failed(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for ReloadApiError {}
 
 impl WorkspaceEntry {
     /// Returns `true` if the workspace loaded successfully (no load error).
@@ -61,6 +104,12 @@ impl WorkspaceEntry {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .is_none()
+    }
+
+    /// Helper for tests and constructors that need a fresh `reload_state`
+    /// without having to name [`ReloadState`] directly.
+    pub fn default_reload_state() -> Arc<Mutex<ReloadState>> {
+        Arc::new(Mutex::new(ReloadState::default()))
     }
 }
 
@@ -190,6 +239,7 @@ impl WorkspaceManager {
                             source_path,
                             load_error: Arc::new(std::sync::RwLock::new(None)),
                             load_warnings: Arc::new(std::sync::RwLock::new(warnings)),
+                            reload_state: Arc::new(Mutex::new(ReloadState::default())),
                         },
                     );
                 }
@@ -206,6 +256,7 @@ impl WorkspaceManager {
                             source_path,
                             load_error: Arc::new(std::sync::RwLock::new(Some(err_msg))),
                             load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+                            reload_state: Arc::new(Mutex::new(ReloadState::default())),
                         },
                     );
                 }
@@ -244,6 +295,7 @@ impl WorkspaceManager {
                 source_path: PathBuf::from("/dev/null"),
                 load_error: Arc::new(std::sync::RwLock::new(None)),
                 load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+                reload_state: Arc::new(Mutex::new(ReloadState::default())),
             },
         );
         Self {
@@ -362,16 +414,74 @@ impl WorkspaceManager {
     /// Reload a specific workspace from its source, updating config and revision.
     /// Library items are re-merged into the workspace config.
     /// On success, clears any previous load error. On failure, sets the load error.
+    ///
+    /// Concurrent reload attempts on the same workspace are serialized via the
+    /// per-workspace `reload_state` mutex — this is the only reason the
+    /// expensive `source.load()` (git fetch + reset --hard) can be safely
+    /// invoked from multiple call sites (watcher, scheduler, hooks, API).
+    /// Without this guard, two simultaneous reloads would perform
+    /// `reset --hard` on the same on-disk libgit2 clone and corrupt its
+    /// working tree.
     pub async fn reload(&self, name: &str) -> Result<()> {
         let entry = self
             .entries
             .get(name)
             .with_context(|| format!("Workspace '{}' not found", name))?;
 
+        let mut reload_state = entry.reload_state.lock().await;
+        let result = Self::do_reload(name, entry, &self.resolved_libraries).await;
+        reload_state.last_completed = Some(Instant::now());
+        result
+    }
+
+    /// Like [`Self::reload`], but enforces a `cooldown` window since the last
+    /// completed reload and returns a typed [`ReloadApiError`] so the HTTP
+    /// handler can map cleanly to 404 / 429 / 500. Pass `Duration::ZERO` to
+    /// skip the cooldown (used by tests).
+    pub async fn reload_for_api(
+        &self,
+        name: &str,
+        cooldown: Duration,
+    ) -> std::result::Result<(), ReloadApiError> {
+        let entry = self.entries.get(name).ok_or(ReloadApiError::NotFound)?;
+
+        // try_lock first so a refresh that's currently in flight is
+        // surfaced as a cooldown response rather than queueing the caller
+        // and tying up a worker.
+        let mut reload_state = match entry.reload_state.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(ReloadApiError::Cooldown {
+                    retry_after_secs: cooldown.as_secs().max(1),
+                });
+            }
+        };
+
+        if let Some(last) = reload_state.last_completed {
+            let elapsed = last.elapsed();
+            if elapsed < cooldown {
+                let retry_after = (cooldown - elapsed).as_secs().max(1);
+                return Err(ReloadApiError::Cooldown {
+                    retry_after_secs: retry_after,
+                });
+            }
+        }
+
+        let result = Self::do_reload(name, entry, &self.resolved_libraries).await;
+        reload_state.last_completed = Some(Instant::now());
+        result.map_err(ReloadApiError::Failed)
+    }
+
+    /// Reload implementation. Caller must hold `entry.reload_state` lock.
+    async fn do_reload(
+        name: &str,
+        entry: &WorkspaceEntry,
+        resolved_libraries: &HashMap<String, ResolvedLibrary>,
+    ) -> Result<()> {
         match entry.source.load().await {
             Ok((mut new_config, new_warnings)) => {
                 // Re-merge library items
-                for lib in self.resolved_libraries.values() {
+                for lib in resolved_libraries.values() {
                     merge_library_into_workspace(&mut new_config, lib);
                 }
 
@@ -2062,5 +2172,98 @@ tasks:
             mgr.get_revision("ws").is_some(),
             "revision should be Some after workspace recovers"
         );
+    }
+
+    // ─── reload_for_api ────────────────────────────────────────────────
+
+    /// Helper: build a single-workspace manager backed by a real folder so
+    /// reload calls hit the same load path the API uses.
+    async fn make_reloadable_manager() -> (WorkspaceManager, TempDir) {
+        let temp = create_test_workspace_dir();
+        let path = temp.path().to_str().unwrap().to_string();
+        let mut defs = HashMap::new();
+        defs.insert("ws".to_string(), WorkspaceSourceDef::Folder { path });
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+        (mgr, temp)
+    }
+
+    #[tokio::test]
+    async fn test_reload_for_api_returns_not_found_for_unknown_workspace() {
+        let (mgr, _temp) = make_reloadable_manager().await;
+        let result = mgr.reload_for_api("nope", Duration::ZERO).await;
+        match result {
+            Err(ReloadApiError::NotFound) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reload_for_api_succeeds_with_zero_cooldown() {
+        let (mgr, _temp) = make_reloadable_manager().await;
+        // No previous reload → no cooldown to enforce. Should succeed.
+        mgr.reload_for_api("ws", Duration::ZERO)
+            .await
+            .expect("first reload should succeed");
+        // Second back-to-back call with zero cooldown must also succeed.
+        mgr.reload_for_api("ws", Duration::ZERO)
+            .await
+            .expect("second reload with zero cooldown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_reload_for_api_enforces_cooldown() {
+        let (mgr, _temp) = make_reloadable_manager().await;
+        // Prime the timestamp with a successful reload.
+        mgr.reload_for_api("ws", Duration::ZERO).await.unwrap();
+
+        // Same workspace within cooldown window → 429-shaped error.
+        let result = mgr.reload_for_api("ws", Duration::from_secs(60)).await;
+        match result {
+            Err(ReloadApiError::Cooldown { retry_after_secs }) => {
+                assert!(
+                    retry_after_secs > 0 && retry_after_secs <= 60,
+                    "retry_after_secs should be in (0, 60], got {retry_after_secs}"
+                );
+            }
+            other => panic!("expected Cooldown, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reload_for_api_failure_still_blocks_cooldown_window() {
+        // A reload that fails (e.g. transient git/folder error) must still
+        // update the cooldown timestamp — otherwise a tight retry loop on a
+        // broken source defeats the rate limit.
+        let (mgr, temp) = make_reloadable_manager().await;
+        // Break the workspace so the next reload fails.
+        let ws_path = temp.path().to_path_buf();
+        fs::remove_dir_all(&ws_path).unwrap();
+        let _ = mgr.reload_for_api("ws", Duration::ZERO).await; // populates timestamp regardless
+
+        let result = mgr.reload_for_api("ws", Duration::from_secs(60)).await;
+        assert!(
+            matches!(result, Err(ReloadApiError::Cooldown { .. })),
+            "failed reload should still block subsequent calls within cooldown: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_for_api_in_flight_call_surfaces_as_cooldown() {
+        // When a reload is already running on another task, a concurrent
+        // refresh-API caller must NOT queue behind it (that would tie up a
+        // worker on a slow git fetch). Instead it should surface as a
+        // Cooldown immediately. We simulate "already in flight" by manually
+        // grabbing the per-entry mutex.
+        let (mgr, _temp) = make_reloadable_manager().await;
+        let entry = mgr.entries.get("ws").unwrap();
+        let _guard = entry.reload_state.lock().await;
+
+        let result = mgr.reload_for_api("ws", Duration::from_secs(30)).await;
+        match result {
+            Err(ReloadApiError::Cooldown { retry_after_secs }) => {
+                assert!(retry_after_secs >= 1);
+            }
+            other => panic!("expected Cooldown (in-flight), got {other:?}"),
+        }
     }
 }

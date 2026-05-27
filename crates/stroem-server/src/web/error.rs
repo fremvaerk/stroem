@@ -1,4 +1,4 @@
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -17,6 +17,11 @@ pub enum AppError {
     NotFound(String),
     /// 409 Conflict
     Conflict(String),
+    /// 429 Too Many Requests — sets a `Retry-After` header.
+    TooManyRequests {
+        message: String,
+        retry_after_secs: u64,
+    },
     /// 500 Internal Server Error — wraps anyhow::Error.
     /// Full error logged server-side; client sees "Internal server error".
     Internal(anyhow::Error),
@@ -31,6 +36,24 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // TooManyRequests is handled separately because it carries a header.
+        if let Self::TooManyRequests {
+            message,
+            retry_after_secs,
+        } = self
+        {
+            let mut headers = HeaderMap::new();
+            if let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string()) {
+                headers.insert(header::RETRY_AFTER, value);
+            }
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                headers,
+                Json(json!({"error": message})),
+            )
+                .into_response();
+        }
+
         let (status, message) = match self {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
@@ -44,6 +67,9 @@ impl IntoResponse for AppError {
                     "Internal server error".into(),
                 )
             }
+            // Already handled above; matched here so the compiler enforces
+            // exhaustiveness when new variants are added.
+            Self::TooManyRequests { .. } => unreachable!(),
         };
         (status, Json(json!({"error": message}))).into_response()
     }

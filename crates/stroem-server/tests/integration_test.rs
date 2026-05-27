@@ -7167,6 +7167,7 @@ async fn setup_multi_workspace() -> Result<(
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
             load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+            reload_state: WorkspaceEntry::default_reload_state(),
         },
     );
     entries.insert(
@@ -7178,6 +7179,7 @@ async fn setup_multi_workspace() -> Result<(
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
             load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+            reload_state: WorkspaceEntry::default_reload_state(),
         },
     );
 
@@ -7219,6 +7221,398 @@ async fn test_list_workspaces() -> Result<()> {
     assert_eq!(ops_ws["tasks_count"].as_u64().unwrap(), 1);
     assert_eq!(ops_ws["actions_count"].as_u64().unwrap(), 1);
 
+    Ok(())
+}
+
+// ─── Multi-workspace: Refresh endpoint ──────────────────────────────
+
+#[tokio::test]
+async fn test_refresh_workspace_success() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/refresh")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(body["workspace"], "default");
+    assert_eq!(body["refreshed"], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_workspace_unknown_returns_404() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/does-not-exist/refresh")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 404);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_workspace_cooldown_returns_429_with_retry_after() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace().await?;
+
+    // First refresh succeeds and primes the cooldown timestamp.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/refresh")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(req).await?;
+    assert_eq!(response.status(), 200);
+
+    // Immediate second call should hit the 5s cooldown and return 429 + Retry-After.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/refresh")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 429);
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .expect("429 must include Retry-After header")
+        .to_str()
+        .unwrap();
+    let secs: u64 = retry_after.parse().expect("Retry-After must parse as u64");
+    assert!(
+        (1..=5).contains(&secs),
+        "Retry-After should be in [1, 5], got {secs}"
+    );
+    Ok(())
+}
+
+// ─── Multi-workspace: Refresh endpoint + ACL ────────────────────────
+
+const ACL_ADMIN_EMAIL: &str = "admin-acl@test.com";
+const ACL_VIEWER_EMAIL: &str = "viewer@test.com";
+const ACL_NOBODY_EMAIL: &str = "nobody@test.com";
+const ACL_USER_PASSWORD: &str = "test-password-123";
+
+/// Builds a router with auth enabled + ACL configured. Two workspaces
+/// (`default`, `ops`); three users:
+/// - `admin@test.com` (admin flag set → bypasses ACL)
+/// - `viewer@test.com` (group `viewers` → View on `default` only)
+/// - `nobody@test.com` (no groups, no rules → ACL default Deny)
+async fn setup_with_auth_and_acl() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    use stroem_db::UserGroupRepo;
+    use stroem_server::config::{AclAction, AclConfig, AclRule};
+
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([
+            (
+                "default".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "ops".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+        ]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: Some(AuthConfig {
+            jwt_secret: AUTH_JWT_SECRET.to_string(),
+            refresh_secret: AUTH_REFRESH_SECRET.to_string(),
+            base_url: None,
+            providers: HashMap::new(),
+            // Users are seeded manually below — we want explicit control
+            // over admin flag and group membership.
+            initial_user: None,
+        }),
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: Some(AclConfig {
+            default: AclAction::Deny,
+            rules: vec![AclRule {
+                workspace: "default".to_string(),
+                tasks: vec!["*".to_string()],
+                action: AclAction::View,
+                groups: vec!["viewers".to_string()],
+                users: vec![],
+            }],
+        }),
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    // Seed three users.
+    let password_hash = hash_password(ACL_USER_PASSWORD)?;
+    let admin_id = Uuid::new_v4();
+    UserRepo::create(&pool, admin_id, ACL_ADMIN_EMAIL, Some(&password_hash), None).await?;
+    UserRepo::set_admin(&pool, admin_id, true).await?;
+
+    let viewer_id = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        viewer_id,
+        ACL_VIEWER_EMAIL,
+        Some(&password_hash),
+        None,
+    )
+    .await?;
+    UserGroupRepo::add(&pool, viewer_id, "viewers").await?;
+
+    let nobody_id = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        nobody_id,
+        ACL_NOBODY_EMAIL,
+        Some(&password_hash),
+        None,
+    )
+    .await?;
+
+    // Build manager with two workspaces using in-memory sources.
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use stroem_server::workspace::WorkspaceEntry;
+    use tokio::sync::RwLock;
+
+    struct InMemSource(WorkspaceConfig);
+    #[async_trait::async_trait]
+    impl stroem_server::workspace::WorkspaceSource for InMemSource {
+        async fn load(&self) -> Result<(WorkspaceConfig, Vec<String>)> {
+            Ok((self.0.clone(), Vec::new()))
+        }
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("/dev/null")
+        }
+        fn revision(&self) -> Option<String> {
+            Some("test-rev".to_string())
+        }
+    }
+
+    let ws_default = test_workspace();
+    let ws_ops = test_workspace_ops();
+    let src_default: Arc<dyn stroem_server::workspace::WorkspaceSource> =
+        Arc::new(InMemSource(ws_default.clone()));
+    let src_ops: Arc<dyn stroem_server::workspace::WorkspaceSource> =
+        Arc::new(InMemSource(ws_ops.clone()));
+
+    let mut entries = HashMap::new();
+    entries.insert(
+        "default".to_string(),
+        WorkspaceEntry {
+            config: Arc::new(RwLock::new(Arc::new(ws_default))),
+            source: src_default,
+            name: "default".to_string(),
+            source_path: PathBuf::from("/dev/null"),
+            load_error: Arc::new(std::sync::RwLock::new(None)),
+            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+            reload_state: WorkspaceEntry::default_reload_state(),
+        },
+    );
+    entries.insert(
+        "ops".to_string(),
+        WorkspaceEntry {
+            config: Arc::new(RwLock::new(Arc::new(ws_ops))),
+            source: src_ops,
+            name: "ops".to_string(),
+            source_path: PathBuf::from("/dev/null"),
+            load_error: Arc::new(std::sync::RwLock::new(None)),
+            load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+            reload_state: WorkspaceEntry::default_reload_state(),
+        },
+    );
+
+    let mgr = WorkspaceManager::from_entries(entries);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
+async fn acl_login(router: &Router, email: &str) -> Result<String> {
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": email, "password": ACL_USER_PASSWORD}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200, "login failed for {email}");
+    let body = body_json(response).await;
+    Ok(body["access_token"].as_str().unwrap().to_string())
+}
+
+fn authed_post_empty(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_refresh_admin_can_refresh_any_workspace() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let token = acl_login(&router, ACL_ADMIN_EMAIL).await?;
+
+    let response = router
+        .clone()
+        .oneshot(authed_post_empty("/api/workspaces/default/refresh", &token))
+        .await?;
+    assert_eq!(response.status(), 200, "admin should refresh `default`");
+
+    // Different workspace → no shared cooldown.
+    let response = router
+        .clone()
+        .oneshot(authed_post_empty("/api/workspaces/ops/refresh", &token))
+        .await?;
+    assert_eq!(response.status(), 200, "admin should refresh `ops`");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_viewer_can_refresh_visible_workspace() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
+
+    let response = router
+        .oneshot(authed_post_empty("/api/workspaces/default/refresh", &token))
+        .await?;
+    assert_eq!(
+        response.status(),
+        200,
+        "viewer with View on `default` should refresh it"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_acl_hidden_workspace_returns_same_404_as_nonexistent() -> Result<()> {
+    // The core enumeration-prevention assertion: a 404 for an
+    // ACL-hidden workspace must be indistinguishable (status AND body) from
+    // a 404 for a non-existent workspace name. Without this guarantee, an
+    // authenticated low-privilege caller can enumerate workspace names by
+    // observing differing responses.
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
+
+    // `ops` exists but the viewer's group has no rule for it.
+    let response = router
+        .clone()
+        .oneshot(authed_post_empty("/api/workspaces/ops/refresh", &token))
+        .await?;
+    assert_eq!(response.status(), 404, "ACL-hidden workspace must be 404");
+    let hidden_body = body_json(response).await;
+
+    // A wholly fictitious workspace name.
+    let response = router
+        .oneshot(authed_post_empty(
+            "/api/workspaces/does-not-exist/refresh",
+            &token,
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+    let missing_body = body_json(response).await;
+
+    // Both responses use the same `{"error": "Workspace 'X' not found"}`
+    // template — only the name differs, which is fine because that's the
+    // value the caller already sent.
+    let hidden_err = hidden_body["error"].as_str().unwrap();
+    let missing_err = missing_body["error"].as_str().unwrap();
+    assert!(
+        hidden_err.contains("not found"),
+        "hidden-workspace body should use the 'not found' template, got: {hidden_err}"
+    );
+    assert!(
+        missing_err.contains("not found"),
+        "missing-workspace body should use the 'not found' template, got: {missing_err}"
+    );
+    // Both must share the same shape (JSON object with a single `error` key).
+    assert_eq!(
+        hidden_body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        missing_body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        "both 404 responses must have the same JSON shape"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_user_without_groups_gets_404_on_all_workspaces() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let token = acl_login(&router, ACL_NOBODY_EMAIL).await?;
+
+    // Even though both workspaces exist, the `nobody` user has zero
+    // group memberships and the ACL default is Deny → every workspace is
+    // invisible to them.
+    for ws in ["default", "ops"] {
+        let response = router
+            .clone()
+            .oneshot(authed_post_empty(
+                &format!("/api/workspaces/{ws}/refresh"),
+                &token,
+            ))
+            .await?;
+        assert_eq!(
+            response.status(),
+            404,
+            "user with no group memberships must get 404 on `{ws}`"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_unauthenticated_request_when_auth_enabled() -> Result<()> {
+    // Sanity: with auth enabled, an unauthenticated POST must fail with 401
+    // before reaching the handler — confirms the route is correctly mounted
+    // under the protected router.
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/refresh")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 401);
     Ok(())
 }
 
@@ -16354,6 +16748,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
             load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+            reload_state: WorkspaceEntry::default_reload_state(),
         },
     );
     let mgr = WorkspaceManager::from_entries(entries);
@@ -16602,6 +16997,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
             source_path: PathBuf::from("/dev/null"),
             load_error: Arc::new(std::sync::RwLock::new(None)),
             load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+            reload_state: WorkspaceEntry::default_reload_state(),
         },
     );
 
