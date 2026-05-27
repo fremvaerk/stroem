@@ -265,7 +265,7 @@ Input parameters define the schema for action and task inputs.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | **required** | `string`, `text`, `integer`, `number`, `boolean`, `date`, `datetime`, or a connection type name |
+| `type` | string | **required** | `string`, `text`, `integer`, `number`, `boolean`, `date`, `datetime`, or a connection type name. Alias: `bool` is accepted as a shorthand for `boolean` and normalized on load |
 | `name` | string | — | Human-readable label for the UI |
 | `description` | string | — | Help text |
 | `required` | bool | `false` | Whether the field must be provided |
@@ -318,7 +318,7 @@ Output fields are defined directly under the `output:` key as a flat map of fiel
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | String | Required | `string`, `integer`, `number`, `boolean`, `array`, `object` |
+| `type` | String | Required | `string`, `integer`, `number`, `boolean`, `array`, `object`. Alias: `bool` is accepted for `boolean` |
 | `description` | String | — | Human-readable description |
 | `required` | Boolean | `false` | Whether the field must be present |
 | `default` | Any | — | Default value |
@@ -905,7 +905,7 @@ Define schemas for reusable connection configurations.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | **required** | `string`, `text`, `integer`, `number`, `boolean`, `date`, or `datetime` |
+| `type` | string | **required** | `string`, `text`, `integer`, `number`, `boolean`, `date`, or `datetime`. Alias: `bool` is accepted for `boolean` |
 | `required` | bool | `false` | Whether the property must be provided |
 | `default` | any | — | Default value |
 | `secret` | bool | `false` | Mask in UI and logs |

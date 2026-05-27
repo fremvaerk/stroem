@@ -35,11 +35,36 @@ pub struct ConnectionDef {
     pub values: HashMap<String, serde_json::Value>,
 }
 
+/// Normalize a user-supplied field-type string to its canonical form.
+///
+/// Currently maps `bool` → `boolean`. Aliases exist so authors can write
+/// YAML in their preferred shorthand; the rest of the codebase only sees
+/// the canonical name, so validation, JSON Schema generation, and the UI
+/// don't need to know about aliases.
+pub(crate) fn canonicalize_field_type(raw: &str) -> &str {
+    match raw {
+        "bool" => "boolean",
+        other => other,
+    }
+}
+
+fn deserialize_field_type<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(canonicalize_field_type(&raw).to_string())
+}
+
 /// Input field definition for actions and tasks
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InputFieldDef {
-    #[serde(rename = "type")]
-    pub field_type: String, // "string", "text", "integer", "number", "boolean", "date", "datetime", or connection type. Element type — value is an array when `multiple: true`.
+    /// Canonical type names: `string`, `text`, `integer`, `number`, `boolean`,
+    /// `date`, `datetime`, or a connection type name. Element type — value is
+    /// an array when `multiple: true`. Aliases accepted on input: `bool` →
+    /// `boolean` (see [`canonicalize_field_type`]).
+    #[serde(rename = "type", deserialize_with = "deserialize_field_type")]
+    pub field_type: String,
     /// Human-readable display name for this input field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -73,8 +98,10 @@ fn is_false(b: &bool) -> bool {
 /// Output field definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputFieldDef {
-    #[serde(rename = "type")]
-    pub field_type: String, // "string", "integer", "number", "boolean", "array", "object"
+    /// Canonical type names: `string`, `integer`, `number`, `boolean`,
+    /// `array`, `object`. Aliases accepted on input: `bool` → `boolean`.
+    #[serde(rename = "type", deserialize_with = "deserialize_field_type")]
+    pub field_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
@@ -3497,6 +3524,98 @@ tasks:
         assert_eq!(default.as_array().unwrap().len(), 2);
         assert_eq!(default[0], "dev");
         assert_eq!(default[1], "staging");
+    }
+
+    #[test]
+    fn test_bool_alias_canonicalizes_on_input_field() {
+        let yaml = "{ type: bool, default: true }";
+        let field: InputFieldDef = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(field.field_type, "boolean");
+    }
+
+    #[test]
+    fn test_bool_alias_canonicalizes_on_output_field() {
+        let yaml = "{ type: bool }";
+        let field: OutputFieldDef = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(field.field_type, "boolean");
+    }
+
+    #[test]
+    fn test_canonical_boolean_unchanged() {
+        let yaml = "{ type: boolean }";
+        let field: InputFieldDef = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(field.field_type, "boolean");
+    }
+
+    #[test]
+    fn test_other_types_unchanged_by_canonicalization() {
+        for t in [
+            "string",
+            "text",
+            "integer",
+            "number",
+            "date",
+            "datetime",
+            "my-connection-type",
+        ] {
+            let yaml = format!("{{ type: {} }}", t);
+            let field: InputFieldDef = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(field.field_type, t, "type {t} should be untouched");
+        }
+    }
+
+    #[test]
+    fn test_bool_alias_serialize_after_deserialize_roundtrip() {
+        // Deserializing `type: bool` should canonicalize; the next serialize
+        // must emit `type: boolean` (never `type: bool`).
+        let field: InputFieldDef = serde_yaml::from_str("{ type: bool }").unwrap();
+        let yaml = serde_yaml::to_string(&field).unwrap();
+        assert!(
+            yaml.contains("type: boolean"),
+            "round-trip should emit canonical form: {yaml}"
+        );
+        assert!(
+            !yaml.contains("type: bool\n")
+                && !yaml.contains("type: bool ")
+                && !yaml.ends_with("type: bool"),
+            "round-trip should not emit the alias: {yaml}"
+        );
+    }
+
+    #[test]
+    fn test_field_type_alias_is_case_sensitive() {
+        // Only the exact lowercase `bool` is an alias. Other casings pass
+        // through unchanged so they'd be treated as connection-type
+        // references at validation time. Locking that behaviour so a future
+        // change doesn't silently accept `BOOL` as a primitive too.
+        for variant in ["BOOL", "Bool", "Boolean", "BOOLEAN"] {
+            let yaml = format!("{{ type: {variant} }}");
+            let field: InputFieldDef = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(
+                field.field_type, variant,
+                "case variant `{variant}` should pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bool_alias_in_task_input_parses_via_workspace_config() {
+        // End-to-end: ensure the alias survives the full TaskDef parse path
+        // (which is how it arrives from .workflows/*.yaml).
+        let yaml = r#"
+tasks:
+  flag-job:
+    input:
+      enabled:
+        type: bool
+        default: true
+    flow:
+      run:
+        action: nope
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let task = cfg.tasks.get("flag-job").unwrap();
+        assert_eq!(task.input.get("enabled").unwrap().field_type, "boolean");
     }
 
     #[test]

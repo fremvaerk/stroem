@@ -36,7 +36,7 @@ The optional `description` field is displayed in the web UI as placeholder text 
 | `text`     | Multiline text. Renders as a textarea in the UI                |
 | `integer`  | Whole number                                                   |
 | `number`   | Numeric value (integer or decimal)                             |
-| `boolean`  | True/false. Renders as a checkbox in the UI                    |
+| `boolean`  | True/false. Renders as a checkbox in the UI. Also accepts `bool` as an alias |
 | `date`     | Date value (`YYYY-MM-DD`). Renders as a date picker in the UI |
 | `datetime` | Date and time. Renders as a datetime picker in the UI          |
 

@@ -54,6 +54,8 @@ tasks:
         depends_on: [<other-step>]
 ```
 
+Values like `{{ input.param }}` and `{{ <step>.output.<field> }}` are [Tera](https://keats.github.io/tera/) templates — Strøm's template engine. See [Templating](/guides/templating/) for the full reference.
+
 ## Actions
 
 Actions are the smallest execution unit. Each action defines a command or script that runs on a worker. See [Action Types](/guides/action-types/) for all supported types.

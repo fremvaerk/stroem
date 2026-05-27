@@ -593,9 +593,24 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
     let valid_prop_types = [
         "string", "text", "integer", "number", "boolean", "date", "datetime",
     ];
+    // Connection-type names that would collide with a primitive input-field
+    // type (or one of its aliases — see canonicalize_field_type). A task
+    // input written as `type: <name>` is resolved as a primitive first; if a
+    // connection type shadows that name, the reference would silently miss
+    // the connection registry.
+    let reserved_type_names = [
+        "string", "text", "integer", "number", "boolean", "bool", "date", "datetime", "array",
+        "object",
+    ];
 
     // Validate connection type definitions
     for (type_name, type_def) in &config.connection_types {
+        if reserved_type_names.contains(&type_name.as_str()) {
+            bail!(
+                "Connection type name '{}' is reserved (collides with a primitive input-field type or alias)",
+                type_name
+            );
+        }
         for (prop_name, prop_def) in &type_def.properties {
             if !valid_prop_types.contains(&prop_def.property_type.as_str()) {
                 bail!(
@@ -3854,6 +3869,49 @@ on_cancel:
     }
 
     // --- connection validation tests ---
+
+    #[test]
+    fn test_connection_type_named_bool_is_rejected() {
+        // A connection type whose name matches the `bool → boolean` alias
+        // would silently lose its connection inputs: the input field's
+        // `type: bool` is canonicalized to `boolean` and resolved as a
+        // primitive, never reaching the connection registry. Reject at
+        // validation time so authors get a clear error instead of
+        // misbehavior at runtime.
+        let yaml = r#"
+connection_types:
+  bool:
+    host:
+      type: string
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config(&config);
+        assert!(
+            result.is_err(),
+            "connection type named `bool` must be rejected"
+        );
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("reserved") && err_msg.contains("bool"),
+            "error should mention the reservation reason: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_connection_type_named_primitive_is_rejected() {
+        // Same protection for every other primitive name and the array/object
+        // output-schema primitives. Spot-check a few — exhaustive coverage
+        // would test 10 names and add no value.
+        for reserved in ["boolean", "string", "integer", "datetime", "object"] {
+            let yaml = format!("connection_types:\n  {reserved}:\n    host:\n      type: string\n");
+            let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
+            let result = validate_workflow_config(&config);
+            assert!(
+                result.is_err(),
+                "connection type named `{reserved}` must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn test_validate_connections_valid() {
