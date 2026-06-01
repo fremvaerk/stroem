@@ -1,4 +1,6 @@
 use anyhow::Result;
+#[cfg(feature = "s3")]
+use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::stream::BoxStream;
@@ -147,6 +149,155 @@ impl BlobArchive for LocalBlobArchive {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(feature = "s3")]
+pub use s3_blob_archive::S3BlobArchive;
+
+#[cfg(feature = "s3")]
+mod s3_blob_archive {
+    use super::*;
+    use crate::config::ArchiveConfig;
+    use aws_sdk_s3::operation::get_object::GetObjectError;
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+
+    pub struct S3BlobArchive {
+        client: aws_sdk_s3::Client,
+        bucket: String,
+    }
+
+    impl S3BlobArchive {
+        pub async fn from_config(config: &ArchiveConfig) -> Result<Self> {
+            let region = config
+                .region
+                .as_deref()
+                .context("S3 blob archive requires 'region'")?;
+            let bucket = config
+                .bucket
+                .as_deref()
+                .context("S3 blob archive requires 'bucket'")?
+                .to_string();
+
+            let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_sdk_s3::config::Region::new(region.to_string()));
+            if let Some(ref endpoint) = config.endpoint {
+                builder = builder.endpoint_url(endpoint);
+            }
+            let cfg = builder.load().await;
+            let s3_cfg = aws_sdk_s3::config::Builder::from(&cfg)
+                .force_path_style(config.endpoint.is_some())
+                .build();
+            let client = aws_sdk_s3::Client::from_conf(s3_cfg);
+            tracing::info!("S3 blob archive enabled: bucket={}", bucket);
+            Ok(Self { client, bucket })
+        }
+
+        pub fn from_client(client: aws_sdk_s3::Client, bucket: String) -> Self {
+            Self { client, bucket }
+        }
+    }
+
+    #[async_trait]
+    impl BlobArchive for S3BlobArchive {
+        async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .content_type(content_type)
+                .body(ByteStream::from(data))
+                .send()
+                .await
+                .with_context(|| format!("S3 PUT {key}"))?;
+            Ok(())
+        }
+
+        async fn get(&self, key: &str) -> Result<Option<Blob>> {
+            let out = match self
+                .client
+                .get_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    if matches!(e.as_service_error(), Some(GetObjectError::NoSuchKey(_))) {
+                        return Ok(None);
+                    }
+                    return Err(anyhow::anyhow!(e)).context(format!("S3 GET {key}"));
+                }
+            };
+            let content_type = out
+                .content_type()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let body = out
+                .body
+                .collect()
+                .await
+                .with_context(|| format!("S3 read body {key}"))?
+                .into_bytes();
+            Ok(Some(Blob { content_type, bytes: body }))
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send()
+                .await
+                .with_context(|| format!("S3 DELETE {key}"))?;
+            Ok(())
+        }
+
+        async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+            let mut continuation: Option<String> = None;
+            loop {
+                let mut req = self
+                    .client
+                    .list_objects_v2()
+                    .bucket(&self.bucket)
+                    .prefix(prefix);
+                if let Some(c) = continuation.clone() {
+                    req = req.continuation_token(c);
+                }
+                let resp = req
+                    .send()
+                    .await
+                    .with_context(|| format!("S3 LIST {prefix}"))?;
+                let objects: Vec<ObjectIdentifier> = resp
+                    .contents()
+                    .iter()
+                    .filter_map(|o| o.key().map(|k| {
+                        ObjectIdentifier::builder().key(k).build().unwrap()
+                    }))
+                    .collect();
+                if !objects.is_empty() {
+                    let delete = Delete::builder()
+                        .set_objects(Some(objects))
+                        .build()
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    self.client
+                        .delete_objects()
+                        .bucket(&self.bucket)
+                        .delete(delete)
+                        .send()
+                        .await
+                        .with_context(|| format!("S3 BATCH DELETE {prefix}"))?;
+                }
+                if resp.is_truncated().unwrap_or(false) {
+                    continuation = resp.next_continuation_token().map(|s| s.to_string());
+                } else {
+                    break;
+                }
+            }
+            Ok(())
         }
     }
 }
