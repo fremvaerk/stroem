@@ -1,8 +1,9 @@
 #![cfg(feature = "s3")]
 
 use anyhow::Result;
+use bytes::Bytes;
 use std::sync::Arc;
-use stroem_server::blob_storage::S3BlobArchive;
+use stroem_server::blob_storage::{BlobArchive, S3BlobArchive};
 use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
@@ -248,6 +249,30 @@ async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
 
     let test_logs = storage.get_step_log(job_id, "test", &meta).await?;
     assert_eq!(test_logs, format!("{}\n", test_line));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s3_delete_prefix_removes_only_matching() -> Result<()> {
+    let (_container, endpoint) = setup_minio().await?;
+    let bucket = format!("test-{}", Uuid::new_v4());
+    let client = test_s3_client(&endpoint);
+    create_bucket(&client, &bucket).await?;
+
+    let blob = S3BlobArchive::from_client(client, bucket);
+
+    blob.put("ws/job1/a.txt", "text/plain", Bytes::from_static(b"1"))
+        .await?;
+    blob.put("ws/job1/b.txt", "text/plain", Bytes::from_static(b"2"))
+        .await?;
+    blob.put("ws/job2/c.txt", "text/plain", Bytes::from_static(b"3"))
+        .await?;
+
+    blob.delete_prefix("ws/job1/").await?;
+    assert!(blob.get("ws/job1/a.txt").await?.is_none());
+    assert!(blob.get("ws/job1/b.txt").await?.is_none());
+    assert!(blob.get("ws/job2/c.txt").await?.is_some());
 
     Ok(())
 }
