@@ -2,6 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::stream::BoxStream;
+use std::path::PathBuf;
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 /// A retrieved blob plus its content type.
 #[derive(Debug, Clone)]
@@ -52,6 +55,98 @@ pub trait BlobArchive: Send + Sync {
                 let one_shot = futures_util::stream::once(async move { Ok(blob.bytes) });
                 Ok(Some((blob.content_type, Box::pin(one_shot))))
             }
+        }
+    }
+}
+
+/// Local-filesystem `BlobArchive` backend. Keys map directly to relative paths
+/// under `root`. Content type is stored alongside the blob as `<file>.ct`.
+pub struct LocalBlobArchive {
+    root: PathBuf,
+}
+
+impl LocalBlobArchive {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn validate_key(key: &str) -> Result<()> {
+        if key.is_empty() || key.starts_with('/') {
+            anyhow::bail!("invalid key: {key}");
+        }
+        for part in key.split('/') {
+            if part.is_empty() || part == "." || part == ".." {
+                anyhow::bail!("invalid key: {key}");
+            }
+            if part.contains('\0') {
+                anyhow::bail!("invalid key: {key}");
+            }
+        }
+        Ok(())
+    }
+
+    fn path_for(&self, key: &str) -> Result<PathBuf> {
+        Self::validate_key(key)?;
+        Ok(self.root.join(key))
+    }
+}
+
+#[async_trait]
+impl BlobArchive for LocalBlobArchive {
+    async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
+        let path = self.path_for(key)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let mut f = fs::File::create(&path).await?;
+        f.write_all(&data).await?;
+        f.flush().await?;
+        let ct_path = path.with_extension(format!(
+            "{}.ct",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+        fs::write(ct_path, content_type.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<Blob>> {
+        let path = self.path_for(key)?;
+        let bytes = match fs::read(&path).await {
+            Ok(b) => Bytes::from(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let ct_path = path.with_extension(format!(
+            "{}.ct",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+        let content_type = fs::read_to_string(&ct_path)
+            .await
+            .unwrap_or_else(|_| "application/octet-stream".to_string());
+        Ok(Some(Blob { content_type, bytes }))
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        let path = self.path_for(key)?;
+        let ct_path = path.with_extension(format!(
+            "{}.ct",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        ));
+        let _ = fs::remove_file(&ct_path).await;
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+        Self::validate_key(prefix.trim_end_matches('/'))?;
+        let dir = self.root.join(prefix);
+        match fs::remove_dir_all(&dir).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -137,5 +232,44 @@ mod tests {
         assert!(store.get("a/x").await.unwrap().is_none());
         assert!(store.get("a/y").await.unwrap().is_none());
         assert!(store.get("b/z").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn local_blob_roundtrip_and_prefix_delete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+
+        store
+            .put("ws/job1/step/foo.txt", "text/plain", Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+        store
+            .put("ws/job1/step/bar.png", "image/png", Bytes::from_static(b"png"))
+            .await
+            .unwrap();
+        store
+            .put("ws/job2/step/baz.txt", "text/plain", Bytes::from_static(b"keep"))
+            .await
+            .unwrap();
+
+        let got = store.get("ws/job1/step/foo.txt").await.unwrap().unwrap();
+        assert_eq!(got.content_type, "text/plain");
+        assert_eq!(&got.bytes[..], b"hello");
+
+        store.delete_prefix("ws/job1/").await.unwrap();
+        assert!(store.get("ws/job1/step/foo.txt").await.unwrap().is_none());
+        assert!(store.get("ws/job1/step/bar.png").await.unwrap().is_none());
+        assert!(store.get("ws/job2/step/baz.txt").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn local_blob_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+        let err = store
+            .put("../escape.txt", "text/plain", Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid key"), "unexpected: {err}");
     }
 }
