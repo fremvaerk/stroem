@@ -81,6 +81,9 @@ pub struct AppState {
     pub last_retention_run: Arc<AtomicI64>,
     /// Optional task state snapshot storage (None when feature is not configured).
     pub state_storage: Option<Arc<StateStorage>>,
+    /// Shared blob archive backend used by logs, state, and artifacts.
+    /// `None` when no archive backend is configured.
+    pub blob_archive: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
     /// Leader-election handle. Background tasks gate themselves on
     /// `leader.is_leader()`. Defaults to an always-leader for tests and
     /// single-replica deployments; real HA wiring happens in `main.rs`.
@@ -121,9 +124,21 @@ impl AppState {
             background_tasks: BackgroundTasks::new(),
             last_retention_run: Arc::new(AtomicI64::new(0)),
             state_storage: state_storage.map(Arc::new),
+            blob_archive: None,
             leader: LeaderElection::always(),
             event_bus: EventBus::noop(),
         }
+    }
+
+    /// Replace the shared blob archive. Used by `main.rs` after constructing
+    /// the backend from `log_storage.archive`. Tests/single-replica builds
+    /// default to `None`.
+    pub fn with_blob_archive(
+        mut self,
+        archive: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
+    ) -> Self {
+        self.blob_archive = archive;
+        self
     }
 
     /// Replace the leader handle. Used by `main.rs` after spawning the HA

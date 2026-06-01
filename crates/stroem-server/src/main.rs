@@ -133,44 +133,64 @@ async fn main() -> Result<()> {
         std::collections::HashMap::new()
     };
 
-    // Initialize log storage with optional archive backend
-    let log_storage = {
-        let base = LogStorage::new(&config.log_storage.local_dir);
+    // Construct an Arc<dyn BlobArchive> from an ArchiveConfig, with consistent
+    // error contexts. Used for both the log archive and any per-subsystem
+    // override (e.g. state_storage.archive).
+    async fn build_blob_archive(
+        archive_config: &stroem_server::config::ArchiveConfig,
+    ) -> Result<Arc<dyn stroem_server::blob_storage::BlobArchive>> {
+        match archive_config.archive_type.as_str() {
+            #[cfg(feature = "s3")]
+            "s3" => {
+                let archive =
+                    stroem_server::blob_storage::S3BlobArchive::from_config(archive_config)
+                        .await
+                        .context("Failed to initialize S3 archive backend")?;
+                Ok(Arc::new(archive))
+            }
+            #[cfg(not(feature = "s3"))]
+            "s3" => {
+                anyhow::bail!("Archive type 's3' requires the 's3' cargo feature to be enabled");
+            }
+            "local" => {
+                let path = archive_config
+                    .path
+                    .as_deref()
+                    .context("Local archive requires 'path' field")?;
+                tracing::info!("Local archive enabled: path={}", path);
+                Ok(Arc::new(
+                    stroem_server::blob_storage::LocalBlobArchive::new(std::path::PathBuf::from(
+                        path,
+                    )),
+                ))
+            }
+            other => {
+                anyhow::bail!(
+                    "Unknown archive type: '{}' (expected 's3' or 'local')",
+                    other
+                );
+            }
+        }
+    }
+
+    // Build the shared log-archive Arc<dyn BlobArchive>. This same Arc is
+    // cloned into LogStorage, StateStorage (when it doesn't override with its
+    // own archive block), and AppState.blob_archive so the artifacts code can
+    // reuse the same backend.
+    let log_archive: Option<(Arc<dyn stroem_server::blob_storage::BlobArchive>, String)> =
         if let Some(archive_config) = config.log_storage.effective_archive() {
             let prefix = archive_config.prefix.clone();
-            match archive_config.archive_type.as_str() {
-                #[cfg(feature = "s3")]
-                "s3" => {
-                    let archive =
-                        stroem_server::blob_storage::S3BlobArchive::from_config(&archive_config)
-                            .await
-                            .context("Failed to initialize S3 archive backend")?;
-                    base.with_archive(std::sync::Arc::new(archive), prefix)
-                }
-                #[cfg(not(feature = "s3"))]
-                "s3" => {
-                    anyhow::bail!(
-                        "Archive type 's3' requires the 's3' cargo feature to be enabled"
-                    );
-                }
-                "local" => {
-                    let path = archive_config
-                        .path
-                        .as_deref()
-                        .context("Local archive requires 'path' field")?;
-                    let archive = stroem_server::blob_storage::LocalBlobArchive::new(
-                        std::path::PathBuf::from(path),
-                    );
-                    tracing::info!("Local log archival enabled: path={}", path);
-                    base.with_archive(std::sync::Arc::new(archive), prefix)
-                }
-                other => {
-                    anyhow::bail!(
-                        "Unknown archive type: '{}' (expected 's3' or 'local')",
-                        other
-                    );
-                }
-            }
+            let archive = build_blob_archive(&archive_config).await?;
+            Some((archive, prefix))
+        } else {
+            None
+        };
+
+    // Initialize log storage with optional archive backend.
+    let log_storage = {
+        let base = LogStorage::new(&config.log_storage.local_dir);
+        if let Some((archive, prefix)) = log_archive.clone() {
+            base.with_archive(archive, prefix)
         } else {
             base
         }
@@ -180,45 +200,17 @@ async fn main() -> Result<()> {
     // Prefers the dedicated `state_storage.archive` config if present, falling back
     // to the log-storage archive backend (per Phase 6a design).
     let state_storage = if let Some(ref ss_config) = config.state_storage {
-        let archive_config = ss_config
-            .archive
-            .clone()
-            .or_else(|| config.log_storage.effective_archive())
-            .context(
-                "state_storage requires an `archive` section or a log_storage.archive backend",
-            )?;
         let archive: Arc<dyn stroem_server::blob_storage::BlobArchive> =
-            match archive_config.archive_type.as_str() {
-                #[cfg(feature = "s3")]
-                "s3" => {
-                    let archive =
-                        stroem_server::blob_storage::S3BlobArchive::from_config(&archive_config)
-                            .await
-                            .context("Failed to initialize S3 state archive backend")?;
-                    Arc::new(archive)
-                }
-                #[cfg(not(feature = "s3"))]
-                "s3" => {
-                    anyhow::bail!(
-                    "state_storage archive type 's3' requires the 's3' cargo feature to be enabled"
+            if let Some(ref archive_config) = ss_config.archive {
+                // Subsystem-specific override: construct a separate Arc.
+                build_blob_archive(archive_config).await?
+            } else if let Some((archive, _)) = log_archive.as_ref() {
+                // No override -- reuse the same Arc as LogStorage.
+                archive.clone()
+            } else {
+                anyhow::bail!(
+                    "state_storage requires an `archive` section or a log_storage.archive backend"
                 );
-                }
-                "local" => {
-                    let path = archive_config
-                        .path
-                        .as_deref()
-                        .context("Local state archive requires 'path' field")?;
-                    tracing::info!("Local state archival enabled: path={}", path);
-                    Arc::new(stroem_server::blob_storage::LocalBlobArchive::new(
-                        std::path::PathBuf::from(path),
-                    ))
-                }
-                other => {
-                    anyhow::bail!(
-                        "Unknown state_storage archive type: '{}' (expected 's3' or 'local')",
-                        other
-                    );
-                }
             };
         Some(stroem_server::state_storage::StateStorage::new(
             archive,
@@ -229,6 +221,10 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    // The shared blob archive surfaced on AppState for artifact-specific
+    // operations. Reuses the log archive when configured.
+    let blob_archive = log_archive.as_ref().map(|(arc, _)| arc.clone());
 
     // Build application state. The HA primitives (LeaderElection and
     // EventBus) are created next; AppState starts with no-op defaults so we
@@ -252,6 +248,7 @@ async fn main() -> Result<()> {
         oidc_providers,
         state_storage,
     )
+    .with_blob_archive(blob_archive)
     .with_leader(leader)
     .with_event_bus(event_bus);
 
