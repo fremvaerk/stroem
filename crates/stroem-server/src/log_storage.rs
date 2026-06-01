@@ -1,5 +1,6 @@
+use crate::blob_storage::BlobArchive;
 use anyhow::{Context, Result};
-use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,20 +15,6 @@ pub struct JobLogMeta {
     pub workspace: String,
     pub task_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Pluggable archive backend for log storage.
-///
-/// Operates on raw bytes — gzip compression/decompression is handled by
-/// `LogStorage` before calling these methods.
-#[async_trait]
-pub trait LogArchive: Send + Sync {
-    /// Upload raw bytes to the archive under the given key.
-    async fn upload(&self, key: &str, data: &[u8]) -> Result<()>;
-    /// Download raw bytes from the archive. Returns `None` if the key doesn't exist.
-    async fn download(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    /// Delete an object from the archive.
-    async fn delete(&self, key: &str) -> Result<()>;
 }
 
 /// Build a structured archive key from job metadata.
@@ -45,186 +32,6 @@ pub fn archive_key(prefix: &str, job_id: Uuid, meta: &JobLogMeta) -> String {
         dt.format("%Y-%m-%dT%H-%M-%S"),
         job_id,
     )
-}
-
-// ─── S3 Archive Backend ──────────────────────────────────────────────────
-
-#[cfg(feature = "s3")]
-pub use s3_archive::S3Archive;
-
-#[cfg(feature = "s3")]
-mod s3_archive {
-    use super::*;
-    use crate::config::ArchiveConfig;
-
-    /// S3-backed archive implementation.
-    pub struct S3Archive {
-        client: aws_sdk_s3::Client,
-        bucket: String,
-    }
-
-    impl S3Archive {
-        /// Create from an `ArchiveConfig` (production init — builds AWS SDK client).
-        pub async fn from_config(config: &ArchiveConfig) -> Result<Self> {
-            let region = config
-                .region
-                .as_deref()
-                .context("S3 archive requires 'region' field")?;
-            let bucket = config
-                .bucket
-                .as_deref()
-                .context("S3 archive requires 'bucket' field")?;
-
-            let mut aws_config_builder =
-                aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .region(aws_sdk_s3::config::Region::new(region.to_string()));
-
-            if let Some(ref endpoint) = config.endpoint {
-                aws_config_builder = aws_config_builder.endpoint_url(endpoint);
-            }
-
-            let aws_config = aws_config_builder.load().await;
-            let s3_sdk_config = aws_sdk_s3::config::Builder::from(&aws_config)
-                .force_path_style(config.endpoint.is_some())
-                .build();
-            let client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
-
-            tracing::info!("S3 log archival enabled: bucket={}", bucket);
-
-            Ok(Self {
-                client,
-                bucket: bucket.to_string(),
-            })
-        }
-
-        /// Create from a pre-built client (for testing).
-        pub fn from_client(client: aws_sdk_s3::Client, bucket: String) -> Self {
-            Self { client, bucket }
-        }
-    }
-
-    #[async_trait]
-    impl LogArchive for S3Archive {
-        async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .content_type("application/gzip")
-                .body(data.to_vec().into())
-                .send()
-                .await
-                .with_context(|| format!("Failed to upload log to S3: {}", key))?;
-            tracing::info!("Uploaded logs to S3: s3://{}/{}", self.bucket, key);
-            Ok(())
-        }
-
-        async fn download(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            match self
-                .client
-                .get_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send()
-                .await
-            {
-                Ok(output) => {
-                    let bytes = output
-                        .body
-                        .collect()
-                        .await
-                        .context("Failed to read S3 object body")?
-                        .into_bytes();
-                    Ok(Some(bytes.to_vec()))
-                }
-                Err(sdk_err) => {
-                    if let aws_sdk_s3::error::SdkError::ServiceError(ref service_err) = sdk_err {
-                        if service_err.err().is_no_such_key() {
-                            return Ok(None);
-                        }
-                    }
-                    tracing::warn!("S3 log lookup failed (non-fatal): {}", sdk_err);
-                    Ok(None)
-                }
-            }
-        }
-
-        async fn delete(&self, key: &str) -> Result<()> {
-            self.client
-                .delete_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send()
-                .await
-                .with_context(|| format!("Failed to delete S3 log: {}", key))?;
-            tracing::debug!("Deleted S3 log: {}", key);
-            Ok(())
-        }
-    }
-}
-
-// ─── Local Archive Backend ───────────────────────────────────────────────
-
-/// Local filesystem archive backend.
-///
-/// Maps archive keys to files under `base_path` — the key's `/` separators
-/// become subdirectories.
-pub struct LocalArchive {
-    base_path: PathBuf,
-}
-
-impl LocalArchive {
-    pub fn new(base_path: impl AsRef<Path>) -> Self {
-        Self {
-            base_path: base_path.as_ref().to_path_buf(),
-        }
-    }
-
-    fn key_path(&self, key: &str) -> Result<PathBuf> {
-        // Reject keys with path traversal components
-        if key.contains("..") || key.starts_with('/') {
-            anyhow::bail!("Invalid archive key (path traversal attempt): {}", key);
-        }
-        Ok(self.base_path.join(key))
-    }
-}
-
-#[async_trait]
-impl LogArchive for LocalArchive {
-    async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
-        let path = self.key_path(key)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create archive dir: {:?}", parent))?;
-        }
-        fs::write(&path, data)
-            .await
-            .with_context(|| format!("Failed to write archive file: {:?}", path))?;
-        tracing::debug!("Archived log to local file: {:?}", path);
-        Ok(())
-    }
-
-    async fn download(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let path = self.key_path(key)?;
-        match fs::read(&path).await {
-            Ok(data) => Ok(Some(data)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("Failed to read archive file: {:?}", path)),
-        }
-    }
-
-    async fn delete(&self, key: &str) -> Result<()> {
-        let path = self.key_path(key)?;
-        match fs::remove_file(&path).await {
-            Ok(()) => {
-                tracing::debug!("Deleted local archive file: {:?}", path);
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("Failed to delete archive file: {:?}", path)),
-        }
-    }
 }
 
 // ─── LogStorage ──────────────────────────────────────────────────────────
@@ -248,7 +55,7 @@ pub struct LogStorage {
     /// Open, buffered file handles keyed by job UUID.
     file_cache: Arc<DashMap<Uuid, CachedHandle>>,
     /// Pluggable archive backend (S3, local, etc.).
-    archive: Option<Arc<dyn LogArchive>>,
+    archive: Option<Arc<dyn BlobArchive>>,
     /// Key prefix for archive objects.
     archive_prefix: String,
 }
@@ -266,7 +73,7 @@ impl LogStorage {
     }
 
     /// Attach an archive backend with the given key prefix.
-    pub fn with_archive(mut self, archive: Arc<dyn LogArchive>, prefix: String) -> Self {
+    pub fn with_archive(mut self, archive: Arc<dyn BlobArchive>, prefix: String) -> Self {
         self.archive = Some(archive);
         self.archive_prefix = prefix;
         self
@@ -433,7 +240,9 @@ impl LogStorage {
             .context("spawn_blocking panicked")??;
 
             let key = archive_key(&self.archive_prefix, job_id, meta);
-            archive.upload(&key, &compressed).await?;
+            archive
+                .put(&key, "application/gzip", Bytes::from(compressed))
+                .await?;
         }
 
         Ok(())
@@ -448,11 +257,11 @@ impl LogStorage {
     ) -> Result<Option<String>> {
         if let Some(ref archive) = self.archive {
             let key = archive_key(&self.archive_prefix, job_id, meta);
-            if let Some(bytes) = archive.download(&key).await? {
+            if let Some(blob) = archive.get(&key).await? {
                 use flate2::read::GzDecoder;
                 use std::io::Read;
 
-                let mut decoder = GzDecoder::new(&bytes[..]);
+                let mut decoder = GzDecoder::new(blob.bytes.as_ref());
                 let mut content = String::new();
                 decoder
                     .read_to_string(&mut content)
@@ -583,12 +392,12 @@ impl LogStorage {
         };
 
         let key = archive_key(&self.archive_prefix, job_id, meta);
-        match archive.download(&key).await? {
-            Some(bytes) => {
+        match archive.get(&key).await? {
+            Some(blob) => {
                 use flate2::read::GzDecoder;
                 use std::io::{BufRead, BufReader};
 
-                let decoder = GzDecoder::new(&bytes[..]);
+                let decoder = GzDecoder::new(blob.bytes.as_ref());
                 let reader = BufReader::new(decoder);
                 let mut result = String::new();
 
@@ -639,7 +448,7 @@ mod tests {
 
     /// In-memory archive backend for testing.
     struct MockArchive {
-        store: TokioMutex<HashMap<String, Vec<u8>>>,
+        store: TokioMutex<HashMap<String, (String, Vec<u8>)>>,
     }
 
     impl MockArchive {
@@ -650,20 +459,33 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl LogArchive for MockArchive {
-        async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+    #[async_trait::async_trait]
+    impl BlobArchive for MockArchive {
+        async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
             self.store
                 .lock()
                 .await
-                .insert(key.to_string(), data.to_vec());
+                .insert(key.to_string(), (content_type.to_string(), data.to_vec()));
             Ok(())
         }
-        async fn download(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.store.lock().await.get(key).cloned())
+        async fn get(&self, key: &str) -> Result<Option<crate::blob_storage::Blob>> {
+            Ok(self
+                .store
+                .lock()
+                .await
+                .get(key)
+                .map(|(ct, data)| crate::blob_storage::Blob {
+                    content_type: ct.clone(),
+                    bytes: Bytes::from(data.clone()),
+                }))
         }
         async fn delete(&self, key: &str) -> Result<()> {
             self.store.lock().await.remove(key);
+            Ok(())
+        }
+        async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+            let mut store = self.store.lock().await;
+            store.retain(|k, _| !k.starts_with(prefix));
             Ok(())
         }
     }
@@ -1206,7 +1028,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mock = Arc::new(MockArchive::new());
         let storage = LogStorage::new(temp_dir.path())
-            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
 
         let job_id = Uuid::new_v4();
         let meta = JobLogMeta {
@@ -1229,7 +1051,8 @@ mod tests {
         assert!(store.contains_key(&key), "archive should have the key");
 
         // Decompress and verify
-        let compressed = store.get(&key).unwrap();
+        let (ct, compressed) = store.get(&key).unwrap();
+        assert_eq!(ct, "application/gzip");
         use flate2::read::GzDecoder;
         use std::io::Read;
         let mut decoder = GzDecoder::new(&compressed[..]);
@@ -1242,8 +1065,10 @@ mod tests {
     async fn test_archive_read_fallback() {
         let temp_dir = TempDir::new().unwrap();
         let mock = Arc::new(MockArchive::new());
-        let storage = LogStorage::new(temp_dir.path())
-            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "pfx/".to_string());
+        let storage = LogStorage::new(temp_dir.path()).with_archive(
+            Arc::clone(&mock) as Arc<dyn BlobArchive>,
+            "pfx/".to_string(),
+        );
 
         let job_id = Uuid::new_v4();
         let meta = JobLogMeta {
@@ -1276,7 +1101,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mock = Arc::new(MockArchive::new());
         let storage = LogStorage::new(temp_dir.path())
-            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
 
         let job_id = Uuid::new_v4();
         let meta = JobLogMeta {
@@ -1313,7 +1138,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mock = Arc::new(MockArchive::new());
         let storage = LogStorage::new(temp_dir.path())
-            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
 
         let job_id = Uuid::new_v4();
         let meta = JobLogMeta {
@@ -1350,67 +1175,6 @@ mod tests {
             .delete_archive_log(job_id, &test_meta())
             .await
             .unwrap();
-    }
-
-    // ─── LocalArchive tests ─────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_local_archive_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = LocalArchive::new(dir.path());
-
-        let data = b"hello world compressed";
-        archive
-            .upload("ws/task/2025/01/01/file.jsonl.gz", data)
-            .await
-            .unwrap();
-
-        let downloaded = archive
-            .download("ws/task/2025/01/01/file.jsonl.gz")
-            .await
-            .unwrap();
-        assert_eq!(downloaded.unwrap(), data);
-    }
-
-    #[tokio::test]
-    async fn test_local_archive_download_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = LocalArchive::new(dir.path());
-
-        let result = archive.download("nonexistent/key").await.unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_local_archive_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = LocalArchive::new(dir.path());
-
-        archive.upload("key.gz", b"data").await.unwrap();
-        assert!(archive.download("key.gz").await.unwrap().is_some());
-
-        archive.delete("key.gz").await.unwrap();
-        assert!(archive.download("key.gz").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn test_local_archive_delete_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = LocalArchive::new(dir.path());
-
-        // Should not error
-        archive.delete("nonexistent").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_local_archive_creates_subdirectories() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive = LocalArchive::new(dir.path());
-
-        archive.upload("a/b/c/d/file.gz", b"nested").await.unwrap();
-
-        let result = archive.download("a/b/c/d/file.gz").await.unwrap();
-        assert_eq!(result.unwrap(), b"nested");
     }
 
     // ─── LogStorageConfig::effective_archive tests ───────────────────────
@@ -1458,7 +1222,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mock = Arc::new(MockArchive::new());
         let storage = LogStorage::new(temp_dir.path())
-            .with_archive(Arc::clone(&mock) as Arc<dyn LogArchive>, "".to_string());
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
 
         let job_id = Uuid::new_v4();
         let meta = JobLogMeta {
@@ -1471,25 +1235,29 @@ mod tests {
 
         // Insert non-gzip bytes directly into the mock archive
         let key = archive_key("", job_id, &meta);
-        mock.store
-            .lock()
-            .await
-            .insert(key, b"this is not gzip data".to_vec());
+        mock.store.lock().await.insert(
+            key,
+            (
+                "application/gzip".to_string(),
+                b"this is not gzip data".to_vec(),
+            ),
+        );
 
         // get_log should return an error (not an empty string)
         let result = storage.get_log(job_id, &meta).await;
         assert!(result.is_err(), "corrupt gzip data should produce an error");
     }
 
-    // ─── LocalArchive end-to-end wired into LogStorage ───────────────────
+    // ─── LocalBlobArchive end-to-end wired into LogStorage ──────────────
 
     #[tokio::test]
     async fn test_local_archive_end_to_end_with_log_storage() {
+        use crate::blob_storage::LocalBlobArchive;
         let live_dir = tempfile::tempdir().unwrap();
         let archive_dir = tempfile::tempdir().unwrap();
-        let archive = Arc::new(LocalArchive::new(archive_dir.path()));
+        let archive = Arc::new(LocalBlobArchive::new(archive_dir.path().to_path_buf()));
         let storage = LogStorage::new(live_dir.path())
-            .with_archive(archive as Arc<dyn LogArchive>, "".to_string());
+            .with_archive(archive as Arc<dyn BlobArchive>, "".to_string());
 
         let job_id = Uuid::new_v4();
         let meta = JobLogMeta {
@@ -1521,54 +1289,6 @@ mod tests {
         // Step log should also work from archive
         let step_log = storage.get_step_log(job_id, "build", &meta).await.unwrap();
         assert_eq!(step_log, content);
-    }
-
-    // ─── S3Archive::from_config validation ───────────────────────────────
-
-    #[cfg(feature = "s3")]
-    #[tokio::test]
-    async fn test_s3_archive_from_config_missing_region() {
-        use super::S3Archive;
-        use crate::config::ArchiveConfig;
-        let config = ArchiveConfig {
-            archive_type: "s3".to_string(),
-            bucket: Some("my-bucket".to_string()),
-            region: None,
-            endpoint: None,
-            path: None,
-            prefix: "".to_string(),
-        };
-        let result = S3Archive::from_config(&config).await;
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.err().expect("expected Err from from_config"));
-        assert!(
-            err_msg.contains("region"),
-            "error should mention region: {}",
-            err_msg
-        );
-    }
-
-    #[cfg(feature = "s3")]
-    #[tokio::test]
-    async fn test_s3_archive_from_config_missing_bucket() {
-        use super::S3Archive;
-        use crate::config::ArchiveConfig;
-        let config = ArchiveConfig {
-            archive_type: "s3".to_string(),
-            bucket: None,
-            region: Some("us-east-1".to_string()),
-            endpoint: None,
-            path: None,
-            prefix: "".to_string(),
-        };
-        let result = S3Archive::from_config(&config).await;
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.err().expect("expected Err from from_config"));
-        assert!(
-            err_msg.contains("bucket"),
-            "error should mention bucket: {}",
-            err_msg
-        );
     }
 
     // ─── line_matches_step substring false-positive guard ────────────────

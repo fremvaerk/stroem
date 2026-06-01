@@ -1,6 +1,6 @@
-use anyhow::Result;
 #[cfg(feature = "s3")]
 use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::stream::BoxStream;
@@ -125,7 +125,10 @@ impl BlobArchive for LocalBlobArchive {
         let content_type = fs::read_to_string(&ct_path)
             .await
             .unwrap_or_else(|_| "application/octet-stream".to_string());
-        Ok(Some(Blob { content_type, bytes }))
+        Ok(Some(Blob {
+            content_type,
+            bytes,
+        }))
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
@@ -242,7 +245,10 @@ mod s3_blob_archive {
                 .await
                 .with_context(|| format!("S3 read body {key}"))?
                 .into_bytes();
-            Ok(Some(Blob { content_type, bytes: body }))
+            Ok(Some(Blob {
+                content_type,
+                bytes: body,
+            }))
         }
 
         async fn delete(&self, key: &str) -> Result<()> {
@@ -274,9 +280,10 @@ mod s3_blob_archive {
                 let objects: Vec<ObjectIdentifier> = resp
                     .contents()
                     .iter()
-                    .filter_map(|o| o.key().map(|k| {
-                        ObjectIdentifier::builder().key(k).build().unwrap()
-                    }))
+                    .filter_map(|o| {
+                        o.key()
+                            .map(|k| ObjectIdentifier::builder().key(k).build().unwrap())
+                    })
                     .collect();
                 if !objects.is_empty() {
                     let delete = Delete::builder()
@@ -314,7 +321,9 @@ mod tests {
 
     impl InMemoryBlob {
         fn new() -> Self {
-            Self { map: Mutex::new(HashMap::new()) }
+            Self {
+                map: Mutex::new(HashMap::new()),
+            }
         }
     }
 
@@ -323,7 +332,10 @@ mod tests {
         async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
             self.map.lock().await.insert(
                 key.to_string(),
-                Blob { content_type: content_type.to_string(), bytes: data },
+                Blob {
+                    content_type: content_type.to_string(),
+                    bytes: data,
+                },
             );
             Ok(())
         }
@@ -349,10 +361,7 @@ mod tests {
             Ok(Bytes::from_static(b"hello ")),
             Ok(Bytes::from_static(b"world")),
         ]));
-        store
-            .put_stream("k1", "text/plain", body)
-            .await
-            .unwrap();
+        store.put_stream("k1", "text/plain", body).await.unwrap();
         let got = store.get("k1").await.unwrap().unwrap();
         assert_eq!(got.content_type, "text/plain");
         assert_eq!(&got.bytes[..], b"hello world");
@@ -376,9 +385,18 @@ mod tests {
     #[tokio::test]
     async fn delete_prefix_removes_matching_keys() {
         let store = InMemoryBlob::new();
-        store.put("a/x", "t", Bytes::from_static(b"1")).await.unwrap();
-        store.put("a/y", "t", Bytes::from_static(b"2")).await.unwrap();
-        store.put("b/z", "t", Bytes::from_static(b"3")).await.unwrap();
+        store
+            .put("a/x", "t", Bytes::from_static(b"1"))
+            .await
+            .unwrap();
+        store
+            .put("a/y", "t", Bytes::from_static(b"2"))
+            .await
+            .unwrap();
+        store
+            .put("b/z", "t", Bytes::from_static(b"3"))
+            .await
+            .unwrap();
         store.delete_prefix("a/").await.unwrap();
         assert!(store.get("a/x").await.unwrap().is_none());
         assert!(store.get("a/y").await.unwrap().is_none());
@@ -391,15 +409,27 @@ mod tests {
         let store = LocalBlobArchive::new(tmp.path().to_path_buf());
 
         store
-            .put("ws/job1/step/foo.txt", "text/plain", Bytes::from_static(b"hello"))
+            .put(
+                "ws/job1/step/foo.txt",
+                "text/plain",
+                Bytes::from_static(b"hello"),
+            )
             .await
             .unwrap();
         store
-            .put("ws/job1/step/bar.png", "image/png", Bytes::from_static(b"png"))
+            .put(
+                "ws/job1/step/bar.png",
+                "image/png",
+                Bytes::from_static(b"png"),
+            )
             .await
             .unwrap();
         store
-            .put("ws/job2/step/baz.txt", "text/plain", Bytes::from_static(b"keep"))
+            .put(
+                "ws/job2/step/baz.txt",
+                "text/plain",
+                Bytes::from_static(b"keep"),
+            )
             .await
             .unwrap();
 

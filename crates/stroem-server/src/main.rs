@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
                 #[cfg(feature = "s3")]
                 "s3" => {
                     let archive =
-                        stroem_server::log_storage::S3Archive::from_config(&archive_config)
+                        stroem_server::blob_storage::S3BlobArchive::from_config(&archive_config)
                             .await
                             .context("Failed to initialize S3 archive backend")?;
                     base.with_archive(std::sync::Arc::new(archive), prefix)
@@ -158,7 +158,9 @@ async fn main() -> Result<()> {
                         .path
                         .as_deref()
                         .context("Local archive requires 'path' field")?;
-                    let archive = stroem_server::log_storage::LocalArchive::new(path);
+                    let archive = stroem_server::blob_storage::LocalBlobArchive::new(
+                        std::path::PathBuf::from(path),
+                    );
                     tracing::info!("Local log archival enabled: path={}", path);
                     base.with_archive(std::sync::Arc::new(archive), prefix)
                 }

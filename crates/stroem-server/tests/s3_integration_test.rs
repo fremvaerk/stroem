@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use stroem_server::log_storage::{JobLogMeta, LogStorage, S3Archive};
+use stroem_server::blob_storage::S3BlobArchive;
+use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::minio::MinIO;
@@ -61,7 +62,7 @@ fn make_log_storage(
     bucket: &str,
     prefix: &str,
 ) -> LogStorage {
-    let archive = S3Archive::from_client(client.clone(), bucket.to_string());
+    let archive = S3BlobArchive::from_client(client.clone(), bucket.to_string());
     LogStorage::new(temp_dir.path()).with_archive(Arc::new(archive), prefix.to_string())
 }
 
