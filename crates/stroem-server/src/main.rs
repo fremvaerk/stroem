@@ -226,6 +226,22 @@ async fn main() -> Result<()> {
     // operations. Reuses the log archive when configured.
     let blob_archive = log_archive.as_ref().map(|(arc, _)| arc.clone());
 
+    // Resolve the artifact-specific blob backend. Prefers a dedicated
+    // `artifact_storage.archive` block when present; otherwise reuses the
+    // shared log archive so operators get "single S3 bucket, multiple
+    // prefixes" by default. When neither is configured, `None` propagates and
+    // artifact uploads will be rejected at the handler.
+    let artifact_blob: Option<Arc<dyn stroem_server::blob_storage::BlobArchive>> =
+        if let Some(ref ac) = config.artifact_storage {
+            if let Some(ref archive_config) = ac.archive {
+                Some(build_blob_archive(archive_config).await?)
+            } else {
+                blob_archive.clone()
+            }
+        } else {
+            blob_archive.clone()
+        };
+
     // Build application state. The HA primitives (LeaderElection and
     // EventBus) are created next; AppState starts with no-op defaults so we
     // can spawn the leader/listener tasks below, then swap them in.
@@ -249,6 +265,7 @@ async fn main() -> Result<()> {
         state_storage,
     )
     .with_blob_archive(blob_archive)
+    .with_artifact_blob(artifact_blob)
     .with_leader(leader)
     .with_event_bus(event_bus);
 

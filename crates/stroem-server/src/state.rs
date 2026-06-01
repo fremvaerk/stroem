@@ -84,6 +84,14 @@ pub struct AppState {
     /// Shared blob archive backend used by logs, state, and artifacts.
     /// `None` when no archive backend is configured.
     pub blob_archive: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
+    /// Dedicated blob archive backend for artifacts. Falls back to the shared
+    /// `blob_archive` when no `artifact_storage.archive` override is set. `None`
+    /// when no backend is configured at all.
+    pub artifact_blob: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
+    /// Artifact storage config (size limits, prefix). Defaults are populated
+    /// from `ArtifactStorageConfig::default()` when the operator omits the
+    /// `artifact_storage` section entirely.
+    pub artifact_config: crate::config::ArtifactStorageConfig,
     /// Leader-election handle. Background tasks gate themselves on
     /// `leader.is_leader()`. Defaults to an always-leader for tests and
     /// single-replica deployments; real HA wiring happens in `main.rs`.
@@ -110,6 +118,7 @@ impl AppState {
             .map(|p| p.join("tarball_cache"))
             .unwrap_or_else(|| PathBuf::from("tarball_cache"));
         let tarball_cache = TarballCache::new(tarball_cache_dir);
+        let artifact_config = config.artifact_storage.clone().unwrap_or_default();
         Self {
             pool,
             workspaces: Arc::new(workspaces),
@@ -125,9 +134,37 @@ impl AppState {
             last_retention_run: Arc::new(AtomicI64::new(0)),
             state_storage: state_storage.map(Arc::new),
             blob_archive: None,
+            artifact_blob: None,
+            artifact_config,
             leader: LeaderElection::always(),
             event_bus: EventBus::noop(),
         }
+    }
+
+    /// Replace the artifact blob backend. Used by `main.rs` after constructing
+    /// either a dedicated backend from `artifact_storage.archive` or reusing
+    /// the shared log archive. Tests/single-replica builds default to `None`.
+    pub fn with_artifact_blob(
+        mut self,
+        archive: Option<Arc<dyn crate::blob_storage::BlobArchive>>,
+    ) -> Self {
+        self.artifact_blob = archive;
+        self
+    }
+
+    /// Compose the storage key for an artifact:
+    /// `{prefix}{workspace}/{job_id}/{step}/{name}`.
+    pub fn artifact_storage_key(
+        &self,
+        workspace: &str,
+        job_id: Uuid,
+        step: &str,
+        name: &str,
+    ) -> String {
+        format!(
+            "{}{}/{}/{}/{}",
+            self.artifact_config.prefix, workspace, job_id, step, name
+        )
     }
 
     /// Replace the shared blob archive. Used by `main.rs` after constructing
