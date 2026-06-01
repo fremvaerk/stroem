@@ -22,6 +22,9 @@ pub enum AppError {
         message: String,
         retry_after_secs: u64,
     },
+    /// 413 Payload Too Large — used when an upload exceeds a configured
+    /// size limit (per-file or per-job cap for artifacts).
+    PayloadTooLarge(String),
     /// 500 Internal Server Error — wraps anyhow::Error.
     /// Full error logged server-side; client sees "Internal server error".
     Internal(anyhow::Error),
@@ -60,6 +63,7 @@ impl IntoResponse for AppError {
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            Self::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
             Self::Internal(err) => {
                 tracing::error!("Internal error: {:#}", err);
                 (

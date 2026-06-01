@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod event_source;
 pub mod jobs;
 pub mod rendering;
@@ -97,6 +98,11 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
         .route(
             "/global-state/{ws}/{job_id}",
             post(state::upload_global_state).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
+        .route(
+            "/jobs/{job_id}/steps/{step_name}/artifacts/{*name}",
+            post(artifacts::upload_artifact)
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
