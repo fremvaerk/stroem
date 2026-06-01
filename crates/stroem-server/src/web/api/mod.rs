@@ -1,4 +1,5 @@
 pub mod api_keys;
+pub mod artifacts;
 pub mod auth;
 pub mod jobs;
 pub mod middleware;
@@ -293,6 +294,11 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs/{id}/steps/{step}/approve", post(jobs::approve_step))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
+        .route("/jobs/{id}/artifacts", get(artifacts::list_artifacts))
+        .route(
+            "/jobs/{id}/artifacts/{name}",
+            get(artifacts::download_artifact),
+        )
         .merge(api_key_create)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

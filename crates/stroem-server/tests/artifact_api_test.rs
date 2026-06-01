@@ -1,0 +1,298 @@
+//! User-facing artifact API: list + download.
+//!
+//! Exercises `GET /api/jobs/{id}/artifacts` and `GET /api/jobs/{id}/artifacts/{name}`
+//! end-to-end against the real router, a testcontainers Postgres, and a
+//! local-filesystem `BlobArchive` backend.
+//!
+//! The plan called for a `common::TestHarness` helper, but that abstraction
+//! does not exist in this crate's test suite yet. To stay within the task's
+//! listed scope (artifact-only changes) we inline the harness here, mirroring
+//! the pattern already established in `artifact_upload_test.rs`.
+
+use anyhow::Result;
+use axum::body::Body;
+use axum::Router;
+use http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::Arc;
+use stroem_common::models::workflow::WorkspaceConfig;
+use stroem_db::{create_pool, run_migrations};
+use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
+use stroem_server::config::{
+    ArtifactStorageConfig, DbConfig, LogStorageConfig, RetentionConfig, ServerConfig,
+    WorkspaceSourceDef,
+};
+use stroem_server::log_storage::LogStorage;
+use stroem_server::state::AppState;
+use stroem_server::web::build_router;
+use stroem_server::workspace::WorkspaceManager;
+use tempfile::TempDir;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres;
+use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const WORKER_TOKEN: &str = "test-worker-token";
+
+struct TestApp {
+    router: Router,
+    pool: PgPool,
+    _pg: testcontainers::ContainerAsync<Postgres>,
+    _tmp: TempDir,
+}
+
+async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+    Ok((pool, container))
+}
+
+async fn build_test_app() -> Result<TestApp> {
+    let (pool, _pg) = spawn_pg().await?;
+
+    let tmp = TempDir::new()?;
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let artifact_dir = tmp.path().join("artifact-archive");
+    std::fs::create_dir_all(&artifact_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://unused".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "ws1".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: tmp.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: WORKER_TOKEN.to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: Some(ArtifactStorageConfig::default()),
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let workspace = WorkspaceConfig::new();
+    let mgr = WorkspaceManager::from_config("ws1", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+
+    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(artifact_dir));
+
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
+        .with_artifact_blob(Some(archive));
+    let router = build_router(state, CancellationToken::new());
+
+    Ok(TestApp {
+        router,
+        pool,
+        _pg,
+        _tmp: tmp,
+    })
+}
+
+async fn create_test_job(pool: &PgPool, workspace: &str, task_name: &str) -> Result<Uuid> {
+    let job_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO job (job_id, workspace, task_name, status, source_type, created_at) \
+         VALUES ($1, $2, $3, 'running', 'api', NOW())",
+    )
+    .bind(job_id)
+    .bind(workspace)
+    .bind(task_name)
+    .execute(pool)
+    .await?;
+    Ok(job_id)
+}
+
+fn upload_request(
+    job_id: Uuid,
+    step_name: &str,
+    artifact_name: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/worker/jobs/{job_id}/steps/{step_name}/artifacts/{artifact_name}"
+        ))
+        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
+        .header("content-type", content_type)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn upload_artifact(
+    app: &TestApp,
+    job_id: Uuid,
+    step_name: &str,
+    artifact_name: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
+    let req = upload_request(
+        job_id,
+        step_name,
+        artifact_name,
+        content_type,
+        body.to_vec(),
+    );
+    let resp = app.router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "upload {} failed",
+        artifact_name
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_artifacts_returns_uploaded() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(&app, job_id, "s1", "a.txt", "text/plain", b"hi").await?;
+    upload_artifact(&app, job_id, "s2", "b.png", "image/png", b"PNGDATA").await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let names: Vec<&str> = items.iter().map(|v| v["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"a.txt"));
+    assert!(names.contains(&"b.png"));
+
+    // url field should look like /api/jobs/{id}/artifacts/{name}
+    for item in items {
+        let url = item["url"].as_str().unwrap();
+        assert!(
+            url.starts_with(&format!("/api/jobs/{job_id}/artifacts/")),
+            "unexpected url {url}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_safe_mime_serves_inline() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(&app, job_id, "s1", "shot.png", "image/png", b"PNG").await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/shot.png"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(disp.starts_with("inline"), "expected inline, got {disp}");
+
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    assert_eq!(&bytes[..], b"PNG");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_html_forced_to_attachment() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(
+        &app,
+        job_id,
+        "s1",
+        "evil.html",
+        "text/html",
+        b"<script>alert(1)</script>",
+    )
+    .await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/evil.html"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp.starts_with("attachment"),
+        "expected attachment, got {disp}"
+    );
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_unknown_artifact_is_404() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/missing.txt"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_unknown_job_is_404() -> Result<()> {
+    let app = build_test_app().await?;
+    let bogus = Uuid::new_v4();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{bogus}/artifacts"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
