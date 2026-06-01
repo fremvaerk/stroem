@@ -31,6 +31,72 @@ pub struct UploadResponse {
     pub content_type: String,
 }
 
+/// Reject names/segments that could escape the artifact sandbox or store opaque
+/// bytes (NUL/control chars). The on-disk `LocalBlobArchive` also rejects these
+/// via its key validator, but we fail fast at the API boundary with a clear
+/// `400` rather than bubbling up a `500` from the blob layer — and S3 keys
+/// don't get the same protection, so the handler is the right gate.
+fn validate_path_segment(value: &str, field: &str) -> Result<(), AppError> {
+    if value.is_empty() {
+        return Err(AppError::BadRequest(format!("{field} is empty")));
+    }
+    if value.len() > 255 {
+        return Err(AppError::BadRequest(format!(
+            "{field} exceeds 255 characters"
+        )));
+    }
+    if value == "." || value == ".." {
+        return Err(AppError::BadRequest(format!("invalid {field}: {value}")));
+    }
+    for ch in value.chars() {
+        if ch == '\0' || ch == '\\' || (ch.is_control() && ch != ' ') {
+            return Err(AppError::BadRequest(format!(
+                "{field} contains forbidden character"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifact_name(name: &str) -> Result<(), AppError> {
+    if name.is_empty() {
+        return Err(AppError::BadRequest("artifact name is empty".into()));
+    }
+    if name.len() > 255 {
+        return Err(AppError::BadRequest(
+            "artifact name exceeds 255 characters".into(),
+        ));
+    }
+    if name.starts_with('/') {
+        return Err(AppError::BadRequest("artifact name is absolute".into()));
+    }
+    if name.starts_with('-') {
+        return Err(AppError::BadRequest(
+            "artifact name must not start with '-'".into(),
+        ));
+    }
+    for segment in name.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(AppError::BadRequest(format!(
+                "invalid path segment in artifact name: '{segment}'"
+            )));
+        }
+        if segment.starts_with('-') {
+            return Err(AppError::BadRequest(
+                "artifact name segment must not start with '-'".into(),
+            ));
+        }
+        for ch in segment.chars() {
+            if ch == '\0' || ch == '\\' || (ch.is_control() && ch != ' ') {
+                return Err(AppError::BadRequest(
+                    "artifact name contains forbidden character".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tracing::instrument(skip(state, body))]
 pub async fn upload_artifact(
     State(state): State<Arc<AppState>>,
@@ -38,6 +104,11 @@ pub async fn upload_artifact(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
+    // Reject path-traversal and control-char inputs before doing any DB work
+    // or constructing a storage key.
+    validate_path_segment(&step_name, "step_name")?;
+    validate_artifact_name(&name)?;
+
     let cfg = &state.artifact_config;
 
     // Per-file size limit
@@ -112,4 +183,51 @@ pub async fn upload_artifact(
             content_type: rec.content_type,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_bad(result: Result<(), AppError>) {
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected BadRequest, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn name_validation_rejects_traversal_and_control() {
+        assert_bad(validate_artifact_name(""));
+        assert_bad(validate_artifact_name("/abs"));
+        assert_bad(validate_artifact_name(".."));
+        assert_bad(validate_artifact_name("../etc/passwd"));
+        assert_bad(validate_artifact_name("foo/../bar"));
+        assert_bad(validate_artifact_name("foo/./bar"));
+        assert_bad(validate_artifact_name("foo//bar"));
+        assert_bad(validate_artifact_name("a\0b"));
+        assert_bad(validate_artifact_name("a\x01b"));
+        assert_bad(validate_artifact_name("-leading"));
+        assert_bad(validate_artifact_name("ok/-leading-segment"));
+        assert_bad(validate_artifact_name("win\\style"));
+        assert_bad(validate_artifact_name(&"x".repeat(256)));
+    }
+
+    #[test]
+    fn name_validation_accepts_normal_inputs() {
+        validate_artifact_name("report.html").unwrap();
+        validate_artifact_name("reports/q1.html").unwrap();
+        validate_artifact_name("nested/dir/file_name-1.zip").unwrap();
+        validate_artifact_name("ok with space.txt").unwrap();
+    }
+
+    #[test]
+    fn step_validation_rejects_traversal() {
+        assert_bad(validate_path_segment("", "step_name"));
+        assert_bad(validate_path_segment(".", "step_name"));
+        assert_bad(validate_path_segment("..", "step_name"));
+        assert_bad(validate_path_segment("evil\0step", "step_name"));
+        validate_path_segment("build", "step_name").unwrap();
+        validate_path_segment("step-with-dash", "step_name").unwrap();
+    }
 }
