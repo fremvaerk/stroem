@@ -1132,7 +1132,7 @@ tasks:
         .unwrap();
 
         let (config, _) = workspace_loader::load_workspace(dir.path()).unwrap();
-        assert!(config.tasks.get("nonexistent").is_none());
+        assert!(!config.tasks.contains_key("nonexistent"));
     }
 
     #[test]

@@ -125,7 +125,7 @@ async fn create_test_job(pool: &PgPool, workspace: &str, task_name: &str) -> Res
 
 async fn list_artifacts(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobArtifactRecord>> {
     let repo = JobArtifactRepo::new(pool.clone());
-    Ok(repo.list_for_job(job_id).await?)
+    repo.list_for_job(job_id).await
 }
 
 fn upload_request(
@@ -196,13 +196,7 @@ async fn worker_upload_rejects_oversized_file() -> Result<()> {
     let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
 
     let body = vec![0u8; 100];
-    let request = upload_request(
-        job_id,
-        "build",
-        "big.bin",
-        "application/octet-stream",
-        body,
-    );
+    let request = upload_request(job_id, "build", "big.bin", "application/octet-stream", body);
     let resp = app.router.clone().oneshot(request).await?;
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
@@ -218,13 +212,23 @@ async fn worker_upload_rejects_when_per_job_cap_would_exceed() -> Result<()> {
     let app = build_test_app(cfg).await?;
     let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
 
-    let request =
-        upload_request(job_id, "s", "a.bin", "application/octet-stream", vec![0u8; 15]);
+    let request = upload_request(
+        job_id,
+        "s",
+        "a.bin",
+        "application/octet-stream",
+        vec![0u8; 15],
+    );
     let resp = app.router.clone().oneshot(request).await?;
     assert_eq!(resp.status(), StatusCode::CREATED);
 
-    let request =
-        upload_request(job_id, "s", "b.bin", "application/octet-stream", vec![0u8; 10]);
+    let request = upload_request(
+        job_id,
+        "s",
+        "b.bin",
+        "application/octet-stream",
+        vec![0u8; 10],
+    );
     let resp = app.router.clone().oneshot(request).await?;
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 

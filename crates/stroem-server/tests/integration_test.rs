@@ -9621,7 +9621,6 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
             unmatched_step_timeout_secs: 30,
-            ..Default::default()
         },
         retention: RetentionConfig::default(),
         acl: None,
@@ -11615,7 +11614,6 @@ async fn setup_recovery() -> Result<(
             heartbeat_timeout_secs: 5, // short for tests
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: 30,
-            ..Default::default()
         },
         retention: RetentionConfig::default(),
         acl: None,
@@ -11873,7 +11871,6 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
             heartbeat_timeout_secs: 5,
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: 30,
-            ..Default::default()
         },
         retention: RetentionConfig::default(),
         acl: None,
@@ -15455,7 +15452,6 @@ async fn setup_recovery_with_unmatched_timeout(
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 1,
             unmatched_step_timeout_secs: timeout_secs,
-            ..Default::default()
         },
         retention: RetentionConfig::default(),
         acl: None,
@@ -16343,7 +16339,7 @@ async fn test_webhook_job_status_unknown_webhook() -> Result<()> {
     let job_id = Uuid::new_v4();
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/hooks/nonexistent-webhook/jobs/{}", job_id))
+        .uri(format!("/hooks/nonexistent-webhook/jobs/{}", job_id))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await?;
@@ -16365,7 +16361,7 @@ async fn test_webhook_job_status_unknown_job_id() -> Result<()> {
     let random_id = Uuid::new_v4();
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/hooks/public-hook/jobs/{}", random_id))
+        .uri(format!("/hooks/public-hook/jobs/{}", random_id))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await?;
@@ -16400,7 +16396,7 @@ async fn test_webhook_job_status_idor_api_sourced_job() -> Result<()> {
     // Try to access it via the webhook status endpoint for public-hook
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/hooks/public-hook/jobs/{}", api_job_id))
+        .uri(format!("/hooks/public-hook/jobs/{}", api_job_id))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await?;
@@ -16425,7 +16421,7 @@ async fn test_webhook_job_status_idor_different_webhook() -> Result<()> {
     // Try to access that job via github-push's status endpoint
     let request = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/hooks/github-push/jobs/{}?secret=whsec_test123",
             job_id
         ))
@@ -16451,7 +16447,7 @@ async fn test_webhook_job_status_secret_required_but_missing() -> Result<()> {
     // Request without any secret for the secret-protected github-push webhook
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/hooks/github-push/jobs/{}", job_id))
+        .uri(format!("/hooks/github-push/jobs/{}", job_id))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await?;
@@ -16476,7 +16472,7 @@ async fn test_webhook_job_status_secret_via_query_param() -> Result<()> {
     // Access status with secret via query param
     let request = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/hooks/github-push/jobs/{}?secret=whsec_test123",
             job_id
         ))
@@ -16517,7 +16513,7 @@ async fn test_webhook_job_status_secret_via_bearer() -> Result<()> {
     // Check status with secret via Authorization: Bearer header
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/hooks/github-push/jobs/{}", job_id))
+        .uri(format!("/hooks/github-push/jobs/{}", job_id))
         .header("Authorization", "Bearer whsec_test123")
         .body(Body::empty())
         .unwrap();
@@ -16546,7 +16542,7 @@ async fn test_webhook_job_status_default_no_wait() -> Result<()> {
     // Check status immediately — no wait param, job is likely still pending/running
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/hooks/public-hook/jobs/{}", job_id))
+        .uri(format!("/hooks/public-hook/jobs/{}", job_id))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await?;
@@ -16625,7 +16621,7 @@ async fn test_webhook_job_status_wait_on_terminal_job() -> Result<()> {
     // immediately without waiting on the broadcast channel.
     let request = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/hooks/public-hook/jobs/{}?wait=true&timeout=5",
             job_id
         ))
@@ -16687,7 +16683,7 @@ async fn test_webhook_job_status_cancelled_treated_as_terminal() -> Result<()> {
     // so the endpoint should return immediately without blocking on the broadcast channel.
     let request = Request::builder()
         .method("GET")
-        .uri(&format!(
+        .uri(format!(
             "/hooks/public-hook/jobs/{}?wait=true&timeout=2",
             job_id
         ))
@@ -16999,7 +16995,6 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
             heartbeat_timeout_secs: 120,
             sweep_interval_secs: 60,
             unmatched_step_timeout_secs: 30,
-            ..Default::default()
         },
         retention: RetentionConfig::default(),
         acl: None,

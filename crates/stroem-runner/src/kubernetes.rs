@@ -2706,9 +2706,10 @@ mod tests {
         let spec = pod.spec.unwrap();
 
         // Should NOT have startup-scripts volume
-        let has_startup_vol = spec.volumes.as_ref().map_or(false, |vols| {
-            vols.iter().any(|v| v.name == "startup-scripts")
-        });
+        let has_startup_vol = spec
+            .volumes
+            .as_ref()
+            .is_some_and(|vols| vols.iter().any(|v| v.name == "startup-scripts"));
         assert!(
             !has_startup_vol,
             "NoWorkspace pods should not have startup-scripts volume"
@@ -2716,9 +2717,10 @@ mod tests {
 
         // Step container should NOT have the mount
         let container = &spec.containers[0];
-        let has_startup_mount = container.volume_mounts.as_ref().map_or(false, |mounts| {
-            mounts.iter().any(|m| m.name == "startup-scripts")
-        });
+        let has_startup_mount = container
+            .volume_mounts
+            .as_ref()
+            .is_some_and(|mounts| mounts.iter().any(|m| m.name == "startup-scripts"));
         assert!(
             !has_startup_mount,
             "NoWorkspace pods should not have startup-scripts mount"

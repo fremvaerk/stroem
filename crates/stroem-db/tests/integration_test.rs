@@ -4057,7 +4057,7 @@ async fn test_task_duration_stats_basic_percentiles() -> Result<()> {
 
     let p95 = stats.p95_ms.expect("p95 should be present");
     assert!(
-        p95 >= 4500.0 && p95 <= 5000.0,
+        (4500.0..=5000.0).contains(&p95),
         "p95 expected ~4800ms, got {}",
         p95
     );

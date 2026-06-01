@@ -221,7 +221,6 @@ impl TestEnv {
                 heartbeat_timeout_secs: 5,
                 sweep_interval_secs: 2,
                 unmatched_step_timeout_secs: 30,
-                ..Default::default()
             },
             retention: RetentionConfig::default(),
             acl: None,
@@ -229,6 +228,7 @@ impl TestEnv {
             metrics: None,
             agents: None,
             state_storage: None,
+            artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
         };
