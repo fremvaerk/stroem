@@ -17,9 +17,10 @@ use stroem_db::{create_pool, run_migrations};
 use stroem_server::config::{
     AuthConfig, DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
+use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
-use stroem_server::state_storage::{LocalStateArchive, StateArchive, StateStorage};
+use stroem_server::state_storage::StateStorage;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
@@ -176,7 +177,7 @@ async fn build_test_app_inner(
     let storage = if with_state_storage {
         let state_dir = tmp.path().join("state-archive");
         std::fs::create_dir_all(&state_dir)?;
-        let archive: Arc<dyn StateArchive> = Arc::new(LocalStateArchive::new(&state_dir));
+        let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(state_dir));
         Some(StateStorage::new(archive, "state/".to_string(), 5, None))
     } else {
         None
@@ -721,7 +722,7 @@ async fn build_test_app_with_auth(
 
     let mgr = WorkspaceManager::from_config(workspace_name, workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
-    let archive: Arc<dyn StateArchive> = Arc::new(LocalStateArchive::new(&state_dir));
+    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(state_dir.clone()));
     let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
 
     // Create admin user in DB.

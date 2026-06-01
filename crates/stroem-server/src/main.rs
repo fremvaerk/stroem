@@ -187,12 +187,12 @@ async fn main() -> Result<()> {
             .context(
                 "state_storage requires an `archive` section or a log_storage.archive backend",
             )?;
-        let archive: Arc<dyn stroem_server::state_storage::StateArchive> =
+        let archive: Arc<dyn stroem_server::blob_storage::BlobArchive> =
             match archive_config.archive_type.as_str() {
                 #[cfg(feature = "s3")]
                 "s3" => {
                     let archive =
-                        stroem_server::state_storage::S3StateArchive::from_config(&archive_config)
+                        stroem_server::blob_storage::S3BlobArchive::from_config(&archive_config)
                             .await
                             .context("Failed to initialize S3 state archive backend")?;
                     Arc::new(archive)
@@ -209,7 +209,9 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .context("Local state archive requires 'path' field")?;
                     tracing::info!("Local state archival enabled: path={}", path);
-                    Arc::new(stroem_server::state_storage::LocalStateArchive::new(path))
+                    Arc::new(stroem_server::blob_storage::LocalBlobArchive::new(
+                        std::path::PathBuf::from(path),
+                    ))
                 }
                 other => {
                     anyhow::bail!(
