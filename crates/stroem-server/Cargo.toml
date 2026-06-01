@@ -56,6 +56,9 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false }
 rand = "0.8"
 walkdir = "2"
 dashmap = "6"
+bytes = "1"
+futures-core = "0.3"
+futures-util = "0.3"
 # default features include `rustls` which pulls aws-smithy-runtime/tls-rustls →
 # aws-smithy-http-client/legacy-rustls-ring → rustls 0.21 + rustls-webpki 0.101
 # (advisories RUSTSEC-2024-0336 / GHSA-mvb-cxhh-fwh6). The `default-https-client`

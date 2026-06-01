@@ -1,5 +1,6 @@
 pub mod acl;
 pub mod auth;
+pub mod blob_storage;
 pub mod cancellation;
 pub mod config;
 pub mod event_source;
