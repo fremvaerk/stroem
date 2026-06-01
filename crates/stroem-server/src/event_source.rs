@@ -913,6 +913,7 @@ mod tests {
             metrics: None,
             agents: None,
             state_storage: None,
+            artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
         };

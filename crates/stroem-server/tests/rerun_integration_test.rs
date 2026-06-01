@@ -236,6 +236,7 @@ async fn build_test_app(workspace_name: &str, workspace: WorkspaceConfig) -> Res
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };

@@ -77,6 +77,7 @@ fn empty_config(url: &str, log_dir: &std::path::Path) -> ServerConfig {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     }

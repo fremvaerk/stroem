@@ -101,6 +101,45 @@ fn default_max_snapshots() -> usize {
     5
 }
 
+/// Artifact storage configuration (optional).
+///
+/// Controls per-file and per-job size limits, the key prefix used in the blob
+/// archive, and an optional dedicated archive backend. When absent, defaults
+/// kick in: 100 MiB per file, 1 GiB per job, prefix `artifacts/`, and the
+/// shared log archive backend is reused.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactStorageConfig {
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_max_job_bytes")]
+    pub max_job_bytes: u64,
+    #[serde(default = "default_artifact_prefix")]
+    pub prefix: String,
+    pub archive: Option<ArchiveConfig>,
+}
+
+fn default_max_file_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+fn default_max_job_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+fn default_artifact_prefix() -> String {
+    "artifacts/".to_string()
+}
+
+impl Default for ArtifactStorageConfig {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: default_max_file_bytes(),
+            max_job_bytes: default_max_job_bytes(),
+            prefix: default_artifact_prefix(),
+            archive: None,
+        }
+    }
+}
+
 /// Git auth configuration for workspace sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -372,6 +411,10 @@ pub struct ServerConfig {
     pub agents: Option<AgentsConfig>,
     /// Task state snapshot configuration (optional — defaults to log archive backend)
     pub state_storage: Option<StateStorageConfig>,
+    /// Artifact storage configuration (optional — defaults to log archive backend
+    /// with 100 MiB per-file and 1 GiB per-job limits)
+    #[serde(default)]
+    pub artifact_storage: Option<ArtifactStorageConfig>,
     /// Default step timeout applied when a `FlowStep` has no `timeout` field.
     /// Capped at the same 24h limit as per-step timeouts. `None` = no default
     /// (existing behaviour: steps without timeouts run unbounded).
@@ -2292,6 +2335,7 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             agents: None,
             metrics: None,
             state_storage: None,
+            artifact_storage: None,
             default_step_timeout: None,
             default_job_timeout: None,
         }
@@ -2340,5 +2384,44 @@ metrics: {}
 "#;
         let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.metrics.as_ref().map(|m| m.public), Some(false));
+    }
+
+    #[test]
+    fn artifact_storage_defaults_used_when_unset() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: "/tmp"
+worker_token: "t"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let art = cfg.artifact_storage.unwrap_or_default();
+        assert_eq!(art.max_file_bytes, 100 * 1024 * 1024);
+        assert_eq!(art.max_job_bytes, 1024 * 1024 * 1024);
+        assert!(art.archive.is_none());
+        assert_eq!(art.prefix, "artifacts/");
+    }
+
+    #[test]
+    fn artifact_storage_size_limits_parsed() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://x"
+log_storage:
+  local_dir: "/tmp"
+worker_token: "t"
+artifact_storage:
+  max_file_bytes: 52428800
+  max_job_bytes: 524288000
+  prefix: "art/"
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let art = cfg.artifact_storage.unwrap();
+        assert_eq!(art.max_file_bytes, 52_428_800);
+        assert_eq!(art.max_job_bytes, 524_288_000);
+        assert_eq!(art.prefix, "art/");
     }
 }

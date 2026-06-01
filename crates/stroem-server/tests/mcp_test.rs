@@ -294,6 +294,7 @@ async fn setup_with_mcp() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -348,6 +349,7 @@ async fn setup_mcp_disabled() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -411,6 +413,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -1181,6 +1184,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };

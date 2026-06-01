@@ -1161,6 +1161,7 @@ async fn setup() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -2273,6 +2274,7 @@ async fn test_task_detail_connections() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -4451,6 +4453,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -4719,6 +4722,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -4957,6 +4961,7 @@ async fn setup_with_auth() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -7124,6 +7129,7 @@ async fn setup_multi_workspace() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -7373,6 +7379,7 @@ async fn setup_with_auth_and_acl() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -7920,6 +7927,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -8092,6 +8100,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -8182,6 +8191,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -8288,6 +8298,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -8429,6 +8440,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -9257,6 +9269,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -9346,6 +9359,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -9419,6 +9433,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -9614,6 +9629,7 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -11607,6 +11623,7 @@ async fn setup_recovery() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -11864,6 +11881,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -13640,6 +13658,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -13999,6 +14018,7 @@ async fn setup_sync_webhook() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -14558,6 +14578,7 @@ async fn test_scheduler_fires_cron_trigger() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -14647,6 +14668,7 @@ async fn test_scheduler_disabled_trigger_does_not_fire() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -14718,6 +14740,7 @@ async fn test_scheduler_passes_trigger_input_to_job() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -14795,6 +14818,7 @@ async fn test_scheduler_clean_shutdown() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -15190,6 +15214,7 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -15438,6 +15463,7 @@ async fn setup_recovery_with_unmatched_timeout(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -16774,6 +16800,7 @@ async fn test_scheduler_triggered_job_stores_revision() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -16980,6 +17007,7 @@ fn revision_test_state(pool: PgPool, workspace: WorkspaceConfig) -> AppState {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -17633,6 +17661,7 @@ async fn setup_with_workspace(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -18486,6 +18515,7 @@ async fn setup_event_source() -> Result<(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -18999,6 +19029,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -19132,6 +19163,7 @@ async fn setup_event_source_with_workspace(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };

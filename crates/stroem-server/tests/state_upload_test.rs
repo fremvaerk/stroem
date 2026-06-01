@@ -162,6 +162,7 @@ async fn build_test_app_inner(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
@@ -711,6 +712,7 @@ async fn build_test_app_with_auth(
         metrics: None,
         agents: None,
         state_storage: None,
+        artifact_storage: None,
         default_step_timeout: None,
         default_job_timeout: None,
     };
