@@ -1,7 +1,7 @@
 # Strøm TODO
 
 Consolidated from [codebase-review-2026-03-01.md](codebase-review-2026-03-01.md) and development memory.
-Last updated: 2026-05-21.
+Last updated: 2026-06-03.
 
 ---
 
@@ -1344,3 +1344,90 @@ Multi-replica fix for the "Waiting for logs…" flicker and missing finished-job
 - [x] **Three-replica concurrent publishers** — added `notify_log_chunk_three_replica_fanout_no_corruption`. A and C publish 50 chunks each via `tokio::join!`; B's mirror contains all 100 unique identifiers exactly once.
 - [x] **Reconnect-window gap on `stroem_job_log_chunk`** — added `notify_log_chunk_lost_during_listener_gap_documented`. Publishes chunk-1 with listener up, kills listener, publishes chunk-2 into the gap, restarts listener, publishes chunk-3; asserts B has chunk-1 and chunk-3 but not chunk-2.
 - [x] **UI E2E flicker regression** — added `empty poll from replica does not clear displayed logs (no flicker)` in `ui/e2e/log-streaming.spec.ts`. Waits for real logs, intercepts exactly one subsequent `getStepLogs` as `{ logs: "" }`, asserts displayed content unchanged after 3 s, then unroutes and confirms normal polling resumes.
+
+## Review: Artifacts Feature (2026-06-03)
+
+Five-agent review (security-auditor, rust-engineer, database-optimizer, react-specialist, qa-expert) of the `feat/artifacts` branch (28 commits introducing BlobArchive trait, job_artifact schema/repo, worker scan+upload+retry+cleanup, runner mounts, user API list/download with inline-when-safe, MCP tools, CLI, UI section, hook context, retention sweep).
+
+### Critical findings
+
+- [ ] **TOCTOU race on per-job size cap** — `web/worker_api/artifacts.rs:120-140`. Read existing total → read replacing-row size → put blob → upsert row, with no transaction or lock. Two `for_each` instances uploading concurrent distinct names both pass the cap check and collectively exceed `max_job_bytes` by up to `N × max_file_bytes`. Fix: wrap in a transaction with `SELECT 1 FROM job WHERE id = $1 FOR UPDATE`, or use a single CTE INSERT that enforces the cap as a WHERE clause.
+- [ ] **`LocalBlobArchive::put` non-atomic write — silent corruption window** — `blob_storage.rs:103-110`. Sequence is `File::create` (truncates existing) → `write_all` → `flush` → write `.ct` sidecar. If `flush` fails after `create`, the data file is truncated and the stale `.ct` from the previous upload remains. A subsequent `get` returns truncated bytes with the previous content-type. Fix: write to `{path}.tmp.{rand}`, fsync, write sidecar to `{path}.ct.tmp`, fsync, atomic rename both into place. Unlink temp files on error.
+- [ ] **Worker fully controls served Content-Type → inline-when-safe bypass** — `web/worker_api/artifacts.rs:144-148` → `web/api/artifacts.rs:156-158`. A malicious task uploads HTML/JS bytes claiming `Content-Type: application/pdf` (which is on `SAFE_INLINE`); the download handler serves it inline. `nosniff` blocks naïve sniffing, but PDFs rendered by PDF.js have historical CVEs (script execution via embedded JS). Fix: either drop `application/pdf` and `text/markdown` from `SAFE_INLINE` (force download for everything except images / plain text), or sniff body magic bytes at upload time and reject mismatched `Content-Type`.
+- [ ] **`DefaultBodyLimit::max(100 * 1024 * 1024)` hardcoded, independent of config** — `web/worker_api/mod.rs:104`. Operators raising `max_file_bytes` above 100 MiB get axum-level 413s before the handler runs; operators lowering it below 100 MiB still let axum buffer 100 MiB per concurrent request before the handler rejects. Fix: wire `DefaultBodyLimit` from `state.config.artifact_storage.max_file_bytes` at router construction time, or use streaming body extraction with an inline cap.
+
+### Important findings
+
+- [ ] **Retention sweep silently orphans blobs when backend removed mid-deployment** — `recovery.rs:351-389`. The `if let Some(ref blob)` guard skips cleanup but `delete_for_job` still runs. Fix: refuse to delete artifact rows when the table is non-empty for the job but no backend is configured; log loudly.
+- [ ] **`build_hook_context` swallows DB errors with `unwrap_or_default()`** — `hooks.rs:289-306`. Transient DB failures render hook templates with an empty `artifacts` list instead of failing. Fix: propagate via `?` like the sibling `get_steps_for_job`.
+- [ ] **`download_artifact` loads full blob into memory before serving** — `web/api/artifacts.rs:115-171`. Up to 100 MiB allocation per concurrent download. `BlobArchive::get_stream` exists. Fix: use `get_stream` + `Body::from_stream`.
+- [ ] **Filename spoofing via RFC 6266 `filename*=` parameter** — `web/api/artifacts.rs:69-71`. `sanitize_filename` strips `"`, `\r`, `\n` but leaves `;`, allowing a stored artifact named `report;filename*=UTF-8''evil.html` to override the download filename via the extension parameter (browsers prefer `filename*=` over `filename=`). Fix: also strip `;`, `\`, control chars; or use only `filename*=UTF-8''<percent-encoded>` and drop the legacy `filename="..."` form.
+- [ ] **Worker upload/delete handlers don't check job status** — `web/worker_api/artifacts.rs:151-155, 199-203`. Anyone with the worker token can attach blobs to completed/cancelled jobs indefinitely. Fix: gate on `job.status NOT IN ('completed', 'failed', 'cancelled')`.
+- [ ] **`upload_with_retry` clones `Vec<u8>` body on every attempt** — `crates/stroem-worker/src/poller.rs:142-170`. 100 MiB × N memory cost on failure paths. Fix: pass `Bytes` (refcounted clone) instead of `Vec<u8>`.
+- [ ] **`S3BlobArchive::delete_prefix` ignores per-object errors** — `blob_storage.rs:265-309`. `delete_objects` response can return partial success with an `errors` array; current code only checks the API call itself. Fix: inspect `errors`, return `Err` if any.
+- [ ] **`dir_has_content` uses sync `std::fs::read_dir` in async fn** — `crates/stroem-worker/src/poller.rs:84-88`. Blocks the tokio thread on slow filesystems. Fix: use `tokio::fs::read_dir` or `spawn_blocking`.
+- [ ] **`WalkDir::into_iter().filter_map(|e| e.ok())` swallows scan errors** — `crates/stroem-worker/src/artifacts.rs:38-42`. Permission-denied subdirectories disappear from the result with no warning. Fix: split error iter, log a warning per failed entry.
+- [ ] **Missing index `(job_id, step_name)`** — `migrations/038_job_artifact.sql:11`. `delete_for_step` index-scans on `job_id` then filters in-heap. Fix: `CREATE INDEX ix_job_artifact_job_step ON job_artifact(job_id, step_name)`.
+- [ ] **Redundant index `ix_job_artifact_job_id`** — `migrations/038_job_artifact.sql:11`. `UNIQUE(job_id, name)` already covers `WHERE job_id = $1` prefix queries. Drop the redundant index to halve write amplification.
+- [ ] **No upper-bound `CHECK` on `job_artifact.size_bytes`** — `migrations/038_job_artifact.sql:8`. App enforces 100 MiB but DB ceiling is `BIGINT`. Risk: `SUM(size_bytes)` near `i64::MAX` could overflow the `as i64` cast. Fix: `CHECK (size_bytes <= 1099511627776)` (1 TiB ceiling).
+- [ ] **`hook.artifacts` URL uses relative path; no public base URL** — `hooks.rs::build_hook_context`. Slack/email hooks need an absolute URL. Fix: read a `public_base_url` from config and prefix.
+- [ ] **UI artifact links missing `download` attribute for attachment path** — `ui/src/components/artifact-list.tsx:64`. If server miscategorises a MIME or browser overrides `Content-Disposition`, the file opens in the current SPA tab and loses state. Fix: `download={a.name}` on non-safe path.
+- [ ] **UI uses `rel="noreferrer"` only; spec-cleaner form is `rel="noopener noreferrer"`** — `ui/src/components/artifact-list.tsx:64`. Modern browsers treat as equivalent but the explicit form survives stricter linters/auditors.
+- [ ] **UI links lack `aria-label` with artifact name** — `ui/src/components/artifact-list.tsx:58`. Screen reader hears "Open ↗" / "Download" repeatedly with no context. Fix: `aria-label={safe ? \`Open ${a.name} in new tab\` : \`Download ${a.name}\`}`.
+- [ ] **UI silently swallows artifact fetch errors** — `ui/src/pages/job-detail.tsx:74-78`. Empty section indistinguishable from a 403/500. Fix: track a `fetchError` boolean, render a muted error row inside the section.
+
+### Minor findings
+
+- [ ] **`.ct` sidecar naming replaces extension instead of appending** — `blob_storage.rs:106-110`. `foo.tar.gz` → `foo.tar.ct` (round-trip self-consistent but external scanners can't tell blobs from sidecars). Fix: use `file_name() + ".ct"`.
+- [ ] **`validate_path_segment` allows leading/trailing ASCII spaces** — `web/worker_api/artifacts.rs:39-58`. `" evil"` accepted as step_name. Low impact; consider trimming or rejecting.
+- [ ] **Windows reserved names (`CON`, `NUL`, `COM1`...) not rejected** — `web/worker_api/artifacts.rs::validate_artifact_name`. Low-impact since workers target Linux but would alias on Windows hosts.
+- [ ] **No `Cache-Control` header on artifact downloads** — `web/api/artifacts.rs:115-171`. Browser disk cache could replay to a subsequent unauthenticated session on the same machine. Suggest `Cache-Control: private, max-age=0, must-revalidate`.
+- [ ] **`total_size_for_job` returns `(Option<i64>,)` but `COALESCE` makes it non-null** — `repos/job_artifact.rs:141-144`. Dead `unwrap_or(0)` path. Cosmetic but misleading.
+- [ ] **`upsert` always generates `Uuid::new_v4()`, discarded on conflict** — `repos/job_artifact.rs:38-82`. Harmless but wasteful and confusing — caller receives the existing row's id, not the generated one.
+- [ ] **MIME icon matching uses `.endsWith("gzip")` / `.endsWith("tar")`** — `ui/src/components/artifact-list.tsx:28-30`. Loose: `application/notatar` would match. Use exact equality / Set.
+- [ ] **Long artifact names truncate in UI with no tooltip** — `ui/src/components/artifact-list.tsx:55`. Add `title={a.name}`.
+- [ ] **`humanSize` returns NaN/empty for negative values** — `ui/src/components/artifact-list.tsx`. Defensive only; `size_bytes` has `CHECK >= 0` server-side.
+
+### Missing tests — critical
+
+- [ ] **`upload_with_retry` retry-then-cleanup path** — `crates/stroem-worker/src/poller.rs:142`. Wire wiremock to return 500 three times; verify DELETE cleanup endpoint is called once and `complete` is reported with a non-zero exit code.
+- [ ] **Failed step (exit non-zero) skips artifact upload** — `crates/stroem-worker/src/poller.rs:686-704`. Plant a file in `/artifacts/`, exit 1, assert zero calls to the upload endpoint.
+- [ ] **Cancelled step does not upload artifacts** — same branch as above. Plant file, cancel mid-execution, assert no upload.
+- [ ] **Retention sweep skips job when `blob.delete_prefix` fails** — `recovery.rs:366-374`. Use a `BlobArchive` impl whose `delete_prefix` returns Err; assert the job row survives the sweep.
+- [ ] **Empty `/artifacts/` directory on success — step succeeds, no upload** — `crates/stroem-worker/src/poller.rs::execute_step_tests`.
+- [ ] **CLI `download_artifact` with `--output` nested path** — `crates/stroem-cli/src/remote/artifacts.rs:83-87`. Mock HTTP, verify parent dirs are created and file is written to the correct path.
+- [ ] **S3 backend end-to-end via router** — currently only the trait impl is tested directly against MinIO. Add a router-based upload/list/download test using `S3BlobArchive` from MinIO.
+
+### Missing tests — important (boundaries)
+
+- [ ] File exactly at `max_file_bytes` (passes) and one byte over (413).
+- [ ] Per-job total exactly at cap (passes) and one byte over (413).
+- [ ] Name at 255 chars (passes) and 256 chars (rejected).
+- [ ] Subdirectory artifact end-to-end (upload `reports/q1.html` → list → download via `%2F` encoding).
+- [ ] Concurrent `for_each` upload of same filename — race + last-writer-wins.
+- [ ] MCP `get_artifact` at 1 MiB exactly (passes) and one byte over (rejected).
+- [ ] MCP `list_artifacts` with ACL Deny → tool error (not empty list).
+- [ ] `sniff_with_name` for all 8 extension branches (only `md` currently covered).
+- [ ] `disposition_for` SVG and JavaScript → attachment.
+- [ ] `LocalBlobArchive::get` without `.ct` sidecar → `application/octet-stream` fallback.
+- [ ] Worker upload when `artifact_blob` is `None` → 500 with clear error.
+- [ ] `delete_step_artifacts` for unknown job → 404.
+- [ ] `step_supports_artifacts` unit test (excludes `agent`/`approval`/`task`, includes `script`/`docker`/`pod`).
+- [ ] UI fetch failure: Playwright route mock returns 500; assert section absent and no uncaught console error.
+
+### Well-covered areas (snapshot)
+
+- Full upload → DB row → blob persistence chain.
+- Per-file cap rejection (413) and per-job cumulative cap rejection (413).
+- Same-name replace-by-upsert semantics at repo + HTTP level.
+- Step-scoped delete cleanup (rows + blobs), idempotent DELETE endpoint.
+- List/download via user API (200/404), inline-vs-attachment dispatch decisions, `X-Content-Type-Options: nosniff` always present.
+- Retention sweep blob-before-row ordering with post-sweep verification.
+- MCP `list_artifacts` / `get_artifact` text/binary/oversize/missing/invalid paths.
+- `validate_artifact_name` and `validate_path_segment` traversal/control-char unit tests (including the post-smoke regression fix at `3f027f3`).
+- `scan_artifacts` recursion, symlink skipping, control-char rejection.
+- `BlobArchive` trait default-impl streaming, `delete_prefix`, local roundtrip, key path-traversal rejection.
+- DB repo upsert / replace / delete_for_job / delete_for_step.
+- `DockerRunner::build_container_config` mounts `/artifacts:rw` in both WithWorkspace and NoWorkspace modes.
+- `hook.artifacts` Tera iteration and field access.
+- E2E shell + Playwright happy-path coverage.
