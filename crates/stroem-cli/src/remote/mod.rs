@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod cancel;
 pub mod client;
 pub mod jobs;
@@ -57,6 +58,30 @@ pub enum Commands {
     State {
         #[command(subcommand)]
         action: StateAction,
+    },
+    /// Manage job artifacts
+    Artifacts {
+        #[command(subcommand)]
+        action: ArtifactsAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ArtifactsAction {
+    /// List artifacts for a job
+    List {
+        /// Job ID
+        job_id: String,
+    },
+    /// Download an artifact by name
+    Download {
+        /// Job ID
+        job_id: String,
+        /// Artifact name
+        name: String,
+        /// Output path (defaults to the artifact name in the current directory)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
     },
 }
 
@@ -133,6 +158,9 @@ pub async fn dispatch(command: Commands, server: &str, token: Option<&str>) -> R
         }
         Commands::State { action } => {
             state::dispatch(&http_client, server, action).await?;
+        }
+        Commands::Artifacts { action } => {
+            artifacts::dispatch(&http_client, server, action).await?;
         }
     }
 
@@ -401,6 +429,109 @@ mod tests {
             }
             _ => panic!("unexpected command variant"),
         }
+    }
+
+    #[test]
+    fn artifacts_list_subcommand_parses() {
+        let cli = parse(&["stroem-api", "artifacts", "list", "abc-123"]).unwrap();
+        match cli.command {
+            super::Commands::Artifacts {
+                action: super::ArtifactsAction::List { job_id },
+            } => {
+                assert_eq!(job_id, "abc-123");
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn artifacts_list_subcommand_requires_job_id() {
+        let result = parse(&["stroem-api", "artifacts", "list"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn artifacts_download_subcommand_parses_with_defaults() {
+        let cli = parse(&[
+            "stroem-api",
+            "artifacts",
+            "download",
+            "abc-123",
+            "report.png",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Artifacts {
+                action:
+                    super::ArtifactsAction::Download {
+                        job_id,
+                        name,
+                        output,
+                    },
+            } => {
+                assert_eq!(job_id, "abc-123");
+                assert_eq!(name, "report.png");
+                assert!(output.is_none());
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn artifacts_download_subcommand_accepts_output_flag() {
+        let cli = parse(&[
+            "stroem-api",
+            "artifacts",
+            "download",
+            "abc-123",
+            "report.png",
+            "--output",
+            "/tmp/r.png",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Artifacts {
+                action:
+                    super::ArtifactsAction::Download {
+                        job_id,
+                        name,
+                        output,
+                    },
+            } => {
+                assert_eq!(job_id, "abc-123");
+                assert_eq!(name, "report.png");
+                assert_eq!(output.as_deref(), Some("/tmp/r.png"));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn artifacts_download_subcommand_accepts_short_output_flag() {
+        let cli = parse(&[
+            "stroem-api",
+            "artifacts",
+            "download",
+            "abc-123",
+            "report.png",
+            "-o",
+            "out.png",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Artifacts {
+                action: super::ArtifactsAction::Download { output, .. },
+            } => {
+                assert_eq!(output.as_deref(), Some("out.png"));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn artifacts_download_subcommand_requires_name() {
+        let result = parse(&["stroem-api", "artifacts", "download", "abc-123"]);
+        assert!(result.is_err());
     }
 
     #[test]
