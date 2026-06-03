@@ -110,14 +110,24 @@ async fn build_test_app(artifact_cfg: ArtifactStorageConfig) -> Result<TestApp> 
 }
 
 async fn create_test_job(pool: &PgPool, workspace: &str, task_name: &str) -> Result<Uuid> {
+    create_test_job_with_status(pool, workspace, task_name, "running").await
+}
+
+async fn create_test_job_with_status(
+    pool: &PgPool,
+    workspace: &str,
+    task_name: &str,
+    status: &str,
+) -> Result<Uuid> {
     let job_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO job (job_id, workspace, task_name, status, source_type, created_at) \
-         VALUES ($1, $2, $3, 'running', 'api', NOW())",
+         VALUES ($1, $2, $3, $4, 'api', NOW())",
     )
     .bind(job_id)
     .bind(workspace)
     .bind(task_name)
+    .bind(status)
     .execute(pool)
     .await?;
     Ok(job_id)
@@ -318,6 +328,148 @@ async fn delete_step_artifacts_clears_rows_and_blobs() -> Result<()> {
         .body(Body::empty())?;
     let resp = app.router.clone().oneshot(delete_request).await?;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    Ok(())
+}
+
+/// Regression for the per-job cap TOCTOU race. Two concurrent uploads to the
+/// same `job_id` with distinct names whose combined size just exceeds the
+/// per-job cap. Without the row-level lock around the cap math, both reads
+/// see the same `existing=0` and both insert, leaving the DB over-cap. With
+/// the lock, one upload sees the other's insert and is rejected with 413.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_uploads_respect_per_job_cap() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_job_bytes: 18, // tight: each upload is 10 bytes, two = 20 > 18
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let router1 = app.router.clone();
+    let router2 = app.router.clone();
+
+    let req_a = upload_request(
+        job_id,
+        "s",
+        "a.bin",
+        "application/octet-stream",
+        vec![0u8; 10],
+    );
+    let req_b = upload_request(
+        job_id,
+        "s",
+        "b.bin",
+        "application/octet-stream",
+        vec![0u8; 10],
+    );
+
+    // Fire both uploads in parallel. The row-level lock should serialise
+    // them, so exactly one sees the other's 10 bytes already counted and is
+    // rejected.
+    let (res_a, res_b) = tokio::join!(router1.oneshot(req_a), router2.oneshot(req_b));
+    let status_a = res_a?.status();
+    let status_b = res_b?.status();
+
+    let mut statuses = [status_a, status_b];
+    statuses.sort_by_key(|s| s.as_u16());
+    assert_eq!(
+        statuses,
+        [StatusCode::CREATED, StatusCode::PAYLOAD_TOO_LARGE],
+        "expected exactly one 201 + one 413, got {status_a:?} and {status_b:?}"
+    );
+
+    // Critically: the DB must be left in a consistent state — only the
+    // successful upload's row exists, and the total is under cap.
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(rows.len(), 1, "expected one row, got {}", rows.len());
+    let total: i64 = rows.iter().map(|r| r.size_bytes).sum();
+    assert_eq!(total, 10, "total size must reflect only the winning upload");
+    assert!(
+        (total as u64) <= 18,
+        "DB left over per-job cap: {total} > 18"
+    );
+
+    Ok(())
+}
+
+/// Upload to a terminal job must be refused with 409 Conflict so workers
+/// can't keep writing artifacts after the orchestrator has already finalised
+/// the job (and started log archival / retention math).
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_rejects_completed_job_with_409() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+    let job_id = create_test_job_with_status(&app.pool, "ws1", "task1", "completed").await?;
+
+    let request = upload_request(
+        job_id,
+        "build",
+        "late.txt",
+        "text/plain",
+        b"too late".to_vec(),
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // No row should have landed.
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert!(
+        rows.is_empty(),
+        "no row should be inserted for terminal job"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_rejects_failed_and_cancelled_jobs_with_409() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+
+    for status in ["failed", "cancelled"] {
+        let job_id = create_test_job_with_status(&app.pool, "ws1", "task1", status).await?;
+        let request = upload_request(job_id, "s", "x.txt", "text/plain", b"x".to_vec());
+        let resp = app.router.clone().oneshot(request).await?;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "expected 409 for status={status}, got {:?}",
+            resp.status()
+        );
+    }
+
+    Ok(())
+}
+
+/// Delete on a terminal job is also refused: once the job has finalised, its
+/// artifact set is frozen for audit and retention is the only thing allowed
+/// to remove rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_delete_rejects_completed_job_with_409() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    // Upload while the job is still running so there's something to delete.
+    let request = upload_request(job_id, "build", "a.txt", "text/plain", b"hello".to_vec());
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Flip to a terminal state and try to delete.
+    sqlx::query("UPDATE job SET status = 'completed' WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&app.pool)
+        .await?;
+
+    let delete_request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/worker/jobs/{job_id}/steps/build/artifacts"))
+        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
+        .body(Body::empty())?;
+    let resp = app.router.clone().oneshot(delete_request).await?;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Row must still be there — delete was refused, not silently dropped.
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(rows.len(), 1, "row must survive a refused delete");
 
     Ok(())
 }

@@ -66,8 +66,24 @@ fn disposition_for(content_type: &str, name: &str) -> String {
     format!("{}; filename=\"{}\"", kind, sanitize_filename(name))
 }
 
+/// Sanitize a filename for use in a `Content-Disposition` header.
+///
+/// Strips characters that would let an attacker break out of the quoted
+/// `filename=` value (quotes), inject a second header line (CR/LF), inject a
+/// new disposition parameter such as `filename*=` (`;`), introduce a Windows
+/// path separator (`\`), or smuggle a control character (anything matching
+/// `char::is_control`). Replaced with `_` so the result is always a non-empty
+/// safe string.
 fn sanitize_filename(name: &str) -> String {
-    name.replace(['"', '\r', '\n'], "_")
+    name.chars()
+        .map(|c| {
+            if c == '"' || c == ';' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 fn url_encode(s: &str) -> String {
@@ -201,5 +217,47 @@ mod tests {
     #[test]
     fn sanitize_filename_strips_quotes_and_newlines() {
         assert_eq!(sanitize_filename("a\"b\rc\nd"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_semicolon() {
+        // `;` would let an attacker append a second Content-Disposition
+        // parameter such as `filename*=UTF-8''evil.html`, which RFC 5987
+        // says takes precedence over the quoted `filename=` value. Quotes
+        // and backslashes are also stripped; the remaining `*=...''` is
+        // harmless once it can't break out of the quoted value.
+        let out = sanitize_filename("safe.html\"; filename*=UTF-8''evil.html");
+        assert!(!out.contains(';'), "semicolon must be stripped: {out}");
+        assert!(!out.contains('"'), "quote must be stripped: {out}");
+        assert_eq!(out, "safe.html__ filename*=UTF-8''evil.html");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_backslash() {
+        // `\` is the Windows path separator and is also the quoted-string
+        // escape character per RFC 7230.
+        assert_eq!(sanitize_filename("a\\b\\c.txt"), "a_b_c.txt");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_all_ascii_control_chars() {
+        // Sweep every ASCII control character (U+0000–U+001F, U+007F) and
+        // make sure none of them survive into the header value.
+        for code in 0u8..=0x1F {
+            let input = format!("a{}b", code as char);
+            let out = sanitize_filename(&input);
+            assert_eq!(out, "a_b", "control char 0x{code:02X} not stripped");
+        }
+        assert_eq!(sanitize_filename("a\x7Fb"), "a_b");
+    }
+
+    #[test]
+    fn sanitize_filename_preserves_safe_characters() {
+        assert_eq!(
+            sanitize_filename("report-2026_q1.tar.gz"),
+            "report-2026_q1.tar.gz"
+        );
+        // Plain space is not a control char and must be preserved.
+        assert_eq!(sanitize_filename("hello world.txt"), "hello world.txt");
     }
 }

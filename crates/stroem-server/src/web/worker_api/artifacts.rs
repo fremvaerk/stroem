@@ -3,11 +3,16 @@
 //! `POST /worker/jobs/{job_id}/steps/{step_name}/artifacts/{name}` accepts the
 //! file body verbatim and:
 //!   1. Enforces the per-file size cap.
-//!   2. Enforces the per-job size cap (existing + this upload, minus any
-//!      same-named artifact being replaced).
-//!   3. Resolves the workspace from the `job` row (FK validation).
-//!   4. Writes the bytes to the configured artifact blob backend.
-//!   5. Upserts the row in `job_artifact` (replace-by-name semantics).
+//!   2. Opens a transaction and takes a row-level lock on the parent `job`
+//!      row (`SELECT … FOR UPDATE`) to serialise concurrent uploads.
+//!   3. Rejects the upload if the job is in a terminal state
+//!      (`completed`/`failed`/`cancelled`) with `409 Conflict`.
+//!   4. Enforces the per-job size cap inside the locked transaction so two
+//!      concurrent uploads can't both squeeze past the cap (TOCTOU).
+//!   5. Writes the bytes to the configured artifact blob backend.
+//!   6. Upserts the row in `job_artifact` (replace-by-name semantics) inside
+//!      the same transaction; commit failure or upsert failure best-effort
+//!      cleans up the staged blob.
 
 use axum::{
     body::Bytes,
@@ -17,7 +22,7 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use stroem_db::repos::job_artifact::{JobArtifactRepo, NewArtifactRow};
+use stroem_db::repos::job_artifact::JobArtifactRepo;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -47,6 +52,14 @@ fn validate_path_segment(value: &str, field: &str) -> Result<(), AppError> {
     }
     if value == "." || value == ".." {
         return Err(AppError::BadRequest(format!("invalid {field}: {value}")));
+    }
+    // Reject leading/trailing whitespace so " build" and "build " can't
+    // collide with "build" once a downstream consumer trims, and so they
+    // can't smuggle ambiguous lookups through path matching.
+    if value.trim() != value {
+        return Err(AppError::BadRequest(format!(
+            "{field} has leading or trailing whitespace"
+        )));
     }
     for ch in value.chars() {
         if ch == '\0' || ch == '\\' || ch == '/' || (ch.is_control() && ch != ' ') {
@@ -111,7 +124,7 @@ pub async fn upload_artifact(
 
     let cfg = &state.artifact_config;
 
-    // Per-file size limit
+    // Per-file size limit — cheap, do it before opening any tx.
     if body.len() as u64 > cfg.max_file_bytes {
         return Err(AppError::PayloadTooLarge(format!(
             "file '{name}' is {} bytes, exceeds per-file limit of {}",
@@ -120,17 +133,63 @@ pub async fn upload_artifact(
         )));
     }
 
-    // Per-job size limit (counts existing + this upload)
-    let repo = JobArtifactRepo::new(state.pool.clone());
-    let existing = repo.total_size_for_job(job_id).await? as u64;
-    // If we're replacing the same-named artifact, subtract its size from the cap math.
-    let replacing = repo
-        .get_by_name(job_id, &name)
-        .await?
-        .map(|r| r.size_bytes as u64)
-        .unwrap_or(0);
-    let projected = existing
-        .saturating_sub(replacing)
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let blob = state
+        .artifact_blob
+        .clone()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("artifact storage not configured")))?;
+
+    // Per-job cap is enforced under a row-level lock on the parent job so two
+    // concurrent uploads can't both observe a stale total and both squeeze
+    // through the cap check (TOCTOU). The whole sequence
+    //   lock job → read existing total → read replacing size → blob.put → upsert
+    // runs inside one transaction; the blob.put happens AFTER the cap check
+    // (so we don't stage bytes we'd reject) but before the upsert (so a
+    // failed write doesn't leave an orphan row). If the upsert or the final
+    // commit fails we best-effort delete the blob to avoid leaking storage.
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| AppError::Internal(e.into()))?;
+
+    // SELECT … FOR UPDATE serialises all uploads for this job_id. Also acts
+    // as our FK check + status gate. If the job is already terminal we
+    // refuse before doing any blob I/O.
+    let job_row = sqlx::query_as::<_, (String, String)>(
+        "SELECT workspace, status FROM job WHERE job_id = $1 FOR UPDATE",
+    )
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("job {job_id}")))?;
+    let (workspace, status) = job_row;
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(AppError::Conflict(format!(
+            "job {job_id} is {status}; artifact uploads are no longer accepted"
+        )));
+    }
+
+    // Cap math under the lock.
+    let existing: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM job_artifact WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let replacing: Option<i64> =
+        sqlx::query_scalar("SELECT size_bytes FROM job_artifact WHERE job_id = $1 AND name = $2")
+            .bind(job_id)
+            .bind(&name)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let projected = (existing as u64)
+        .saturating_sub(replacing.unwrap_or(0) as u64)
         .saturating_add(body.len() as u64);
     if projected > cfg.max_job_bytes {
         return Err(AppError::PayloadTooLarge(format!(
@@ -141,46 +200,73 @@ pub async fn upload_artifact(
         )));
     }
 
-    let content_type = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-
-    // Resolve workspace from the job row (validate FK + collect prefix)
-    let workspace = sqlx::query_scalar::<_, String>("SELECT workspace FROM job WHERE job_id = $1")
-        .bind(job_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("job {job_id}")))?;
-
-    let blob = state
-        .artifact_blob
-        .clone()
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("artifact storage not configured")))?;
+    // Cap holds: stage the blob. If the tx later fails to commit we delete
+    // the blob (best-effort) so we don't leak storage.
     let key = state.artifact_storage_key(&workspace, job_id, &step_name, &name);
     blob.put(&key, &content_type, body.clone())
         .await
         .map_err(AppError::Internal)?;
 
-    let rec = repo
-        .upsert(NewArtifactRow {
-            job_id,
-            step_name,
-            name: name.clone(),
-            content_type: content_type.clone(),
-            size_bytes: body.len() as i64,
-            storage_key: key,
-        })
-        .await?;
+    // Upsert row inside the same tx as the lock + cap check.
+    let id = Uuid::new_v4();
+    let rec = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        r#"
+        INSERT INTO job_artifact
+            (id, job_id, step_name, name, content_type, size_bytes, storage_key)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (job_id, name) DO UPDATE
+            SET step_name    = EXCLUDED.step_name,
+                content_type = EXCLUDED.content_type,
+                size_bytes   = EXCLUDED.size_bytes,
+                storage_key  = EXCLUDED.storage_key,
+                created_at   = NOW()
+        RETURNING id, job_id, step_name, name, content_type, size_bytes, storage_key, created_at
+        "#,
+    )
+    .bind(id)
+    .bind(job_id)
+    .bind(&step_name)
+    .bind(&name)
+    .bind(&content_type)
+    .bind(body.len() as i64)
+    .bind(&key)
+    .fetch_one(&mut *tx)
+    .await;
+
+    let rec = match rec {
+        Ok(r) => r,
+        Err(e) => {
+            // Best-effort blob cleanup so we don't leak orphaned bytes when
+            // the row write fails after the put succeeded.
+            let _ = blob.delete(&key).await;
+            return Err(AppError::Internal(e.into()));
+        }
+    };
+
+    if let Err(e) = tx.commit().await {
+        let _ = blob.delete(&key).await;
+        return Err(AppError::Internal(e.into()));
+    }
 
     Ok((
         StatusCode::CREATED,
         Json(UploadResponse {
-            id: rec.id,
-            name: rec.name,
-            size_bytes: rec.size_bytes,
-            content_type: rec.content_type,
+            id: rec.0,
+            name: rec.3,
+            size_bytes: rec.5,
+            content_type: rec.4,
         }),
     ))
 }
@@ -196,11 +282,19 @@ pub async fn delete_step_artifacts(
 ) -> Result<StatusCode, AppError> {
     validate_path_segment(&step_name, "step_name")?;
 
-    let workspace = sqlx::query_scalar::<_, String>("SELECT workspace FROM job WHERE job_id = $1")
-        .bind(job_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("job {job_id}")))?;
+    let job_row = sqlx::query_as::<_, (String, String)>(
+        "SELECT workspace, status FROM job WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("job {job_id}")))?;
+    let (workspace, status) = job_row;
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(AppError::Conflict(format!(
+            "job {job_id} is {status}; artifact deletions are no longer accepted"
+        )));
+    }
 
     let blob = state
         .artifact_blob
@@ -268,5 +362,19 @@ mod tests {
         assert_bad(validate_path_segment("win\\style", "step_name"));
         validate_path_segment("build", "step_name").unwrap();
         validate_path_segment("step-with-dash", "step_name").unwrap();
+    }
+
+    #[test]
+    fn step_validation_rejects_leading_or_trailing_whitespace() {
+        // Smuggling a leading space lets " build" look distinct from
+        // "build" until something downstream trims, at which point you
+        // get ambiguous lookups. We reject before any of that can happen.
+        assert_bad(validate_path_segment(" build", "step_name"));
+        assert_bad(validate_path_segment("build ", "step_name"));
+        assert_bad(validate_path_segment("  build  ", "step_name"));
+        assert_bad(validate_path_segment("\tbuild", "step_name"));
+        assert_bad(validate_path_segment("build\t", "step_name"));
+        // Internal space is still fine.
+        validate_path_segment("build step", "step_name").unwrap();
     }
 }
