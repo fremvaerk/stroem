@@ -1,5 +1,6 @@
 #[cfg(feature = "agent")]
 pub mod agent_executor;
+pub mod artifacts;
 pub mod client;
 pub mod config;
 pub mod executor;

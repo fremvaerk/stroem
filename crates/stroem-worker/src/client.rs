@@ -683,6 +683,43 @@ impl ServerClient {
         Ok(())
     }
 
+    /// Upload a single artifact file to the server.
+    ///
+    /// Mirrors `upload_state_tarball`: the body is the raw file contents and
+    /// `content_type` becomes the row's recorded MIME type. The server
+    /// enforces per-file and per-job size caps; on rejection the response
+    /// body is surfaced verbatim so the caller can log it.
+    #[tracing::instrument(skip(self, body))]
+    pub async fn upload_artifact(
+        &self,
+        job_id: Uuid,
+        step_name: &str,
+        name: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/worker/jobs/{}/steps/{}/artifacts/{}",
+            self.base_url, job_id, step_name, name
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .header(reqwest::header::CONTENT_LENGTH, body.len())
+            .body(body)
+            .send()
+            .await
+            .context("upload_artifact request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("upload_artifact {status}: {body}");
+        }
+        Ok(())
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(
