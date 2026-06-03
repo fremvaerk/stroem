@@ -9,6 +9,21 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use stroem_db::{JobRepo, JobStepRepo};
 
+/// Max size of an artifact body returned via MCP `get_artifact`. Larger blobs
+/// must be downloaded out-of-band via the HTTP API to avoid blowing the agent's
+/// context window.
+const MCP_ARTIFACT_MAX_BYTES: i64 = 1024 * 1024;
+
+/// Content-type prefixes considered "textual" for `get_artifact`. Anything else
+/// is rejected so binary blobs (images, archives, executables) cannot be smuggled
+/// into the agent's prompt.
+const MCP_TEXT_PREFIXES: &[&str] = &[
+    "text/",
+    "application/json",
+    "application/yaml",
+    "application/xml",
+];
+
 // ---------------------------------------------------------------------------
 // Parameter structs
 // ---------------------------------------------------------------------------
@@ -74,6 +89,20 @@ pub struct ListJobsParams {
 pub struct CancelJobParams {
     /// Job ID (UUID) to cancel
     pub job_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListArtifactsParams {
+    /// Job ID (UUID)
+    pub job_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetArtifactParams {
+    /// Job ID (UUID)
+    pub job_id: String,
+    /// Artifact name as returned by `list_artifacts`.
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +685,128 @@ impl StromMcpHandler {
             }
             Err(e) => Err(internal_err(format!("Failed to cancel job: {e}"))),
         }
+    }
+
+    /// List artifacts produced by a job.
+    #[tool(
+        description = "List artifacts produced by a job. Returns name, content_type, size_bytes, step_name, and a relative download URL (use list_artifacts then call get_artifact, or pass the URL to a human for binary content)."
+    )]
+    async fn list_artifacts(
+        &self,
+        params: Parameters<ListArtifactsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, "MCP: list_artifacts");
+
+        let job_id: uuid::Uuid = params
+            .job_id
+            .parse()
+            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
+
+        let job = JobRepo::get(&self.state.pool, job_id)
+            .await
+            .map_err(|e| internal_err(format!("DB error: {e}")))?
+            .ok_or_else(|| not_found("Job"))?;
+
+        // ACL: Deny → 404
+        check_job_acl(self, &job).await?;
+
+        let rows = stroem_db::repos::job_artifact::JobArtifactRepo::new(self.state.pool.clone())
+            .list_for_job(job_id)
+            .await
+            .map_err(|e| internal_err(format!("list artifacts: {e}")))?;
+
+        let items: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| {
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(r.name.as_bytes()).collect();
+                serde_json::json!({
+                    "name": r.name,
+                    "content_type": r.content_type,
+                    "size_bytes": r.size_bytes,
+                    "step_name": r.step_name,
+                    "created_at": r.created_at.to_rfc3339(),
+                    "url": format!("/api/jobs/{job_id}/artifacts/{encoded}"),
+                })
+            })
+            .collect();
+
+        Ok(json_result(&items))
+    }
+
+    /// Fetch an artifact body (textual content only, up to 1 MiB).
+    #[tool(
+        description = "Read an artifact's bytes (text/JSON/YAML/XML up to 1MB only). Refuses binary or oversize files; the agent should call list_artifacts and pass the URL to a human for binary content."
+    )]
+    async fn get_artifact(
+        &self,
+        params: Parameters<GetArtifactParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let Parameters(params) = params;
+        tracing::info!(job_id = %params.job_id, name = %params.name, "MCP: get_artifact");
+
+        let job_id: uuid::Uuid = params
+            .job_id
+            .parse()
+            .map_err(|_| rmcp::ErrorData::invalid_params("Invalid job_id UUID", None))?;
+
+        let job = JobRepo::get(&self.state.pool, job_id)
+            .await
+            .map_err(|e| internal_err(format!("DB error: {e}")))?
+            .ok_or_else(|| not_found("Job"))?;
+
+        // ACL: Deny → 404
+        check_job_acl(self, &job).await?;
+
+        let repo = stroem_db::repos::job_artifact::JobArtifactRepo::new(self.state.pool.clone());
+        let rec = repo
+            .get_by_name(job_id, &params.name)
+            .await
+            .map_err(|e| internal_err(format!("get artifact: {e}")))?
+            .ok_or_else(|| not_found("Artifact"))?;
+
+        // SECURITY: enforce size + content-type guards BEFORE reading the blob.
+        if rec.size_bytes > MCP_ARTIFACT_MAX_BYTES {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "artifact {} is {} bytes; MCP get_artifact caps at {}",
+                    rec.name, rec.size_bytes, MCP_ARTIFACT_MAX_BYTES
+                ),
+                None,
+            ));
+        }
+        let ct = rec
+            .content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let is_text = MCP_TEXT_PREFIXES.iter().any(|p| ct.starts_with(p));
+        if !is_text {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "artifact {} has content_type {}; MCP get_artifact only returns textual content",
+                    rec.name, rec.content_type
+                ),
+                None,
+            ));
+        }
+
+        let blob = self
+            .state
+            .artifact_blob
+            .clone()
+            .ok_or_else(|| internal_err("artifact storage not configured"))?;
+        let stored = blob
+            .get(&rec.storage_key)
+            .await
+            .map_err(|e| internal_err(format!("blob fetch: {e:#}")))?
+            .ok_or_else(|| internal_err(format!("blob missing for artifact {}", rec.name)))?;
+
+        let text = String::from_utf8_lossy(&stored.bytes).into_owned();
+        Ok(text_result(text))
     }
 }
 

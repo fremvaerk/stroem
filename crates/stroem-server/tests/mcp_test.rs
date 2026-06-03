@@ -525,9 +525,9 @@ async fn mcp_initialize(router: Router) -> (Router, Option<String>) {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-/// Test 1: tools/list returns all 8 expected tools.
+/// Test 1: tools/list returns all 10 expected tools.
 #[tokio::test]
-async fn test_mcp_tools_list_returns_all_8_tools() -> Result<()> {
+async fn test_mcp_tools_list_returns_all_10_tools() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
 
     let (router, session_id) = mcp_initialize(router).await;
@@ -570,12 +570,15 @@ async fn test_mcp_tools_list_returns_all_8_tools() -> Result<()> {
         "get_job_logs",
         "list_jobs",
         "cancel_job",
+        "list_artifacts",
+        "get_artifact",
     ];
 
     assert_eq!(
         tool_names.len(),
         expected.len(),
-        "expected 8 tools, got {}: {:?}",
+        "expected {} tools, got {}: {:?}",
+        expected.len(),
         tool_names.len(),
         tool_names
     );
