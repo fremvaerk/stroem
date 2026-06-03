@@ -300,7 +300,7 @@ async fn sweep(state: &AppState) -> Result<()> {
 
 /// Clean up stale workers and old log files based on retention config.
 /// Errors in individual deletions are logged but do not fail the sweep.
-async fn retention_cleanup(state: &AppState) {
+pub async fn retention_cleanup(state: &AppState) {
     // Worker retention
     if let Some(hours) = state.config.retention.worker_hours {
         match WorkerRepo::delete_stale(&state.pool, hours as f64).await {
@@ -351,6 +351,38 @@ async fn retention_cleanup(state: &AppState) {
                             job_id,
                             e
                         );
+                    }
+
+                    // Delete artifact blobs before the job row — FK RESTRICT on
+                    // `job_artifact.job_id` would otherwise block the DB delete,
+                    // and an orphan blob would leak. Skip this job on blob failure
+                    // and retry next sweep; the next branch (`delete_for_job`)
+                    // must not run unless the blobs are gone.
+                    let prefix = format!(
+                        "{}{}/{}/",
+                        state.artifact_config.prefix, meta.workspace, job_id
+                    );
+                    if let Some(ref blob) = state.artifact_blob {
+                        if let Err(e) = blob.delete_prefix(&prefix).await {
+                            tracing::warn!(
+                                "Retention: artifact blob cleanup failed for job {}: {:#}",
+                                job_id,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                    if let Err(e) =
+                        stroem_db::repos::job_artifact::JobArtifactRepo::new(state.pool.clone())
+                            .delete_for_job(job_id)
+                            .await
+                    {
+                        tracing::warn!(
+                            "Retention: failed to delete artifact rows for job {}: {:#}",
+                            job_id,
+                            e
+                        );
+                        continue;
                     }
 
                     // Delete job + steps from DB
