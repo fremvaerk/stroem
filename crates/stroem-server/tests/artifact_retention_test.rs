@@ -5,9 +5,7 @@
 //! crate yet, so the relevant setup is duplicated here for clarity.
 
 use anyhow::Result;
-use axum::body::Body;
 use axum::Router;
-use http::{Request, StatusCode};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,12 +25,16 @@ use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use tokio_util::sync::CancellationToken;
-use tower::ServiceExt;
 use uuid::Uuid;
 
 const WORKER_TOKEN: &str = "test-worker-token";
 
 struct TestApp {
+    // Kept around so existing fixture wiring keeps the router built; the two
+    // retention tests below bypass the HTTP layer entirely (the upload
+    // endpoint's status gate rejects writes to terminal jobs, so we seed
+    // artifact rows + blobs via the repo and BlobArchive directly).
+    #[allow(dead_code)]
     router: Router,
     pool: PgPool,
     state: AppState,
@@ -148,33 +150,6 @@ async fn create_old_terminal_job(
     Ok(job_id)
 }
 
-async fn upload_artifact(
-    app: &TestApp,
-    job_id: Uuid,
-    step_name: &str,
-    artifact_name: &str,
-    content_type: &str,
-    body: &[u8],
-) -> Result<()> {
-    let req = Request::builder()
-        .method("POST")
-        .uri(format!(
-            "/worker/jobs/{job_id}/steps/{step_name}/artifacts/{artifact_name}"
-        ))
-        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
-        .header("content-type", content_type)
-        .body(Body::from(body.to_vec()))
-        .unwrap();
-    let resp = app.router.clone().oneshot(req).await?;
-    assert_eq!(
-        resp.status(),
-        StatusCode::CREATED,
-        "upload {} failed",
-        artifact_name
-    );
-    Ok(())
-}
-
 async fn job_exists(pool: &PgPool, job_id: Uuid) -> Result<bool> {
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM job WHERE job_id = $1")
         .bind(job_id)
@@ -190,16 +165,28 @@ async fn retention_sweep_deletes_artifacts_then_job() -> Result<()> {
 
     let job_id = create_old_terminal_job(&app.pool, "ws1", "task1", 2).await?;
 
-    // Upload an artifact (job is "running" in the upload path's check —
-    // but the upload endpoint only requires the job exists, which it does
-    // after the INSERT above. Verify by listing rows + presence on disk.)
-    upload_artifact(&app, job_id, "s", "a.txt", "text/plain", b"x").await?;
+    // The upload endpoint now rejects writes to terminal jobs (status gate
+    // added in commit 15e316c). The retention sweep — what this test
+    // actually exercises — needs the artifact row + blob to exist on a
+    // terminal job. Insert them directly via the repo + blob backend.
+    let repo = JobArtifactRepo::new(app.pool.clone());
+    let key = format!("artifacts/ws1/{job_id}/s/a.txt");
+    app.blob
+        .put(&key, "text/plain", bytes::Bytes::from_static(b"x"))
+        .await?;
+    repo.upsert(NewArtifactRow {
+        job_id,
+        step_name: "s".to_string(),
+        name: "a.txt".to_string(),
+        content_type: "text/plain".to_string(),
+        size_bytes: 1,
+        storage_key: key.clone(),
+    })
+    .await?;
 
     // Sanity: artifact row + blob exist pre-sweep.
-    let repo = JobArtifactRepo::new(app.pool.clone());
     let rows = repo.list_for_job(job_id).await?;
     assert_eq!(rows.len(), 1, "expected one artifact pre-sweep");
-    let key = format!("artifacts/ws1/{job_id}/s/a.txt");
     assert!(
         app.blob.get(&key).await?.is_some(),
         "expected blob at {key} pre-sweep"
