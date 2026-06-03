@@ -9,13 +9,15 @@ import { StepTimeline } from "@/components/step-timeline";
 import { WorkflowDag } from "@/components/workflow-dag";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ServerEvents } from "@/components/server-events";
+import { ArtifactList } from "@/components/artifact-list";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { getJob, getTaskStats, cancelJob } from "@/lib/api";
+import { getJob, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
+import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
 
 export function JobDetailPage() {
@@ -24,6 +26,7 @@ export function JobDetailPage() {
   const workerNames = useWorkerNames();
   const [job, setJob] = useState<JobDetail | null>(null);
   const [stats, setStats] = useState<TaskStatsResponse | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
@@ -62,6 +65,24 @@ export function JobDetailPage() {
       cancelled = true;
     };
   }, [job?.workspace, job?.task_name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch artifacts whenever the job reloads. Artifacts accumulate as steps
+  // upload them; piggy-backing on the job poll cadence keeps things simple.
+  // Failure is non-fatal — the section just stays empty.
+  useEffect(() => {
+    if (!job) return;
+    let cancelled = false;
+    listJobArtifacts(job.job_id)
+      .then((data) => {
+        if (!cancelled) setArtifacts(data);
+      })
+      .catch(() => {
+        /* non-fatal */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [job?.job_id, job?.status, job?.steps.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-tick once a second while running so the ETA countdown stays current
   // without re-fetching the job. (load() already fires on a 3–8s cadence.)
@@ -283,6 +304,8 @@ export function JobDetailPage() {
       />
 
       <ServerEvents jobId={job.job_id} jobStatus={job.status} />
+
+      <ArtifactList items={artifacts} />
 
       {(job.input || job.output) && (
         <div className="grid gap-4 lg:grid-cols-2">

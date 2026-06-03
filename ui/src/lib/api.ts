@@ -326,6 +326,20 @@ export async function getJobLogs(
   return apiFetch<{ logs: string }>(`/api/jobs/${id}/logs`);
 }
 
+// Artifacts
+export interface ArtifactItem {
+  name: string;
+  content_type: string;
+  size_bytes: number;
+  step_name: string;
+  created_at: string;
+  url: string;
+}
+
+export async function listJobArtifacts(jobId: string): Promise<ArtifactItem[]> {
+  return apiFetch<ArtifactItem[]>(`/api/jobs/${jobId}/artifacts`);
+}
+
 // Workers
 export async function getWorker(id: string): Promise<WorkerDetail> {
   return apiFetch<WorkerDetail>(`/api/workers/${id}`);
