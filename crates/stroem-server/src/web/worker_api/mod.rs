@@ -12,7 +12,7 @@ use axum::{
     http::header,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -102,6 +102,10 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
         .route(
             "/jobs/{job_id}/steps/{step_name}/artifacts/{*name}",
             post(artifacts::upload_artifact).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
+        .route(
+            "/jobs/{job_id}/steps/{step_name}/artifacts",
+            delete(artifacts::delete_step_artifacts),
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -10,7 +10,7 @@ use crate::client::{ClaimedStep, ServerClient};
 /// Returns true if this step's action type runs user code that may write to
 /// `/artifacts`. False for `agent`, `approval`, and `task` — those don't shell
 /// out to user-provided scripts and therefore have no artifacts to collect.
-fn step_supports_artifacts(step: &ClaimedStep) -> bool {
+pub(crate) fn step_supports_artifacts(step: &ClaimedStep) -> bool {
     !matches!(step.action_type.as_str(), "agent" | "approval" | "task")
 }
 
@@ -104,6 +104,10 @@ impl StepExecutor {
     /// `state_out_dir` is the path to the new state output directory (mounted read-write at /state-out).
     /// `global_state_dir` is the path to the global workspace state directory (mounted read-only at /global-state).
     /// `global_state_out_dir` is the path to the global state output directory (mounted read-write at /global-state-out).
+    /// `artifacts_out_dir` is the path to the artifact output directory (mounted read-write at /artifacts).
+    /// When `None` (e.g. agent/approval/task steps), no `ARTIFACTS_DIR` env var is exported and no
+    /// artifact mount is configured. The caller owns the tempdir's lifetime so it survives the
+    /// post-execution scan/upload phase.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, client, log_buffer, cancel_token))]
     pub async fn execute_step(
@@ -114,6 +118,7 @@ impl StepExecutor {
         state_out_dir: Option<&str>,
         global_state_dir: Option<&str>,
         global_state_out_dir: Option<&str>,
+        artifacts_out_dir: Option<&str>,
         log_buffer: Arc<Mutex<Vec<serde_json::Value>>>,
         cancel_token: CancellationToken,
         client: &ServerClient,
@@ -160,25 +165,23 @@ impl StepExecutor {
         // Shell runner writes directly to the host path; docker bind-mounts host
         // path → /artifacts. Kube modes don't mount (deferred); agent/approval/task
         // actions don't run user code so no artifacts.
-        let _artifacts_tmp = if step_supports_artifacts(step) {
-            let dir = tempfile::TempDir::new().context("create artifacts tmpdir")?;
-            let path = dir.path().to_string_lossy().into_owned();
-            config.artifacts_out_dir = Some(path.clone());
+        if step_supports_artifacts(step) {
+            if let Some(path) = artifacts_out_dir {
+                let path = path.to_string();
+                config.artifacts_out_dir = Some(path.clone());
 
-            let runner_field = step.runner.as_deref().unwrap_or("local");
-            let env_value = match (step.action_type.as_str(), runner_field) {
-                ("script", "local") => path.clone(),
-                ("script", "docker") | ("docker", _) => "/artifacts".to_string(),
-                // Kube modes: do not set env var. Author can detect unset.
-                _ => String::new(),
-            };
-            if !env_value.is_empty() {
-                config.env.insert("ARTIFACTS_DIR".into(), env_value);
+                let runner_field = step.runner.as_deref().unwrap_or("local");
+                let env_value = match (step.action_type.as_str(), runner_field) {
+                    ("script", "local") => path,
+                    ("script", "docker") | ("docker", _) => "/artifacts".to_string(),
+                    // Kube modes: do not set env var. Author can detect unset.
+                    _ => String::new(),
+                };
+                if !env_value.is_empty() {
+                    config.env.insert("ARTIFACTS_DIR".into(), env_value);
+                }
             }
-            Some(dir)
-        } else {
-            None
-        };
+        }
 
         // Resolve ref+ secret references in env vars via vals CLI
         crate::secrets::resolve_secrets(&mut config.env)
@@ -817,6 +820,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 log_buffer.clone(),
                 CancellationToken::new(),
                 &client,
@@ -855,6 +859,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 log_buffer,
                 CancellationToken::new(),
                 &client,
@@ -882,6 +887,7 @@ mod tests {
             .execute_step(
                 &step,
                 "/tmp",
+                None,
                 None,
                 None,
                 None,
@@ -919,6 +925,7 @@ mod tests {
             .execute_step(
                 &step,
                 "/tmp",
+                None,
                 None,
                 None,
                 None,

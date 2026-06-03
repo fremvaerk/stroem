@@ -255,3 +255,69 @@ async fn worker_upload_replaces_existing_artifact_by_name() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_step_artifacts_clears_rows_and_blobs() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    // Upload two artifacts under step `build` and one under step `test` so we
+    // can prove the delete is scoped to a single step.
+    let request = upload_request(job_id, "build", "a.txt", "text/plain", b"x".to_vec());
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let request = upload_request(job_id, "build", "b.txt", "text/plain", b"y".to_vec());
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let request = upload_request(job_id, "test", "c.txt", "text/plain", b"z".to_vec());
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Snapshot the on-disk blob paths so we can verify they get cleaned up.
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(rows.len(), 3);
+    let archive_root = app._tmp.path().join("artifact-archive");
+    let build_blobs: Vec<_> = rows
+        .iter()
+        .filter(|r| r.step_name == "build")
+        .map(|r| archive_root.join(&r.storage_key))
+        .collect();
+    for p in &build_blobs {
+        assert!(p.exists(), "expected blob on disk at {}", p.display());
+    }
+
+    let delete_request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/worker/jobs/{job_id}/steps/build/artifacts"))
+        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
+        .body(Body::empty())?;
+    let resp = app.router.clone().oneshot(delete_request).await?;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Rows for `build` are gone; the `test` row survives.
+    let remaining = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].step_name, "test");
+
+    // The blob subtree for `build` is gone.
+    for p in &build_blobs {
+        assert!(
+            !p.exists(),
+            "expected blob removed from disk at {}",
+            p.display()
+        );
+    }
+
+    // Idempotent: a second delete returns 204 even though there's nothing left.
+    let delete_request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/worker/jobs/{job_id}/steps/build/artifacts"))
+        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
+        .body(Body::empty())?;
+    let resp = app.router.clone().oneshot(delete_request).await?;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    Ok(())
+}

@@ -720,6 +720,30 @@ impl ServerClient {
         Ok(())
     }
 
+    /// Delete every artifact recorded for `(job_id, step_name)` plus the matching
+    /// blob subtree. Used by the worker to roll back a partial upload when
+    /// `upload_artifact` fails after some files have already landed.
+    #[tracing::instrument(skip(self))]
+    pub async fn delete_step_artifacts(&self, job_id: Uuid, step_name: &str) -> Result<()> {
+        let url = format!(
+            "{}/worker/jobs/{}/steps/{}/artifacts",
+            self.base_url, job_id, step_name
+        );
+        let resp = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .send()
+            .await
+            .context("delete_step_artifacts request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("delete_step_artifacts {status}: {body}");
+        }
+        Ok(())
+    }
+
     /// Push log lines to the server
     #[tracing::instrument(skip(self, lines))]
     pub async fn push_logs(

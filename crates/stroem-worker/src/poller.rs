@@ -113,6 +113,62 @@ fn merge_state_entries(
     }
 }
 
+/// Scan `dir` for files written by the step, sniff each one's MIME type, and
+/// upload to the server with bounded retries. Returns the first
+/// non-recoverable error encountered, or `Ok(())` if every file uploaded.
+async fn upload_artifacts_for_step(
+    client: &ServerClient,
+    step: &crate::client::ClaimedStep,
+    dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let scan = crate::artifacts::scan_artifacts(dir)?;
+    for warning in &scan.warnings {
+        tracing::warn!(step = %step.step_name, "{warning}");
+    }
+    for file in scan.files {
+        let bytes = tokio::fs::read(&file.abs_path)
+            .await
+            .with_context(|| format!("read artifact {}", file.abs_path.display()))?;
+        let ct = crate::artifacts::sniff_with_name(&bytes, &file.name);
+        upload_with_retry(client, step.job_id, &step.step_name, &file.name, &ct, bytes).await?;
+    }
+    Ok(())
+}
+
+/// Per-file upload with three attempts and exponential backoff. The server's
+/// own size/validation rejections come back as `4xx` and are non-retryable in
+/// practice — the upstream caller surfaces whatever error we return here and
+/// kicks off `delete_step_artifacts` to roll back the partial upload.
+async fn upload_with_retry(
+    client: &ServerClient,
+    job_id: Uuid,
+    step: &str,
+    name: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> anyhow::Result<()> {
+    let mut delay_ms = 250u64;
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=3 {
+        match client
+            .upload_artifact(job_id, step, name, content_type, body.clone())
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt == 3 {
+                    last_err = Some(e);
+                    break;
+                }
+                tracing::warn!("artifact upload attempt {attempt} failed: {e:#}");
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(4_000);
+            }
+        }
+    }
+    Err(last_err.expect("loop exited without success and without recording an error"))
+}
+
 /// Execute a claimed step: download workspace, report start, run with log buffering, report result.
 ///
 /// This function owns the claimed step and drives the full execution lifecycle. It is spawned as
@@ -384,6 +440,28 @@ pub(crate) async fn execute_claimed_step(
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
 
+    // ── Artifacts: create a host-side tempdir the runner writes into ─────────
+    // The directory lives until this function returns, so it's still readable
+    // when the post-step scan/upload phase runs below.
+    let artifacts_temp = if crate::executor::step_supports_artifacts(&step) {
+        match tempfile::TempDir::new() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create artifacts temp dir, artifact upload will be skipped: {:#}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let artifacts_out_dir_path = artifacts_temp.as_ref().map(|t| t.path().to_path_buf());
+    let artifacts_out_dir_str = artifacts_out_dir_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+
     // Execute the step inside an inner spawn to catch panics
     let inner_executor = executor.clone();
     let inner_step = step.clone();
@@ -395,6 +473,7 @@ pub(crate) async fn execute_claimed_step(
     let inner_state_out_dir = state_out_dir_str.clone();
     let inner_global_state_dir = global_state_dir_str.clone();
     let inner_global_state_out_dir = global_state_out_dir_str.clone();
+    let inner_artifacts_out_dir = artifacts_out_dir_str.clone();
     let exec_handle = tokio::spawn(async move {
         inner_executor
             .execute_step(
@@ -404,6 +483,7 @@ pub(crate) async fn execute_claimed_step(
                 inner_state_out_dir.as_deref(),
                 inner_global_state_dir.as_deref(),
                 inner_global_state_out_dir.as_deref(),
+                inner_artifacts_out_dir.as_deref(),
                 inner_buffer,
                 inner_cancel,
                 &inner_client,
@@ -591,22 +671,70 @@ pub(crate) async fn execute_claimed_step(
         }
     }
 
+    // ── Upload artifacts if the step succeeded ───────────────────────────────
+    //
+    // A step is "succeeded" when the runner returned cleanly AND the user code
+    // exited zero. Otherwise we leave any files in `/artifacts/` on disk and
+    // skip the upload phase entirely — failed steps shouldn't pollute artifact
+    // storage and re-runs shouldn't see partial outputs.
+    //
+    // On upload failure we roll back the rows + blobs we already wrote for this
+    // step (best-effort) and demote the step to failed by overriding the error
+    // message reported in the next block. The plan calls this "retry with
+    // cleanup" — the upload is the implicit retry loop in `upload_with_retry`,
+    // and the cleanup is `delete_step_artifacts`.
+    let artifact_upload_error: Option<String> = match (&result, artifacts_out_dir_path.as_ref()) {
+        (Ok(run_result), Some(dir)) if run_result.exit_code == 0 => {
+            match upload_artifacts_for_step(&client, &step, dir).await {
+                Ok(()) => None,
+                Err(e) => {
+                    let msg = format!("artifact upload failed: {e:#}");
+                    tracing::error!("{}", msg);
+                    if let Err(ce) = client
+                        .delete_step_artifacts(step.job_id, &step.step_name)
+                        .await
+                    {
+                        tracing::warn!("artifact cleanup also failed: {ce:#}");
+                    }
+                    push_error_log(&client, step.job_id, &step.step_name, &msg).await;
+                    Some(msg)
+                }
+            }
+        }
+        _ => None,
+    };
+
+    // Tempdir cleanup is automatic when `artifacts_temp` drops at end of scope.
+    drop(artifacts_temp);
+
     // Report result
     match result {
         Ok(run_result) => {
-            let error = if run_result.exit_code != 0 {
-                Some(format!(
-                    "Exit code: {}\nStderr: {}",
-                    run_result.exit_code, run_result.stderr
-                ))
+            let (exit_code, error) = if let Some(msg) = artifact_upload_error {
+                (
+                    if run_result.exit_code == 0 {
+                        1
+                    } else {
+                        run_result.exit_code
+                    },
+                    Some(msg),
+                )
+            } else if run_result.exit_code != 0 {
+                (
+                    run_result.exit_code,
+                    Some(format!(
+                        "Exit code: {}\nStderr: {}",
+                        run_result.exit_code, run_result.stderr
+                    )),
+                )
             } else {
-                None
+                (run_result.exit_code, None)
             };
             if let Err(e) = client
                 .report_step_complete(
                     step.job_id,
                     &step.step_name,
-                    run_result.exit_code,
+                    exit_code,
                     run_result.output,
                     error,
                 )

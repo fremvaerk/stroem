@@ -185,6 +185,42 @@ pub async fn upload_artifact(
     ))
 }
 
+/// Worker-only cleanup hook used when artifact upload for a step fails partway
+/// through. Removes every `job_artifact` row recorded for the step and deletes
+/// the matching `{prefix}{ws}/{job_id}/{step}/` blob subtree. Idempotent: re-
+/// calling on an already-clean step is a 204 no-op.
+#[tracing::instrument(skip(state))]
+pub async fn delete_step_artifacts(
+    State(state): State<Arc<AppState>>,
+    Path((job_id, step_name)): Path<(Uuid, String)>,
+) -> Result<StatusCode, AppError> {
+    validate_path_segment(&step_name, "step_name")?;
+
+    let workspace = sqlx::query_scalar::<_, String>("SELECT workspace FROM job WHERE job_id = $1")
+        .bind(job_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("job {job_id}")))?;
+
+    let blob = state
+        .artifact_blob
+        .clone()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("artifact storage not configured")))?;
+    let prefix = format!(
+        "{}{}/{}/{}/",
+        state.artifact_config.prefix, workspace, job_id, step_name
+    );
+    blob.delete_prefix(&prefix)
+        .await
+        .map_err(AppError::Internal)?;
+
+    JobArtifactRepo::new(state.pool.clone())
+        .delete_for_step(job_id, &step_name)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
