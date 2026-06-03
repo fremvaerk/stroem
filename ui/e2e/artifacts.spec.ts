@@ -68,4 +68,48 @@ test.describe("Artifacts", () => {
       page.getByRole("heading", { name: "Artifacts" }),
     ).toHaveCount(0);
   });
+
+  test("artifacts section surfaces fetch error row when API returns 500", async ({
+    page,
+    baseURL,
+  }) => {
+    // Mock the artifacts list endpoint to return 500 BEFORE navigating so the
+    // failure is captured on the first (and any retry) fetch.
+    await page.route("**/api/jobs/*/artifacts", (route) => {
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "internal" }),
+      });
+    });
+
+    // Trigger any job — we just need a real job_id to load the detail page.
+    const jobId = await triggerJob(baseURL!, "hello-world", {
+      name: "fetch-error-test",
+    });
+    await waitForJob(baseURL!, jobId);
+
+    // Track uncaught console errors so we can assert none of them are caused
+    // by the fetch failure (the .catch handler should swallow it cleanly).
+    const consoleErrors: string[] = [];
+    page.on("pageerror", (err) => consoleErrors.push(err.message));
+
+    await page.goto(`/jobs/${jobId}`);
+
+    // The section header MUST be rendered so the user can see something went
+    // wrong instead of the silent empty-section case.
+    await expect(
+      page.getByRole("heading", { name: "Artifacts" }),
+    ).toBeVisible();
+
+    // The muted error row carries data-testid="artifacts-fetch-error".
+    await expect(
+      page.getByTestId("artifacts-fetch-error"),
+    ).toBeVisible();
+
+    // No uncaught page errors from the fetch failure.
+    expect(consoleErrors).toEqual([]);
+
+    await page.unroute("**/api/jobs/*/artifacts");
+  });
 });

@@ -27,6 +27,7 @@ export function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [stats, setStats] = useState<TaskStatsResponse | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
+  const [artifactsFetchError, setArtifactsFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
@@ -68,16 +69,20 @@ export function JobDetailPage() {
 
   // Fetch artifacts whenever the job reloads. Artifacts accumulate as steps
   // upload them; piggy-backing on the job poll cadence keeps things simple.
-  // Failure is non-fatal — the section just stays empty.
+  // Failure is non-fatal — the section surfaces a muted error row so a 403/500
+  // is distinguishable from "no artifacts produced".
   useEffect(() => {
     if (!job) return;
     let cancelled = false;
     listJobArtifacts(job.job_id)
       .then((data) => {
-        if (!cancelled) setArtifacts(data);
+        if (!cancelled) {
+          setArtifacts(data);
+          setArtifactsFetchError(false);
+        }
       })
       .catch(() => {
-        /* non-fatal */
+        if (!cancelled) setArtifactsFetchError(true);
       });
     return () => {
       cancelled = true;
@@ -305,7 +310,7 @@ export function JobDetailPage() {
 
       <ServerEvents jobId={job.job_id} jobStatus={job.status} />
 
-      <ArtifactList items={artifacts} />
+      <ArtifactList items={artifacts} fetchError={artifactsFetchError} />
 
       {(job.input || job.output) && (
         <div className="grid gap-4 lg:grid-cols-2">
