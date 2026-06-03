@@ -612,6 +612,8 @@ async fn upload_max_snapshots_prunes_archive_blobs() -> Result<()> {
 
     // Also verify on-disk archive blobs — there should be exactly 5 .tar.gz files
     // under the state archive directory. Poll briefly for background storage.delete calls.
+    // (LocalBlobArchive writes a `.ct` sidecar alongside each blob to preserve the
+    // content type; the assertion counts only the `.tar.gz` blobs, not sidecars.)
     let archive_dir = app
         ._tmp
         .path()
@@ -620,22 +622,30 @@ async fn upload_max_snapshots_prunes_archive_blobs() -> Result<()> {
         .join("production")
         .join("t");
 
+    let count_blobs = |dir: &std::path::Path| -> std::io::Result<usize> {
+        Ok(std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".tar.gz"))
+                    .unwrap_or(false)
+            })
+            .count())
+    };
+
     for _ in 0..20 {
-        if archive_dir.exists() {
-            let entries: Vec<_> = std::fs::read_dir(&archive_dir)?.collect();
-            if entries.len() == 5 {
-                break;
-            }
+        if archive_dir.exists() && count_blobs(&archive_dir)? == 5 {
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let entries: Vec<_> = std::fs::read_dir(&archive_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    let blob_count = count_blobs(&archive_dir)?;
     assert_eq!(
-        entries.len(),
-        5,
-        "expected 5 archive blobs on disk, got {}",
-        entries.len()
+        blob_count, 5,
+        "expected 5 .tar.gz blobs on disk, got {blob_count}"
     );
 
     Ok(())
