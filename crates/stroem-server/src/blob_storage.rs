@@ -1,12 +1,12 @@
-#[cfg(feature = "s3")]
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::stream::BoxStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 /// A retrieved blob plus its content type.
 #[derive(Debug, Clone)]
@@ -91,6 +91,17 @@ impl LocalBlobArchive {
         Self::validate_key(key)?;
         Ok(self.root.join(key))
     }
+
+    /// Sidecar path: append `.ct` to the full file name so `foo.tar.gz`
+    /// becomes `foo.tar.gz.ct` (not `foo.tar.ct`, which would collide with
+    /// a real blob named `foo.tar`).
+    fn ct_path_for(path: &Path) -> PathBuf {
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        path.with_file_name(format!("{file_name}.ct"))
+    }
 }
 
 #[async_trait]
@@ -98,17 +109,84 @@ impl BlobArchive for LocalBlobArchive {
     async fn put(&self, key: &str, content_type: &str, data: Bytes) -> Result<()> {
         let path = self.path_for(key)?;
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await?;
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create parent dir for {}", path.display()))?;
         }
-        let mut f = fs::File::create(&path).await?;
-        f.write_all(&data).await?;
-        f.flush().await?;
-        let ct_path = path.with_extension(format!(
-            "{}.ct",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        let ct_path = Self::ct_path_for(&path);
+
+        // Crash-safe write: stream to per-call uniquely-suffixed temp files,
+        // fsync each, then atomically rename both into the final names. On any
+        // error before the rename, both temp files are unlinked so we never
+        // leave torn data or stale sidecars in place.
+        let suffix = Uuid::new_v4().simple().to_string();
+        let tmp_data = path.with_file_name(format!(
+            "{}.tmp.{suffix}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
         ));
-        fs::write(ct_path, content_type.as_bytes()).await?;
-        Ok(())
+        let tmp_ct = ct_path.with_file_name(format!(
+            "{}.tmp.{suffix}",
+            ct_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+
+        let write_result = async {
+            // Data temp file: write, flush, fsync.
+            let mut f = fs::File::create(&tmp_data)
+                .await
+                .with_context(|| format!("create temp {}", tmp_data.display()))?;
+            f.write_all(&data)
+                .await
+                .with_context(|| format!("write temp {}", tmp_data.display()))?;
+            f.flush()
+                .await
+                .with_context(|| format!("flush temp {}", tmp_data.display()))?;
+            f.sync_all()
+                .await
+                .with_context(|| format!("fsync temp {}", tmp_data.display()))?;
+            drop(f);
+
+            // Sidecar temp file: write, flush, fsync.
+            let mut g = fs::File::create(&tmp_ct)
+                .await
+                .with_context(|| format!("create temp {}", tmp_ct.display()))?;
+            g.write_all(content_type.as_bytes())
+                .await
+                .with_context(|| format!("write temp {}", tmp_ct.display()))?;
+            g.flush()
+                .await
+                .with_context(|| format!("flush temp {}", tmp_ct.display()))?;
+            g.sync_all()
+                .await
+                .with_context(|| format!("fsync temp {}", tmp_ct.display()))?;
+            drop(g);
+
+            // Atomic renames into the published names. The data rename comes
+            // first so that even if the sidecar rename fails, readers see
+            // fresh bytes with at worst a stale content-type (preferable to
+            // a stale blob with a fresh content-type).
+            fs::rename(&tmp_data, &path)
+                .await
+                .with_context(|| format!("rename {} -> {}", tmp_data.display(), path.display()))?;
+            fs::rename(&tmp_ct, &ct_path)
+                .await
+                .with_context(|| format!("rename {} -> {}", tmp_ct.display(), ct_path.display()))?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if write_result.is_err() {
+            // Best-effort cleanup of whichever temp file(s) still exist. We
+            // ignore NotFound (the rename above may have already consumed it)
+            // and other errors (the original write error is what matters).
+            let _ = fs::remove_file(&tmp_data).await;
+            let _ = fs::remove_file(&tmp_ct).await;
+        }
+        write_result
     }
 
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
@@ -118,10 +196,7 @@ impl BlobArchive for LocalBlobArchive {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let ct_path = path.with_extension(format!(
-            "{}.ct",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
+        let ct_path = Self::ct_path_for(&path);
         let content_type = fs::read_to_string(&ct_path)
             .await
             .unwrap_or_else(|_| "application/octet-stream".to_string());
@@ -133,10 +208,7 @@ impl BlobArchive for LocalBlobArchive {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.path_for(key)?;
-        let ct_path = path.with_extension(format!(
-            "{}.ct",
-            path.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
+        let ct_path = Self::ct_path_for(&path);
         let _ = fs::remove_file(&ct_path).await;
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
@@ -452,5 +524,166 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid key"), "unexpected: {err}");
+    }
+
+    /// Regression: the sidecar path used `with_extension`, which replaced the
+    /// final extension. `foo.tar.gz` became `foo.tar.ct` (clobbering an
+    /// unrelated `foo.tar` blob). The sidecar must be appended to the *full*
+    /// file name so the canonical naming is `foo.tar.gz.ct`.
+    #[tokio::test]
+    async fn local_blob_sidecar_appends_to_full_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+
+        store
+            .put(
+                "ws/job/step/foo.tar.gz",
+                "application/gzip",
+                Bytes::from_static(b"gz-bytes"),
+            )
+            .await
+            .unwrap();
+
+        // Sidecar lives at `foo.tar.gz.ct` — not `foo.tar.ct`.
+        let sidecar = tmp.path().join("ws/job/step/foo.tar.gz.ct");
+        let wrong_sidecar = tmp.path().join("ws/job/step/foo.tar.ct");
+        assert!(
+            sidecar.exists(),
+            "expected sidecar at {}, got missing",
+            sidecar.display()
+        );
+        assert!(
+            !wrong_sidecar.exists(),
+            "stale sidecar location {} should not exist",
+            wrong_sidecar.display()
+        );
+        let ct_contents = std::fs::read_to_string(&sidecar).unwrap();
+        assert_eq!(ct_contents, "application/gzip");
+
+        // Round-trip still resolves the right sidecar.
+        let got = store.get("ws/job/step/foo.tar.gz").await.unwrap().unwrap();
+        assert_eq!(got.content_type, "application/gzip");
+        assert_eq!(&got.bytes[..], b"gz-bytes");
+
+        // Delete cleans up both files (no orphan sidecar left behind).
+        store.delete("ws/job/step/foo.tar.gz").await.unwrap();
+        assert!(!sidecar.exists(), "sidecar should be deleted");
+        assert!(
+            !tmp.path().join("ws/job/step/foo.tar.gz").exists(),
+            "blob should be deleted"
+        );
+    }
+
+    /// Regression: the previous implementation truncated the live blob on
+    /// `File::create` *before* writing the new bytes. A crash anywhere between
+    /// `create` and the final `flush` left a truncated/half-written file
+    /// readable by subsequent `get` calls, while the sidecar still claimed the
+    /// old content-type.
+    ///
+    /// The atomic version writes to a uniquely-suffixed temp file, fsyncs,
+    /// then renames into place. We can't literally kill the process inside a
+    /// unit test, but we can:
+    ///   1. plant a stale `.tmp.*` file (the artifact a previous crash would
+    ///      leave behind) and verify it does not poison the next `put`;
+    ///   2. confirm the live blob is **never** visible in a half-written state
+    ///      — readers either see the prior bytes or the new bytes, never a
+    ///      mix — by holding the old put concurrently and observing that the
+    ///      live path always returns a complete value.
+    #[tokio::test]
+    async fn local_blob_put_is_crash_safe_and_atomic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+
+        // Initial put — establishes the baseline blob + sidecar.
+        store
+            .put("ws/j/s/data.bin", "text/plain", Bytes::from_static(b"v1"))
+            .await
+            .unwrap();
+        let baseline = store.get("ws/j/s/data.bin").await.unwrap().unwrap();
+        assert_eq!(&baseline.bytes[..], b"v1");
+        assert_eq!(baseline.content_type, "text/plain");
+
+        // Simulate a prior crash mid-put: plant stale temp files at the
+        // *same directory* under the same naming scheme. A correct atomic
+        // implementation uses a per-call UUID suffix, so these stale files
+        // must not interfere with subsequent puts.
+        let stale_data = tmp.path().join("ws/j/s/data.bin.tmp.deadbeefcafebabe");
+        let stale_ct = tmp.path().join("ws/j/s/data.bin.ct.tmp.deadbeefcafebabe");
+        std::fs::write(&stale_data, b"GARBAGE_FROM_PREVIOUS_CRASH").unwrap();
+        std::fs::write(&stale_ct, b"application/x-corrupt").unwrap();
+
+        // Re-put with new bytes — must succeed and must not consume the
+        // stale temps. Reader sees the new values, never a partial blend.
+        store
+            .put(
+                "ws/j/s/data.bin",
+                "application/octet-stream",
+                Bytes::from_static(b"v2-much-longer-than-v1"),
+            )
+            .await
+            .unwrap();
+        let after = store.get("ws/j/s/data.bin").await.unwrap().unwrap();
+        assert_eq!(&after.bytes[..], b"v2-much-longer-than-v1");
+        assert_eq!(after.content_type, "application/octet-stream");
+
+        // Stale temp files are still present (the new put used a different
+        // UUID suffix and did not touch them). They are inert — they don't
+        // affect get and a subsequent delete clears the live pair without
+        // touching them.
+        assert!(stale_data.exists(), "stale temp must not be consumed");
+        assert!(stale_ct.exists(), "stale temp sidecar must not be consumed");
+
+        store.delete("ws/j/s/data.bin").await.unwrap();
+        assert!(store.get("ws/j/s/data.bin").await.unwrap().is_none());
+
+        // Atomicity property — repeatedly overwrite while readers race; the
+        // live file is published via rename, so every observed read returns
+        // a complete value (one of the two written versions, never empty,
+        // never partial).
+        store
+            .put(
+                "ws/j/s/race.bin",
+                "text/plain",
+                Bytes::from_static(b"aaaaaaaaaa"),
+            )
+            .await
+            .unwrap();
+        use std::sync::Arc;
+        let store = Arc::new(store);
+        let writer = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                for i in 0..50u8 {
+                    let payload = if i % 2 == 0 {
+                        Bytes::from_static(b"aaaaaaaaaa")
+                    } else {
+                        Bytes::from_static(b"BBBBBBBBBB")
+                    };
+                    store
+                        .put("ws/j/s/race.bin", "text/plain", payload)
+                        .await
+                        .unwrap();
+                }
+            })
+        };
+        let reader = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                for _ in 0..200 {
+                    if let Some(blob) = store.get("ws/j/s/race.bin").await.unwrap() {
+                        // Every observed value is one of the two complete
+                        // payloads — never empty, never half written.
+                        assert!(
+                            &blob.bytes[..] == b"aaaaaaaaaa" || &blob.bytes[..] == b"BBBBBBBBBB",
+                            "torn read observed: {:?}",
+                            &blob.bytes[..]
+                        );
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        writer.await.unwrap();
+        reader.await.unwrap();
     }
 }
