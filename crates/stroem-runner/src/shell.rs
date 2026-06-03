@@ -333,6 +333,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         }
     }
 
@@ -513,6 +514,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         // spawn will fail because the working directory doesn't exist, or return non-zero
         let result = runner.execute(config, None, CancellationToken::new()).await;

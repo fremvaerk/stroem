@@ -110,6 +110,9 @@ impl DockerRunner {
                 if let Some(ref global_state_out_dir) = config.global_state_out_dir {
                     binds.push(format!("{}:/global-state-out:rw", global_state_out_dir));
                 }
+                if let Some(ref out) = config.artifacts_out_dir {
+                    binds.push(format!("{}:/artifacts:rw", out));
+                }
 
                 ContainerCreateBody {
                     image: Some(image),
@@ -159,11 +162,25 @@ impl DockerRunner {
                     })
                 };
 
+                let mut binds: Vec<String> = Vec::new();
+                if let Some(ref out) = config.artifacts_out_dir {
+                    binds.push(format!("{}:/artifacts:rw", out));
+                }
+                let host_config = if binds.is_empty() {
+                    None
+                } else {
+                    Some(HostConfig {
+                        binds: Some(binds),
+                        ..Default::default()
+                    })
+                };
+
                 ContainerCreateBody {
                     image: Some(image),
                     entrypoint,
                     cmd,
                     env: Some(env),
+                    host_config,
                     // No workspace bind mount, no workdir override
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
@@ -423,6 +440,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -471,6 +489,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -502,6 +521,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -539,6 +559,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -585,6 +606,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -618,6 +640,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -651,6 +674,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -689,6 +713,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -732,6 +757,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -769,6 +795,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -808,6 +835,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -839,6 +867,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -875,6 +904,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -908,6 +938,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -957,6 +988,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1000,6 +1032,7 @@ mod tests {
             state_out_dir: Some("/tmp/state-out".to_string()),
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1038,6 +1071,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1071,6 +1105,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: Some("/tmp/global-state".to_string()),
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1089,6 +1124,70 @@ mod tests {
             "global_state_out_dir must be bind-mounted read-write at /global-state-out, got: {:?}",
             binds
         );
+    }
+
+    #[test]
+    fn no_workspace_bind_mounts_artifacts_when_set() {
+        let config = RunConfig {
+            cmd: None,
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp".to_string(),
+            action_type: "docker".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::NoWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
+            artifacts_out_dir: Some("/tmp/art-abc".to_string()),
+        };
+        let container = DockerRunner::build_container_config(&config);
+        let binds = container
+            .host_config
+            .as_ref()
+            .unwrap()
+            .binds
+            .as_ref()
+            .unwrap();
+        assert!(binds.iter().any(|b| b == "/tmp/art-abc:/artifacts:rw"));
+    }
+
+    #[test]
+    fn with_workspace_includes_artifacts_bind() {
+        let config = RunConfig {
+            cmd: Some("echo hi".to_string()),
+            script: None,
+            env: HashMap::new(),
+            workdir: "/tmp/ws".to_string(),
+            action_type: "script".to_string(),
+            image: Some("alpine:latest".to_string()),
+            runner_mode: RunnerMode::WithWorkspace,
+            runner_image: None,
+            entrypoint: None,
+            command: None,
+            pod_manifest_overrides: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            state_dir: None,
+            state_out_dir: None,
+            global_state_dir: None,
+            global_state_out_dir: None,
+            artifacts_out_dir: Some("/tmp/art-xyz".to_string()),
+        };
+        let container = DockerRunner::build_container_config(&config);
+        let binds = container.host_config.unwrap().binds.unwrap();
+        assert!(binds.iter().any(|b| b == "/tmp/art-xyz:/artifacts:rw"));
     }
 
     /// Integration test: requires Docker daemon running.
@@ -1117,6 +1216,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let result = runner
@@ -1149,6 +1249,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1185,6 +1286,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let container_config = DockerRunner::build_container_config(&config);
@@ -1224,6 +1326,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let token = CancellationToken::new();

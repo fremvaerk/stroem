@@ -7,6 +7,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::{ClaimedStep, ServerClient};
 
+/// Returns true if this step's action type runs user code that may write to
+/// `/artifacts`. False for `agent`, `approval`, and `task` — those don't shell
+/// out to user-provided scripts and therefore have no artifacts to collect.
+fn step_supports_artifacts(step: &ClaimedStep) -> bool {
+    !matches!(step.action_type.as_str(), "agent" | "approval" | "task")
+}
+
 /// Executes workflow steps using the appropriate runner
 pub struct StepExecutor {
     shell_runner: ShellRunner,
@@ -148,6 +155,30 @@ impl StepExecutor {
                     .insert("GLOBAL_STATE_OUT_DIR".to_string(), gsod.clone());
             }
         }
+
+        // Set up /artifacts output directory for runners that support it.
+        // Shell runner writes directly to the host path; docker bind-mounts host
+        // path → /artifacts. Kube modes don't mount (deferred); agent/approval/task
+        // actions don't run user code so no artifacts.
+        let _artifacts_tmp = if step_supports_artifacts(step) {
+            let dir = tempfile::TempDir::new().context("create artifacts tmpdir")?;
+            let path = dir.path().to_string_lossy().into_owned();
+            config.artifacts_out_dir = Some(path.clone());
+
+            let runner_field = step.runner.as_deref().unwrap_or("local");
+            let env_value = match (step.action_type.as_str(), runner_field) {
+                ("script", "local") => path.clone(),
+                ("script", "docker") | ("docker", _) => "/artifacts".to_string(),
+                // Kube modes: do not set env var. Author can detect unset.
+                _ => String::new(),
+            };
+            if !env_value.is_empty() {
+                config.env.insert("ARTIFACTS_DIR".into(), env_value);
+            }
+            Some(dir)
+        } else {
+            None
+        };
 
         // Resolve ref+ secret references in env vars via vals CLI
         crate::secrets::resolve_secrets(&mut config.env)
@@ -465,6 +496,7 @@ impl StepExecutor {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         })
     }
 }

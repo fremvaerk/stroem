@@ -70,6 +70,12 @@ pub struct RunConfig {
     pub global_state_dir: Option<String>,
     /// Path to global workspace state output directory (mounted read-write at /global-state-out).
     pub global_state_out_dir: Option<String>,
+    /// Path on the worker host that becomes `/artifacts` inside the container,
+    /// or the literal directory the shell runner writes into.
+    /// Set only for runners that support artifacts (shell, docker WithWorkspace,
+    /// docker NoWorkspace). Unset for Kube modes (deferred) and for
+    /// agent/approval/task actions.
+    pub artifacts_out_dir: Option<String>,
 }
 
 /// A callback for receiving log lines as they're produced

@@ -393,6 +393,13 @@ impl KubeRunner {
             }
         }
 
+        if config.artifacts_out_dir.is_some() {
+            tracing::warn!(
+                "kubernetes runner does not support /artifacts mount yet; \
+                 files written by the step will be discarded"
+            );
+        }
+
         // Validate overrides for dangerous fields before applying them
         if let Some(ref overrides) = config.pod_manifest_overrides {
             validate_pod_overrides(overrides).context("Pod manifest override validation failed")?;
@@ -1540,6 +1547,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1617,6 +1625,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1671,6 +1680,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1722,6 +1732,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1792,6 +1803,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let mut labels = HashMap::new();
@@ -1864,6 +1876,7 @@ mod tests {
             state_out_dir: Some("/tmp/state-out".to_string()),
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let labels = HashMap::new();
@@ -1941,6 +1954,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let labels = HashMap::new();
@@ -2013,6 +2027,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: Some("/tmp/global-state".to_string()),
             global_state_out_dir: Some("/tmp/global-state-out".to_string()),
+            artifacts_out_dir: None,
         };
 
         let labels = HashMap::new();
@@ -2094,6 +2109,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let labels = HashMap::new();
@@ -2153,6 +2169,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let result = runner
@@ -2191,6 +2208,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2259,6 +2277,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2323,6 +2342,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2368,6 +2388,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let pod_json = runner.build_pod_json_with_workspace(
@@ -2466,6 +2487,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         }
     }
 
@@ -2614,6 +2636,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2750,6 +2773,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2809,6 +2833,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2880,6 +2905,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2927,6 +2953,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -2973,6 +3000,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
         let pod = runner
             .build_pod_spec("test-pod", &config, "default", make_labels())
@@ -3826,6 +3854,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let pod = runner.build_pod_json_with_workspace(
@@ -3876,6 +3905,7 @@ mod tests {
             state_out_dir: None,
             global_state_dir: None,
             global_state_out_dir: None,
+            artifacts_out_dir: None,
         };
 
         let token = CancellationToken::new();
