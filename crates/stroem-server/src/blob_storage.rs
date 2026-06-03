@@ -362,13 +362,45 @@ mod s3_blob_archive {
                         .set_objects(Some(objects))
                         .build()
                         .map_err(|e| anyhow::anyhow!(e))?;
-                    self.client
+                    let del_resp = self
+                        .client
                         .delete_objects()
                         .bucket(&self.bucket)
                         .delete(delete)
                         .send()
                         .await
                         .with_context(|| format!("S3 BATCH DELETE {prefix}"))?;
+
+                    // S3 batch DeleteObjects returns 200 OK even when individual
+                    // keys fail (access denied, internal error, etc). The failures
+                    // surface only in the response's per-object `Errors` array, so
+                    // a successful HTTP call above does NOT mean every key was
+                    // removed. If we ignored these the caller would believe the
+                    // prefix was wiped and (in retention sweeps) drop the DB rows
+                    // that point at the still-present blobs, orphaning them.
+                    let errs = del_resp.errors();
+                    if !errs.is_empty() {
+                        let total = errs.len();
+                        let mut sample: Vec<String> = errs
+                            .iter()
+                            .take(10)
+                            .map(|e| {
+                                format!(
+                                    "{}: {}{}",
+                                    e.key().unwrap_or("<no-key>"),
+                                    e.code().unwrap_or("<no-code>"),
+                                    e.message().map(|m| format!(" ({m})")).unwrap_or_default(),
+                                )
+                            })
+                            .collect();
+                        if total > sample.len() {
+                            sample.push(format!("... and {} more", total - sample.len()));
+                        }
+                        anyhow::bail!(
+                            "S3 BATCH DELETE {prefix}: {total} object(s) failed: [{}]",
+                            sample.join(", ")
+                        );
+                    }
                 }
                 if resp.is_truncated().unwrap_or(false) {
                     continuation = resp.next_continuation_token().map(|s| s.to_string());

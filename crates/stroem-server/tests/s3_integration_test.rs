@@ -276,3 +276,113 @@ async fn s3_delete_prefix_removes_only_matching() -> Result<()> {
 
     Ok(())
 }
+
+// ─── delete_prefix partial-failure regression ───────────────────────────
+//
+// MinIO doesn't let us provoke per-object failures from DeleteObjects, so we
+// stand up a tiny axum mock that speaks just enough of the S3 wire protocol
+// (ListObjectsV2 + DeleteObjects) to return a partial-success response. The
+// regression we're guarding against: the SDK call succeeds (HTTP 200) but the
+// response body lists individual keys that failed; the previous implementation
+// ignored these and reported the prefix wipe as successful, causing the
+// retention sweeper to drop DB rows that still pointed at live blobs.
+
+fn mock_s3_client(endpoint: &str) -> aws_sdk_s3::Client {
+    let creds = aws_sdk_s3::config::Credentials::new("k", "s", None, None, "test");
+    let config = aws_sdk_s3::Config::builder()
+        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+        .region(aws_sdk_s3::config::Region::new("us-east-1"))
+        .endpoint_url(endpoint)
+        .credentials_provider(creds)
+        .force_path_style(true)
+        .build();
+    aws_sdk_s3::Client::from_conf(config)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s3_delete_prefix_surfaces_partial_failures() -> Result<()> {
+    use axum::extract::Query;
+    use axum::http::StatusCode;
+    use axum::routing::{any, get};
+    use axum::Router;
+    use std::collections::HashMap;
+
+    // ListObjectsV2 (`GET /{bucket}/?list-type=2&prefix=...`) returns three keys.
+    async fn list_handler(Query(q): Query<HashMap<String, String>>) -> (StatusCode, String) {
+        // We only need to answer list-type=2 calls; reject anything else loudly so
+        // a misconfigured test fails fast instead of hanging.
+        if q.get("list-type").map(|s| s.as_str()) != Some("2") {
+            return (StatusCode::BAD_REQUEST, "expected list-type=2".to_string());
+        }
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>b</Name>
+  <Prefix>p/</Prefix>
+  <KeyCount>3</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>false</IsTruncated>
+  <Contents><Key>p/ok.txt</Key><Size>1</Size><LastModified>2025-01-01T00:00:00Z</LastModified><ETag>"x"</ETag></Contents>
+  <Contents><Key>p/denied.txt</Key><Size>1</Size><LastModified>2025-01-01T00:00:00Z</LastModified><ETag>"x"</ETag></Contents>
+  <Contents><Key>p/broken.txt</Key><Size>1</Size><LastModified>2025-01-01T00:00:00Z</LastModified><ETag>"x"</ETag></Contents>
+</ListBucketResult>"#;
+        (StatusCode::OK, body.to_string())
+    }
+
+    // DeleteObjects (`POST /{bucket}/?delete`) returns 200 with one Deleted and
+    // two per-object Errors — the exact shape AWS itself uses for partial
+    // success. The SDK call succeeds; the failures must propagate as an Err.
+    async fn delete_handler() -> (StatusCode, String) {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Deleted><Key>p/ok.txt</Key></Deleted>
+  <Error><Key>p/denied.txt</Key><Code>AccessDenied</Code><Message>denied by policy</Message></Error>
+  <Error><Key>p/broken.txt</Key><Code>InternalError</Code><Message>boom</Message></Error>
+</DeleteResult>"#;
+        (StatusCode::OK, body.to_string())
+    }
+
+    let app = Router::new()
+        // path-style: `/{bucket}` and `/{bucket}/` both reachable.
+        .route("/b", get(list_handler).post(delete_handler))
+        .route("/b/", get(list_handler).post(delete_handler))
+        .fallback(any(|| async {
+            (StatusCode::NOT_FOUND, "unhandled".to_string())
+        }));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{addr}");
+    let client = mock_s3_client(&endpoint);
+    let blob = S3BlobArchive::from_client(client, "b".to_string());
+
+    let err = blob
+        .delete_prefix("p/")
+        .await
+        .expect_err("partial-failure DeleteObjects must propagate as Err");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("2 object(s) failed"),
+        "missing failure count, got: {msg}"
+    );
+    assert!(
+        msg.contains("p/denied.txt") && msg.contains("AccessDenied"),
+        "missing first failed key/code, got: {msg}"
+    );
+    assert!(
+        msg.contains("p/broken.txt") && msg.contains("InternalError"),
+        "missing second failed key/code, got: {msg}"
+    );
+    // The single successfully-deleted key MUST NOT appear in the error message —
+    // operators read this to know which keys to retry.
+    assert!(
+        !msg.contains("p/ok.txt"),
+        "successful key leaked into error: {msg}"
+    );
+
+    server.abort();
+    Ok(())
+}
