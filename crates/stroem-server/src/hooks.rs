@@ -277,6 +277,38 @@ pub async fn fire_suspended_hooks(
     }
 }
 
+/// Fetch the artifact list for a job and project it into `HookArtifactMeta`.
+///
+/// Surfaces DB errors via `?` rather than swallowing them into an empty
+/// `Vec` — a transient outage on this query should reach `fire_hooks`, which
+/// logs and skips the hook, instead of silently rendering `hook.artifacts ==
+/// []` (indistinguishable from a job that produced no artifacts).
+async fn list_hook_artifacts(
+    pool: &PgPool,
+    job_id: uuid::Uuid,
+) -> anyhow::Result<Vec<HookArtifactMeta>> {
+    let rows = stroem_db::repos::job_artifact::JobArtifactRepo::new(pool.clone())
+        .list_for_job(job_id)
+        .await
+        .context("Failed to list artifacts for hook context")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| HookArtifactMeta {
+            url: format!(
+                "/api/jobs/{}/artifacts/{}",
+                job_id,
+                url::form_urlencoded::byte_serialize(r.name.as_bytes()).collect::<String>()
+            ),
+            name: r.name,
+            content_type: r.content_type,
+            size_bytes: r.size_bytes,
+            step_name: r.step_name,
+            created_at: r.created_at,
+        })
+        .collect())
+}
+
 async fn build_hook_context(
     pool: &PgPool,
     job: &stroem_db::JobRow,
@@ -286,24 +318,7 @@ async fn build_hook_context(
         .await
         .context("Failed to get steps for hook context")?;
 
-    let artifacts = stroem_db::repos::job_artifact::JobArtifactRepo::new(pool.clone())
-        .list_for_job(job.job_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| HookArtifactMeta {
-            url: format!(
-                "/api/jobs/{}/artifacts/{}",
-                job.job_id,
-                url::form_urlencoded::byte_serialize(r.name.as_bytes()).collect::<String>()
-            ),
-            name: r.name,
-            content_type: r.content_type,
-            size_bytes: r.size_bytes,
-            step_name: r.step_name,
-            created_at: r.created_at,
-        })
-        .collect();
+    let artifacts = list_hook_artifacts(pool, job.job_id).await?;
 
     let failed_steps: Vec<FailedStepInfo> = steps
         .iter()
@@ -1169,5 +1184,39 @@ mod tests {
 
         let value = serde_json::to_value(&ctx).unwrap();
         assert!(value["source_id"].is_null());
+    }
+
+    /// Regression test for F8: a DB failure while listing artifacts must
+    /// propagate out of the artifact-fetch helper instead of being swallowed
+    /// into an empty `Vec<HookArtifactMeta>`.
+    ///
+    /// Before the fix, the artifact-list call in `build_hook_context` used
+    /// `.unwrap_or_default()`, which meant a transient Postgres outage would
+    /// render hook templates with `hook.artifacts == []` — indistinguishable
+    /// from a job that genuinely produced no artifacts. The fix replaces
+    /// that with `?` (extracted into [`list_hook_artifacts`]), so
+    /// `fire_hooks` can log the real cause and skip the hook instead of
+    /// firing one on a silently corrupted context.
+    ///
+    /// The test targets [`list_hook_artifacts`] directly to isolate the
+    /// artifact path — the broader `build_hook_context` also has an earlier
+    /// `?` on `get_steps_for_job`, so a failing pool would Err there
+    /// regardless of the artifact-list behaviour.
+    #[tokio::test]
+    async fn list_hook_artifacts_propagates_db_error() {
+        use uuid::Uuid;
+
+        // Lazy pool to an unreachable host — actual queries fail with a
+        // connection error, which is exactly the transient-DB-blip we want
+        // to test against.
+        let pool = sqlx::PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
+
+        let result = list_hook_artifacts(&pool, Uuid::new_v4()).await;
+        assert!(
+            result.is_err(),
+            "list_hook_artifacts must surface DB errors as Err rather than yielding an empty list — \
+             otherwise hook templates would render `hook.artifacts == []` on a transient outage \
+             (indistinguishable from a job that legitimately produced no artifacts)"
+        );
     }
 }
