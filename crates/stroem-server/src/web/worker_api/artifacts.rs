@@ -49,7 +49,7 @@ fn validate_path_segment(value: &str, field: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest(format!("invalid {field}: {value}")));
     }
     for ch in value.chars() {
-        if ch == '\0' || ch == '\\' || (ch.is_control() && ch != ' ') {
+        if ch == '\0' || ch == '\\' || ch == '/' || (ch.is_control() && ch != ' ') {
             return Err(AppError::BadRequest(format!(
                 "{field} contains forbidden character"
             )));
@@ -262,7 +262,10 @@ mod tests {
         assert_bad(validate_path_segment("", "step_name"));
         assert_bad(validate_path_segment(".", "step_name"));
         assert_bad(validate_path_segment("..", "step_name"));
+        assert_bad(validate_path_segment("../escape", "step_name"));
+        assert_bad(validate_path_segment("nested/step", "step_name"));
         assert_bad(validate_path_segment("evil\0step", "step_name"));
+        assert_bad(validate_path_segment("win\\style", "step_name"));
         validate_path_segment("build", "step_name").unwrap();
         validate_path_segment("step-with-dash", "step_name").unwrap();
     }
