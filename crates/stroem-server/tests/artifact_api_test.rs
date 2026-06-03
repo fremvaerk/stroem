@@ -222,6 +222,13 @@ async fn download_safe_mime_serves_inline() -> Result<()> {
 
     assert_eq!(resp.headers()["content-type"], "image/png");
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    // Cache-Control must be present on every successful download response so
+    // the browser disk cache cannot replay it to a subsequent unauthenticated
+    // session on the same machine.
+    assert_eq!(
+        resp.headers()["cache-control"],
+        "private, max-age=0, must-revalidate"
+    );
     let disp = resp.headers()["content-disposition"]
         .to_str()
         .unwrap()
@@ -230,6 +237,37 @@ async fn download_safe_mime_serves_inline() -> Result<()> {
 
     let bytes = resp.into_body().collect().await?.to_bytes();
     assert_eq!(&bytes[..], b"PNG");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_attachment_path_sets_cache_control() -> Result<()> {
+    // Regression: every successful download — inline or attachment — must set
+    // `Cache-Control: private, max-age=0, must-revalidate`.
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(
+        &app,
+        job_id,
+        "s1",
+        "report.bin",
+        "application/octet-stream",
+        b"BINARY",
+    )
+    .await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/report.bin"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()["cache-control"],
+        "private, max-age=0, must-revalidate"
+    );
     Ok(())
 }
 
@@ -264,6 +302,170 @@ async fn download_html_forced_to_attachment() -> Result<()> {
         "expected attachment, got {disp}"
     );
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_pdf_forced_to_attachment() -> Result<()> {
+    // Regression: PDFs were on the inline allow-list, but PDF.js has a history
+    // of script-execution CVEs via embedded JS. They must download as
+    // attachments now.
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(
+        &app,
+        job_id,
+        "s1",
+        "report.pdf",
+        "application/pdf",
+        b"%PDF-1.4 stub",
+    )
+    .await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/report.pdf"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp.starts_with("attachment"),
+        "expected attachment for PDF, got {disp}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_markdown_forced_to_attachment() -> Result<()> {
+    // Regression: Markdown was on the inline allow-list, but no major browser
+    // renders it natively and some intermediaries render it as HTML — which
+    // would reintroduce the XSS surface we close for HTML.
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(&app, job_id, "s1", "notes.md", "text/markdown", b"# notes").await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/notes.md"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp.starts_with("attachment"),
+        "expected attachment for Markdown, got {disp}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_svg_forced_to_attachment() -> Result<()> {
+    // SVG can carry inline <script> and event handlers — must download.
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(
+        &app,
+        job_id,
+        "s1",
+        "logo.svg",
+        "image/svg+xml",
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+    )
+    .await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/logo.svg"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp.starts_with("attachment"),
+        "expected attachment for SVG, got {disp}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_javascript_forced_to_attachment() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    upload_artifact(
+        &app,
+        job_id,
+        "s1",
+        "evil.js",
+        "application/javascript",
+        b"alert(1)",
+    )
+    .await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/evil.js"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp.starts_with("attachment"),
+        "expected attachment for JavaScript, got {disp}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn download_streams_body_and_returns_full_payload() -> Result<()> {
+    // Regression: the handler previously buffered the full blob via
+    // `BlobArchive::get` before returning a response. It now uses
+    // `get_stream` + `Body::from_stream`. Verify that a moderately-sized
+    // payload round-trips intact.
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let payload: Vec<u8> = (0..(256 * 1024)).map(|i| (i % 256) as u8).collect();
+    upload_artifact(
+        &app,
+        job_id,
+        "s1",
+        "big.bin",
+        "application/octet-stream",
+        &payload,
+    )
+    .await?;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/big.bin"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    assert_eq!(bytes.len(), payload.len());
+    assert_eq!(&bytes[..], &payload[..]);
     Ok(())
 }
 

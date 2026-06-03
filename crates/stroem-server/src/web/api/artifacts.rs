@@ -3,11 +3,17 @@
 //! - `GET /api/jobs/{id}/artifacts` — list artifacts for a job (ACL: View)
 //! - `GET /api/jobs/{id}/artifacts/{name}` — download a single artifact (ACL: View)
 //!
-//! Inline content disposition is used only for an allow-list of "safe" content
-//! types (images, PDF, plain text/markdown). Everything else — including HTML,
-//! SVG and JS — is forced to `attachment` so a malicious upload cannot execute
-//! in the browser context of an authenticated user. `X-Content-Type-Options:
-//! nosniff` is always set.
+//! Inline content disposition is used only for a tight allow-list of "safe"
+//! content types (raster images, plain text). Everything else — including
+//! HTML, SVG, JavaScript, PDF and Markdown — is forced to `attachment` so a
+//! malicious or misrendered upload cannot execute in the browser context of
+//! an authenticated user. PDFs are excluded because of historical PDF.js
+//! script-execution CVEs; Markdown is excluded because no major browser has
+//! a built-in renderer and some intermediaries render it as HTML.
+//! `X-Content-Type-Options: nosniff` is always set, and every successful
+//! download response carries `Cache-Control: private, max-age=0,
+//! must-revalidate` so the browser disk cache cannot replay a download to a
+//! subsequent unauthenticated session on the same machine.
 
 use anyhow::Context;
 use axum::{
@@ -42,16 +48,18 @@ pub struct ArtifactListItem {
 
 /// Content types that are safe to render inline in the browser.
 ///
-/// HTML, SVG and JavaScript are deliberately excluded: even when uploaded by a
-/// trusted task they could execute in the user's authenticated session.
+/// Everything not listed here — including HTML, SVG, JavaScript, PDF and
+/// Markdown — is forced to `attachment`. PDFs are excluded because PDF.js (the
+/// renderer Chromium/Firefox ship by default) has a history of script-
+/// execution CVEs via embedded JS. Markdown is excluded because no major
+/// browser renders it natively and some intermediaries (proxies, viewers)
+/// will render it as HTML, reintroducing the XSS surface we close above.
 const SAFE_INLINE: &[&str] = &[
     "image/png",
     "image/jpeg",
     "image/gif",
     "image/webp",
-    "application/pdf",
     "text/plain",
-    "text/markdown",
 ];
 
 fn disposition_for(content_type: &str, name: &str) -> String {
@@ -158,15 +166,19 @@ pub async fn download_artifact(
         .artifact_blob
         .clone()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("artifact storage not configured")))?;
-    let stored = blob_archive
-        .get(&rec.storage_key)
+    // Stream the blob through to the client rather than buffering up to 100 MiB
+    // per concurrent download. The default `get_stream` impl on `BlobArchive`
+    // wraps the buffered backend, so this works for both `LocalBlobArchive`
+    // and `S3BlobArchive` without further trait changes.
+    let (_stored_ct, stream) = blob_archive
+        .get_stream(&rec.storage_key)
         .await
         .map_err(AppError::Internal)?
         .ok_or_else(|| {
             AppError::Internal(anyhow::anyhow!("blob missing for artifact {}", rec.name))
         })?;
 
-    let mut resp = Response::new(Body::from(stored.bytes));
+    let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -183,6 +195,12 @@ pub async fn download_artifact(
             .unwrap_or(HeaderValue::from_static("attachment")),
     );
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(rec.size_bytes));
+    // Prevent the browser disk cache from replaying an authenticated download
+    // to a subsequent unauthenticated session on the same machine.
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=0, must-revalidate"),
+    );
     Ok(resp)
 }
 
@@ -206,6 +224,36 @@ mod tests {
     fn html_forced_to_attachment() {
         let d = disposition_for("text/html", "evil.html");
         assert!(d.starts_with("attachment"));
+    }
+
+    #[test]
+    fn pdf_forced_to_attachment() {
+        // PDF.js has a history of script-execution CVEs via embedded JS, so we
+        // refuse to render PDFs inline even though the browser would happily
+        // do so.
+        let d = disposition_for("application/pdf", "report.pdf");
+        assert!(d.starts_with("attachment"), "expected attachment, got {d}");
+    }
+
+    #[test]
+    fn markdown_forced_to_attachment() {
+        // No browser renders Markdown natively; some intermediaries render it
+        // as HTML, which would reintroduce the XSS surface we close above.
+        let d = disposition_for("text/markdown", "notes.md");
+        assert!(d.starts_with("attachment"), "expected attachment, got {d}");
+    }
+
+    #[test]
+    fn svg_forced_to_attachment() {
+        // SVG can carry inline <script> and event handlers.
+        let d = disposition_for("image/svg+xml", "logo.svg");
+        assert!(d.starts_with("attachment"), "expected attachment, got {d}");
+    }
+
+    #[test]
+    fn javascript_forced_to_attachment() {
+        let d = disposition_for("application/javascript", "evil.js");
+        assert!(d.starts_with("attachment"), "expected attachment, got {d}");
     }
 
     #[test]
