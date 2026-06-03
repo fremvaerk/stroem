@@ -1,0 +1,15 @@
+actions:
+  make-report:
+    type: script
+    runner: local
+    language: shell
+    script: |
+      echo "<h1>Report</h1>" > "$ARTIFACTS_DIR/report.html"
+      echo "ok" > "$ARTIFACTS_DIR/status.txt"
+
+tasks:
+  produce-artifacts:
+    mode: distributed
+    flow:
+      make-report:
+        action: make-report

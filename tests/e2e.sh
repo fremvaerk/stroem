@@ -493,6 +493,71 @@ pass "read-state job rendered state.greeting from query param"
 # Cleanup
 rm -rf "$TMPDIR_STATE"
 
+# --- 16. Artifacts: produce, list, download ---
+info "Triggering produce-artifacts task..."
+EXEC_RESP_ART=$(acurl -X POST "$BASE_URL/api/workspaces/test/tasks/produce-artifacts/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+
+ART_JOB_ID=$(echo "$EXEC_RESP_ART" | jq -r '.job_id')
+if [ -z "$ART_JOB_ID" ] || [ "$ART_JOB_ID" = "null" ]; then
+    fail "produce-artifacts execute failed: $EXEC_RESP_ART"
+fi
+pass "produce-artifacts job created: $ART_JOB_ID"
+
+info "Waiting for produce-artifacts job to complete..."
+ART_POLLED=0
+ART_STATUS="pending"
+while [ "$ART_STATUS" != "completed" ] && [ "$ART_STATUS" != "failed" ]; do
+    sleep 2
+    ART_POLLED=$((ART_POLLED + 2))
+    if [ "$ART_POLLED" -ge "$MAX_POLL" ]; then
+        acurl "$BASE_URL/api/jobs/$ART_JOB_ID" | jq .
+        fail "produce-artifacts did not reach terminal state within ${MAX_POLL}s (status: $ART_STATUS)"
+    fi
+    ART_DETAIL=$(acurl "$BASE_URL/api/jobs/$ART_JOB_ID")
+    ART_STATUS=$(echo "$ART_DETAIL" | jq -r '.status')
+    printf "."
+done
+echo ""
+
+if [ "$ART_STATUS" != "completed" ]; then
+    echo "$ART_DETAIL" | jq .
+    fail "produce-artifacts job failed (status: $ART_STATUS)"
+fi
+pass "produce-artifacts job completed (${ART_POLLED}s)"
+
+info "Listing artifacts for job $ART_JOB_ID..."
+ARTIFACTS=$(acurl "$BASE_URL/api/jobs/$ART_JOB_ID/artifacts")
+ART_COUNT=$(echo "$ARTIFACTS" | jq 'length')
+if [ -z "$ART_COUNT" ] || [ "$ART_COUNT" = "null" ] || [ "$ART_COUNT" -lt 1 ]; then
+    echo "Artifacts response: $ARTIFACTS"
+    fail "Expected >=1 artifact, got: $ART_COUNT"
+fi
+pass "Found $ART_COUNT artifact(s)"
+
+info "Downloading first artifact..."
+ART_URL=$(echo "$ARTIFACTS" | jq -r '.[0].url')
+ART_NAME=$(echo "$ARTIFACTS" | jq -r '.[0].name')
+if [ -z "$ART_URL" ] || [ "$ART_URL" = "null" ]; then
+    echo "Artifacts response: $ARTIFACTS"
+    fail "Artifact URL missing from listing"
+fi
+
+# URL may be relative (e.g. /api/...) or absolute; prepend $BASE_URL if relative.
+case "$ART_URL" in
+    http://*|https://*) DL_URL="$ART_URL" ;;
+    *) DL_URL="${BASE_URL}${ART_URL}" ;;
+esac
+
+DL_PATH="/tmp/stroem-e2e-${ART_JOB_ID}-${ART_NAME//\//_}"
+acurl -o "$DL_PATH" "$DL_URL"
+if [ ! -s "$DL_PATH" ]; then
+    fail "Downloaded artifact is empty: $DL_PATH"
+fi
+pass "Downloaded artifact '$ART_NAME' ($(wc -c < "$DL_PATH") bytes)"
+rm -f "$DL_PATH"
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"

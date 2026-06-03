@@ -25,6 +25,7 @@ services:
     volumes:
       - ./workspace:/workspace:ro
       - ./workspace-ops:/workspace-ops:ro
+      - ./tests/e2e-workspace:/workspace-test:ro
       - ./docker/server-config.yaml:/etc/stroem/server-config.yaml:ro
       - logs:/var/stroem/logs
       - state:/var/stroem/state

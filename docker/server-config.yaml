@@ -20,6 +20,9 @@ workspaces:
   ops:
     type: folder
     path: /workspace-ops
+  test:
+    type: folder
+    path: /workspace-test
 
 worker_token: "dev-worker-token-change-in-production"
 
