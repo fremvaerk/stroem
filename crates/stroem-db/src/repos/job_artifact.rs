@@ -35,6 +35,11 @@ impl JobArtifactRepo {
     }
 
     pub async fn upsert(&self, row: NewArtifactRow) -> Result<JobArtifactRecord> {
+        // job_artifact.id has no DEFAULT (see migration 038), so the client
+        // generates the UUID. On the ON CONFLICT (job_id, name) DO UPDATE
+        // branch this generated value is discarded — the existing row keeps
+        // its original id and RETURNING surfaces that. Harmless but worth
+        // calling out to anyone reading the INSERT.
         let id = Uuid::new_v4();
         let rec = sqlx::query_as::<
             _,
@@ -154,13 +159,15 @@ impl JobArtifactRepo {
     }
 
     pub async fn total_size_for_job(&self, job_id: Uuid) -> Result<i64> {
-        let total: (Option<i64>,) = sqlx::query_as(
+        // COALESCE guarantees a non-null result even for jobs with zero
+        // artifacts, so the column type is plain BIGINT, not nullable.
+        let total: (i64,) = sqlx::query_as(
             "SELECT COALESCE(SUM(size_bytes), 0)::BIGINT FROM job_artifact WHERE job_id = $1",
         )
         .bind(job_id)
         .fetch_one(&self.pool)
         .await?;
-        Ok(total.0.unwrap_or(0))
+        Ok(total.0)
     }
 
     pub async fn delete_for_job(&self, job_id: Uuid) -> Result<u64> {
