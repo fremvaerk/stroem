@@ -1729,6 +1729,397 @@ mod tests {
             .await;
         }
 
+        /// Regression: when artifact upload fails after all retries, the worker
+        /// MUST roll back the partial upload by calling `delete_step_artifacts`,
+        /// and the step MUST be reported with a non-zero exit code carrying the
+        /// upload error. Three 500s in a row on the per-file POST exhausts
+        /// `upload_with_retry`; we then assert (a) the DELETE cleanup route is
+        /// called exactly once, and (b) `complete` is invoked with `exit_code != 0`.
+        #[tokio::test]
+        async fn test_execute_claimed_step_artifact_upload_retry_then_cleanup() {
+            let mock_server = MockServer::start().await;
+
+            // Workspace tarball
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-upload-fail"),
+                )
+                .mount(&mock_server)
+                .await;
+
+            mount_common_mocks(&mock_server).await;
+
+            // Per-file artifact upload always returns 500 — exhausts the three
+            // in-loop retries inside `upload_with_retry` and surfaces an error
+            // to the caller. expect(3) locks in the retry-attempt count.
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+                .respond_with(ResponseTemplate::new(500).set_body_string("blob backend down"))
+                .with_priority(1)
+                .expect(3)
+                .mount(&mock_server)
+                .await;
+
+            // Step-scoped cleanup endpoint MUST be hit exactly once after the
+            // retries exhaust. Distinct from the per-file upload route — this
+            // matches the DELETE without a trailing filename segment.
+            Mock::given(method("DELETE"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts$"))
+                .respond_with(ResponseTemplate::new(200))
+                .with_priority(1)
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp_dir.path()).unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
+
+            let job_id = Uuid::new_v4();
+            // Script writes a single artifact then exits 0, forcing the upload
+            // path to run. `$ARTIFACTS_DIR` is the host-side tempdir for the
+            // ("script", "local") dispatch.
+            let step = make_step(
+                job_id,
+                r#"mkdir -p "$ARTIFACTS_DIR" && echo data > "$ARTIFACTS_DIR/out.txt""#,
+            );
+
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            // Assert: complete was called with a non-zero exit_code carrying
+            // the upload failure. We pull recorded requests and find the
+            // complete call — the body is JSON `{exit_code, output, error}`.
+            let received = mock_server.received_requests().await.unwrap();
+            let completes: Vec<_> = received
+                .iter()
+                .filter(|r| {
+                    r.method.as_str() == "POST"
+                        && r.url.path().ends_with("/complete")
+                        && r.url.path().contains("/steps/")
+                })
+                .collect();
+            assert_eq!(
+                completes.len(),
+                1,
+                "expected exactly one complete call, got {}",
+                completes.len()
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&completes[0].body).expect("complete body should be JSON");
+            let exit_code = body
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .expect("complete body should have exit_code");
+            assert_ne!(
+                exit_code, 0,
+                "step must report non-zero exit on artifact upload failure, got {exit_code}"
+            );
+            let error = body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                error.contains("artifact upload failed"),
+                "complete error must mention artifact upload failure, got: {error}"
+            );
+            // wiremock verifies expect(3) on upload + expect(1) on cleanup on drop.
+        }
+
+        /// Regression: a failed step (non-zero exit) MUST NOT upload artifacts
+        /// even if files were written to `$ARTIFACTS_DIR` before the failure.
+        /// The condition is in poller.rs around line 709:
+        /// `(Ok(run_result), Some(dir)) if run_result.exit_code == 0`. If the
+        /// guard regresses to e.g. always-upload, this test catches it because
+        /// the `expect(0)` mock on the upload route panics on drop.
+        #[tokio::test]
+        async fn test_execute_claimed_step_failed_step_skips_artifact_upload() {
+            let mock_server = MockServer::start().await;
+
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-fail-skip"),
+                )
+                .mount(&mock_server)
+                .await;
+
+            mount_common_mocks(&mock_server).await;
+
+            // Asserts ZERO upload calls. The mock returns 500 so that if the
+            // skip-on-failure guard regresses, the upload error path would
+            // amplify the failure — but we never expect to get here.
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+
+            // Cleanup must NOT be invoked either — there was no upload to clean up.
+            Mock::given(method("DELETE"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts$"))
+                .respond_with(ResponseTemplate::new(200))
+                .with_priority(1)
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp_dir.path()).unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
+
+            let job_id = Uuid::new_v4();
+            // Plant a file in $ARTIFACTS_DIR, then exit non-zero. The guard
+            // should suppress the upload despite the file being present.
+            let step = make_step(
+                job_id,
+                r#"mkdir -p "$ARTIFACTS_DIR" && echo planted > "$ARTIFACTS_DIR/out.txt" && exit 1"#,
+            );
+
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            // wiremock verifies both expect(0) mocks on drop.
+        }
+
+        /// Regression: a step cancelled mid-execution MUST NOT upload artifacts
+        /// even if files were already written to `$ARTIFACTS_DIR`. Cancellation
+        /// surfaces as `exit_code = -1` from the runner (see ShellRunner Outcome::Cancelled),
+        /// which the upload guard treats as "not exit 0" → skip. Driven by the
+        /// `/worker/jobs/{id}/cancelled` endpoint returning `cancelled: true`,
+        /// the same path the cancel-checker polls every 5s (first tick fires
+        /// immediately on `tokio::time::interval`).
+        #[tokio::test]
+        async fn test_execute_claimed_step_cancelled_skips_artifact_upload() {
+            let mock_server = MockServer::start().await;
+
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-cancel-skip"),
+                )
+                .mount(&mock_server)
+                .await;
+
+            // Manually mount everything except the cancellation endpoint so we
+            // can override it with `cancelled: true`. Mirrors `mount_common_mocks`
+            // for the rest.
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/start"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/worker/jobs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/logs"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/complete"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&mock_server)
+                .await;
+
+            // Cancellation poll returns true from the first tick — the runner
+            // gets killed almost immediately, the step result becomes
+            // exit_code = -1, and the upload guard skips.
+            Mock::given(method("GET"))
+                .and(path_regex(r"/worker/jobs/.+/cancelled"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"cancelled": true})),
+                )
+                .mount(&mock_server)
+                .await;
+
+            // No upload calls expected.
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+            // No cleanup either — no partial upload occurred.
+            Mock::given(method("DELETE"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts$"))
+                .respond_with(ResponseTemplate::new(200))
+                .with_priority(1)
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp_dir.path()).unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
+
+            let job_id = Uuid::new_v4();
+            // Plant the artifact first, then sleep long enough that the
+            // cancel-checker's first tick (immediate) wins the race against
+            // the sleep finishing. The shell runner kills the child on cancel.
+            let step = make_step(
+                job_id,
+                r#"mkdir -p "$ARTIFACTS_DIR" && echo planted > "$ARTIFACTS_DIR/out.txt" && sleep 30"#,
+            );
+
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            // wiremock verifies both expect(0) mocks on drop.
+        }
+
+        /// Regression: a successful step with an empty `$ARTIFACTS_DIR` MUST NOT
+        /// hit the upload endpoint at all (scan returns zero files → no per-file
+        /// POSTs) and the step still reports `exit_code = 0`. Locks in the
+        /// "nothing to do" branch of `upload_artifacts_for_step`.
+        #[tokio::test]
+        async fn test_execute_claimed_step_empty_artifacts_dir_no_upload() {
+            let mock_server = MockServer::start().await;
+
+            Mock::given(method("GET"))
+                .and(path("/worker/workspace/default.tar.gz"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(create_test_tarball())
+                        .insert_header("X-Revision", "test-rev-empty-dir"),
+                )
+                .mount(&mock_server)
+                .await;
+
+            mount_common_mocks(&mock_server).await;
+
+            // Asserts ZERO upload calls — the runner exits 0 but the tempdir
+            // is empty, so the scan finds nothing and the loop is a no-op.
+            Mock::given(method("POST"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+            // Cleanup likewise must NOT be invoked — upload succeeded vacuously.
+            Mock::given(method("DELETE"))
+                .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts$"))
+                .respond_with(ResponseTemplate::new(200))
+                .with_priority(1)
+                .expect(0)
+                .mount(&mock_server)
+                .await;
+
+            let client = Arc::new(ServerClient::new(
+                &mock_server.uri(),
+                "test-token",
+                Some(5),
+                Some(30),
+            ));
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp_dir.path()).unwrap();
+            let executor = Arc::new(StepExecutor::new());
+            let ws_cache = Arc::new(WorkspaceCache::new(temp_dir.path().to_str().unwrap(), None));
+
+            let job_id = Uuid::new_v4();
+            // Don't touch $ARTIFACTS_DIR. Exit 0 cleanly.
+            let step = make_step(job_id, "echo done");
+
+            execute_claimed_step(
+                client,
+                executor,
+                ws_cache,
+                step,
+                Uuid::new_v4(),
+                #[cfg(feature = "agent")]
+                None,
+            )
+            .await;
+
+            // Step still reports exit_code = 0.
+            let received = mock_server.received_requests().await.unwrap();
+            let completes: Vec<_> = received
+                .iter()
+                .filter(|r| {
+                    r.method.as_str() == "POST"
+                        && r.url.path().ends_with("/complete")
+                        && r.url.path().contains("/steps/")
+                })
+                .collect();
+            assert_eq!(
+                completes.len(),
+                1,
+                "expected exactly one complete call, got {}",
+                completes.len()
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&completes[0].body).expect("complete body should be JSON");
+            assert_eq!(
+                body.get("exit_code").and_then(|v| v.as_i64()),
+                Some(0),
+                "successful empty-artifacts step should report exit_code = 0"
+            );
+        }
+
         #[tokio::test]
         async fn test_execute_claimed_step_with_pinned_revision() {
             let mock_server = MockServer::start().await;
