@@ -51,6 +51,20 @@ async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)
 }
 
 async fn build_test_app(artifact_cfg: ArtifactStorageConfig) -> Result<TestApp> {
+    build_test_app_inner(artifact_cfg, true).await
+}
+
+/// Variant that deliberately omits the artifact blob backend so we can prove
+/// the worker handler returns a clean 500 (rather than panicking or 404'ing)
+/// when an operator forgot to configure `artifact_storage`.
+async fn build_test_app_no_blob(artifact_cfg: ArtifactStorageConfig) -> Result<TestApp> {
+    build_test_app_inner(artifact_cfg, false).await
+}
+
+async fn build_test_app_inner(
+    artifact_cfg: ArtifactStorageConfig,
+    with_blob: bool,
+) -> Result<TestApp> {
     let (pool, _pg) = spawn_pg().await?;
 
     let tmp = TempDir::new()?;
@@ -95,10 +109,14 @@ async fn build_test_app(artifact_cfg: ArtifactStorageConfig) -> Result<TestApp> 
     let mgr = WorkspaceManager::from_config("ws1", workspace);
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
 
-    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(artifact_dir));
+    let archive: Option<Arc<dyn BlobArchive>> = if with_blob {
+        Some(Arc::new(LocalBlobArchive::new(artifact_dir)))
+    } else {
+        None
+    };
 
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
-        .with_artifact_blob(Some(archive));
+        .with_artifact_blob(archive);
     let router = build_router(state, CancellationToken::new());
 
     Ok(TestApp {
@@ -563,5 +581,239 @@ async fn worker_delete_rejects_completed_job_with_409() -> Result<()> {
     let rows = list_artifacts(&app.pool, job_id).await?;
     assert_eq!(rows.len(), 1, "row must survive a refused delete");
 
+    Ok(())
+}
+
+// ─── Boundary tests ─────────────────────────────────────────────────────────
+
+/// File exactly at `max_file_bytes` is accepted: the cap is inclusive, so a
+/// file of N bytes with a cap of N must pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_at_max_file_bytes_exactly_passes() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_file_bytes: 1024,
+        // Raise the per-job cap so it can't be the limiting factor.
+        max_job_bytes: 10 * 1024 * 1024,
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let body = vec![0u8; 1024];
+    let request = upload_request(
+        job_id,
+        "build",
+        "exact.bin",
+        "application/octet-stream",
+        body,
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].size_bytes, 1024);
+    Ok(())
+}
+
+/// File of `max_file_bytes + 1` is rejected with 413. Note: the per-route
+/// `DefaultBodyLimit` is wired from `max_file_bytes` so the rejection happens
+/// at the axum layer before the handler runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_one_byte_over_max_file_bytes_returns_413() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_file_bytes: 1024,
+        max_job_bytes: 10 * 1024 * 1024,
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let body = vec![0u8; 1025];
+    let request = upload_request(
+        job_id,
+        "build",
+        "over.bin",
+        "application/octet-stream",
+        body,
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert!(rows.is_empty(), "no row may land for an over-cap upload");
+    Ok(())
+}
+
+/// Per-job total exactly at the cap is accepted. Two uploads of 10 + 10 bytes
+/// against a 20-byte cap: both must succeed because the cap is inclusive.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_per_job_total_at_cap_exactly_passes() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_file_bytes: 1024,
+        max_job_bytes: 20,
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let request = upload_request(
+        job_id,
+        "s",
+        "a.bin",
+        "application/octet-stream",
+        vec![0u8; 10],
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let request = upload_request(
+        job_id,
+        "s",
+        "b.bin",
+        "application/octet-stream",
+        vec![0u8; 10],
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    let total: i64 = rows.iter().map(|r| r.size_bytes).sum();
+    assert_eq!(total, 20);
+    Ok(())
+}
+
+/// Per-job total one byte over the cap is rejected with 413.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_per_job_total_one_byte_over_returns_413() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_file_bytes: 1024,
+        max_job_bytes: 20,
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let request = upload_request(
+        job_id,
+        "s",
+        "a.bin",
+        "application/octet-stream",
+        vec![0u8; 10],
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 11 more bytes would push total to 21, which is > 20.
+    let request = upload_request(
+        job_id,
+        "s",
+        "b.bin",
+        "application/octet-stream",
+        vec![0u8; 11],
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(rows.len(), 1, "second over-cap upload must not have landed");
+    Ok(())
+}
+
+/// Artifact name at the documented length limit is accepted at the HTTP
+/// layer. The unit test `name_validation_*` covers the pure validator at
+/// exactly 255/256 chars; this test proves the full request path through
+/// routing + extraction + handler also accepts a long name. We can't push
+/// all the way to 255 here because `LocalBlobArchive`'s atomic write appends
+/// a `.tmp.{uuid32}` suffix to the filename, which overflows the macOS / ext4
+/// 255-byte NAME_MAX — that's a backend-specific filesystem limit, not a
+/// server-API limit, and S3 backends accept the full 255. 200 chars is well
+/// past anything humans type and proves the long-name path round-trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_long_name_is_accepted_through_http_layer() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    // 196 'a's + ".txt" → 200 chars total. Fits with the 37-byte temp suffix
+    // (`.tmp.<uuid-simple>`) under the 255-byte NAME_MAX of the local FS.
+    let name = format!("{}.txt", "a".repeat(196));
+    assert_eq!(name.len(), 200);
+
+    let request = upload_request(job_id, "build", &name, "text/plain", b"x".to_vec());
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, name);
+    Ok(())
+}
+
+/// Artifact name of 256 characters is rejected with 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_name_at_256_chars_is_rejected_400() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let name = "a".repeat(256);
+    let request = upload_request(job_id, "build", &name, "text/plain", b"x".to_vec());
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert!(rows.is_empty());
+    Ok(())
+}
+
+/// When `artifact_storage` is omitted entirely (no blob backend), upload must
+/// fail with a clear 500 rather than panic or silently 404. We construct the
+/// `TestApp` with `with_artifact_blob(None)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_without_artifact_blob_returns_500() -> Result<()> {
+    let app = build_test_app_no_blob(ArtifactStorageConfig::default()).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let request = upload_request(
+        job_id,
+        "build",
+        "x.txt",
+        "text/plain",
+        b"some content".to_vec(),
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let body = resp.into_body().collect().await?.to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    // The handler's anyhow error carries the message; the response body
+    // should mention artifact storage so an operator can diagnose this
+    // quickly from a tail of nginx logs.
+    assert!(
+        body_str.to_ascii_lowercase().contains("artifact")
+            || body_str.to_ascii_lowercase().contains("storage")
+            || body_str.to_ascii_lowercase().contains("internal"),
+        "expected diagnostic body, got: {body_str}"
+    );
+
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert!(rows.is_empty(), "no row should land when blob unavailable");
+    Ok(())
+}
+
+/// DELETE on a job that doesn't exist must return 404, not 204. The endpoint
+/// is idempotent for *known* jobs (re-deleting an already-clean step is 204);
+/// idempotence does NOT extend to phantom jobs that were never created.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_delete_unknown_job_returns_404() -> Result<()> {
+    let app = build_test_app(ArtifactStorageConfig::default()).await?;
+    let bogus = Uuid::new_v4();
+
+    let delete_request = Request::builder()
+        .method("DELETE")
+        .uri(format!("/worker/jobs/{bogus}/steps/build/artifacts"))
+        .header("authorization", format!("Bearer {WORKER_TOKEN}"))
+        .body(Body::empty())?;
+    let resp = app.router.clone().oneshot(delete_request).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     Ok(())
 }

@@ -558,6 +558,41 @@ mod tests {
         assert!(err.to_string().contains("invalid key"), "unexpected: {err}");
     }
 
+    /// Regression: when the `.ct` sidecar is absent (e.g. left over from a
+    /// pre-sidecar release, externally-rsync'd backup, or partial recovery),
+    /// `get` must still return the blob with `application/octet-stream` rather
+    /// than fail or return None. We simulate the missing-sidecar case by
+    /// writing the data file directly via `tokio::fs::write`, bypassing
+    /// `put`.
+    #[tokio::test]
+    async fn local_blob_get_without_sidecar_falls_back_to_octet_stream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LocalBlobArchive::new(tmp.path().to_path_buf());
+
+        // Plant a data file directly — no `.ct` sidecar.
+        let key = "ws/job/step/manual.bin";
+        let path = tmp.path().join(key);
+        fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        fs::write(&path, b"manually written").await.unwrap();
+
+        // Sanity check: no sidecar file exists for this key.
+        let sidecar = path.with_file_name(format!(
+            "{}.ct",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(
+            !sidecar.exists(),
+            "test setup: sidecar must not exist for this case"
+        );
+
+        let got = store.get(key).await.unwrap().expect("blob should be found");
+        assert_eq!(
+            got.content_type, "application/octet-stream",
+            "missing sidecar must fall back to octet-stream"
+        );
+        assert_eq!(&got.bytes[..], b"manually written");
+    }
+
     /// Regression: the sidecar path used `with_extension`, which replaced the
     /// final extension. `foo.tar.gz` became `foo.tar.ct` (clobbering an
     /// unrelated `foo.tar` blob). The sidecar must be appended to the *full*

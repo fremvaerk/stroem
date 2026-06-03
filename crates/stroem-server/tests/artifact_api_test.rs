@@ -498,3 +498,70 @@ async fn list_unknown_job_is_404() -> Result<()> {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     Ok(())
 }
+
+/// Round-trip an artifact whose name contains a `/` (i.e. lives in a
+/// subdirectory under `/artifacts/`). The upload accepts `reports/q1.html`,
+/// the list endpoint preserves the slash, and the download endpoint accepts
+/// the URL-encoded form (`reports%2Fq1.html`) and returns the original bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn subdirectory_artifact_round_trips_list_and_download() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    let payload = b"<html><body>Q1 report</body></html>";
+    upload_artifact(
+        &app,
+        job_id,
+        "build",
+        "reports/q1.html",
+        "text/html",
+        payload,
+    )
+    .await?;
+
+    // List shows the full `reports/q1.html` name (no escaping in the JSON).
+    let list_req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(list_req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let items = body.as_array().expect("array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"].as_str().unwrap(), "reports/q1.html");
+
+    // The `url` field is the percent-encoded download path — the slash is
+    // encoded as `%2F` so the artifact name is a single URL segment.
+    let url = items[0]["url"].as_str().unwrap();
+    assert!(
+        url.ends_with("/reports%2Fq1.html"),
+        "expected percent-encoded slash, got {url}"
+    );
+
+    // Download via the percent-encoded form. Browsers don't decode `%2F` to
+    // `/` in path segments, so the router resolves this to the single
+    // artifact name `reports/q1.html`.
+    let dl_req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/jobs/{job_id}/artifacts/reports%2Fq1.html"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.router.clone().oneshot(dl_req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // HTML is forced to attachment regardless of subdirectory placement.
+    let disp = resp.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disp.starts_with("attachment"),
+        "subdir HTML must still be attachment, got {disp}"
+    );
+
+    let dl_bytes = resp.into_body().collect().await?.to_bytes();
+    assert_eq!(&dl_bytes[..], &payload[..]);
+    Ok(())
+}

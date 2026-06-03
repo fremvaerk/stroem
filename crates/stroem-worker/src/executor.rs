@@ -1457,4 +1457,33 @@ mod tests {
         let config = executor.build_run_config(&step, "/workspace").unwrap();
         assert_eq!(config.args, vec!["valid", "also-valid"]);
     }
+
+    /// `step_supports_artifacts` gates the entire artifact-mounting + post-step
+    /// scan pipeline. Regressing it to true for `agent`/`approval`/`task` would
+    /// silently start scanning empty directories on every server-dispatched
+    /// step (wasted I/O, log spam, possible false-positive scan warnings).
+    /// Regressing it to false for `script`/`docker`/`pod` would silently drop
+    /// every user-emitted artifact on the floor.
+    #[test]
+    fn step_supports_artifacts_excludes_server_dispatched_actions() {
+        let mut step = test_step(None);
+
+        // Server-dispatched / non-user-code action types: no artifacts.
+        for ty in ["agent", "approval", "task"] {
+            step.action_type = ty.to_string();
+            assert!(
+                !step_supports_artifacts(&step),
+                "{ty} steps must not support artifacts"
+            );
+        }
+
+        // User-code action types: artifacts supported.
+        for ty in ["script", "docker", "pod"] {
+            step.action_type = ty.to_string();
+            assert!(
+                step_supports_artifacts(&step),
+                "{ty} steps must support artifacts"
+            );
+        }
+    }
 }

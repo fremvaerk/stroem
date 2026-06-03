@@ -187,6 +187,32 @@ mod tests {
         assert_eq!(ct, "text/markdown");
     }
 
+    /// Cover every extension branch in `sniff_with_name`'s fallback. `infer`
+    /// returns `application/octet-stream` for these bytes (plain ASCII has no
+    /// magic header), so the fallback table is what gets exercised. A bug in
+    /// any single arm (e.g. typo in the MIME string, missing alias) would
+    /// surface here rather than as a silent serve-as-octet-stream regression.
+    #[test]
+    fn sniff_extension_fallback_covers_each_known_type() {
+        // Plain text bytes — infer won't match any magic header.
+        let bytes = b"plain content with no magic";
+
+        assert_eq!(sniff_with_name(bytes, "data.json"), "application/json");
+        assert_eq!(sniff_with_name(bytes, "cfg.yaml"), "application/yaml");
+        assert_eq!(sniff_with_name(bytes, "cfg.yml"), "application/yaml");
+        assert_eq!(sniff_with_name(bytes, "rows.csv"), "text/csv");
+        assert_eq!(sniff_with_name(bytes, "run.log"), "text/plain");
+        assert_eq!(sniff_with_name(bytes, "notes.txt"), "text/plain");
+        assert_eq!(sniff_with_name(bytes, "report.html"), "text/html");
+        assert_eq!(sniff_with_name(bytes, "frag.htm"), "text/html");
+        assert_eq!(sniff_with_name(bytes, "logo.svg"), "image/svg+xml");
+        // Sanity: unknown extension still falls back to octet-stream.
+        assert_eq!(
+            sniff_with_name(bytes, "thing.unknown"),
+            "application/octet-stream"
+        );
+    }
+
     /// Regression: WalkDir entry errors (e.g. unreadable subdirectory) must
     /// surface as warnings in `scan.warnings` rather than be silently
     /// dropped by `filter_map(|e| e.ok())`. We make a subdirectory mode 000
