@@ -213,6 +213,98 @@ async fn worker_upload_rejects_oversized_file() -> Result<()> {
     Ok(())
 }
 
+/// Regression for F2: `DefaultBodyLimit` was hardcoded at 100 MiB regardless
+/// of `artifact_storage.max_file_bytes`, so operators raising the cap couldn't
+/// upload large files (axum 413'd before the handler) and operators lowering
+/// the cap still let axum buffer 100 MiB per concurrent request before the
+/// handler rejected. With the fix, the per-route `DefaultBodyLimit` is wired
+/// from config so bodies over the configured limit are rejected at the
+/// axum-layer level — before the handler runs at all.
+///
+/// We prove "before the handler runs" by asserting the response body is NOT
+/// the handler's JSON shape (`{"error": "...exceeds per-file limit of..."}`).
+/// A pre-fix run would have buffered the 100 KiB body, reached the handler's
+/// own per-file check (1024), and returned that JSON.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_body_limit_wired_from_config_returns_413_before_handler() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_file_bytes: 1024,
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    // 100 KiB — comfortably over the 1024-byte cap.
+    let body = vec![0u8; 100 * 1024];
+    let request = upload_request(
+        job_id,
+        "build",
+        "huge.bin",
+        "application/octet-stream",
+        body,
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    let status = resp.status();
+    let body_bytes = resp.into_body().collect().await?.to_bytes();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "expected 413; got {status} with body: {body_str}"
+    );
+
+    // Layer-level rejection should NOT carry the handler's JSON envelope.
+    // The handler builds its 413 via `AppError::PayloadTooLarge` which serialises
+    // to `{"error":"...exceeds per-file limit of..."}`. axum's `RequestBodyLimit`
+    // tower layer produces a plain "length limit exceeded" text body instead.
+    assert!(
+        !body_str.contains("exceeds per-file limit of"),
+        "expected layer-level rejection (no handler message) but got handler JSON: {body_str}"
+    );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&body_bytes).is_err()
+            || !body_str.contains("\"error\""),
+        "expected non-JSON layer body, got: {body_str}"
+    );
+
+    // No row should land — the handler never executed.
+    let rows = list_artifacts(&app.pool, job_id).await?;
+    assert!(
+        rows.is_empty(),
+        "handler must not have executed; found rows: {rows:?}"
+    );
+
+    Ok(())
+}
+
+/// Sister check: with the cap raised above the body size, the same upload
+/// succeeds — proving the limit really is being read from config, not just
+/// rejecting everything at the new lower bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_upload_body_limit_wired_from_config_accepts_when_under_cap() -> Result<()> {
+    let cfg = ArtifactStorageConfig {
+        max_file_bytes: 200 * 1024,
+        ..ArtifactStorageConfig::default()
+    };
+    let app = build_test_app(cfg).await?;
+    let job_id = create_test_job(&app.pool, "ws1", "task1").await?;
+
+    // 100 KiB — under the 200 KiB cap.
+    let body = vec![0u8; 100 * 1024];
+    let request = upload_request(
+        job_id,
+        "build",
+        "okay.bin",
+        "application/octet-stream",
+        body,
+    );
+    let resp = app.router.clone().oneshot(request).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_upload_rejects_when_per_job_cap_would_exceed() -> Result<()> {
     let cfg = ArtifactStorageConfig {

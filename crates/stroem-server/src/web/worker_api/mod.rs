@@ -60,6 +60,20 @@ pub(crate) async fn auth_middleware(
 }
 
 pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
+    // Wire the artifact upload body limit from configured `max_file_bytes` so
+    // raising the cap above the previous hardcoded 100 MiB actually takes
+    // effect, and lowering it stops axum from buffering oversized bodies
+    // before the handler ever runs. Falls back to the same default as
+    // `ArtifactStorageConfig::default()` when no override is configured.
+    let artifact_body_limit: usize = state
+        .config
+        .artifact_storage
+        .as_ref()
+        .map(|c| c.max_file_bytes)
+        .unwrap_or_else(|| crate::config::ArtifactStorageConfig::default().max_file_bytes)
+        .try_into()
+        .unwrap_or(usize::MAX);
+
     Router::new()
         .route("/register", post(jobs::register_worker))
         .route("/heartbeat", post(jobs::heartbeat))
@@ -101,7 +115,7 @@ pub fn build_worker_api_routes(state: Arc<AppState>) -> Router {
         )
         .route(
             "/jobs/{job_id}/steps/{step_name}/artifacts/{*name}",
-            post(artifacts::upload_artifact).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
+            post(artifacts::upload_artifact).layer(DefaultBodyLimit::max(artifact_body_limit)),
         )
         .route(
             "/jobs/{job_id}/steps/{step_name}/artifacts",
