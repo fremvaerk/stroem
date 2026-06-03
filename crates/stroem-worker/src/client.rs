@@ -689,6 +689,9 @@ impl ServerClient {
     /// `content_type` becomes the row's recorded MIME type. The server
     /// enforces per-file and per-job size caps; on rejection the response
     /// body is surfaced verbatim so the caller can log it.
+    ///
+    /// Body is `bytes::Bytes` so that retry loops can clone the request body
+    /// as a refcount bump rather than re-allocating the full file each time.
     #[tracing::instrument(skip(self, body))]
     pub async fn upload_artifact(
         &self,
@@ -696,18 +699,19 @@ impl ServerClient {
         step_name: &str,
         name: &str,
         content_type: &str,
-        body: Vec<u8>,
+        body: bytes::Bytes,
     ) -> Result<()> {
         let url = format!(
             "{}/worker/jobs/{}/steps/{}/artifacts/{}",
             self.base_url, job_id, step_name, name
         );
+        let content_length = body.len();
         let resp = self
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header(reqwest::header::CONTENT_TYPE, content_type)
-            .header(reqwest::header::CONTENT_LENGTH, body.len())
+            .header(reqwest::header::CONTENT_LENGTH, content_length)
             .body(body)
             .send()
             .await

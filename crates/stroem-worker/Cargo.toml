@@ -31,6 +31,7 @@ futures-util = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 tempfile.workspace = true
+bytes.workspace = true
 infer = "0.16"
 walkdir = "2"
 

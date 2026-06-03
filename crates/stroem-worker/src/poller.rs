@@ -81,10 +81,21 @@ fn build_state_tarball(dir: &std::path::Path) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Returns true if the directory contains at least one entry (file or subdirectory).
-fn dir_has_content(dir: &std::path::Path) -> bool {
-    std::fs::read_dir(dir)
-        .map(|mut rd| rd.next().is_some())
-        .unwrap_or(false)
+///
+/// I/O errors propagate to the caller so a stuck filesystem doesn't silently
+/// suppress a state-snapshot upload. Async — the caller is already on the
+/// tokio runtime, so blocking on `std::fs::read_dir` here would stall other
+/// step pollers waiting on the same worker thread.
+async fn dir_has_content(dir: &std::path::Path) -> anyhow::Result<bool> {
+    let mut rd = tokio::fs::read_dir(dir)
+        .await
+        .with_context(|| format!("read_dir {}", dir.display()))?;
+    let has = rd
+        .next_entry()
+        .await
+        .with_context(|| format!("next_entry in {}", dir.display()))?
+        .is_some();
+    Ok(has)
 }
 
 /// Shallow-merge parsed JSON entries into a single `serde_json::Map`.
@@ -130,7 +141,10 @@ async fn upload_artifacts_for_step(
             .await
             .with_context(|| format!("read artifact {}", file.abs_path.display()))?;
         let ct = crate::artifacts::sniff_with_name(&bytes, &file.name);
-        upload_with_retry(client, step.job_id, &step.step_name, &file.name, &ct, bytes).await?;
+        // Hand the body to retry as `Bytes` so attempt 2/3 clone the
+        // refcount, not the whole file payload.
+        let body = bytes::Bytes::from(bytes);
+        upload_with_retry(client, step.job_id, &step.step_name, &file.name, &ct, body).await?;
     }
     Ok(())
 }
@@ -145,7 +159,7 @@ async fn upload_with_retry(
     step: &str,
     name: &str,
     content_type: &str,
-    body: Vec<u8>,
+    body: bytes::Bytes,
 ) -> anyhow::Result<()> {
     let mut delay_ms = 250u64;
     let mut last_err: Option<anyhow::Error> = None;
@@ -600,8 +614,8 @@ pub(crate) async fn execute_claimed_step(
                 }
             }
 
-            if dir_has_content(sod) {
-                match build_state_tarball(sod) {
+            match dir_has_content(sod).await {
+                Ok(true) => match build_state_tarball(sod) {
                     Ok(tarball_bytes) => {
                         let has_json = sod.join("state.json").exists();
                         if let Err(e) = client
@@ -625,6 +639,10 @@ pub(crate) async fn execute_claimed_step(
                         }
                     }
                     Err(e) => tracing::warn!("Failed to build state tarball: {:#}", e),
+                },
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to inspect state-out dir, skipping upload: {:#}", e)
                 }
             }
         }
@@ -643,8 +661,8 @@ pub(crate) async fn execute_claimed_step(
                 }
             }
 
-            if dir_has_content(gsod) {
-                match build_state_tarball(gsod) {
+            match dir_has_content(gsod).await {
+                Ok(true) => match build_state_tarball(gsod) {
                     Ok(tarball_bytes) => {
                         let has_json = gsod.join("state.json").exists();
                         if let Err(e) = client
@@ -666,7 +684,12 @@ pub(crate) async fn execute_claimed_step(
                         }
                     }
                     Err(e) => tracing::warn!("Failed to build global state tarball: {:#}", e),
-                }
+                },
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    "Failed to inspect global state-out dir, skipping upload: {:#}",
+                    e
+                ),
             }
         }
     }
@@ -1132,17 +1155,110 @@ mod tests {
 
     // ─── State tarball tests ──────────────────────────────────────────
 
-    #[test]
-    fn test_dir_has_content_empty() {
+    #[tokio::test]
+    async fn test_dir_has_content_empty() {
         let dir = tempfile::TempDir::new().unwrap();
-        assert!(!super::dir_has_content(dir.path()));
+        assert!(!super::dir_has_content(dir.path()).await.unwrap());
     }
 
-    #[test]
-    fn test_dir_has_content_with_file() {
+    #[tokio::test]
+    async fn test_dir_has_content_with_file() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.txt"), "hello").unwrap();
-        assert!(super::dir_has_content(dir.path()));
+        assert!(super::dir_has_content(dir.path()).await.unwrap());
+    }
+
+    /// Regression: `dir_has_content` must surface I/O errors (e.g. missing
+    /// directory) instead of silently returning `false`. The previous
+    /// implementation used `unwrap_or(false)` which swallowed read failures,
+    /// suppressing state-snapshot uploads when the dir vanished mid-step.
+    #[tokio::test]
+    async fn test_dir_has_content_missing_dir_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nonexistent = dir.path().join("does-not-exist");
+        let result = super::dir_has_content(&nonexistent).await;
+        assert!(
+            result.is_err(),
+            "missing dir must error, got {:?}",
+            result.ok()
+        );
+    }
+
+    // --- upload_with_retry tests (mocked HTTP) ---
+
+    /// Regression: retry attempts must clone the body refcount, not the
+    /// payload. We assert behavior via a mock server that flakes once then
+    /// succeeds; the test verifies that the second attempt sends the same
+    /// bytes (so the `Bytes::clone()` round-trip is intact). Before the
+    /// fix the same path was `Vec<u8>::clone()` — semantically correct but
+    /// O(n) per attempt, which the test cannot directly observe but is the
+    /// reason for the type change.
+    #[tokio::test]
+    async fn test_upload_with_retry_succeeds_after_one_failure() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        // First call → 503, second → 200. wiremock evaluates mocks in
+        // registration order with priorities; we use `up_to_n_times(1)`
+        // for the failing mock so the success mock takes over on attempt 2.
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("transient"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&mock)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+            .respond_with(ResponseTemplate::new(200))
+            .with_priority(2)
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = crate::client::ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let body = bytes::Bytes::from_static(b"hello-bytes-clone");
+        let res = super::upload_with_retry(
+            &client,
+            Uuid::new_v4(),
+            "step",
+            "out.txt",
+            "text/plain",
+            body,
+        )
+        .await;
+        assert!(res.is_ok(), "upload_with_retry should succeed: {res:?}");
+    }
+
+    /// Regression: the final attempt's failure must propagate. Three 503s in
+    /// a row → Err. Locks in the "exhausted attempts" branch so a future
+    /// refactor that turns 5xx into Ok by accident gets caught.
+    #[tokio::test]
+    async fn test_upload_with_retry_exhausts_and_errors() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/worker/jobs/.+/steps/.+/artifacts/.+"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("still down"))
+            .expect(3)
+            .mount(&mock)
+            .await;
+
+        let client = crate::client::ServerClient::new(&mock.uri(), "t", Some(5), Some(30));
+        let body = bytes::Bytes::from_static(b"payload");
+        let res = super::upload_with_retry(
+            &client,
+            Uuid::new_v4(),
+            "step",
+            "out.txt",
+            "text/plain",
+            body,
+        )
+        .await;
+        assert!(res.is_err());
     }
 
     #[test]

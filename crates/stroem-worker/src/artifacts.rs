@@ -35,11 +35,22 @@ pub fn scan_artifacts(root: &Path) -> Result<ScanResult> {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
 
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    // Walk eagerly so we can surface per-entry errors (permission denied,
+    // broken symlink mid-traversal, IO race) as scan warnings instead of
+    // silently dropping them — the previous `filter_map(|e| e.ok())` made
+    // unreadable directories invisible to the operator.
+    for entry_result in WalkDir::new(root).follow_links(false).into_iter() {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(e) => {
+                let path = e
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                warnings.push(format!("walk error at {path}: {e}"));
+                continue;
+            }
+        };
         if entry.file_type().is_dir() {
             continue;
         }
@@ -174,5 +185,46 @@ mod tests {
         // infer doesn't strongly detect plain text; we fall back to extension for known textual types
         let ct = sniff_with_name(b"hello", "notes.md");
         assert_eq!(ct, "text/markdown");
+    }
+
+    /// Regression: WalkDir entry errors (e.g. unreadable subdirectory) must
+    /// surface as warnings in `scan.warnings` rather than be silently
+    /// dropped by `filter_map(|e| e.ok())`. We make a subdirectory mode 000
+    /// so WalkDir trips when it tries to descend into it.
+    #[test]
+    #[cfg(unix)]
+    fn scan_surfaces_walk_errors_as_warnings() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("ok.txt"), b"x").unwrap();
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("inside.txt"), b"y").unwrap();
+        // Strip all perms so WalkDir cannot list the directory.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Probe whether the perm strip actually denies access — running as
+        // root (some CI containers) or on filesystems that ignore mode bits
+        // makes this test meaningless. We check by trying to list the dir
+        // ourselves, then short-circuit if it succeeded.
+        let access_denied = std::fs::read_dir(&locked).is_err();
+
+        let scan = scan_artifacts(root).unwrap();
+
+        // Restore perms before any asserts so the temp dir can be cleaned up.
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700));
+
+        if !access_denied {
+            // Environment doesn't enforce mode 000 — skip the warning assertion.
+            return;
+        }
+        assert!(
+            scan.warnings.iter().any(|w| w.contains("walk error")),
+            "expected a `walk error` warning, got {:?}",
+            scan.warnings
+        );
+        // The readable sibling must still be reported.
+        assert!(scan.files.iter().any(|f| f.name == "ok.txt"));
     }
 }
