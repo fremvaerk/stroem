@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stroem_common::models::workflow::WorkspaceConfig;
-use stroem_db::repos::job_artifact::JobArtifactRepo;
+use stroem_db::repos::job_artifact::{JobArtifactRepo, NewArtifactRow};
 use stroem_db::{create_pool, run_migrations};
 use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
@@ -51,6 +51,14 @@ async fn spawn_pg() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)
 }
 
 async fn build_test_app_with_retention(job_days: u64) -> Result<TestApp> {
+    build_test_app_inner(job_days, true).await
+}
+
+async fn build_test_app_with_retention_no_blob(job_days: u64) -> Result<TestApp> {
+    build_test_app_inner(job_days, false).await
+}
+
+async fn build_test_app_inner(job_days: u64, with_blob: bool) -> Result<TestApp> {
     let (pool, _pg) = spawn_pg().await?;
 
     let tmp = TempDir::new()?;
@@ -101,8 +109,10 @@ async fn build_test_app_with_retention(job_days: u64) -> Result<TestApp> {
 
     let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(artifact_dir));
 
-    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None)
-        .with_artifact_blob(Some(archive.clone()));
+    let mut state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    if with_blob {
+        state = state.with_artifact_blob(Some(archive.clone()));
+    }
     let router = build_router(state.clone(), CancellationToken::new());
 
     Ok(TestApp {
@@ -214,6 +224,71 @@ async fn retention_sweep_deletes_artifacts_then_job() -> Result<()> {
     assert!(
         app.blob.get(&key).await?.is_none(),
         "expected blob deleted post-sweep at {key}"
+    );
+
+    Ok(())
+}
+
+/// Regression: if the artifact_storage backend is missing (e.g. operator
+/// removed it from config mid-deployment), the retention sweep must not
+/// delete `job` or `job_artifact` rows for jobs that have artifacts — that
+/// would orphan the blobs permanently. Instead it should log loudly and
+/// skip the job so an operator can clean up after restoring the backend.
+#[tokio::test(flavor = "multi_thread")]
+async fn retention_sweep_skips_jobs_with_artifacts_when_blob_backend_missing() -> Result<()> {
+    // 1 day retention; job created 2 days ago is eligible for sweep.
+    let app = build_test_app_with_retention_no_blob(1).await?;
+
+    let job_id = create_old_terminal_job(&app.pool, "ws1", "task1", 2).await?;
+
+    // Insert an artifact row directly (no blob backend available, so we cannot
+    // use the upload endpoint — but the row is what we need anyway).
+    let repo = JobArtifactRepo::new(app.pool.clone());
+    repo.upsert(NewArtifactRow {
+        job_id,
+        step_name: "s".to_string(),
+        name: "a.txt".to_string(),
+        content_type: "text/plain".to_string(),
+        size_bytes: 1,
+        storage_key: format!("artifacts/ws1/{job_id}/s/a.txt"),
+    })
+    .await?;
+
+    // Sanity: row exists pre-sweep.
+    assert_eq!(repo.list_for_job(job_id).await?.len(), 1);
+
+    // Run the retention sweep — should refuse to delete this job.
+    stroem_server::recovery::retention_cleanup(&app.state).await;
+
+    // Job row must STILL EXIST.
+    assert!(
+        job_exists(&app.pool, job_id).await?,
+        "expected job row to survive sweep when artifact backend missing"
+    );
+    // Artifact rows must STILL EXIST.
+    let rows_after = repo.list_for_job(job_id).await?;
+    assert_eq!(
+        rows_after.len(),
+        1,
+        "expected artifact rows to survive sweep, got {}",
+        rows_after.len()
+    );
+
+    // Server log for the job must contain a warning about the missing backend.
+    let log_path = std::path::Path::new(&app.state.config.log_storage.local_dir)
+        .join(format!("{job_id}.jsonl"));
+    assert!(
+        log_path.exists(),
+        "expected server log file at {log_path:?}"
+    );
+    let log_contents = std::fs::read_to_string(&log_path)?;
+    assert!(
+        log_contents.contains("artifact_storage"),
+        "expected server log to mention artifact_storage, got: {log_contents}"
+    );
+    assert!(
+        log_contents.contains("_server"),
+        "expected server log to be tagged step=_server, got: {log_contents}"
     );
 
     Ok(())

@@ -371,6 +371,44 @@ pub async fn retention_cleanup(state: &AppState) {
                             );
                             continue;
                         }
+                    } else {
+                        // No blob backend configured. If this job has artifact rows,
+                        // their blobs (wherever they live) are unreachable from this
+                        // process. Deleting the DB rows now would orphan the blobs
+                        // permanently. Keep the rows so an operator can clean up
+                        // after restoring the backend.
+                        let has_artifacts: Result<(bool,), sqlx::Error> = sqlx::query_as(
+                            "SELECT EXISTS(SELECT 1 FROM job_artifact WHERE job_id = $1)",
+                        )
+                        .bind(job_id)
+                        .fetch_one(&state.pool)
+                        .await;
+                        match has_artifacts {
+                            Ok((true,)) => {
+                                tracing::error!(
+                                    "Retention: refusing to delete job {} — it has artifact rows but no artifact_storage backend is configured. Configure artifact_storage to allow cleanup.",
+                                    job_id
+                                );
+                                state
+                                    .append_server_log(
+                                        job_id,
+                                        "Retention sweep refused to delete this job: it has artifact rows but no artifact_storage backend is configured. Configure artifact_storage to allow cleanup.",
+                                    )
+                                    .await;
+                                continue;
+                            }
+                            Ok((false,)) => {
+                                // No artifacts to worry about — fall through.
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Retention: failed to check artifact rows for job {}: {:#}",
+                                    job_id,
+                                    e
+                                );
+                                continue;
+                            }
+                        }
                     }
                     if let Err(e) =
                         stroem_db::repos::job_artifact::JobArtifactRepo::new(state.pool.clone())
