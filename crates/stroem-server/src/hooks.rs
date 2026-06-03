@@ -35,6 +35,7 @@ pub struct HookContext {
     pub completed_at: Option<String>,
     pub duration_secs: Option<f64>,
     pub failed_steps: Vec<FailedStepInfo>,
+    pub artifacts: Vec<HookArtifactMeta>,
 }
 
 /// Info about a single failed step, available in `hook.failed_steps`
@@ -44,6 +45,19 @@ pub struct FailedStepInfo {
     pub action_name: String,
     pub error_message: Option<String>,
     pub continue_on_failure: bool,
+}
+
+/// Metadata for one artifact, available in `hook.artifacts`.
+#[derive(Debug, Serialize)]
+pub struct HookArtifactMeta {
+    pub name: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub step_name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Path under the server origin (e.g. `/api/jobs/{id}/artifacts/{name}`).
+    /// Hook templates can prefix the deployment's public base URL.
+    pub url: String,
 }
 
 /// Fire hooks for a job that has reached a terminal state.
@@ -272,6 +286,25 @@ async fn build_hook_context(
         .await
         .context("Failed to get steps for hook context")?;
 
+    let artifacts = stroem_db::repos::job_artifact::JobArtifactRepo::new(pool.clone())
+        .list_for_job(job.job_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| HookArtifactMeta {
+            url: format!(
+                "/api/jobs/{}/artifacts/{}",
+                job.job_id,
+                url::form_urlencoded::byte_serialize(r.name.as_bytes()).collect::<String>()
+            ),
+            name: r.name,
+            content_type: r.content_type,
+            size_bytes: r.size_bytes,
+            step_name: r.step_name,
+            created_at: r.created_at,
+        })
+        .collect();
+
     let failed_steps: Vec<FailedStepInfo> = steps
         .iter()
         .filter(|s| s.status == StepStatus::Failed.as_ref())
@@ -324,6 +357,7 @@ async fn build_hook_context(
         completed_at: job.completed_at.map(|t| t.to_rfc3339()),
         duration_secs,
         failed_steps,
+        artifacts,
     })
 }
 
@@ -525,6 +559,7 @@ mod tests {
                 error_message: Some("exit code 1".to_string()),
                 continue_on_failure: false,
             }],
+            artifacts: vec![],
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -549,6 +584,7 @@ mod tests {
             completed_at: None,
             duration_secs: Some(42.5),
             failed_steps: vec![],
+            artifacts: vec![],
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -586,6 +622,7 @@ mod tests {
                 error_message: Some(traceback.to_string()),
                 continue_on_failure: false,
             }],
+            artifacts: vec![],
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -618,6 +655,7 @@ mod tests {
             completed_at: None,
             duration_secs: None,
             failed_steps: vec![],
+            artifacts: vec![],
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -663,6 +701,7 @@ mod tests {
             completed_at: None,
             duration_secs: None,
             failed_steps: vec![],
+            artifacts: vec![],
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -681,6 +720,112 @@ mod tests {
 
         let result = render_input_map(&input, &template_context).unwrap();
         assert_eq!(result["url"], "https://chat.googleapis.com/webhook/123");
+    }
+
+    #[test]
+    fn hook_artifacts_template_iteration() {
+        use chrono::{TimeZone, Utc};
+        let ctx = HookContext {
+            workspace: "default".to_string(),
+            task_name: "build".to_string(),
+            job_id: "00000000-0000-0000-0000-000000000123".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "api".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: Some(12.0),
+            failed_steps: vec![],
+            artifacts: vec![
+                HookArtifactMeta {
+                    name: "report.html".to_string(),
+                    content_type: "text/html".to_string(),
+                    size_bytes: 1024,
+                    step_name: "build".to_string(),
+                    created_at: Utc.with_ymd_and_hms(2026, 6, 1, 10, 0, 0).unwrap(),
+                    url: "/api/jobs/00000000-0000-0000-0000-000000000123/artifacts/report.html"
+                        .to_string(),
+                },
+                HookArtifactMeta {
+                    name: "screenshot.png".to_string(),
+                    content_type: "image/png".to_string(),
+                    size_bytes: 4096,
+                    step_name: "test".to_string(),
+                    created_at: Utc.with_ymd_and_hms(2026, 6, 1, 10, 5, 0).unwrap(),
+                    url: "/api/jobs/00000000-0000-0000-0000-000000000123/artifacts/screenshot.png"
+                        .to_string(),
+                },
+            ],
+        };
+
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        let template_context = json!({ "hook": ctx_value });
+
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "text".to_string(),
+            json!("{% for a in hook.artifacts %}{{ a.name }}={{ a.url }};{% endfor %}"),
+        );
+
+        let rendered = render_input_map(&input, &template_context).unwrap();
+        let text = rendered["text"].as_str().unwrap();
+        assert!(
+            text.contains(
+                "report.html=/api/jobs/00000000-0000-0000-0000-000000000123/artifacts/report.html"
+            ),
+            "missing report.html row: {text}"
+        );
+        assert!(
+            text.contains("screenshot.png=/api/jobs/00000000-0000-0000-0000-000000000123/artifacts/screenshot.png"),
+            "missing screenshot.png row: {text}"
+        );
+        assert_eq!(
+            text.matches(';').count(),
+            2,
+            "expected exactly 2 rows: {text}"
+        );
+    }
+
+    #[test]
+    fn hook_artifacts_size_and_step_name_accessible() {
+        use chrono::Utc;
+        let ctx = HookContext {
+            workspace: "default".to_string(),
+            task_name: "build".to_string(),
+            job_id: "00000000-0000-0000-0000-000000000999".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "api".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: None,
+            failed_steps: vec![],
+            artifacts: vec![HookArtifactMeta {
+                name: "dist.zip".to_string(),
+                content_type: "application/zip".to_string(),
+                size_bytes: 12345,
+                step_name: "package".to_string(),
+                created_at: Utc::now(),
+                url: "/api/jobs/00000000-0000-0000-0000-000000000999/artifacts/dist.zip"
+                    .to_string(),
+            }],
+        };
+
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        let template_context = json!({ "hook": ctx_value });
+
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "text".to_string(),
+            json!("{{ hook.artifacts[0].name }}|{{ hook.artifacts[0].size_bytes }}|{{ hook.artifacts[0].step_name }}"),
+        );
+
+        let rendered = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(rendered["text"], "dist.zip|12345|package");
     }
 
     // ─── Workspace-level hook fallback selection tests ───────────────────────
