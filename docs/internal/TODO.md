@@ -772,6 +772,7 @@ Last updated: 2026-05-21.
 - [ ] Circuit breaker for worker→server communication
 - [ ] Retry for final log flush and S3 upload
 - [ ] Extract `stroem-orchestrator` crate (orchestrator, job_creator, job_recovery, hooks, scheduler)
+- [ ] Kube runner artifact mount (sidecar uploader) — `/artifacts/` is not exposed on kube runners today; matches the existing state file-mount gap. Likely needs an init/sidecar that scans the emptyDir after main exits and POSTs to the worker upload endpoint.
 
 ## Review: Unmatched Step Recovery (2026-03-05)
 

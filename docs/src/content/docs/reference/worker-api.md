@@ -175,6 +175,49 @@ Appends structured log lines to the job's JSONL log file. Called periodically (~
 
 The server appends each line as a JSONL entry and broadcasts via WebSocket for live streaming.
 
+## Upload Step Artifact
+
+```
+POST /worker/jobs/{id}/steps/{step}/artifacts/{name}
+```
+
+Uploads a single file produced by a successful step. The worker scans `/artifacts/` after the step exits and POSTs each file here. `name` is the file's path relative to `/artifacts/` and may contain `/` (greedy match — `reports/q1.html` is one upload).
+
+**Request:**
+
+- `Content-Type` — the type the worker sniffed via `infer` (defaults to `application/octet-stream`).
+- Body — raw file bytes.
+
+**Response:**
+
+```json
+{
+  "id": "0190f...",
+  "name": "report.html",
+  "size_bytes": 12453,
+  "content_type": "text/html"
+}
+```
+
+| Status | Description |
+|--------|-------------|
+| `201` | Artifact stored. Repeat uploads with the same `name` replace the existing row (last writer wins). |
+| `404` | `job` row doesn't exist. |
+| `413` | Per-file or per-job size cap exceeded (`artifact_storage.max_file_bytes` / `max_job_bytes`). |
+
+## Delete Step Artifacts
+
+```
+DELETE /worker/jobs/{id}/steps/{step}/artifacts
+```
+
+Removes every artifact uploaded for `step` on this job — both the `job_artifact` rows and the underlying blobs. The worker calls this after an upload attempt fails terminally, so a partial upload doesn't leave orphan blobs from a step that gets demoted to `failed`.
+
+| Status | Description |
+|--------|-------------|
+| `204` | Cleared (also returned if nothing was there). |
+| `404` | `job` row doesn't exist. |
+
 ## Download Workspace Tarball
 
 ```

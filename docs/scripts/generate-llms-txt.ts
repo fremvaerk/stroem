@@ -119,6 +119,8 @@ const sections: Section[] = [
     desc: "LLM calls as workflow steps (19 providers, structured output, tools)", group: "Guides" },
   { file: "guides/task-state.md", title: "Task State Snapshots", slug: "task-state",
     desc: "Cross-run state persistence: STATE:, GLOBAL_STATE:, /state mount", group: "Guides" },
+  { file: "guides/artifacts.md", title: "Artifacts", slug: "artifacts",
+    desc: "Per-job files via /artifacts/: limits, MIME sniffing, UI/CLI/MCP download", group: "Guides" },
   { file: "guides/mcp.md", title: "MCP Integration", slug: "mcp",
     desc: "Model Context Protocol server for exposing Strøm to AI agents", group: "Guides" },
   { file: "reference/workflow-yaml.md", title: "Workflow YAML Reference", slug: "workflow-yaml",

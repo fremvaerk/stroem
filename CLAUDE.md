@@ -227,6 +227,18 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - Same `StateArchive` backend and retention model as task state
 - Concurrent writes: last writer wins (immutable snapshots, latest by `created_at`)
 
+### Artifacts
+- Per-job opaque files produced by successful steps. Convention dir `/artifacts/` (or `$ARTIFACTS_DIR`); recursive scan, dotfiles included, symlinks skipped + warned.
+- Per-file 100 MiB cap, per-job 1 GiB cap, both configurable under `artifact_storage:`.
+- Success-only upload: failed/cancelled steps discard `/artifacts/`. Upload retried 3× with backoff; terminal failure fails the step AND cleans up already-uploaded blobs for that step.
+- Per-job namespace, `UNIQUE(job_id, name)`, last-writer-wins on collision (for_each authors must template filenames).
+- Worker sniffs Content-Type via `infer` crate; server stores verbatim, applies `X-Content-Type-Options: nosniff` and inline-when-safe `Content-Disposition` (images, PDF, text/plain, text/markdown). HTML/SVG/XML/JSON forced to attachment.
+- Storage via `BlobArchive` trait (unified backend for logs, state, artifacts). S3 + Local impls; `put_stream`/`get_stream` overrides for memory-flat artifact transfers.
+- Retention: cascades with `job` row. FK `RESTRICT` + explicit two-phase delete (blob → row).
+- Runner support: shell, `script:docker`, `type:docker`. Kube modes deferred (same gap as state file-mount).
+- Hooks: `hook.artifacts` is a list of `{name, content_type, size_bytes, url, step_name, created_at}`.
+- ACL: `View` on the task. No new permission level.
+
 ### Retry Mechanism
 - **Two layers**: step/action retry (in-place) and task retry (new job).
 - **Step retry**: `FlowStep.retry: Option<RetryConfig>` — retries the individual step on failure. In-place: same `job_step` row reset to `ready` with `retry_at` backoff timestamp. Previous attempt errors stored in `retry_history` JSONB array.

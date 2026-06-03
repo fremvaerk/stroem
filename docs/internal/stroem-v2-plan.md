@@ -850,12 +850,16 @@ When a task runs in distributed mode, its steps may execute on different workers
 - Cleanup on job completion (configurable delay)
 - Solves: Large artifact sharing (1GB+) across workers with minimal latency
 
-**6c. Built-in Artifact Storage** — Strøm server provides HTTP-based artifact storage (no external infra).
-- Server endpoints: `PUT/GET/DELETE /api/jobs/{id}/artifacts/{path...}`
-- Server config: `artifacts.path` (local dir) + optional `artifacts.s3` backend
-- Worker: inject `stroem-artifacts` helper CLI (push/pull commands) or use env vars (`STROEM_ARTIFACTS_URL`, `STROEM_ARTIFACTS_TOKEN`)
-- TTL-based cleanup after job completion
-- Solves: Zero-dependency artifact sharing for small-to-medium files
+**6c. Built-in Artifact Storage** — **DONE** (per-job outputs, not cross-step sharing).
+- Workers scan `/artifacts/` (or `$ARTIFACTS_DIR`) after a step succeeds and POST each file to `POST /worker/jobs/{id}/steps/{step}/artifacts/{name}`.
+- Server endpoints: `GET /api/jobs/{id}/artifacts` (list), `GET /api/jobs/{id}/artifacts/{name}` (download with inline-when-safe `Content-Disposition` + `nosniff`).
+- Storage via unified `BlobArchive` trait (S3 + Local). `artifact_storage:` config inherits `log_storage` backend by default; can override `archive`, `prefix`, `max_file_bytes` (100 MiB), `max_job_bytes` (1 GiB).
+- Per-job namespace (`UNIQUE(job_id, name)`, last-writer-wins). Worker sniffs Content-Type via `infer`; HTML/SVG/XML/JSON forced to attachment.
+- Retention cascades with the `job` row (FK `RESTRICT` + two-phase delete).
+- Hook context: `hook.artifacts: [{name, content_type, size_bytes, url, step_name, created_at}]`.
+- CLI: `stroem-api artifacts list/download`. MCP: `list_artifacts` + `get_artifact` (text-only, 1 MB cap).
+- Runners: shell, `script:docker`, `type:docker`. Kube modes deferred (same gap as state file-mount; see TODO).
+- Cross-worker sharing between steps of the same job (6b shared-storage goal) is **not** addressed — artifacts are per-job outputs, surfaced after completion.
 
 ---
 

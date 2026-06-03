@@ -389,6 +389,51 @@ Opens a WebSocket connection for real-time log streaming. Sends existing content
 websocat ws://localhost:8080/api/jobs/JOB_ID/logs/stream
 ```
 
+## List Job Artifacts
+
+```
+GET /api/jobs/{id}/artifacts
+```
+
+Lists files produced by successful steps in this job (anything the worker uploaded from `/artifacts/`). Requires `View` permission on the task.
+
+**Response:**
+
+```json
+[
+  {
+    "name": "report.html",
+    "content_type": "text/html",
+    "size_bytes": 12453,
+    "step_name": "build",
+    "created_at": "2026-06-01T10:00:00Z",
+    "url": "http://localhost:8080/api/jobs/JOB_ID/artifacts/report.html"
+  }
+]
+```
+
+Empty array when no artifacts were produced or the job is still running.
+
+## Download Job Artifact
+
+```
+GET /api/jobs/{id}/artifacts/{name}
+```
+
+Streams the artifact body with the Content-Type recorded at upload time. `name` may contain `/` (artifacts produced under sub-directories like `reports/q1.html` keep the slash). Requires `View` permission on the task.
+
+**Response headers:**
+
+- `Content-Type` — the type recorded when the worker uploaded the file (sniffed via `infer`).
+- `Content-Length` — exact byte count.
+- `X-Content-Type-Options: nosniff` — blocks browsers from second-guessing the type.
+- `Content-Disposition` — `inline; filename="..."` for safe types (PNG, JPEG, GIF, WebP, PDF, `text/plain`, `text/markdown`); `attachment; filename="..."` for everything else (including HTML, SVG, XML, JSON — to keep the host origin XSS-safe).
+
+**Errors:**
+
+- `404 Not Found` — job or artifact name doesn't exist.
+- `403 Forbidden` — caller lacks `View` permission on the task.
+
 ## List Users
 
 ```
