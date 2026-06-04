@@ -29,6 +29,7 @@ services:
       - ./docker/server-config.yaml:/etc/stroem/server-config.yaml:ro
       - logs:/var/stroem/logs
       - state:/var/stroem/state
+      - artifacts:/var/stroem/artifacts
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,3 +61,4 @@ volumes:
   pgdata:
   logs:
   state:
+  artifacts:

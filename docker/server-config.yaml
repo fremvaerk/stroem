@@ -13,6 +13,12 @@ state_storage:
     type: local
     path: /var/stroem/state
 
+artifact_storage:
+  prefix: "artifacts/"
+  archive:
+    type: local
+    path: /var/stroem/artifacts
+
 workspaces:
   default:
     type: folder
