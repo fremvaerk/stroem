@@ -533,7 +533,7 @@ impl StromMcpHandler {
         // ACL: Deny → 404
         check_job_acl(self, &job).await?;
 
-        let is_terminal = matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
+        let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
         let meta = JobLogMeta {
             workspace: job.workspace,
             task_name: job.task_name,

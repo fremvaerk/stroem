@@ -31,8 +31,11 @@ pub struct JobLogMeta {
 pub(crate) fn merge_jsonl_logs(a: &str, b: &str) -> String {
     use std::collections::HashSet;
 
-    let mut seen = HashSet::new();
-    let mut lines: Vec<&str> = Vec::with_capacity(a.lines().count() + b.lines().count());
+    // Cheap allocation hint without a double-scan of inputs: average jsonl
+    // line is ~150 bytes, so estimate line count from total bytes.
+    let estimated_lines = (a.len() + b.len()) / 80 + 1;
+    let mut seen = HashSet::with_capacity(estimated_lines);
+    let mut lines: Vec<&str> = Vec::with_capacity(estimated_lines);
     for line in a.lines().chain(b.lines()) {
         if line.is_empty() {
             continue;
@@ -322,15 +325,20 @@ impl LogStorage {
     /// Get the full log contents for a job.
     ///
     /// Strategy:
-    /// * If `is_terminal` is `true` AND an archive is configured, fetch both
-    ///   the local file (if any) and the archive blob, then return their
+    /// * If `is_terminal` is `true` AND an archive is configured, fetch the
+    ///   archive blob in addition to the local file and return their
     ///   line-level union sorted by timestamp. This recovers chunks that were
     ///   lost in HA cross-replica mirroring: each replica's local file may
     ///   only hold the subset of chunks worker calls happened to route there,
     ///   so for terminal jobs the union of (local on this replica) + (archive
     ///   uploaded by the orchestrating replica) is the most complete view.
-    /// * Otherwise: local `.jsonl` → legacy `.log` → archive, returning the
-    ///   first source that exists.
+    /// * If the archive read errors transiently (e.g. S3 5xx), fall through
+    ///   to local-only rather than 500ing the caller — the local file alone
+    ///   is strictly better than nothing.
+    /// * Otherwise: local `.jsonl` → legacy `.log`, returning the first that
+    ///   exists. Archive is consulted only for terminal jobs because the
+    ///   upload happens at terminal time; pre-terminal archive reads are
+    ///   guaranteed 404s.
     pub async fn get_log(
         &self,
         job_id: Uuid,
@@ -339,62 +347,77 @@ impl LogStorage {
     ) -> Result<String> {
         let local_content = self.read_local_log(job_id).await?;
 
-        if is_terminal && self.archive.is_some() {
-            if let Some(archive_content) = self.get_log_from_archive(job_id, meta).await? {
-                return Ok(merge_jsonl_logs(
-                    local_content.as_deref().unwrap_or(""),
-                    &archive_content,
-                ));
+        // Single archive read regardless of which downstream branch consumes
+        // it — eliminates the previous double-fetch on the "terminal + key
+        // missing + local missing" path. Archive errors degrade to None +
+        // warning rather than propagating so the local-only fallback works
+        // when S3 has a transient blip.
+        let archive_content = if is_terminal && self.archive.is_some() {
+            match self.get_log_from_archive(job_id, meta).await {
+                Ok(opt) => opt,
+                Err(e) => {
+                    tracing::warn!(
+                        "archive read failed for terminal job {}, returning local-only: {:#}",
+                        job_id,
+                        e
+                    );
+                    None
+                }
             }
-        }
+        } else {
+            None
+        };
 
-        if let Some(content) = local_content {
-            return Ok(content);
+        match (local_content, archive_content) {
+            (local, Some(archive)) => {
+                Ok(merge_jsonl_logs(local.as_deref().unwrap_or(""), &archive))
+            }
+            (Some(local), None) => Ok(local),
+            (None, None) => Ok(String::new()),
         }
-
-        // No local file. Pre-terminal: nothing to show. Terminal without
-        // archive configured: also nothing.
-        if let Some(content) = self.get_log_from_archive(job_id, meta).await? {
-            return Ok(content);
-        }
-
-        Ok(String::new())
     }
 
     /// Read the local `.jsonl` (preferred) or legacy `.log` if either exists.
-    /// Returns `None` when neither file is present.
+    /// Returns `None` when neither file is present. Uses error-kind detection
+    /// rather than `path.exists()` so a TOCTOU race with `delete_local_log`
+    /// (which can fire during retention sweeps mid-request) doesn't surface
+    /// as a 500 — a vanished file becomes `Ok(None)` and the caller falls
+    /// through to the archive.
     async fn read_local_log(&self, job_id: Uuid) -> Result<Option<String>> {
-        let path = self.log_path(job_id);
-        if path.exists() {
-            return Ok(Some(Self::read_file(&path).await?));
+        if let Some(content) = Self::read_file_if_present(&self.log_path(job_id)).await? {
+            return Ok(Some(content));
         }
-        let legacy_path = self.legacy_log_path(job_id);
-        if legacy_path.exists() {
-            return Ok(Some(Self::read_file(&legacy_path).await?));
-        }
-        Ok(None)
+        Self::read_file_if_present(&self.legacy_log_path(job_id)).await
     }
 
-    /// Read file contents as a UTF-8 string.
-    async fn read_file(path: &Path) -> Result<String> {
-        let mut file = fs::File::open(path)
-            .await
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+    /// `Some(content)` if the file exists and is readable, `None` if it does
+    /// not exist (the only error kind translated to None). All other I/O
+    /// errors — permission denied, mid-read I/O failure, invalid UTF-8 —
+    /// propagate.
+    async fn read_file_if_present(path: &Path) -> Result<Option<String>> {
+        let mut file = match fs::File::open(path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to open log file: {path:?}"));
+            }
+        };
 
         let mut contents = String::new();
         file.read_to_string(&mut contents)
             .await
             .context("Failed to read log file")?;
 
-        Ok(contents)
+        Ok(Some(contents))
     }
 
     /// Get log lines for a specific step within a job.
     ///
     /// Strategy mirrors [`Self::get_log`]: for terminal jobs with an archive
     /// configured, merge the step-filtered local and archive views to recover
-    /// chunks lost in HA mirroring. Otherwise return the first source that
-    /// exists (local → legacy → archive).
+    /// chunks lost in HA mirroring. Archive errors degrade to local-only
+    /// rather than 500ing the caller. Pre-terminal jobs never touch the
+    /// archive (no upload exists yet).
     pub async fn get_step_log(
         &self,
         job_id: Uuid,
@@ -402,49 +425,68 @@ impl LogStorage {
         meta: &JobLogMeta,
         is_terminal: bool,
     ) -> Result<String> {
-        let path = self.log_path(job_id);
-        let legacy_path = self.legacy_log_path(job_id);
-        let local = if path.exists() {
-            Some(self.filter_step_from_file(&path, step_name).await?)
-        } else if legacy_path.exists() {
-            Some(self.filter_step_from_file(&legacy_path, step_name).await?)
+        let local = self.read_local_step_log(job_id, step_name).await?;
+
+        let archive_content = if is_terminal && self.archive.is_some() {
+            match self
+                .get_step_log_from_archive(job_id, step_name, meta)
+                .await
+            {
+                Ok(opt) => opt,
+                Err(e) => {
+                    tracing::warn!(
+                        "archive read failed for terminal job {} step '{}', returning local-only: {:#}",
+                        job_id,
+                        step_name,
+                        e
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
-        if is_terminal && self.archive.is_some() {
-            if let Some(archive_content) = self
-                .get_step_log_from_archive(job_id, step_name, meta)
-                .await?
-            {
-                return Ok(merge_jsonl_logs(
-                    local.as_deref().unwrap_or(""),
-                    &archive_content,
-                ));
+        match (local, archive_content) {
+            (local, Some(archive)) => {
+                Ok(merge_jsonl_logs(local.as_deref().unwrap_or(""), &archive))
             }
+            (Some(local), None) => Ok(local),
+            (None, None) => Ok(String::new()),
         }
-
-        if let Some(content) = local {
-            return Ok(content);
-        }
-
-        if let Some(content) = self
-            .get_step_log_from_archive(job_id, step_name, meta)
-            .await?
-        {
-            return Ok(content);
-        }
-
-        Ok(String::new())
     }
 
-    /// Read a local file line-by-line, collecting only lines matching `step_name`.
-    async fn filter_step_from_file(&self, path: &Path, step_name: &str) -> Result<String> {
+    /// Filter local `.jsonl` (preferred) or legacy `.log` for a step's lines.
+    /// Returns `None` when neither file is present. Same TOCTOU-safe error
+    /// handling as `read_local_log`.
+    async fn read_local_step_log(&self, job_id: Uuid, step_name: &str) -> Result<Option<String>> {
+        let path = self.log_path(job_id);
+        if let Some(c) = self
+            .filter_step_from_file_if_present(&path, step_name)
+            .await?
+        {
+            return Ok(Some(c));
+        }
+        let legacy_path = self.legacy_log_path(job_id);
+        self.filter_step_from_file_if_present(&legacy_path, step_name)
+            .await
+    }
+
+    async fn filter_step_from_file_if_present(
+        &self,
+        path: &Path,
+        step_name: &str,
+    ) -> Result<Option<String>> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let file = fs::File::open(path)
-            .await
-            .with_context(|| format!("Failed to open log file: {:?}", path))?;
+        let file = match fs::File::open(path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to open log file: {path:?}"));
+            }
+        };
+
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
         let mut result = String::new();
@@ -456,7 +498,7 @@ impl LogStorage {
             }
         }
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     /// Check if a JSONL line belongs to the given step.
@@ -546,13 +588,21 @@ mod tests {
     /// In-memory archive backend for testing.
     struct MockArchive {
         store: TokioMutex<HashMap<String, (String, Vec<u8>)>>,
+        get_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl MockArchive {
         fn new() -> Self {
             Self {
                 store: TokioMutex::new(HashMap::new()),
+                get_calls: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+
+        /// How many times `get()` has been called on this mock — used to
+        /// assert the single-fetch behavior of the merge path.
+        async fn get_call_count(&self) -> usize {
+            self.get_calls.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -566,6 +616,8 @@ mod tests {
             Ok(())
         }
         async fn get(&self, key: &str) -> Result<Option<crate::blob_storage::Blob>> {
+            self.get_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self
                 .store
                 .lock()
@@ -1194,8 +1246,10 @@ mod tests {
         tokio::fs::remove_file(&local_path).await.unwrap();
         assert!(!local_path.exists());
 
-        // get_log should fall back to archive
-        let log = storage.get_log(job_id, &meta, false).await.unwrap();
+        // get_log should fall back to archive. Pass is_terminal=true because
+        // archive is only consulted for terminal jobs (pre-terminal archive
+        // reads are guaranteed 404s — the upload happens at terminal time).
+        let log = storage.get_log(job_id, &meta, true).await.unwrap();
         assert_eq!(log, content);
     }
 
@@ -1228,15 +1282,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Step log should filter from archived data
+        // Step log should filter from archived data. is_terminal=true
+        // because archive is gated to terminal jobs (see test_archive_read_fallback).
         let build_logs = storage
-            .get_step_log(job_id, "build", &meta, false)
+            .get_step_log(job_id, "build", &meta, true)
             .await
             .unwrap();
         assert_eq!(build_logs, format!("{}\n", build_line));
 
         let test_logs = storage
-            .get_step_log(job_id, "test", &meta, false)
+            .get_step_log(job_id, "test", &meta, true)
             .await
             .unwrap();
         assert_eq!(test_logs, format!("{}\n", test_line));
@@ -1327,7 +1382,11 @@ mod tests {
     // ─── Corrupt archive data ────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_get_log_returns_error_on_corrupt_archive_data() {
+    async fn test_get_log_corrupt_archive_degrades_to_local_only() {
+        // Updated contract (was: "returns Err on corrupt archive"): a
+        // corrupt archive blob should NOT 500 the caller — the local file
+        // is intact and serving it is strictly better than an error. The
+        // archive failure is logged via tracing::warn! instead.
         let temp_dir = TempDir::new().unwrap();
         let mock = Arc::new(MockArchive::new());
         let storage = LogStorage::new(temp_dir.path())
@@ -1342,6 +1401,11 @@ mod tests {
                 .with_timezone(&chrono::Utc),
         };
 
+        // Write something locally so we can verify it survives the
+        // corrupt-archive failure.
+        let local = format!("{}\n", jsonl_line("build", "stdout", "local-bytes"));
+        storage.append_log(job_id, &local).await.unwrap();
+
         // Insert non-gzip bytes directly into the mock archive
         let key = archive_key("", job_id, &meta);
         mock.store.lock().await.insert(
@@ -1352,9 +1416,13 @@ mod tests {
             ),
         );
 
-        // get_log should return an error (not an empty string)
-        let result = storage.get_log(job_id, &meta, false).await;
-        assert!(result.is_err(), "corrupt gzip data should produce an error");
+        // is_terminal=true to exercise the merge path. Corrupt archive
+        // must not propagate — local content is returned instead.
+        let result = storage
+            .get_log(job_id, &meta, true)
+            .await
+            .expect("corrupt archive must degrade to local-only, not error");
+        assert!(result.contains("local-bytes"));
     }
 
     // ─── LocalBlobArchive end-to-end wired into LogStorage ──────────────
@@ -1391,13 +1459,14 @@ mod tests {
         storage.delete_local_log(job_id).await;
         assert!(!storage.log_path(job_id).exists());
 
-        // Read should fall back to local archive
-        let log = storage.get_log(job_id, &meta, false).await.unwrap();
+        // Read should fall back to local archive. is_terminal=true because
+        // archive is only consulted for terminal jobs.
+        let log = storage.get_log(job_id, &meta, true).await.unwrap();
         assert_eq!(log, content);
 
         // Step log should also work from archive
         let step_log = storage
-            .get_step_log(job_id, "build", &meta, false)
+            .get_step_log(job_id, "build", &meta, true)
             .await
             .unwrap();
         assert_eq!(step_log, content);
@@ -1537,6 +1606,26 @@ mod tests {
     }
 
     #[test]
+    fn merge_jsonl_logs_all_lines_without_ts_preserves_input_order() {
+        // Tie-breaker for the case where every line lacks `"ts"`. Rust's
+        // `sort_by` is stable, so the insertion order (a then b) must
+        // survive. Documents the contract; locks in current behaviour.
+        let a = "{\"step\":\"a1\"}\n{\"step\":\"a2\"}\n";
+        let b = "{\"step\":\"b1\"}\n{\"step\":\"b2\"}\n";
+        let merged = merge_jsonl_logs(a, b);
+        let lines: Vec<&str> = merged.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                r#"{"step":"a1"}"#,
+                r#"{"step":"a2"}"#,
+                r#"{"step":"b1"}"#,
+                r#"{"step":"b2"}"#,
+            ]
+        );
+    }
+
+    #[test]
     fn extract_ts_pulls_top_level_field() {
         let line = ts_line("2026-06-10T05:00:01Z", "build", "hello");
         assert_eq!(extract_ts(&line), Some("2026-06-10T05:00:01Z"));
@@ -1544,6 +1633,22 @@ mod tests {
         assert_eq!(extract_ts(r#"{"step":"x"}"#), None);
         // Malformed: closing quote missing → None (not a panic).
         assert_eq!(extract_ts(r#"{"ts":"unclosed"#), None);
+    }
+
+    #[test]
+    fn extract_ts_finds_first_ts_in_serde_order() {
+        // `serde_json::to_string(&LogEntry)` emits fields in struct
+        // declaration order, putting "ts" first. So the fast-path scanner
+        // sees the real ts before any literal "ts" substring embedded in
+        // a later field like `line`. This locks that in: if `LogEntry` is
+        // ever reordered to put `line` first, this test catches it.
+        let line = serde_json::json!({
+            "ts": "2026-06-10T05:00:01Z",
+            "step": "s",
+            "line": r#"user wrote: {"ts":"fake-2026"}"#
+        })
+        .to_string();
+        assert_eq!(extract_ts(&line), Some("2026-06-10T05:00:01Z"));
     }
 
     // ─── get_log / get_step_log merge behavior for terminal jobs ──────────
@@ -1640,6 +1745,160 @@ mod tests {
 
         let term = storage.get_log(job_id, &meta, true).await.unwrap();
         assert!(term.contains("only-archive"));
+    }
+
+    #[tokio::test]
+    async fn get_log_terminal_archive_returns_none_serves_local_only() {
+        // Terminal job, archive configured, but the key is missing from the
+        // archive (e.g. upload genuinely never happened). Local must still
+        // be served — and there must be only ONE archive fetch attempt
+        // (previously this path issued two GETs).
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "only-local"));
+        storage.append_log(job_id, &local).await.unwrap();
+        // Mock archive is intentionally empty.
+
+        let result = storage.get_log(job_id, &meta, true).await.unwrap();
+        assert!(result.contains("only-local"));
+        assert_eq!(
+            mock.get_call_count().await,
+            1,
+            "archive should be fetched at most once"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_log_terminal_archive_error_falls_back_to_local() {
+        // Critical regression test: a transient archive failure on a
+        // terminal job must NOT 500 the caller — the local file is intact
+        // and serving it is strictly better than an error. Pre-fix, the
+        // `?` on the archive fetch bubbled the error out.
+        let tmp = TempDir::new().unwrap();
+        let archive = Arc::new(ErroringArchive);
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&archive) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        let local = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "only-local"));
+        storage.append_log(job_id, &local).await.unwrap();
+
+        let result = storage
+            .get_log(job_id, &meta, true)
+            .await
+            .expect("transient archive error must not propagate");
+        assert!(result.contains("only-local"));
+    }
+
+    #[tokio::test]
+    async fn get_step_log_terminal_archive_returns_none_serves_local_only() {
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        let local = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:01Z", "build", "only-local")
+        );
+        storage.append_log(job_id, &local).await.unwrap();
+
+        let result = storage
+            .get_step_log(job_id, "build", &meta, true)
+            .await
+            .unwrap();
+        assert!(result.contains("only-local"));
+    }
+
+    #[tokio::test]
+    async fn get_step_log_terminal_archive_error_falls_back_to_local() {
+        let tmp = TempDir::new().unwrap();
+        let archive = Arc::new(ErroringArchive);
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&archive) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        let local = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:01Z", "build", "only-local")
+        );
+        storage.append_log(job_id, &local).await.unwrap();
+
+        let result = storage
+            .get_step_log(job_id, "build", &meta, true)
+            .await
+            .expect("transient archive error must not propagate");
+        assert!(result.contains("only-local"));
+    }
+
+    #[tokio::test]
+    async fn get_step_log_terminal_merges_legacy_log_with_archive() {
+        // Legacy `.log` file on this replica plus archive content from the
+        // orchestrator — confirms the legacy fallback participates in the
+        // merge path. Without this test, a deployment still serving from
+        // pre-jsonl logs would silently miss the merge.
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        // Write the legacy .log file directly (not via append_log, which
+        // always writes .jsonl). filter_step_from_file_if_present sees it
+        // because the .jsonl path doesn't exist.
+        let legacy_path = tmp.path().join(format!("{job_id}.log"));
+        tokio::fs::create_dir_all(tmp.path()).await.unwrap();
+        let legacy_line = ts_line("2026-06-10T05:00:01Z", "build", "from-legacy");
+        tokio::fs::write(&legacy_path, format!("{legacy_line}\n"))
+            .await
+            .unwrap();
+
+        let archive = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:02Z", "build", "from-archive")
+        );
+        let key = archive_key("", job_id, &meta);
+        mock.put(&key, "application/gzip", Bytes::from(gzip(&archive)))
+            .await
+            .unwrap();
+
+        let result = storage
+            .get_step_log(job_id, "build", &meta, true)
+            .await
+            .unwrap();
+        assert!(result.contains("from-legacy"));
+        assert!(result.contains("from-archive"));
+    }
+
+    /// `BlobArchive` impl that always returns `Err` for `get`. Used to test
+    /// that transient archive failures degrade to local-only rather than
+    /// propagating as 5xx.
+    struct ErroringArchive;
+
+    #[async_trait::async_trait]
+    impl BlobArchive for ErroringArchive {
+        async fn put(&self, _: &str, _: &str, _: Bytes) -> Result<()> {
+            Ok(())
+        }
+        async fn get(&self, _: &str) -> Result<Option<crate::blob_storage::Blob>> {
+            anyhow::bail!("simulated archive failure")
+        }
+        async fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_prefix(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn gzip(s: &str) -> Vec<u8> {

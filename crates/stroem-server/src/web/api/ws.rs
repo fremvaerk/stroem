@@ -134,8 +134,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, sk
     if !skip_backfill {
         let (meta, is_terminal) = match JobRepo::get(&state.pool, job_id).await {
             Ok(Some(job)) => {
-                let is_terminal =
-                    matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
+                let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
                 (
                     JobLogMeta {
                         workspace: job.workspace,

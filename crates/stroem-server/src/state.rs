@@ -314,6 +314,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_server_log_writes_exactly_one_entry_no_recursion() {
+        // Lock in the contract that append_server_log produces exactly one
+        // JSONL entry per call. The internal publish_log_chunk discards its
+        // PublishLogResult via `let _ = ...` precisely to break the cycle
+        // that would otherwise form if a publish failure surfaced via
+        // another append_server_log call. If a future refactor reintroduces
+        // that cycle (e.g. by calling append_server_log from inside the
+        // publish failure path), this test catches it via line count.
+        let temp_dir = TempDir::new().unwrap();
+        let state = test_state(temp_dir.path());
+        let job_id = Uuid::new_v4();
+
+        state.append_server_log(job_id, "first failure").await;
+        state.append_server_log(job_id, "second failure").await;
+
+        let meta = crate::log_storage::JobLogMeta {
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let log = state
+            .log_storage
+            .get_log(job_id, &meta, false)
+            .await
+            .unwrap();
+        let line_count = log.lines().filter(|l| !l.is_empty()).count();
+        assert_eq!(
+            line_count, 2,
+            "two append_server_log calls must produce exactly two JSONL entries (got {line_count})"
+        );
+    }
+
+    #[tokio::test]
     async fn test_append_server_log_broadcasts() {
         let temp_dir = TempDir::new().unwrap();
         let state = test_state(temp_dir.path());

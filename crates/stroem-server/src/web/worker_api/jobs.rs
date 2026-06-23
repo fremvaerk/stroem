@@ -769,21 +769,11 @@ pub async fn append_log(
     // leave peers with partial files until the post-terminal archive
     // upload reconciles them.
     if publish_result.failed_segments > 0 {
-        let last = publish_result
-            .last_error
-            .as_deref()
-            .unwrap_or("unknown error");
-        state
-            .append_server_log(
-                job_id,
-                &format!(
-                    "[ha] cross-replica log mirror failed for {} segment(s); \
-                     peer replicas may serve partial logs until archive upload at job terminal. \
-                     Last error: {}",
-                    publish_result.failed_segments, last
-                ),
-            )
-            .await;
+        let msg = format_ha_mirror_failure_message(
+            publish_result.failed_segments,
+            publish_result.last_error.as_deref(),
+        );
+        state.append_server_log(job_id, &msg).await;
     }
 
     Ok(Json(json!({"status": "ok"})))
@@ -959,6 +949,36 @@ pub async fn agent_save_state(
         .context("save agent state")?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// Render the `_server` log line used to surface cross-replica NOTIFY
+/// failures into the job's UI log. Extracted from `append_log` so the
+/// formatting + truncation contract is independently testable. The
+/// truncation keeps the message well under [`NOTIFY_MAX_BYTES`] (3500)
+/// after JSON escape inflation so the surfacing message itself doesn't
+/// risk being dropped on its own publish.
+fn format_ha_mirror_failure_message(failed_segments: usize, last_error: Option<&str>) -> String {
+    const MAX_ERROR_LEN: usize = 500;
+    let last_truncated = last_error
+        .map(|s| {
+            if s.len() > MAX_ERROR_LEN {
+                // Snap to the nearest preceding char boundary so the
+                // truncation never splits a multi-byte UTF-8 sequence.
+                let mut cut = MAX_ERROR_LEN;
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!("{}… (truncated)", &s[..cut])
+            } else {
+                s.to_string()
+            }
+        })
+        .unwrap_or_else(|| "unknown error".to_string());
+    format!(
+        "[ha] cross-replica log mirror failed for {failed_segments} segment(s); \
+         peer replicas may serve partial logs until archive upload at job terminal. \
+         Last error: {last_truncated}"
+    )
 }
 
 #[cfg(test)]
@@ -1237,5 +1257,48 @@ mod tests {
             json.get("env_overrides").is_none(),
             "env_overrides must not be present as a top-level field"
         );
+    }
+
+    // ─── HA mirror failure surfacing ─────────────────────────────────────
+
+    #[test]
+    fn format_ha_mirror_failure_includes_count_and_error() {
+        let msg = format_ha_mirror_failure_message(3, Some("pg_notify: payload too long"));
+        assert!(msg.contains("3 segment(s)"));
+        assert!(msg.contains("pg_notify: payload too long"));
+        assert!(msg.starts_with("[ha]"));
+    }
+
+    #[test]
+    fn format_ha_mirror_failure_handles_missing_error() {
+        let msg = format_ha_mirror_failure_message(1, None);
+        assert!(msg.contains("1 segment(s)"));
+        assert!(msg.contains("unknown error"));
+    }
+
+    #[test]
+    fn format_ha_mirror_failure_truncates_long_error() {
+        let huge = "x".repeat(2000);
+        let msg = format_ha_mirror_failure_message(1, Some(&huge));
+        assert!(msg.contains("(truncated)"));
+        // Bounded length: the static template (~190 chars) + the 500-char
+        // truncated error + the truncation marker — total well under 1 KB.
+        assert!(
+            msg.len() < 800,
+            "message must stay short enough to fit in NOTIFY_MAX_BYTES even after JSON escape inflation, got {}",
+            msg.len()
+        );
+    }
+
+    #[test]
+    fn format_ha_mirror_failure_truncates_on_utf8_boundary() {
+        // Multibyte char near the 500-byte truncation point — the cut must
+        // snap backward to the preceding char boundary to avoid a panic on
+        // String slicing of a partial UTF-8 sequence.
+        let mut s = "a".repeat(498);
+        s.push_str("∞∞∞∞∞"); // each ∞ is 3 bytes
+        let msg = format_ha_mirror_failure_message(1, Some(&s));
+        // Must not panic, and the message must contain the truncation marker.
+        assert!(msg.contains("(truncated)"));
     }
 }

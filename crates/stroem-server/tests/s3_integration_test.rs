@@ -131,8 +131,10 @@ async fn test_s3_read_fallback_when_local_missing() -> Result<()> {
     tokio::fs::remove_file(&local_path).await?;
     assert!(!local_path.exists());
 
-    // get_log should fall back to S3
-    let log = storage.get_log(job_id, &meta, false).await?;
+    // get_log should fall back to S3 — is_terminal=true because the
+    // archive is only consulted for terminal jobs (pre-terminal archive
+    // reads are guaranteed 404s — the upload happens at terminal time).
+    let log = storage.get_log(job_id, &meta, true).await?;
     assert_eq!(log, content);
 
     Ok(())
@@ -243,11 +245,12 @@ async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
     let local_path = temp_dir.path().join(format!("{}.jsonl", job_id));
     tokio::fs::remove_file(&local_path).await?;
 
-    // get_step_log should filter from S3 content
-    let build_logs = storage.get_step_log(job_id, "build", &meta, false).await?;
+    // get_step_log should filter from S3 content (is_terminal=true so the
+    // archive is consulted).
+    let build_logs = storage.get_step_log(job_id, "build", &meta, true).await?;
     assert_eq!(build_logs, format!("{}\n", build_line));
 
-    let test_logs = storage.get_step_log(job_id, "test", &meta, false).await?;
+    let test_logs = storage.get_step_log(job_id, "test", &meta, true).await?;
     assert_eq!(test_logs, format!("{}\n", test_line));
 
     Ok(())

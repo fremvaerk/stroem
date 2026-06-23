@@ -570,7 +570,7 @@ pub async fn get_step_logs(
         return Err(AppError::not_found("Job"));
     }
 
-    let is_terminal = matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
+    let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
     let meta = JobLogMeta {
         workspace: job.workspace,
         task_name: job.task_name,
@@ -606,7 +606,7 @@ pub async fn get_job_logs(
         return Err(AppError::not_found("Job"));
     }
 
-    let is_terminal = matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
+    let is_terminal = stroem_common::models::job::is_terminal_status(&job.status);
     let meta = JobLogMeta {
         workspace: job.workspace,
         task_name: job.task_name,

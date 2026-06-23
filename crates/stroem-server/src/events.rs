@@ -472,6 +472,37 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn publish_log_chunk_real_bus_reports_failed_segments_on_pool_error() {
+        use sqlx::postgres::PgPoolOptions;
+
+        // Lazy pool against an unreachable address. The first `acquire` for
+        // NOTIFY will fail, and we want that failure to surface as
+        // `failed_segments > 0` plus a populated `last_error` so the
+        // /worker/jobs/:id/logs handler has something to render into a
+        // `_server` event. Without this test the noop-bus default path
+        // would let a regression in the failure-counting logic slip.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://stroem:wrong@127.0.0.1:1/nope")
+            .expect("connect_lazy never fails before first acquire");
+
+        let bus = EventBus::new(pool, Uuid::new_v4());
+        let result = bus
+            .publish_log_chunk(Uuid::new_v4(), "{\"ts\":\"x\",\"line\":\"hi\"}\n")
+            .await;
+        assert!(
+            result.failed_segments >= 1,
+            "expected at least one failed segment, got {}",
+            result.failed_segments
+        );
+        assert!(
+            result.last_error.is_some(),
+            "expected a populated last_error string"
+        );
+    }
+
     #[test]
     fn log_chunk_under_limit_carries_content() {
         let small = "x".repeat(NOTIFY_MAX_BYTES);

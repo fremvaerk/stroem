@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use stroem_common::models::job::JobStatus;
 use stroem_common::models::workflow::TriggerDef;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -231,11 +230,10 @@ fn validate_webhook_secret(
 }
 
 /// Returns `true` if the job status represents a terminal state.
+/// Re-exports the canonical definition from `stroem-common` so all "is this
+/// job terminal?" checks across crates stay in sync.
 fn is_terminal_status(status: &str) -> bool {
-    status == JobStatus::Completed.as_ref()
-        || status == JobStatus::Failed.as_ref()
-        || status == JobStatus::Cancelled.as_ref()
-        || status == JobStatus::Skipped.as_ref()
+    stroem_common::models::job::is_terminal_status(status)
 }
 
 /// Query params for the webhook job status endpoint.

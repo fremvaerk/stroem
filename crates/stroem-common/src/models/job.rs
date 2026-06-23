@@ -49,6 +49,30 @@ impl std::str::FromStr for JobStatus {
     }
 }
 
+impl JobStatus {
+    /// True for states where the job will not change again. A `Skipped` job
+    /// reached terminal without running and is included here so log/archive
+    /// fetch paths treat it consistently with other terminal statuses.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Skipped
+        )
+    }
+}
+
+/// String-shaped wrapper around [`JobStatus::is_terminal`] for callers that
+/// hold the status as a raw string (e.g. straight from `JobRow.status`).
+/// Unknown statuses are treated as non-terminal (conservative — the caller's
+/// behavior degrades to "no merge, no extra archive fetch", which never
+/// damages live state).
+pub fn is_terminal_status(status: &str) -> bool {
+    status
+        .parse::<JobStatus>()
+        .map(JobStatus::is_terminal)
+        .unwrap_or(false)
+}
+
 /// Job step execution status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
