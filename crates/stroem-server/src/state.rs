@@ -217,7 +217,10 @@ impl AppState {
         self.log_broadcast.broadcast(job_id, chunk.clone()).await;
         // Forward to peer replicas so WS viewers on followers see server-side
         // errors (recovery, hooks, orchestration) live, not just on this replica.
-        self.event_bus.publish_log_chunk(job_id, &chunk).await;
+        // Discard the publish result here: we're already inside an _server log
+        // path, and emitting another _server log on failure would recurse.
+        // The `tracing::warn!` inside `publish_log_segment` is sufficient.
+        let _ = self.event_bus.publish_log_chunk(job_id, &chunk).await;
     }
 }
 
@@ -298,7 +301,11 @@ mod tests {
             task_name: "test".to_string(),
             created_at: chrono::Utc::now(),
         };
-        let log = state.log_storage.get_log(job_id, &meta).await.unwrap();
+        let log = state
+            .log_storage
+            .get_log(job_id, &meta, false)
+            .await
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(parsed["step"], "_server");
         assert_eq!(parsed["stream"], "stderr");
@@ -353,7 +360,7 @@ mod tests {
         // Regular step logs should not include _server entries
         let build_logs = state
             .log_storage
-            .get_step_log(job_id, "build", &meta)
+            .get_step_log(job_id, "build", &meta, false)
             .await
             .unwrap();
         assert!(build_logs.contains("compiling..."));
@@ -362,7 +369,7 @@ mod tests {
         // _server logs should be retrievable separately
         let server_logs = state
             .log_storage
-            .get_step_log(job_id, "_server", &meta)
+            .get_step_log(job_id, "_server", &meta, false)
             .await
             .unwrap();
         assert!(server_logs.contains("Hook failed"));
@@ -389,7 +396,7 @@ mod tests {
         };
         let server_logs = state
             .log_storage
-            .get_step_log(job_id, "_server", &meta)
+            .get_step_log(job_id, "_server", &meta, false)
             .await
             .unwrap();
         let lines: Vec<&str> = server_logs.trim().lines().collect();
@@ -418,12 +425,12 @@ mod tests {
         };
         let logs1 = state
             .log_storage
-            .get_step_log(job1, "_server", &meta)
+            .get_step_log(job1, "_server", &meta, false)
             .await
             .unwrap();
         let logs2 = state
             .log_storage
-            .get_step_log(job2, "_server", &meta)
+            .get_step_log(job2, "_server", &meta, false)
             .await
             .unwrap();
 

@@ -570,6 +570,7 @@ pub async fn get_step_logs(
         return Err(AppError::not_found("Job"));
     }
 
+    let is_terminal = matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
     let meta = JobLogMeta {
         workspace: job.workspace,
         task_name: job.task_name,
@@ -578,7 +579,7 @@ pub async fn get_step_logs(
 
     let logs = state
         .log_storage
-        .get_step_log(job_id, &step_name, &meta)
+        .get_step_log(job_id, &step_name, &meta, is_terminal)
         .await
         .context("get step logs")?;
 
@@ -605,6 +606,7 @@ pub async fn get_job_logs(
         return Err(AppError::not_found("Job"));
     }
 
+    let is_terminal = matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
     let meta = JobLogMeta {
         workspace: job.workspace,
         task_name: job.task_name,
@@ -613,7 +615,7 @@ pub async fn get_job_logs(
 
     let logs = state
         .log_storage
-        .get_log(job_id, &meta)
+        .get_log(job_id, &meta, is_terminal)
         .await
         .context("get job logs")?;
 

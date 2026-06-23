@@ -132,23 +132,32 @@ pub async fn job_log_stream(
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, job_id: Uuid, skip_backfill: bool) {
     // 1. Send backfill (existing log content) unless skip_backfill is set
     if !skip_backfill {
-        let meta = match JobRepo::get(&state.pool, job_id).await {
-            Ok(Some(job)) => JobLogMeta {
-                workspace: job.workspace,
-                task_name: job.task_name,
-                created_at: job.created_at,
-            },
-            _ => {
-                // If job not found, use dummy meta (local file lookup still works by job_id)
+        let (meta, is_terminal) = match JobRepo::get(&state.pool, job_id).await {
+            Ok(Some(job)) => {
+                let is_terminal =
+                    matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
+                (
+                    JobLogMeta {
+                        workspace: job.workspace,
+                        task_name: job.task_name,
+                        created_at: job.created_at,
+                    },
+                    is_terminal,
+                )
+            }
+            _ => (
+                // If job not found, use dummy meta (local file lookup still works by job_id).
+                // Treat as non-terminal — no archive lookup to attempt anyway without a real meta.
                 JobLogMeta {
                     workspace: String::new(),
                     task_name: String::new(),
                     created_at: chrono::Utc::now(),
-                }
-            }
+                },
+                false,
+            ),
         };
 
-        if let Ok(existing) = state.log_storage.get_log(job_id, &meta).await {
+        if let Ok(existing) = state.log_storage.get_log(job_id, &meta, is_terminal).await {
             if !existing.is_empty()
                 && socket
                     .send(axum::extract::ws::Message::Text(existing.into()))

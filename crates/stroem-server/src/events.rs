@@ -159,6 +159,11 @@ impl EventBus {
     /// exceeds the cap on its own falls back to a signal-only event for that
     /// segment (receivers know new content exists but can't render it live).
     ///
+    /// Returns a [`PublishLogResult`] describing how many segments failed and
+    /// the last error encountered. Callers with access to `AppState` should
+    /// surface non-zero failures via `append_server_log` so operators see the
+    /// HA gap in the job's UI log (rather than only in server stderr).
+    ///
     /// **Cancel safety**: the inner segment loop publishes segments one at a
     /// time, in order. This sequential ordering is load-bearing: receivers
     /// depend on segments arriving in the same order they were produced so that
@@ -167,28 +172,42 @@ impl EventBus {
     /// be dropped mid-iteration — doing so would leave segments partially
     /// delivered with no recovery path.
     #[tracing::instrument(skip(self, chunk))]
-    pub async fn publish_log_chunk(&self, job_id: Uuid, chunk: &str) {
-        let Some(pool) = &self.inner.pool else { return };
+    pub async fn publish_log_chunk(&self, job_id: Uuid, chunk: &str) -> PublishLogResult {
+        let Some(pool) = &self.inner.pool else {
+            return PublishLogResult::default();
+        };
+
+        let mut result = PublishLogResult::default();
 
         if chunk.len() <= NOTIFY_MAX_BYTES {
-            self.publish_log_segment(pool, job_id, Some(chunk.to_string()))
+            self.publish_log_segment(pool, job_id, Some(chunk.to_string()), &mut result)
                 .await;
-            return;
+            return result;
         }
 
         for segment in split_jsonl_chunk(chunk, NOTIFY_MAX_BYTES) {
             match segment {
                 ChunkSegment::Inline(bytes) => {
-                    self.publish_log_segment(pool, job_id, Some(bytes)).await;
+                    self.publish_log_segment(pool, job_id, Some(bytes), &mut result)
+                        .await;
                 }
                 ChunkSegment::SignalOnly => {
-                    self.publish_log_segment(pool, job_id, None).await;
+                    self.publish_log_segment(pool, job_id, None, &mut result)
+                        .await;
                 }
             }
         }
+
+        result
     }
 
-    async fn publish_log_segment(&self, pool: &PgPool, job_id: Uuid, chunk: Option<String>) {
+    async fn publish_log_segment(
+        &self,
+        pool: &PgPool,
+        job_id: Uuid,
+        chunk: Option<String>,
+        result: &mut PublishLogResult,
+    ) {
         let payload = JobLogChunkPayload {
             replica_id: self.inner.replica_id,
             job_id,
@@ -196,8 +215,23 @@ impl EventBus {
         };
         if let Err(e) = notify(pool, CHANNEL_JOB_LOG_CHUNK, &payload).await {
             tracing::warn!("publish_log_chunk failed for {}: {:#}", job_id, e);
+            result.failed_segments += 1;
+            result.last_error = Some(format!("{e:#}"));
         }
     }
+}
+
+/// Outcome of a `publish_log_chunk` call. A non-zero `failed_segments` means
+/// at least one peer replica won't see the chunk's bytes (or signal) via
+/// NOTIFY; viewers connected to those peers will serve a partial log until
+/// the archive upload at job terminal makes the bytes universally readable.
+#[derive(Debug, Default, Clone)]
+pub struct PublishLogResult {
+    pub failed_segments: usize,
+    /// Stringified form of the most recent error, for inclusion in user-facing
+    /// `_server` log entries (we don't preserve the full anyhow chain since
+    /// the caller serializes into a JSONL `line` field).
+    pub last_error: Option<String>,
 }
 
 /// One NOTIFY-sized piece of a larger jsonl chunk.
@@ -431,7 +465,10 @@ mod tests {
         rt.block_on(async {
             bus.publish_job_cancelled(Uuid::new_v4()).await;
             bus.publish_workspace_reloaded("any").await;
-            bus.publish_log_chunk(Uuid::new_v4(), "hello").await;
+            let result = bus.publish_log_chunk(Uuid::new_v4(), "hello").await;
+            // No pool ⇒ default result (0 failed segments, no error).
+            assert_eq!(result.failed_segments, 0);
+            assert!(result.last_error.is_none());
         });
     }
 

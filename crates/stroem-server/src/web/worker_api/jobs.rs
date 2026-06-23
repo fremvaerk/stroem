@@ -758,10 +758,33 @@ pub async fn append_log(
     // Forward to peer replicas so WS viewers connected elsewhere see the
     // live tail. Payloads above NOTIFY_MAX_BYTES degrade to a signal-only
     // event (peers know new content exists but can't render it live).
-    state
+    let publish_result = state
         .event_bus
         .publish_log_chunk(job_id, &jsonl_chunk)
         .await;
+
+    // Surface cross-replica mirror failures into the job's own log so
+    // operators see the gap in the UI. Without this, dropped segments
+    // (e.g. Postgres NOTIFY 8 KB overflow on JSON-escaped chunks) silently
+    // leave peers with partial files until the post-terminal archive
+    // upload reconciles them.
+    if publish_result.failed_segments > 0 {
+        let last = publish_result
+            .last_error
+            .as_deref()
+            .unwrap_or("unknown error");
+        state
+            .append_server_log(
+                job_id,
+                &format!(
+                    "[ha] cross-replica log mirror failed for {} segment(s); \
+                     peer replicas may serve partial logs until archive upload at job terminal. \
+                     Last error: {}",
+                    publish_result.failed_segments, last
+                ),
+            )
+            .await;
+    }
 
     Ok(Json(json!({"status": "ok"})))
 }

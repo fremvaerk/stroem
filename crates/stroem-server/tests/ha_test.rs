@@ -315,7 +315,7 @@ async fn notify_log_chunk_mirrors_to_receiver_local_disk() -> Result<()> {
     // And get_log on replica B must return the chunk (no archive configured —
     // this would be empty before the fix).
     state_b.log_storage.close_log(job).await;
-    let logs = state_b.log_storage.get_log(job, &meta).await?;
+    let logs = state_b.log_storage.get_log(job, &meta, false).await?;
     assert!(
         logs.contains("mirror-me"),
         "get_log on replica B must see the mirrored content (got {logs:?})"
@@ -380,7 +380,7 @@ async fn notify_log_chunk_oversize_multiline_splits_and_mirrors() -> Result<()> 
         task_name: "task".to_string(),
         created_at: chrono::Utc::now(),
     };
-    let logs = state_b.log_storage.get_log(job, &meta).await?;
+    let logs = state_b.log_storage.get_log(job, &meta, false).await?;
     assert_eq!(
         logs, chunk,
         "mirrored bytes on replica B must match publisher byte-for-byte"
@@ -531,7 +531,7 @@ async fn notify_log_chunk_mixed_inline_and_signal_partial_mirrors() -> Result<()
         task_name: "task".to_string(),
         created_at: chrono::Utc::now(),
     };
-    let logs_b = state_b.log_storage.get_log(job, &meta).await?;
+    let logs_b = state_b.log_storage.get_log(job, &meta, false).await?;
     assert!(
         !logs_b.contains(&"x".repeat(10)),
         "replica B must NOT contain the huge line's raw content (signal-only)"

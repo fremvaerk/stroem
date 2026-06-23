@@ -17,6 +17,52 @@ pub struct JobLogMeta {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Merge two JSONL log strings into the union of their unique lines, sorted
+/// by the `"ts"` field embedded in each line. Blank lines are dropped.
+/// Lines whose ts cannot be extracted sort to the start (preserving partial
+/// data is better than dropping it).
+///
+/// This is the recovery primitive for HA mirror gaps: each replica may hold
+/// only the subset of chunks worker pushes happened to route there, plus
+/// whatever survived NOTIFY mirroring. The post-terminal archive — uploaded
+/// by whichever replica orchestrated the final step — captures THAT
+/// replica's local file at terminal time. Merging the two recovers the
+/// union (provided no individual chunk was lost from both).
+pub(crate) fn merge_jsonl_logs(a: &str, b: &str) -> String {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut lines: Vec<&str> = Vec::with_capacity(a.lines().count() + b.lines().count());
+    for line in a.lines().chain(b.lines()) {
+        if line.is_empty() {
+            continue;
+        }
+        if seen.insert(line) {
+            lines.push(line);
+        }
+    }
+
+    lines.sort_by(|a, b| extract_ts(a).cmp(&extract_ts(b)));
+
+    let mut out = String::with_capacity(a.len() + b.len());
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Extract the value of the top-level `"ts"` field from a JSONL line. Uses
+/// the raw bytes to avoid full JSON parsing in the hot path of merging
+/// thousands of lines.
+fn extract_ts(line: &str) -> Option<&str> {
+    const TS_KEY: &str = "\"ts\":\"";
+    let start = line.find(TS_KEY)? + TS_KEY.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
 /// Build a structured archive key from job metadata.
 ///
 /// Format: `{prefix}{workspace}/{task}/YYYY/MM/DD/YYYY-MM-DDTHH-MM-SS_{job_id}.jsonl.gz`
@@ -275,26 +321,58 @@ impl LogStorage {
 
     /// Get the full log contents for a job.
     ///
-    /// Checks for `.jsonl` first, falls back to legacy `.log` file, then archive.
-    pub async fn get_log(&self, job_id: Uuid, meta: &JobLogMeta) -> Result<String> {
-        let path = self.log_path(job_id);
+    /// Strategy:
+    /// * If `is_terminal` is `true` AND an archive is configured, fetch both
+    ///   the local file (if any) and the archive blob, then return their
+    ///   line-level union sorted by timestamp. This recovers chunks that were
+    ///   lost in HA cross-replica mirroring: each replica's local file may
+    ///   only hold the subset of chunks worker calls happened to route there,
+    ///   so for terminal jobs the union of (local on this replica) + (archive
+    ///   uploaded by the orchestrating replica) is the most complete view.
+    /// * Otherwise: local `.jsonl` → legacy `.log` → archive, returning the
+    ///   first source that exists.
+    pub async fn get_log(
+        &self,
+        job_id: Uuid,
+        meta: &JobLogMeta,
+        is_terminal: bool,
+    ) -> Result<String> {
+        let local_content = self.read_local_log(job_id).await?;
 
-        if path.exists() {
-            return Self::read_file(&path).await;
+        if is_terminal && self.archive.is_some() {
+            if let Some(archive_content) = self.get_log_from_archive(job_id, meta).await? {
+                return Ok(merge_jsonl_logs(
+                    local_content.as_deref().unwrap_or(""),
+                    &archive_content,
+                ));
+            }
         }
 
-        // Fallback to legacy .log file
-        let legacy_path = self.legacy_log_path(job_id);
-        if legacy_path.exists() {
-            return Self::read_file(&legacy_path).await;
+        if let Some(content) = local_content {
+            return Ok(content);
         }
 
-        // Fallback to archive
+        // No local file. Pre-terminal: nothing to show. Terminal without
+        // archive configured: also nothing.
         if let Some(content) = self.get_log_from_archive(job_id, meta).await? {
             return Ok(content);
         }
 
         Ok(String::new())
+    }
+
+    /// Read the local `.jsonl` (preferred) or legacy `.log` if either exists.
+    /// Returns `None` when neither file is present.
+    async fn read_local_log(&self, job_id: Uuid) -> Result<Option<String>> {
+        let path = self.log_path(job_id);
+        if path.exists() {
+            return Ok(Some(Self::read_file(&path).await?));
+        }
+        let legacy_path = self.legacy_log_path(job_id);
+        if legacy_path.exists() {
+            return Ok(Some(Self::read_file(&legacy_path).await?));
+        }
+        Ok(None)
     }
 
     /// Read file contents as a UTF-8 string.
@@ -313,29 +391,48 @@ impl LogStorage {
 
     /// Get log lines for a specific step within a job.
     ///
-    /// Reads local files line-by-line to avoid loading the entire log into
-    /// memory. Falls back to archive when no local file is found.
+    /// Strategy mirrors [`Self::get_log`]: for terminal jobs with an archive
+    /// configured, merge the step-filtered local and archive views to recover
+    /// chunks lost in HA mirroring. Otherwise return the first source that
+    /// exists (local → legacy → archive).
     pub async fn get_step_log(
         &self,
         job_id: Uuid,
         step_name: &str,
         meta: &JobLogMeta,
+        is_terminal: bool,
     ) -> Result<String> {
         let path = self.log_path(job_id);
-        if path.exists() {
-            return self.filter_step_from_file(&path, step_name).await;
-        }
-
         let legacy_path = self.legacy_log_path(job_id);
-        if legacy_path.exists() {
-            return self.filter_step_from_file(&legacy_path, step_name).await;
+        let local = if path.exists() {
+            Some(self.filter_step_from_file(&path, step_name).await?)
+        } else if legacy_path.exists() {
+            Some(self.filter_step_from_file(&legacy_path, step_name).await?)
+        } else {
+            None
+        };
+
+        if is_terminal && self.archive.is_some() {
+            if let Some(archive_content) = self
+                .get_step_log_from_archive(job_id, step_name, meta)
+                .await?
+            {
+                return Ok(merge_jsonl_logs(
+                    local.as_deref().unwrap_or(""),
+                    &archive_content,
+                ));
+            }
         }
 
-        if let Some(result) = self
+        if let Some(content) = local {
+            return Ok(content);
+        }
+
+        if let Some(content) = self
             .get_step_log_from_archive(job_id, step_name, meta)
             .await?
         {
-            return Ok(result);
+            return Ok(content);
         }
 
         Ok(String::new())
@@ -570,7 +667,7 @@ mod tests {
         // Flush before reading so BufWriter contents are on disk.
         storage.close_log(job_id).await;
 
-        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
         assert_eq!(log, format!("{}\n{}\n", line1, line2));
     }
 
@@ -580,7 +677,7 @@ mod tests {
         let storage = LogStorage::new(temp_dir.path());
 
         let job_id = Uuid::new_v4();
-        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
         assert_eq!(log, "");
     }
 
@@ -608,8 +705,8 @@ mod tests {
         storage.close_log(job2).await;
 
         let meta = test_meta();
-        let log1 = storage.get_log(job1, &meta).await.unwrap();
-        let log2 = storage.get_log(job2, &meta).await.unwrap();
+        let log1 = storage.get_log(job1, &meta, false).await.unwrap();
+        let log2 = storage.get_log(job2, &meta, false).await.unwrap();
 
         assert_eq!(log1, format!("{}\n", l1));
         assert_eq!(log2, format!("{}\n", l2));
@@ -633,10 +730,16 @@ mod tests {
         storage.close_log(job_id).await;
 
         let meta = test_meta();
-        let build_logs = storage.get_step_log(job_id, "build", &meta).await.unwrap();
+        let build_logs = storage
+            .get_step_log(job_id, "build", &meta, false)
+            .await
+            .unwrap();
         assert_eq!(build_logs, format!("{}\n{}\n", build1, build2));
 
-        let test_logs = storage.get_step_log(job_id, "test", &meta).await.unwrap();
+        let test_logs = storage
+            .get_step_log(job_id, "test", &meta, false)
+            .await
+            .unwrap();
         assert_eq!(test_logs, format!("{}\n", test1));
     }
 
@@ -655,7 +758,7 @@ mod tests {
         storage.close_log(job_id).await;
 
         let logs = storage
-            .get_step_log(job_id, "deploy", &test_meta())
+            .get_step_log(job_id, "deploy", &test_meta(), false)
             .await
             .unwrap();
         assert_eq!(logs, "");
@@ -680,7 +783,7 @@ mod tests {
         storage.close_log(job_id).await;
 
         let logs = storage
-            .get_step_log(job_id, "build", &test_meta())
+            .get_step_log(job_id, "build", &test_meta(), false)
             .await
             .unwrap();
         assert_eq!(logs, format!("{}\n", valid));
@@ -693,7 +796,7 @@ mod tests {
         let job_id = Uuid::new_v4();
 
         let logs = storage
-            .get_step_log(job_id, "build", &test_meta())
+            .get_step_log(job_id, "build", &test_meta(), false)
             .await
             .unwrap();
         assert_eq!(logs, "");
@@ -725,7 +828,7 @@ mod tests {
             .await
             .unwrap();
 
-        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
         assert_eq!(log, "legacy line 1\nlegacy line 2\n");
     }
 
@@ -749,7 +852,7 @@ mod tests {
 
         storage.close_log(job_id).await;
 
-        let log = storage.get_log(job_id, &test_meta()).await.unwrap();
+        let log = storage.get_log(job_id, &test_meta(), false).await.unwrap();
         assert!(log.contains("new content"));
         assert!(!log.contains("legacy content"));
     }
@@ -776,7 +879,7 @@ mod tests {
 
         // Both stdout and stderr for "build" should be returned
         let build_logs = storage
-            .get_step_log(job_id, "build", &test_meta())
+            .get_step_log(job_id, "build", &test_meta(), false)
             .await
             .unwrap();
         assert_eq!(build_logs, format!("{}\n{}\n", stdout_line, stderr_line));
@@ -1092,7 +1195,7 @@ mod tests {
         assert!(!local_path.exists());
 
         // get_log should fall back to archive
-        let log = storage.get_log(job_id, &meta).await.unwrap();
+        let log = storage.get_log(job_id, &meta, false).await.unwrap();
         assert_eq!(log, content);
     }
 
@@ -1126,10 +1229,16 @@ mod tests {
             .unwrap();
 
         // Step log should filter from archived data
-        let build_logs = storage.get_step_log(job_id, "build", &meta).await.unwrap();
+        let build_logs = storage
+            .get_step_log(job_id, "build", &meta, false)
+            .await
+            .unwrap();
         assert_eq!(build_logs, format!("{}\n", build_line));
 
-        let test_logs = storage.get_step_log(job_id, "test", &meta).await.unwrap();
+        let test_logs = storage
+            .get_step_log(job_id, "test", &meta, false)
+            .await
+            .unwrap();
         assert_eq!(test_logs, format!("{}\n", test_line));
     }
 
@@ -1244,7 +1353,7 @@ mod tests {
         );
 
         // get_log should return an error (not an empty string)
-        let result = storage.get_log(job_id, &meta).await;
+        let result = storage.get_log(job_id, &meta, false).await;
         assert!(result.is_err(), "corrupt gzip data should produce an error");
     }
 
@@ -1283,11 +1392,14 @@ mod tests {
         assert!(!storage.log_path(job_id).exists());
 
         // Read should fall back to local archive
-        let log = storage.get_log(job_id, &meta).await.unwrap();
+        let log = storage.get_log(job_id, &meta, false).await.unwrap();
         assert_eq!(log, content);
 
         // Step log should also work from archive
-        let step_log = storage.get_step_log(job_id, "build", &meta).await.unwrap();
+        let step_log = storage
+            .get_step_log(job_id, "build", &meta, false)
+            .await
+            .unwrap();
         assert_eq!(step_log, content);
     }
 
@@ -1311,14 +1423,14 @@ mod tests {
 
         // "build" must NOT match "build-notify" lines
         let build_logs = storage
-            .get_step_log(job_id, "build", &test_meta())
+            .get_step_log(job_id, "build", &test_meta(), false)
             .await
             .unwrap();
         assert_eq!(build_logs, format!("{}\n", build_line));
 
         // "build-notify" must NOT match "build" lines
         let notify_logs = storage
-            .get_step_log(job_id, "build-notify", &test_meta())
+            .get_step_log(job_id, "build-notify", &test_meta(), false)
             .await
             .unwrap();
         assert_eq!(notify_logs, format!("{}\n", build_notify_line));
@@ -1349,5 +1461,193 @@ mod tests {
             key1, key2,
             "same job with different timestamps must produce different keys"
         );
+    }
+
+    // ─── merge_jsonl_logs: HA-gap recovery ────────────────────────────────
+
+    fn ts_line(ts: &str, step: &str, msg: &str) -> String {
+        format!(r#"{{"ts":"{ts}","stream":"stdout","step":"{step}","line":"{msg}"}}"#)
+    }
+
+    #[test]
+    fn merge_jsonl_logs_unions_disjoint_inputs_sorted_by_ts() {
+        // The production scenario: replica A's local file has steps a/b,
+        // replica B's archive has steps c/d. Both are time-interleaved.
+        let a = format!(
+            "{}\n{}\n",
+            ts_line("2026-06-10T05:00:01Z", "build[0]", "a1"),
+            ts_line("2026-06-10T05:00:05Z", "build[0]", "a2"),
+        );
+        let b = format!(
+            "{}\n{}\n",
+            ts_line("2026-06-10T05:00:02Z", "build[1]", "b1"),
+            ts_line("2026-06-10T05:00:03Z", "build[1]", "b2"),
+        );
+
+        let merged = merge_jsonl_logs(&a, &b);
+        let lines: Vec<&str> = merged.lines().collect();
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected 4 unique lines, got {}",
+            lines.len()
+        );
+        assert!(lines[0].contains(r#""ts":"2026-06-10T05:00:01Z""#));
+        assert!(lines[1].contains(r#""ts":"2026-06-10T05:00:02Z""#));
+        assert!(lines[2].contains(r#""ts":"2026-06-10T05:00:03Z""#));
+        assert!(lines[3].contains(r#""ts":"2026-06-10T05:00:05Z""#));
+    }
+
+    #[test]
+    fn merge_jsonl_logs_dedupes_overlapping_chunks() {
+        // Lines that survived NOTIFY mirror to BOTH replicas appear in both
+        // local and archive. The merge must dedupe by exact line content.
+        let shared = ts_line("2026-06-10T05:00:01Z", "build", "shared");
+        let a = format!(
+            "{}\n{}\n",
+            shared,
+            ts_line("2026-06-10T05:00:02Z", "build", "only-a")
+        );
+        let b = format!(
+            "{}\n{}\n",
+            shared,
+            ts_line("2026-06-10T05:00:03Z", "build", "only-b")
+        );
+
+        let merged = merge_jsonl_logs(&a, &b);
+        let count = merged.matches("shared").count();
+        assert_eq!(count, 1, "shared line must appear exactly once after merge");
+        assert!(merged.contains("only-a"));
+        assert!(merged.contains("only-b"));
+    }
+
+    #[test]
+    fn merge_jsonl_logs_handles_empty_inputs() {
+        assert_eq!(merge_jsonl_logs("", ""), "");
+        let only = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "build", "x"));
+        assert_eq!(merge_jsonl_logs(&only, ""), only);
+        assert_eq!(merge_jsonl_logs("", &only), only);
+    }
+
+    #[test]
+    fn merge_jsonl_logs_skips_blank_lines() {
+        let a = format!("\n{}\n\n", ts_line("2026-06-10T05:00:01Z", "s", "x"));
+        let merged = merge_jsonl_logs(&a, "");
+        assert_eq!(merged.lines().count(), 1);
+    }
+
+    #[test]
+    fn extract_ts_pulls_top_level_field() {
+        let line = ts_line("2026-06-10T05:00:01Z", "build", "hello");
+        assert_eq!(extract_ts(&line), Some("2026-06-10T05:00:01Z"));
+        // No ts field → None.
+        assert_eq!(extract_ts(r#"{"step":"x"}"#), None);
+        // Malformed: closing quote missing → None (not a panic).
+        assert_eq!(extract_ts(r#"{"ts":"unclosed"#), None);
+    }
+
+    // ─── get_log / get_step_log merge behavior for terminal jobs ──────────
+
+    #[tokio::test]
+    async fn get_log_merges_local_and_archive_when_terminal() {
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        // Local has step[0] only; archive has step[1] only — the canonical
+        // HA-mirror-loss scenario.
+        let local = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:01Z", "step[0]", "from-local")
+        );
+        let archive = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:02Z", "step[1]", "from-archive")
+        );
+        storage.append_log(job_id, &local).await.unwrap();
+        // Seed mock archive at the structured key get_log will read.
+        let key = archive_key("", job_id, &meta);
+        mock.put(&key, "application/gzip", Bytes::from(gzip(&archive)))
+            .await
+            .unwrap();
+
+        // Non-terminal: only local returned (back-compat path).
+        let non_term = storage.get_log(job_id, &meta, false).await.unwrap();
+        assert!(non_term.contains("from-local"));
+        assert!(!non_term.contains("from-archive"));
+
+        // Terminal: merged view contains both.
+        let term = storage.get_log(job_id, &meta, true).await.unwrap();
+        assert!(term.contains("from-local"));
+        assert!(term.contains("from-archive"));
+        // Sorted by ts: local's 05:00:01 comes before archive's 05:00:02.
+        let local_pos = term.find("from-local").unwrap();
+        let archive_pos = term.find("from-archive").unwrap();
+        assert!(local_pos < archive_pos);
+    }
+
+    #[tokio::test]
+    async fn get_step_log_merges_local_and_archive_when_terminal() {
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        // Both sources have lines for the SAME step but disjoint timestamps —
+        // exactly what the per-step HA gap looks like.
+        let local = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:01Z", "build", "local-line")
+        );
+        let archive = format!(
+            "{}\n",
+            ts_line("2026-06-10T05:00:02Z", "build", "archive-line")
+        );
+        storage.append_log(job_id, &local).await.unwrap();
+        let key = archive_key("", job_id, &meta);
+        mock.put(&key, "application/gzip", Bytes::from(gzip(&archive)))
+            .await
+            .unwrap();
+
+        let merged = storage
+            .get_step_log(job_id, "build", &meta, true)
+            .await
+            .unwrap();
+        assert!(merged.contains("local-line"));
+        assert!(merged.contains("archive-line"));
+    }
+
+    #[tokio::test]
+    async fn get_log_terminal_falls_back_to_archive_when_local_missing() {
+        let tmp = TempDir::new().unwrap();
+        let mock = Arc::new(MockArchive::new());
+        let storage = LogStorage::new(tmp.path())
+            .with_archive(Arc::clone(&mock) as Arc<dyn BlobArchive>, "".to_string());
+        let job_id = Uuid::new_v4();
+        let meta = test_meta();
+
+        // No local writes at all — only the archive has content.
+        let archive = format!("{}\n", ts_line("2026-06-10T05:00:01Z", "s", "only-archive"));
+        let key = archive_key("", job_id, &meta);
+        mock.put(&key, "application/gzip", Bytes::from(gzip(&archive)))
+            .await
+            .unwrap();
+
+        let term = storage.get_log(job_id, &meta, true).await.unwrap();
+        assert!(term.contains("only-archive"));
+    }
+
+    fn gzip(s: &str) -> Vec<u8> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(s.as_bytes()).unwrap();
+        enc.finish().unwrap()
     }
 }

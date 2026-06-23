@@ -132,7 +132,7 @@ async fn test_s3_read_fallback_when_local_missing() -> Result<()> {
     assert!(!local_path.exists());
 
     // get_log should fall back to S3
-    let log = storage.get_log(job_id, &meta).await?;
+    let log = storage.get_log(job_id, &meta, false).await?;
     assert_eq!(log, content);
 
     Ok(())
@@ -177,7 +177,7 @@ async fn test_s3_local_preferred_over_s3() -> Result<()> {
         .await?;
 
     // get_log should return local content (preferred over S3)
-    let log = storage.get_log(job_id, &meta).await?;
+    let log = storage.get_log(job_id, &meta, false).await?;
     assert_eq!(log, local_content);
 
     Ok(())
@@ -244,10 +244,10 @@ async fn test_s3_get_step_log_falls_back_to_s3() -> Result<()> {
     tokio::fs::remove_file(&local_path).await?;
 
     // get_step_log should filter from S3 content
-    let build_logs = storage.get_step_log(job_id, "build", &meta).await?;
+    let build_logs = storage.get_step_log(job_id, "build", &meta, false).await?;
     assert_eq!(build_logs, format!("{}\n", build_line));
 
-    let test_logs = storage.get_step_log(job_id, "test", &meta).await?;
+    let test_logs = storage.get_step_log(job_id, "test", &meta, false).await?;
     assert_eq!(test_logs, format!("{}\n", test_line));
 
     Ok(())

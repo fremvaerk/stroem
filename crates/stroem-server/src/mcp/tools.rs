@@ -533,6 +533,7 @@ impl StromMcpHandler {
         // ACL: Deny → 404
         check_job_acl(self, &job).await?;
 
+        let is_terminal = matches!(job.status.as_str(), "completed" | "failed" | "cancelled");
         let meta = JobLogMeta {
             workspace: job.workspace,
             task_name: job.task_name,
@@ -543,13 +544,13 @@ impl StromMcpHandler {
             Some(step) => self
                 .state
                 .log_storage
-                .get_step_log(job_id, &step, &meta)
+                .get_step_log(job_id, &step, &meta, is_terminal)
                 .await
                 .map_err(|e| internal_err(format!("Failed to get step logs: {e}")))?,
             None => self
                 .state
                 .log_storage
-                .get_log(job_id, &meta)
+                .get_log(job_id, &meta, is_terminal)
                 .await
                 .map_err(|e| internal_err(format!("Failed to get logs: {e}")))?,
         };
