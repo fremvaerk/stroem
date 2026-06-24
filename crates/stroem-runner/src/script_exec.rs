@@ -13,7 +13,11 @@ use uuid::Uuid;
 /// Mirrors the keys exposed as Tera variables in
 /// `stroem-server/src/web/worker_api/rendering.rs` so both rendering
 /// paths converge on the same observable values inside a script.
-pub const ARGS_PATH_VARS: &[&str] = &[
+///
+/// **To add a new path-var:** append the name here AND add a matching
+/// `(tera_name, "$ENV_REF")` entry in `rendering.rs::render_action_spec`
+/// so server and worker stay in sync.
+const ARGS_PATH_VARS: &[&str] = &[
     "ARTIFACTS_DIR",
     "STATE_DIR",
     "STATE_OUT_DIR",
@@ -22,59 +26,75 @@ pub const ARGS_PATH_VARS: &[&str] = &[
 ];
 
 /// Expand allowlisted `$VAR` and `${VAR}` references in a single arg
-/// against the runner's env map. Values are looked up from the same
-/// `config.env` the script will see, so substitution is automatically
-/// runner-mode aware (local → host tempdir; docker/pod → `/artifacts`,
-/// `/state`, etc.) as long as `executor.rs` set those env vars to the
-/// right per-runner values.
+/// against the supplied env map. Anything not in [`ARGS_PATH_VARS`]
+/// passes through verbatim — `args:` is a direct-argv channel by design.
+///
+/// **Security note:** callers MUST pass an env map populated only from
+/// worker-controlled sources, never the unfiltered `config.env` (which a
+/// workflow could shadow via its `env:` block). The executor builds a
+/// dedicated map of worker-set path values for this reason.
 ///
 /// Identifier-boundary aware: `$STATE_DIR_BACKUP` does NOT match
 /// `$STATE_DIR` — only references followed by a non-identifier char (or
 /// end of string) substitute. The braced form `${STATE_DIR}` is always
 /// unambiguous.
 pub fn expand_path_vars(arg: &str, env: &HashMap<String, String>) -> String {
-    let bytes = arg.as_bytes();
     let mut out = String::with_capacity(arg.len());
+    let bytes = arg.as_bytes();
+    let mut last = 0; // byte index of the start of the un-flushed literal run
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'$' {
-            out.push(bytes[i] as char);
             i += 1;
             continue;
         }
+
         let rest = &bytes[i + 1..];
-        // Braced form: ${VAR}
-        if rest.first() == Some(&b'{') {
-            if let Some(close) = rest.iter().position(|&b| b == b'}') {
-                let name = std::str::from_utf8(&rest[1..close]).unwrap_or("");
-                if ARGS_PATH_VARS.contains(&name) {
-                    if let Some(val) = env.get(name) {
-                        out.push_str(val);
-                        i += 1 + close + 1;
-                        continue;
-                    }
+        // Try to recognise a path-var ref starting at `i`. Two forms:
+        //   Braced: ${NAME}   → consumed = 2 + name_len + 1 (incl `$`, `{`, `}`)
+        //   Bare:   $NAME     → consumed = 1 + name_len     (incl `$`)
+        // For a recognised allowlisted name with a value in `env`, we
+        // flush the literal `arg[last..i]` slice (which is guaranteed
+        // valid UTF-8 since we only break at ASCII `$` boundaries), push
+        // the substitution, advance past the ref, and resume.
+        let recognised: Option<(usize, &str)> = (|| {
+            if rest.first() == Some(&b'{') {
+                let close = rest.iter().position(|&b| b == b'}')?;
+                // SAFETY: `arg` is `&str` and we only slice on ASCII `{`/`}`
+                // boundaries, so the inner bytes are a valid UTF-8 substring.
+                let name = std::str::from_utf8(&rest[1..close]).ok()?;
+                (ARGS_PATH_VARS.contains(&name) && env.contains_key(name))
+                    .then_some((2 + name.len() + 1, name)) // `${NAME}` total
+            } else {
+                let end = rest
+                    .iter()
+                    .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                    .unwrap_or(rest.len());
+                if end == 0 {
+                    return None;
                 }
+                // SAFETY: identifier bytes are ASCII alphanumeric or `_`.
+                let name = std::str::from_utf8(&rest[..end]).ok()?;
+                (ARGS_PATH_VARS.contains(&name) && env.contains_key(name))
+                    .then_some((1 + end, name)) // `$NAME` total
             }
-            out.push('$');
+        })();
+
+        if let Some((consumed, name)) = recognised {
+            // Flush the literal run preceding this `$`, push the value,
+            // and skip past the entire ref.
+            out.push_str(&arg[last..i]);
+            out.push_str(&env[name]);
+            i += consumed;
+            last = i;
+        } else {
+            // Not recognised — leave the `$` and any following chars in
+            // the literal run to be flushed later.
             i += 1;
-            continue;
         }
-        // Bare form: $VAR — maximal identifier run (ASCII letter, digit, underscore).
-        let end = rest
-            .iter()
-            .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
-            .unwrap_or(rest.len());
-        let name = std::str::from_utf8(&rest[..end]).unwrap_or("");
-        if !name.is_empty() && ARGS_PATH_VARS.contains(&name) {
-            if let Some(val) = env.get(name) {
-                out.push_str(val);
-                i += 1 + end;
-                continue;
-            }
-        }
-        out.push('$');
-        i += 1;
     }
+    // Flush the trailing literal run.
+    out.push_str(&arg[last..]);
     out
 }
 
@@ -1586,5 +1606,42 @@ mod tests {
         assert_eq!(expand_path_vars("${}", &env), "${}");
         // Two consecutive `$$`
         assert_eq!(expand_path_vars("$$", &env), "$$");
+    }
+
+    #[test]
+    fn expand_path_vars_preserves_non_ascii_utf8() {
+        // Regression: an earlier byte-by-byte impl cast each non-`$` byte
+        // to `char` (Latin-1 interpretation), corrupting multi-byte UTF-8
+        // sequences like `é` (0xC3 0xA9) into `Ã©`. Args can contain
+        // non-ASCII via Tera-rendered `{{ input.foo }}`.
+        let env = env_with(&[("ARTIFACTS_DIR", "/tmp/out")]);
+        assert_eq!(
+            expand_path_vars("héllo $ARTIFACTS_DIR wörld", &env),
+            "héllo /tmp/out wörld"
+        );
+        // Emoji (4-byte UTF-8) on both sides of the substitution.
+        assert_eq!(expand_path_vars("🎯$ARTIFACTS_DIR🎉", &env), "🎯/tmp/out🎉");
+        // CJK before, after, and around the ref.
+        assert_eq!(
+            expand_path_vars("日本${ARTIFACTS_DIR}語", &env),
+            "日本/tmp/out語"
+        );
+        // No refs at all — pure passthrough preserves UTF-8.
+        assert_eq!(
+            expand_path_vars("Schöne Grüße ohne Variablen", &env),
+            "Schöne Grüße ohne Variablen"
+        );
+    }
+
+    #[test]
+    fn expand_path_vars_braced_unknown_var_stays_literal() {
+        // Pinned behaviour: the entire `${UNKNOWN}` reference passes
+        // through verbatim — we don't peel off just the `$` and leave
+        // a stray `{UNKNOWN}` behind.
+        let env = env_with(&[("ARTIFACTS_DIR", "/a")]);
+        assert_eq!(expand_path_vars("${UNKNOWN}", &env), "${UNKNOWN}");
+        assert_eq!(expand_path_vars("${PATH}/bin", &env), "${PATH}/bin");
+        // Allowlisted but missing from env also passes through whole.
+        assert_eq!(expand_path_vars("${STATE_DIR}", &env), "${STATE_DIR}");
     }
 }

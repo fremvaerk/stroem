@@ -121,17 +121,24 @@ The `args` field is only valid on `type: script` actions. Docker and pod actions
 
 ### Path variables
 
-These Tera variables resolve to env-var-reference strings that the worker substitutes to real paths before exec. They work in any rendered field — `script`, `source`, `args`, `env` values, `manifest`:
+These Tera variables resolve to env-var-reference strings that the worker substitutes to real paths before exec. They are designed to be used in two fields:
+
+- `args:` — the worker substitutes the env ref before `execve`, so the script receives a real path positionally.
+- `script:` (inline) — the spawned shell expands the env ref at exec time.
 
 | Tera var | Equivalent env var | Available when |
 |---|---|---|
-| `{{ artifacts_dir }}` | `$ARTIFACTS_DIR` | Runner supports artifacts (shell, docker; see [Artifacts](../artifacts)) |
-| `{{ state_dir }}` | `$STATE_DIR` | Script actions (read-only state mount) |
-| `{{ state_out_dir }}` | `$STATE_OUT_DIR` | Script actions (writable state mount) |
-| `{{ global_state_dir }}` | `$GLOBAL_STATE_DIR` | Script actions (read-only global state) |
-| `{{ global_state_out_dir }}` | `$GLOBAL_STATE_OUT_DIR` | Script actions (writable global state) |
+| `{{ artifacts_dir }}` | `$ARTIFACTS_DIR` | Runner supports artifacts — shell + docker only; **NOT on Kubernetes pod runners** (deferred — see [Artifacts](../artifacts)) |
+| `{{ state_dir }}` | `$STATE_DIR` | Script actions with task state |
+| `{{ state_out_dir }}` | `$STATE_OUT_DIR` | Script actions with task state |
+| `{{ global_state_dir }}` | `$GLOBAL_STATE_DIR` | Script actions with global state |
+| `{{ global_state_out_dir }}` | `$GLOBAL_STATE_OUT_DIR` | Script actions with global state |
 
-The Tera form and the bare `$VAR` form are interchangeable — both produce the same resolved path at exec time. Pick whichever reads better in your YAML.
+On a runner where the path-var is **not** available (e.g. `{{ artifacts_dir }}` on Kube), the reference passes through to the script as the literal string `$ARTIFACTS_DIR` — substitution silently doesn't fire. Validate this with `stroem validate` and a smoke run; until artifacts ship on Kube, prefer shell or docker for actions that need an artifacts directory.
+
+For `args:` and `script:`, the Tera form and the bare `$VAR` form are interchangeable — both produce the same resolved path at exec time. Pick whichever reads better in your YAML.
+
+**Important:** path-vars do **not** work in `source:`. The `source` field is a file path that the runner opens directly with no shell or substitution layer, so `source: "{{ artifacts_dir }}/foo.sh"` would render to `"$ARTIFACTS_DIR/foo.sh"` and then fail at file-open with that literal path. If you need to invoke a script from `$ARTIFACTS_DIR`, do it from inside an inline `script:` block.
 
 **Example — pass the artifacts dir positionally to an external binary:**
 
@@ -160,7 +167,7 @@ actions:
 
 Inside `script:`, the spawned shell handles `$ARTIFACTS_DIR` expansion naturally; the Tera substitution is redundant but kept for symmetry with the `args` form. `$STATE_DIR_BACKUP` and other identifier-extending names are NOT partial-matched — use `${STATE_DIR}_BACKUP` if you need an adjacent identifier char.
 
-Only the five names above are expanded in `args:`. References like `$PATH`, `$HOME`, or any user-defined env var pass through verbatim — `args:` is a direct-argv channel by design, not a shell, so we only substitute paths the script can't know ahead of time.
+Only the five names above are expanded in `args:`. References like `$PATH`, `$HOME`, or any user-defined env var pass through verbatim — `args:` is a direct-argv channel by design, not a shell, so we only substitute paths the script can't know ahead of time. Workflow `env:` blocks **cannot** override these names — the worker installs its authoritative path and strips any user override before the script starts, so you can't make `{{ artifacts_dir }}` resolve to an arbitrary path of your choice.
 
 ### Environment variables
 

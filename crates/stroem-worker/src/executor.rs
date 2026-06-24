@@ -140,15 +140,16 @@ impl StepExecutor {
         config.global_state_dir = global_state_dir.map(|s| s.to_string());
         config.global_state_out_dir = global_state_out_dir.map(|s| s.to_string());
 
-        // Only set state env vars for WithWorkspace mode — NoWorkspace (container actions)
-        // don't have the state directories bind-mounted.
-        //
-        // For local shell runner: the env value is the host tempdir path
-        // (the script runs on the host and reads the file directly). For
-        // docker/pod: the bind mount target inside the container — the
-        // host path is meaningless to a process inside the container, so
-        // exporting the host path would only mislead. Mirrors what the
-        // ARTIFACTS_DIR block below already does.
+        // Compute worker-authoritative values for the five path vars.
+        // State vars are only set in `WithWorkspace` mode (container
+        // actions don't have state mounts). Local shell runner sees the
+        // host tempdir path directly; docker/pod see the in-container
+        // mount path. Kube runner has no artifacts support today
+        // (deferred), so artifacts_dir is left unset there. See
+        // `apply_worker_path_vars` for the security boundary that
+        // ensures these values are NEVER overridable from the workflow's
+        // `env:` block.
+        let mut worker_vars = WorkerPathVars::default();
         if config.runner_mode == stroem_runner::RunnerMode::WithWorkspace {
             let runner_field = step.runner.as_deref().unwrap_or("local");
             let is_container_runner = runner_field == "docker" || runner_field == "pod";
@@ -159,24 +160,12 @@ impl StepExecutor {
                     host_value.clone()
                 }
             };
-            if let Some(v) = resolve("/state", &config.state_dir) {
-                config.env.insert("STATE_DIR".to_string(), v);
-            }
-            if let Some(v) = resolve("/state-out", &config.state_out_dir) {
-                config.env.insert("STATE_OUT_DIR".to_string(), v);
-            }
-            if let Some(v) = resolve("/global-state", &config.global_state_dir) {
-                config.env.insert("GLOBAL_STATE_DIR".to_string(), v);
-            }
-            if let Some(v) = resolve("/global-state-out", &config.global_state_out_dir) {
-                config.env.insert("GLOBAL_STATE_OUT_DIR".to_string(), v);
-            }
+            worker_vars.state_dir = resolve("/state", &config.state_dir);
+            worker_vars.state_out_dir = resolve("/state-out", &config.state_out_dir);
+            worker_vars.global_state_dir = resolve("/global-state", &config.global_state_dir);
+            worker_vars.global_state_out_dir =
+                resolve("/global-state-out", &config.global_state_out_dir);
         }
-
-        // Set up /artifacts output directory for runners that support it.
-        // Shell runner writes directly to the host path; docker bind-mounts host
-        // path → /artifacts. Kube modes don't mount (deferred); agent/approval/task
-        // actions don't run user code so no artifacts.
         if step_supports_artifacts(step) {
             if let Some(path) = artifacts_out_dir {
                 let path = path.to_string();
@@ -184,28 +173,21 @@ impl StepExecutor {
 
                 let runner_field = step.runner.as_deref().unwrap_or("local");
                 let env_value = match (step.action_type.as_str(), runner_field) {
-                    ("script", "local") => path,
-                    ("script", "docker") | ("docker", _) => "/artifacts".to_string(),
-                    // Kube modes: do not set env var. Author can detect unset.
-                    _ => String::new(),
+                    ("script", "local") => Some(path),
+                    ("script", "docker") | ("docker", _) => Some("/artifacts".to_string()),
+                    // Kube modes: deferred, do not set the env var.
+                    _ => None,
                 };
-                if !env_value.is_empty() {
-                    config.env.insert("ARTIFACTS_DIR".into(), env_value);
-                }
+                worker_vars.artifacts_dir = env_value;
             }
         }
 
-        // Substitute allowlisted path-var refs ($ARTIFACTS_DIR, $STATE_DIR,
-        // …) in `args[]` against the env we just built. Without this, an
-        // arg like `"$ARTIFACTS_DIR"` would reach `execve` as a literal
-        // 14-char string — `args:` is a direct-argv contract with no shell
-        // in the loop to do expansion for us. The matching Tera vars
-        // `{{ artifacts_dir }}` etc render to these env refs server-side,
-        // so a workflow can use either spelling and converge on the same
-        // resolved path here.
-        for arg in config.args.iter_mut() {
-            *arg = stroem_runner::script_exec::expand_path_vars(arg, &config.env);
-        }
+        // Single chokepoint that enforces the worker-managed boundary:
+        // overwrites worker-set names in `config.env`, removes
+        // worker-unset names (defeats user `env:` shadowing), and
+        // substitutes path-var refs in `config.args` against the
+        // worker map only.
+        apply_worker_path_vars(&mut config.env, &mut config.args, &worker_vars);
 
         // Resolve ref+ secret references in env vars via vals CLI
         crate::secrets::resolve_secrets(&mut config.env)
@@ -525,6 +507,87 @@ impl StepExecutor {
             global_state_out_dir: None,
             artifacts_out_dir: None,
         })
+    }
+}
+
+/// The five path-var names whose substitution must be sealed off from
+/// user-controlled `env:` blocks. Kept here as the single source of truth
+/// for both [`apply_worker_path_vars`] and the matching server-side Tera
+/// keys in `rendering.rs::render_action_spec`.
+const PATH_VAR_NAMES: [&str; 5] = [
+    "ARTIFACTS_DIR",
+    "STATE_DIR",
+    "STATE_OUT_DIR",
+    "GLOBAL_STATE_DIR",
+    "GLOBAL_STATE_OUT_DIR",
+];
+
+/// Worker decisions for the five path-var env values, fed by `execute_step`
+/// from its own mount/tempdir setup. `None` means "worker did not set this
+/// on this code path" (Kube runner, agent/approval/task step, missing
+/// state mount) and the corresponding env var will NOT be inserted no
+/// matter what the workflow declared in its `env:` block.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct WorkerPathVars {
+    pub artifacts_dir: Option<String>,
+    pub state_dir: Option<String>,
+    pub state_out_dir: Option<String>,
+    pub global_state_dir: Option<String>,
+    pub global_state_out_dir: Option<String>,
+}
+
+impl WorkerPathVars {
+    fn as_env_map(&self) -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        let pairs: [(&str, &Option<String>); 5] = [
+            ("ARTIFACTS_DIR", &self.artifacts_dir),
+            ("STATE_DIR", &self.state_dir),
+            ("STATE_OUT_DIR", &self.state_out_dir),
+            ("GLOBAL_STATE_DIR", &self.global_state_dir),
+            ("GLOBAL_STATE_OUT_DIR", &self.global_state_out_dir),
+        ];
+        for (name, val) in pairs {
+            if let Some(v) = val {
+                m.insert(name.to_string(), v.clone());
+            }
+        }
+        m
+    }
+}
+
+/// Apply the worker-authoritative path-var values to a step's env + args:
+///
+/// 1. Insert each worker-set value into `env` (overwriting any user
+///    `env:`-block override of the same name).
+/// 2. Remove any path-var name the worker did NOT set, so a user
+///    `env: { ARTIFACTS_DIR: "/etc/passwd" }` cannot leak through into
+///    the spawned script's environment on code paths where the worker
+///    has no authoritative path to install.
+/// 3. Substitute `$ARTIFACTS_DIR` / `${STATE_DIR}` / … in each arg
+///    against the worker map only — never against `env`, which the
+///    workflow can shadow.
+///
+/// This is the single chokepoint that enforces the security boundary:
+/// `args:` substitution and the spawned process's env both source from
+/// `vars`, not from user-controlled fields.
+pub(crate) fn apply_worker_path_vars(
+    env: &mut std::collections::HashMap<String, String>,
+    args: &mut [String],
+    vars: &WorkerPathVars,
+) {
+    let map = vars.as_env_map();
+    for name in PATH_VAR_NAMES {
+        match map.get(name) {
+            Some(v) => {
+                env.insert(name.to_string(), v.clone());
+            }
+            None => {
+                env.remove(name);
+            }
+        }
+    }
+    for arg in args.iter_mut() {
+        *arg = stroem_runner::script_exec::expand_path_vars(arg, &map);
     }
 }
 
@@ -1509,5 +1572,124 @@ mod tests {
                 "{ty} steps must support artifacts"
             );
         }
+    }
+
+    // ─── apply_worker_path_vars: security boundary tests ────────────────
+
+    fn env_with(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn apply_worker_path_vars_user_env_override_cannot_poison_args() {
+        // The core security regression test: a workflow declaring
+        // `env: { ARTIFACTS_DIR: "/etc/passwd" }` MUST NOT influence
+        // path-var substitution. The worker's authoritative value (or
+        // None) is the only thing that can ever land in `args[]`.
+        let mut env = env_with(&[("ARTIFACTS_DIR", "/etc/passwd")]);
+        let mut args = vec!["$ARTIFACTS_DIR/out.txt".to_string()];
+        let vars = WorkerPathVars {
+            artifacts_dir: Some("/tmp/worker-controlled".to_string()),
+            ..Default::default()
+        };
+
+        apply_worker_path_vars(&mut env, &mut args, &vars);
+
+        assert_eq!(args[0], "/tmp/worker-controlled/out.txt");
+        assert_eq!(
+            env.get("ARTIFACTS_DIR").map(|s| s.as_str()),
+            Some("/tmp/worker-controlled"),
+            "spawned process env must see the worker-set value, not the workflow's override"
+        );
+    }
+
+    #[test]
+    fn apply_worker_path_vars_kube_runner_unset_drops_user_override() {
+        // Kube runner doesn't set ARTIFACTS_DIR (artifacts deferred).
+        // Without the boundary, a workflow could set
+        // `env: { ARTIFACTS_DIR: "/etc/passwd" }` and have
+        // `expand_path_vars` honour it OR have the script inherit it.
+        // Both paths are sealed: substitution leaves the literal ref,
+        // env is stripped before the process spawns.
+        let mut env = env_with(&[("ARTIFACTS_DIR", "/etc/passwd")]);
+        let mut args = vec!["$ARTIFACTS_DIR/out.txt".to_string()];
+        let vars = WorkerPathVars::default(); // worker set nothing
+
+        apply_worker_path_vars(&mut env, &mut args, &vars);
+
+        // Substitution doesn't fire (no allowlisted value to substitute).
+        assert_eq!(args[0], "$ARTIFACTS_DIR/out.txt");
+        // Workflow's override is stripped from the spawned env.
+        assert!(
+            !env.contains_key("ARTIFACTS_DIR"),
+            "ARTIFACTS_DIR must be stripped when worker did not set it"
+        );
+    }
+
+    #[test]
+    fn apply_worker_path_vars_all_five_names_isolated() {
+        // Every name in PATH_VAR_NAMES must be sealed. Loop over them
+        // to lock in the contract for future additions.
+        for name in PATH_VAR_NAMES {
+            let mut env = env_with(&[(name, "/poisoned")]);
+            let mut args = vec![format!("${name}/x")];
+            apply_worker_path_vars(&mut env, &mut args, &WorkerPathVars::default());
+            assert_eq!(
+                args[0],
+                format!("${name}/x"),
+                "{name} must not substitute when worker didn't set it"
+            );
+            assert!(
+                !env.contains_key(name),
+                "{name} must be stripped from env when worker didn't set it"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_worker_path_vars_worker_value_overwrites_user_value() {
+        // Happy path: worker DOES set ARTIFACTS_DIR. The worker value
+        // must overwrite any user-declared override in env AND be the
+        // value substituted into args.
+        let mut env = env_with(&[
+            ("ARTIFACTS_DIR", "/user-wanted"),
+            ("MY_OWN_VAR", "/unchanged"),
+        ]);
+        let mut args = vec!["$ARTIFACTS_DIR".to_string(), "$MY_OWN_VAR".to_string()];
+        let vars = WorkerPathVars {
+            artifacts_dir: Some("/worker-set".to_string()),
+            ..Default::default()
+        };
+
+        apply_worker_path_vars(&mut env, &mut args, &vars);
+
+        assert_eq!(
+            env.get("ARTIFACTS_DIR").map(|s| s.as_str()),
+            Some("/worker-set")
+        );
+        assert_eq!(
+            env.get("MY_OWN_VAR").map(|s| s.as_str()),
+            Some("/unchanged")
+        );
+        assert_eq!(args[0], "/worker-set");
+        // Non-allowlisted vars pass through `args[]` verbatim.
+        assert_eq!(args[1], "$MY_OWN_VAR");
+    }
+
+    #[test]
+    fn apply_worker_path_vars_non_allowlisted_user_env_untouched() {
+        // Variables outside the 5 path-var names must be left alone in
+        // both env and args. This documents that the boundary only seals
+        // path-vars; everything else stays as the workflow author wrote it.
+        let mut env = env_with(&[("PATH", "/usr/bin"), ("HOME", "/root")]);
+        let mut args = vec!["$PATH".to_string(), "${HOME}/foo".to_string()];
+        apply_worker_path_vars(&mut env, &mut args, &WorkerPathVars::default());
+        assert_eq!(env.get("PATH").map(|s| s.as_str()), Some("/usr/bin"));
+        assert_eq!(env.get("HOME").map(|s| s.as_str()), Some("/root"));
+        assert_eq!(args[0], "$PATH");
+        assert_eq!(args[1], "${HOME}/foo");
     }
 }

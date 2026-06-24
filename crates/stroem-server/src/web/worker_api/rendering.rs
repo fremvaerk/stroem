@@ -1784,15 +1784,13 @@ mod tests {
         assert_eq!(result["args"][1], "$ARTIFACTS_DIR/FAC42.report");
     }
 
-    #[test]
-    fn path_vars_in_source_field_render_too() {
-        // `source` is also Tera-rendered, so absolute paths can be
-        // templated. Not a common pattern but the path-vars should be
-        // available there for symmetry.
-        let spec = json!({
-            "source": "{{ state_dir }}/install.sh",
-        });
-        let result = render_spec(spec);
-        assert_eq!(result["source"], "$STATE_DIR/install.sh");
-    }
+    // Note: `source` is Tera-rendered (so `{{ input.foo }}` works there),
+    // but there's no worker-side substitution layer for `source` paths —
+    // the runner opens the file by path verbatim. A `source: "{{
+    // artifacts_dir }}/foo.sh"` would render to "$ARTIFACTS_DIR/foo.sh"
+    // and then fail at file-open with that literal path. We intentionally
+    // do NOT add a "path_vars work in source" test because that would
+    // pin in misleading behaviour; if someone needs to invoke a script
+    // from $ARTIFACTS_DIR they should use `script:` (inline) or wrap the
+    // call in a shell that expands the env var.
 }

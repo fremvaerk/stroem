@@ -121,7 +121,12 @@ If no previous state exists, the `state` object is not present in the template c
 | Docker | Bind mount `:ro` at `/state` | Bind mount `:rw` at `/state-out` | Yes |
 | Kubernetes | emptyDir volume | emptyDir volume | Yes |
 
-All runners set `STATE_DIR` and `STATE_OUT_DIR` environment variables automatically.
+All runners set `STATE_DIR` and `STATE_OUT_DIR` environment variables automatically. The value differs by runner mode:
+
+- **Shell (local):** the per-step host tempdir path the worker extracted the state into. Read it directly from the script.
+- **Docker / Kubernetes:** the in-container mount path (`/state` and `/state-out`). The host tempdir is bind-mounted under those paths; the env var points to the in-container location so scripts work portably across runners. Previously the env var was set to the host path even inside containers — that was broken (the host path doesn't exist inside the container) and was fixed; use the env var rather than the literal paths to stay portable.
+
+The same per-runner-mode rule applies to `$GLOBAL_STATE_DIR` and `$GLOBAL_STATE_OUT_DIR` (and `$ARTIFACTS_DIR`, see [Artifacts](../artifacts)). You can also reference these via Tera path variables — see [Action types — Path variables](../action-types/#path-variables) for the full list.
 
 :::note
 For Kubernetes runners, file-based state from previous runs is available via `/state`. However, uploading file state (`/state-out`) in the initial release works only for the `STATE:` protocol (structured data). File artifacts are supported on shell and Docker runners.
