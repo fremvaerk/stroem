@@ -40,14 +40,60 @@ test.describe("Artifacts", () => {
     await expect(page.getByText("report.html")).toBeVisible();
     await expect(page.getByText("status.txt")).toBeVisible();
 
-    // Both Open ↗ and Download buttons render as anchor tags via Button asChild.
+    // Both Open ↗ and Download render as <button> elements (changed from
+    // <a> when downloads moved to programmatic Blob-URL fetch — direct
+    // browser nav can't attach the SPA's in-memory JWT, so all downloads
+    // now go through `apiFetchRaw` + `URL.createObjectURL`).
     // text/plain (status.txt) → "Open ↗"; text/html (report.html) → "Download".
     await expect(
-      page.getByRole("link", { name: /Download/ }).first(),
+      page.getByRole("button", { name: /Download/ }).first(),
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: /Open/ }).first(),
+      page.getByRole("button", { name: /Open/ }).first(),
     ).toBeVisible();
+  });
+
+  test("download button fetches with auth + triggers blob download", async ({
+    page,
+    baseURL,
+  }) => {
+    let jobId: string;
+    try {
+      jobId = await triggerJob(baseURL!, "produce-artifacts", {});
+    } catch (err) {
+      test.skip(
+        true,
+        `produce-artifacts task not available: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    await waitForJob(baseURL!, jobId);
+
+    // Spy the authenticated artifact download request — must carry the
+    // JWT in `Authorization: Bearer …`. Direct `<a href>` nav previously
+    // omitted the header, hitting 401 in production.
+    let sawAuthHeader = false;
+    page.on("request", (req) => {
+      if (req.url().includes("/api/jobs/") && req.url().includes("/artifacts/")) {
+        const hdr = req.headers()["authorization"] ?? "";
+        if (hdr.startsWith("Bearer ")) sawAuthHeader = true;
+      }
+    });
+
+    await page.goto(`/jobs/${jobId}`);
+    await expect(
+      page.getByRole("heading", { name: "Artifacts" }),
+    ).toBeVisible();
+
+    // Trigger the download (Playwright catches the file save dialog via
+    // page.waitForEvent("download")).
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: /Download/ }).first().click(),
+    ]);
+
+    expect(sawAuthHeader).toBe(true);
+    expect(download.suggestedFilename()).toBeTruthy();
   });
 
   test("artifacts section is hidden when no artifacts produced", async ({

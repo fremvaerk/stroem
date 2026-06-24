@@ -1,12 +1,14 @@
+import { useState } from "react";
 import {
   FileText,
   Image as ImageIcon,
   FileArchive,
   FileCode,
   File,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { ArtifactItem } from "@/lib/api";
+import { apiFetchRaw, ApiError, type ArtifactItem } from "@/lib/api";
 
 // Content types that the server marks as inline (Content-Disposition: inline).
 // Mirrors the SAFE_INLINE list in crates/stroem-server/src/web/api/artifacts.rs.
@@ -58,6 +60,48 @@ function humanSize(bytes: number) {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
+/**
+ * Fetch an artifact with the SPA's JWT attached, build a `blob:` URL,
+ * and either open it in a new tab (safe MIME) or trigger a download.
+ *
+ * Direct `<a href={artifact.url}>` navigation can't do this because the
+ * JWT lives in-memory (not in a cookie) — the browser would fire an
+ * unauthenticated GET and the server's `require_auth` middleware would
+ * return 401, surfacing as a JSON error page instead of the file.
+ */
+async function triggerArtifactAction(
+  url: string,
+  filename: string,
+  inline: boolean,
+): Promise<void> {
+  const res = await apiFetchRaw(url);
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    if (inline) {
+      // `noopener` blocks the new tab from reaching back into this window.
+      // The blob URL is same-origin to the SPA so the browser can render
+      // PDFs / images inline without re-fetching (and without needing auth
+      // a second time).
+      window.open(objectUrl, "_blank", "noopener");
+    } else {
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      // Some browsers require the anchor to be in the DOM before .click()
+      // — append, click, remove in the same tick.
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+  } finally {
+    // Give the browser a generous window to actually start the download /
+    // render the inline view before we revoke. 60s is plenty for both
+    // cases without leaking the blob indefinitely.
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  }
+}
+
 export function ArtifactList({
   items,
   fetchError = false,
@@ -65,11 +109,43 @@ export function ArtifactList({
   items: ArtifactItem[];
   fetchError?: boolean;
 }) {
+  // Per-row UI state for download/open in flight + last error message. Keyed
+  // by artifact name (unique per job by the DB constraint).
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
   // Render nothing when there are no artifacts AND no fetch error — keeps the
   // empty-job common case visually quiet. When fetchError is true, show the
   // section header with a muted error row so a 403/500 is distinguishable
   // from "no artifacts produced".
   if (items.length === 0 && !fetchError) return null;
+
+  async function handleClick(name: string, url: string, inline: boolean) {
+    setBusy((b) => ({ ...b, [name]: true }));
+    setErrors((e) => {
+      const { [name]: _drop, ...rest } = e;
+      void _drop;
+      return rest;
+    });
+    try {
+      await triggerArtifactAction(url, name, inline);
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `${e.status}: ${e.message}`
+          : e instanceof Error
+            ? e.message
+            : "Download failed";
+      setErrors((prev) => ({ ...prev, [name]: msg }));
+    } finally {
+      setBusy((b) => {
+        const { [name]: _drop, ...rest } = b;
+        void _drop;
+        return rest;
+      });
+    }
+  }
+
   return (
     <section
       aria-labelledby="artifacts-heading"
@@ -91,11 +167,16 @@ export function ArtifactList({
           {items.map((a) => {
             const ct = a.content_type.split(";")[0].trim().toLowerCase();
             const safe = SAFE_INLINE.has(ct);
+            const isBusy = !!busy[a.name];
+            const error = errors[a.name];
             const label = safe
               ? `Open ${a.name} in new tab`
               : `Download ${a.name}`;
             return (
-              <li key={a.name} className="flex items-center gap-3 py-2">
+              <li
+                key={a.name}
+                className="flex flex-wrap items-center gap-3 py-2"
+              >
                 {iconFor(ct)}
                 <span
                   className="flex-1 truncate font-mono text-sm"
@@ -112,17 +193,36 @@ export function ArtifactList({
                 <span className="hidden text-xs text-muted-foreground md:inline">
                   from: {a.step_name}
                 </span>
-                <Button asChild variant="outline" size="sm">
-                  <a
-                    href={a.url}
-                    target={safe ? "_blank" : undefined}
-                    rel="noopener noreferrer"
-                    aria-label={label}
-                    {...(safe ? {} : { download: a.name })}
-                  >
-                    {safe ? "Open ↗" : "Download"}
-                  </a>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  aria-label={label}
+                  disabled={isBusy}
+                  onClick={() => handleClick(a.name, a.url, safe)}
+                >
+                  {isBusy ? (
+                    <>
+                      <Loader2
+                        className="mr-1 h-3 w-3 animate-spin"
+                        aria-hidden
+                      />
+                      {safe ? "Opening…" : "Downloading…"}
+                    </>
+                  ) : safe ? (
+                    "Open ↗"
+                  ) : (
+                    "Download"
+                  )}
                 </Button>
+                {error && (
+                  <p
+                    role="alert"
+                    data-testid={`artifact-error-${a.name}`}
+                    className="basis-full text-xs text-destructive"
+                  >
+                    {error}
+                  </p>
+                )}
               </li>
             );
           })}

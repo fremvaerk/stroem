@@ -89,7 +89,29 @@ async function apiFetch<T>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
-  // Preemptively refresh if we have no access token (cookie may still be valid)
+  const res = await apiFetchRaw(url, options);
+
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return null as T;
+  }
+
+  return res.json();
+}
+
+/**
+ * Same auth + refresh behaviour as `apiFetch`, but returns the raw
+ * `Response` so callers can consume non-JSON bodies (artifact downloads,
+ * streamed logs, etc.). Throws `ApiError` on non-2xx.
+ *
+ * Browser navigation via `<a href>` can't reach the JWT (lives in memory
+ * for SPA security), so authenticated downloads must go through this
+ * helper, then build a `URL.createObjectURL(blob)` for the actual
+ * browser-visible download/open.
+ */
+export async function apiFetchRaw(
+  url: string,
+  options: RequestInit = {},
+): Promise<Response> {
   await tokenManager.ensureToken();
 
   const headers: Record<string, string> = {
@@ -116,15 +138,11 @@ async function apiFetch<T>(
   }
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    const body = await res.json().catch(() => ({}) as { error?: string });
     throw new ApiError(res.status, body.error || res.statusText);
   }
 
-  if (res.status === 204 || res.headers.get("content-length") === "0") {
-    return null as T;
-  }
-
-  return res.json();
+  return res;
 }
 
 export type { PaginatedResponse } from "./types";
