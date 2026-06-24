@@ -11,14 +11,17 @@
     "astro": "astro"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.38",
-    "astro": "^6",
+    "@astrojs/starlight": "^0.38.5",
+    "astro": "^6.4.8",
     "sharp": "^0.34.5"
   },
   "overrides": {
     "picomatch": "^4.0.4",
     "postcss": "^8.5.10",
     "smol-toml": "^1.6.1",
-    "devalue": "^5.8.1"
+    "devalue": "^5.8.1",
+    "vite": "^7.3.5",
+    "js-yaml": "^4.2.0",
+    "esbuild": "^0.28.1"
   }
 }
