@@ -99,9 +99,14 @@ test.describe("Settings - API Key Management", () => {
     await revealDialog.getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
 
-    // The new key should now appear in the table
+    // The new key should now appear in the table. Extended timeout: the
+    // create handler awaits `load()` before opening the reveal dialog, so
+    // the keys array is fresh in state — but the DOM update for the new
+    // table row sometimes lags behind on slow CI runners (race against
+    // the modal-unmount animation + React commit). 10 s is generous and
+    // mirrors the existing precedent in the "revoke" test below.
     const row = page.locator("table tbody tr").filter({ hasText: keyName });
-    await expect(row).toBeVisible();
+    await expect(row).toBeVisible({ timeout: 10000 });
 
     // The key prefix cell should show "{prefix}..."
     const prefixCell = row.locator("td").nth(1);
@@ -130,10 +135,12 @@ test.describe("Settings - API Key Management", () => {
     const revealDialog = page.getByRole("dialog");
     await expect(revealDialog).toBeVisible();
     await revealDialog.getByRole("button", { name: "Done" }).click();
+    await expect(page.getByRole("dialog")).not.toBeVisible();
 
-    // Row should exist and not show "Never" in expires column
+    // Row should exist and not show "Never" in expires column.
+    // Extended timeout for the same CI-runner race documented above.
     const row = page.locator("table tbody tr").filter({ hasText: keyName });
-    await expect(row).toBeVisible();
+    await expect(row).toBeVisible({ timeout: 10000 });
     const expiresCell = row.locator("td").nth(3);
     await expect(expiresCell).not.toContainText("Never");
   });
@@ -254,11 +261,11 @@ test.describe("Settings - API Key Management", () => {
     const revealDialog = page.getByRole("dialog");
     await expect(revealDialog).toBeVisible();
     await revealDialog.getByRole("button", { name: "Done" }).click();
-    await page.waitForLoadState("networkidle");
+    await expect(page.getByRole("dialog")).not.toBeVisible();
 
-    // Key should be in the table
+    // Key should be in the table — extended timeout for CI-runner race.
     const row = page.locator("table tbody tr").filter({ hasText: keyName });
-    await expect(row).toBeVisible();
+    await expect(row).toBeVisible({ timeout: 10000 });
 
     // Click trash button
     await row.getByRole("button").click();
