@@ -32,7 +32,7 @@ kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 tempfile.workspace = true
 bytes.workspace = true
-infer = "0.16"
+infer = "0.19"
 walkdir = "2"
 
 [features]
