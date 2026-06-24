@@ -1,7 +1,82 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use stroem_common::language::ScriptLanguage;
 use uuid::Uuid;
+
+/// Path-var env references the worker expands in `args[]` before passing
+/// them to `execve`. Keeping this an allowlist preserves the contract that
+/// `args:` is "direct argv, no shell" for everything else — a stray
+/// `$PATH` or `$HOME` from user input still arrives at the script
+/// verbatim, only these five worker-managed paths get substituted.
+///
+/// Mirrors the keys exposed as Tera variables in
+/// `stroem-server/src/web/worker_api/rendering.rs` so both rendering
+/// paths converge on the same observable values inside a script.
+pub const ARGS_PATH_VARS: &[&str] = &[
+    "ARTIFACTS_DIR",
+    "STATE_DIR",
+    "STATE_OUT_DIR",
+    "GLOBAL_STATE_DIR",
+    "GLOBAL_STATE_OUT_DIR",
+];
+
+/// Expand allowlisted `$VAR` and `${VAR}` references in a single arg
+/// against the runner's env map. Values are looked up from the same
+/// `config.env` the script will see, so substitution is automatically
+/// runner-mode aware (local → host tempdir; docker/pod → `/artifacts`,
+/// `/state`, etc.) as long as `executor.rs` set those env vars to the
+/// right per-runner values.
+///
+/// Identifier-boundary aware: `$STATE_DIR_BACKUP` does NOT match
+/// `$STATE_DIR` — only references followed by a non-identifier char (or
+/// end of string) substitute. The braced form `${STATE_DIR}` is always
+/// unambiguous.
+pub fn expand_path_vars(arg: &str, env: &HashMap<String, String>) -> String {
+    let bytes = arg.as_bytes();
+    let mut out = String::with_capacity(arg.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let rest = &bytes[i + 1..];
+        // Braced form: ${VAR}
+        if rest.first() == Some(&b'{') {
+            if let Some(close) = rest.iter().position(|&b| b == b'}') {
+                let name = std::str::from_utf8(&rest[1..close]).unwrap_or("");
+                if ARGS_PATH_VARS.contains(&name) {
+                    if let Some(val) = env.get(name) {
+                        out.push_str(val);
+                        i += 1 + close + 1;
+                        continue;
+                    }
+                }
+            }
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        // Bare form: $VAR — maximal identifier run (ASCII letter, digit, underscore).
+        let end = rest
+            .iter()
+            .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+            .unwrap_or(rest.len());
+        let name = std::str::from_utf8(&rest[..end]).unwrap_or("");
+        if !name.is_empty() && ARGS_PATH_VARS.contains(&name) {
+            if let Some(val) = env.get(name) {
+                out.push_str(val);
+                i += 1 + end;
+                continue;
+            }
+        }
+        out.push('$');
+        i += 1;
+    }
+    out
+}
 
 /// Returns preference-ordered list of (binary, pre_args) for a language.
 /// The first binary found on `$PATH` will be used.
@@ -1398,5 +1473,118 @@ mod tests {
             "file path with spaces must be shell-escaped: {}",
             script
         );
+    }
+
+    // ─── expand_path_vars: args env substitution ─────────────────────────
+
+    fn env_with(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn expand_path_vars_substitutes_dollar_form() {
+        let env = env_with(&[("ARTIFACTS_DIR", "/tmp/artif-xyz")]);
+        assert_eq!(
+            expand_path_vars("$ARTIFACTS_DIR/out.txt", &env),
+            "/tmp/artif-xyz/out.txt"
+        );
+    }
+
+    #[test]
+    fn expand_path_vars_substitutes_braced_form() {
+        let env = env_with(&[("STATE_DIR", "/tmp/state")]);
+        assert_eq!(
+            expand_path_vars("${STATE_DIR}/manifest.json", &env),
+            "/tmp/state/manifest.json"
+        );
+    }
+
+    #[test]
+    fn expand_path_vars_substitutes_all_five_allowlisted_vars() {
+        let env = env_with(&[
+            ("ARTIFACTS_DIR", "/a"),
+            ("STATE_DIR", "/s"),
+            ("STATE_OUT_DIR", "/so"),
+            ("GLOBAL_STATE_DIR", "/gs"),
+            ("GLOBAL_STATE_OUT_DIR", "/gso"),
+        ]);
+        assert_eq!(expand_path_vars("$ARTIFACTS_DIR", &env), "/a");
+        assert_eq!(expand_path_vars("$STATE_DIR", &env), "/s");
+        assert_eq!(expand_path_vars("$STATE_OUT_DIR", &env), "/so");
+        assert_eq!(expand_path_vars("$GLOBAL_STATE_DIR", &env), "/gs");
+        assert_eq!(expand_path_vars("$GLOBAL_STATE_OUT_DIR", &env), "/gso");
+    }
+
+    #[test]
+    fn expand_path_vars_leaves_unknown_vars_untouched() {
+        // Allowlist contract: $PATH, $HOME, $USER, etc. pass through as
+        // literal text. `args:` is a direct-argv channel — we only expand
+        // worker-managed paths the script can't know in advance, never
+        // arbitrary process env. A user who wants $PATH expanded must do
+        // it via inline `script:` (shell-handled) instead.
+        let env = env_with(&[
+            ("ARTIFACTS_DIR", "/a"),
+            ("PATH", "/usr/bin"),
+            ("HOME", "/root"),
+        ]);
+        assert_eq!(expand_path_vars("$PATH", &env), "$PATH");
+        assert_eq!(expand_path_vars("${HOME}/foo", &env), "${HOME}/foo");
+        // Allowlisted var still expands when adjacent to a passthrough one.
+        assert_eq!(expand_path_vars("$ARTIFACTS_DIR:$PATH", &env), "/a:$PATH");
+    }
+
+    #[test]
+    fn expand_path_vars_no_op_when_env_lacks_var() {
+        // Pre-terminal step or runner mode that doesn't set ARTIFACTS_DIR
+        // (agent/approval/task) — the ref must pass through verbatim
+        // rather than crash or empty-string out.
+        let env = env_with(&[]);
+        assert_eq!(
+            expand_path_vars("$ARTIFACTS_DIR/x", &env),
+            "$ARTIFACTS_DIR/x"
+        );
+    }
+
+    #[test]
+    fn expand_path_vars_handles_repeated_refs() {
+        let env = env_with(&[("STATE_DIR", "/s")]);
+        assert_eq!(
+            expand_path_vars("$STATE_DIR:$STATE_DIR:${STATE_DIR}", &env),
+            "/s:/s:/s"
+        );
+    }
+
+    #[test]
+    fn expand_path_vars_identifier_boundary_aware() {
+        // `$STATE_DIR_BACKUP` is a different identifier and must NOT
+        // partial-match `$STATE_DIR`. Bracing the intended ref keeps
+        // adjoining identifier chars safe: `${STATE_DIR}_BACKUP`.
+        let env = env_with(&[("STATE_DIR", "/s")]);
+        assert_eq!(
+            expand_path_vars("$STATE_DIR_BACKUP", &env),
+            "$STATE_DIR_BACKUP"
+        );
+        assert_eq!(expand_path_vars("${STATE_DIR}_BACKUP", &env), "/s_BACKUP");
+        // Trailing non-identifier char still substitutes the bare form.
+        assert_eq!(expand_path_vars("$STATE_DIR/x", &env), "/s/x");
+        assert_eq!(expand_path_vars("$STATE_DIR.", &env), "/s.");
+        // End-of-string counts as a boundary.
+        assert_eq!(expand_path_vars("$STATE_DIR", &env), "/s");
+    }
+
+    #[test]
+    fn expand_path_vars_preserves_literal_dollars_and_braces() {
+        let env = env_with(&[("STATE_DIR", "/s")]);
+        // `$` followed by non-identifier
+        assert_eq!(expand_path_vars("a$b$c", &env), "a$b$c");
+        // Unmatched brace
+        assert_eq!(expand_path_vars("${STATE_DIR", &env), "${STATE_DIR");
+        // Empty ref `${}`
+        assert_eq!(expand_path_vars("${}", &env), "${}");
+        // Two consecutive `$$`
+        assert_eq!(expand_path_vars("$$", &env), "$$");
     }
 }

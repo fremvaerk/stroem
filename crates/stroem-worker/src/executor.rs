@@ -142,22 +142,34 @@ impl StepExecutor {
 
         // Only set state env vars for WithWorkspace mode — NoWorkspace (container actions)
         // don't have the state directories bind-mounted.
+        //
+        // For local shell runner: the env value is the host tempdir path
+        // (the script runs on the host and reads the file directly). For
+        // docker/pod: the bind mount target inside the container — the
+        // host path is meaningless to a process inside the container, so
+        // exporting the host path would only mislead. Mirrors what the
+        // ARTIFACTS_DIR block below already does.
         if config.runner_mode == stroem_runner::RunnerMode::WithWorkspace {
-            if let Some(ref sd) = config.state_dir {
-                config.env.insert("STATE_DIR".to_string(), sd.clone());
+            let runner_field = step.runner.as_deref().unwrap_or("local");
+            let is_container_runner = runner_field == "docker" || runner_field == "pod";
+            let resolve = |container_path: &str, host_value: &Option<String>| -> Option<String> {
+                if is_container_runner {
+                    host_value.as_ref().map(|_| container_path.to_string())
+                } else {
+                    host_value.clone()
+                }
+            };
+            if let Some(v) = resolve("/state", &config.state_dir) {
+                config.env.insert("STATE_DIR".to_string(), v);
             }
-            if let Some(ref sod) = config.state_out_dir {
-                config.env.insert("STATE_OUT_DIR".to_string(), sod.clone());
+            if let Some(v) = resolve("/state-out", &config.state_out_dir) {
+                config.env.insert("STATE_OUT_DIR".to_string(), v);
             }
-            if let Some(ref gsd) = config.global_state_dir {
-                config
-                    .env
-                    .insert("GLOBAL_STATE_DIR".to_string(), gsd.clone());
+            if let Some(v) = resolve("/global-state", &config.global_state_dir) {
+                config.env.insert("GLOBAL_STATE_DIR".to_string(), v);
             }
-            if let Some(ref gsod) = config.global_state_out_dir {
-                config
-                    .env
-                    .insert("GLOBAL_STATE_OUT_DIR".to_string(), gsod.clone());
+            if let Some(v) = resolve("/global-state-out", &config.global_state_out_dir) {
+                config.env.insert("GLOBAL_STATE_OUT_DIR".to_string(), v);
             }
         }
 
@@ -181,6 +193,18 @@ impl StepExecutor {
                     config.env.insert("ARTIFACTS_DIR".into(), env_value);
                 }
             }
+        }
+
+        // Substitute allowlisted path-var refs ($ARTIFACTS_DIR, $STATE_DIR,
+        // …) in `args[]` against the env we just built. Without this, an
+        // arg like `"$ARTIFACTS_DIR"` would reach `execve` as a literal
+        // 14-char string — `args:` is a direct-argv contract with no shell
+        // in the loop to do expansion for us. The matching Tera vars
+        // `{{ artifacts_dir }}` etc render to these env refs server-side,
+        // so a workflow can use either spelling and converge on the same
+        // resolved path here.
+        for arg in config.args.iter_mut() {
+            *arg = stroem_runner::script_exec::expand_path_vars(arg, &config.env);
         }
 
         // Resolve ref+ secret references in env vars via vals CLI

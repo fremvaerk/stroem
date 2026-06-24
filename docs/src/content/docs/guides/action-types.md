@@ -71,7 +71,7 @@ actions:
 
 ### Script file
 
-Scripts are relative to the workspace root:
+Scripts are usually relative to the workspace root:
 
 ```yaml
 actions:
@@ -81,6 +81,21 @@ actions:
     input:
       env: { type: string, default: "staging" }
 ```
+
+Absolute paths are also accepted — the path is used verbatim, with no resolution against the workspace. This lets you invoke a binary that lives on the worker host (or, for `runner: docker` / `runner: pod`, inside the runner image):
+
+```yaml
+actions:
+  validate:
+    type: script
+    source: /opt/allunite-traffic-validation/z1validate.sh
+```
+
+Caveats:
+
+- **The path must exist where the script will actually run.** For `runner: local` that's the worker's host filesystem; for `runner: docker` / `runner: pod` it's inside the container image. Mismatched assumptions silently fail at exec time.
+- **Absolute paths bypass the workspace sandbox.** A workflow can reach any file the worker process can read. Treat it as an operator-managed escape hatch — don't template absolute paths from user input.
+- **Not portable across workers.** If different workers have the binary in different locations, the workflow won't roam.
 
 ### CLI arguments
 
@@ -103,6 +118,49 @@ actions:
 For shell scripts, args become positional parameters (`$1`, `$2`, ...). For other languages, they appear as standard command-line arguments (e.g. `sys.argv[1:]` in Python).
 
 The `args` field is only valid on `type: script` actions. Docker and pod actions should use `cmd`, `command`, or `entrypoint` instead.
+
+### Path variables
+
+These Tera variables resolve to env-var-reference strings that the worker substitutes to real paths before exec. They work in any rendered field — `script`, `source`, `args`, `env` values, `manifest`:
+
+| Tera var | Equivalent env var | Available when |
+|---|---|---|
+| `{{ artifacts_dir }}` | `$ARTIFACTS_DIR` | Runner supports artifacts (shell, docker; see [Artifacts](../artifacts)) |
+| `{{ state_dir }}` | `$STATE_DIR` | Script actions (read-only state mount) |
+| `{{ state_out_dir }}` | `$STATE_OUT_DIR` | Script actions (writable state mount) |
+| `{{ global_state_dir }}` | `$GLOBAL_STATE_DIR` | Script actions (read-only global state) |
+| `{{ global_state_out_dir }}` | `$GLOBAL_STATE_OUT_DIR` | Script actions (writable global state) |
+
+The Tera form and the bare `$VAR` form are interchangeable — both produce the same resolved path at exec time. Pick whichever reads better in your YAML.
+
+**Example — pass the artifacts dir positionally to an external binary:**
+
+```yaml
+actions:
+  validate:
+    type: script
+    source: /opt/allunite-traffic-validation/z1validate.sh
+    args:
+      - "{{ input.facilities }}"
+      - "{{ artifacts_dir }}"
+      - "{{ input.report_type }}"
+```
+
+The worker resolves `{{ artifacts_dir }}` to the real path (a per-step host tempdir for `runner: local`; `/artifacts` for `runner: docker` / `runner: pod`) before invoking the script, so `$2` inside `z1validate.sh` is the actual directory the artifacts collector watches.
+
+**Example — same path inside an inline `script:`:**
+
+```yaml
+actions:
+  build-report:
+    type: script
+    script: |
+      python3 report.py > {{ artifacts_dir }}/report.html
+```
+
+Inside `script:`, the spawned shell handles `$ARTIFACTS_DIR` expansion naturally; the Tera substitution is redundant but kept for symmetry with the `args` form. `$STATE_DIR_BACKUP` and other identifier-extending names are NOT partial-matched — use `${STATE_DIR}_BACKUP` if you need an adjacent identifier char.
+
+Only the five names above are expanded in `args:`. References like `$PATH`, `$HOME`, or any user-defined env var pass through verbatim — `args:` is a direct-argv channel by design, not a shell, so we only substitute paths the script can't know ahead of time.
 
 ### Environment variables
 

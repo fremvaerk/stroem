@@ -195,6 +195,25 @@ pub fn render_action_spec(
     if let Some(global_state_val) = global_state_json {
         spec_ctx.insert("global_state".to_string(), global_state_val.clone());
     }
+    // Path-vars rendered as env-var-reference strings. The server doesn't know
+    // the actual paths (they're per-step tempdirs on the worker host, or fixed
+    // container paths for docker/pod). The renderer just emits the env var
+    // reference; the runner does the actual substitution before execve so
+    // `args:` elements end up holding real paths instead of literal "$VAR"
+    // strings. Inside an inline `script:` block, the shell handles expansion
+    // naturally — both code paths converge on the same observable value.
+    for (key, value) in [
+        ("artifacts_dir", "$ARTIFACTS_DIR"),
+        ("state_dir", "$STATE_DIR"),
+        ("state_out_dir", "$STATE_OUT_DIR"),
+        ("global_state_dir", "$GLOBAL_STATE_DIR"),
+        ("global_state_out_dir", "$GLOBAL_STATE_OUT_DIR"),
+    ] {
+        spec_ctx.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
     for (step_name, output) in completed_steps {
         let mut step_ctx = serde_json::Map::new();
         if let Some(output) = output {
@@ -1677,5 +1696,103 @@ mod tests {
         let result = render_step_input(&ctx).unwrap().unwrap();
         assert_eq!(result["task_cursor"], "task-cursor-val");
         assert_eq!(result["global_cursor"], "global-cursor-val");
+    }
+
+    // ─── path-var Tera context (artifacts_dir, state_dir, …) ──────────────
+
+    /// Helper: render an action spec with empty input/secrets and return
+    /// the rendered JSON, so each path-var test stays focused on its own
+    /// assertion instead of repeating the long `render_action_spec` call.
+    fn render_spec(spec: serde_json::Value) -> serde_json::Value {
+        let secrets = json!({});
+        render_action_spec(
+            Some(&spec),
+            Some(&json!({})),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn path_vars_render_to_env_var_references_in_all_fields() {
+        // All five path-vars resolve to env-var-reference strings here on
+        // the server. Inside an inline `script:` the spawned shell
+        // expands them; inside `args:` the worker's executor expands them
+        // against `config.env` before execve (see
+        // `script_exec::expand_path_vars`). Both paths converge on the
+        // same observable value at exec time.
+        let spec = json!({
+            "args": [
+                "{{ artifacts_dir }}",
+                "{{ state_dir }}",
+                "{{ state_out_dir }}",
+                "{{ global_state_dir }}",
+                "{{ global_state_out_dir }}",
+            ]
+        });
+        let result = render_spec(spec);
+        assert_eq!(result["args"][0], "$ARTIFACTS_DIR");
+        assert_eq!(result["args"][1], "$STATE_DIR");
+        assert_eq!(result["args"][2], "$STATE_OUT_DIR");
+        assert_eq!(result["args"][3], "$GLOBAL_STATE_DIR");
+        assert_eq!(result["args"][4], "$GLOBAL_STATE_OUT_DIR");
+    }
+
+    #[test]
+    fn path_vars_in_inline_script_render_to_env_var_references() {
+        // Inline `script:` use case — the shell will expand $ARTIFACTS_DIR
+        // at exec time, so Tera just needs to substitute the env ref.
+        let spec = json!({
+            "script": "cp report.csv {{ artifacts_dir }}/out.csv",
+        });
+        let result = render_spec(spec);
+        assert_eq!(result["script"], "cp report.csv $ARTIFACTS_DIR/out.csv");
+    }
+
+    #[test]
+    fn path_vars_compose_with_input_template() {
+        // Realistic case: mixed Tera input substitution + path var in a
+        // single arg list. Order of substitution must not matter.
+        let spec = json!({
+            "args": [
+                "{{ input.facility }}",
+                "{{ artifacts_dir }}/{{ input.facility }}.report",
+            ],
+        });
+        let secrets = json!({});
+        let result = render_action_spec(
+            Some(&spec),
+            Some(&json!({"facility": "FAC42"})),
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["args"][0], "FAC42");
+        assert_eq!(result["args"][1], "$ARTIFACTS_DIR/FAC42.report");
+    }
+
+    #[test]
+    fn path_vars_in_source_field_render_too() {
+        // `source` is also Tera-rendered, so absolute paths can be
+        // templated. Not a common pattern but the path-vars should be
+        // available there for symmetry.
+        let spec = json!({
+            "source": "{{ state_dir }}/install.sh",
+        });
+        let result = render_spec(spec);
+        assert_eq!(result["source"], "$STATE_DIR/install.sh");
     }
 }

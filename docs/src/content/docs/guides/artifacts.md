@@ -44,15 +44,17 @@ Exceeding either fails the step loudly.
 
 ### Runner support
 
-| Runner | Supported |
-|---|---|
-| Shell (local) | Yes |
-| Docker (`script:docker`) | Yes |
-| Docker (`type:docker`) | Yes |
-| Kubernetes (any) | No (deferred — same limitation as state `/state-out`) |
-| Agent / Approval / Task actions | n/a |
+| Runner | Supported | What `$ARTIFACTS_DIR` points to |
+|---|---|---|
+| Shell (local) | Yes | A fresh per-step host tempdir (e.g. `/tmp/.tmpXxx/`). The worker creates it via `tempfile::TempDir`, keeps it alive through the post-success scan/upload, then auto-deletes when the step completes. |
+| Docker (`script:docker`) | Yes | `/artifacts` (container path) — the worker bind-mounts a host tempdir to that mount point. |
+| Docker (`type:docker`) | Yes | `/artifacts` |
+| Kubernetes (any) | No (deferred — same limitation as state `/state-out`) | unset |
+| Agent / Approval / Task actions | n/a | unset |
 
 On unsupported runners, `$ARTIFACTS_DIR` is unset; scripts that try `> "$ARTIFACTS_DIR/foo"` will fail loudly with "ambiguous redirect".
+
+You can also reference the directory via the Tera path-variable `{{ artifacts_dir }}` (renders to `$ARTIFACTS_DIR`). See [Action types — Path variables](../action-types/#path-variables) for the full list including `{{ state_dir }}` and friends.
 
 ## Viewing & downloading
 
