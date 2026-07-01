@@ -835,7 +835,7 @@ pub async fn run_worker(
         let mut attempt = 0u32;
         loop {
             tokio::select! {
-                result = client.register(&config.worker_name, &config.tags, Some(env!("CARGO_PKG_VERSION"))) => {
+                result = client.register(&config.worker_name, &config.capabilities, &config.tags, Some(env!("CARGO_PKG_VERSION"))) => {
                     match result {
                         Ok(id) => break id,
                         Err(e) => {
@@ -913,7 +913,7 @@ pub async fn run_worker(
 
         // Try to claim a step, or stop if cancelled
         let claim_result = tokio::select! {
-            result = client.claim_step(worker_id, &config.tags) => result,
+            result = client.claim_step(worker_id, &config.capabilities, &config.tags) => result,
             () = cancel_token.cancelled() => {
                 tracing::info!("Shutdown requested, stopping poll loop");
                 drop(permit);

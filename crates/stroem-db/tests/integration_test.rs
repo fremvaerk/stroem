@@ -150,6 +150,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -179,6 +180,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo hello"})),
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -202,6 +204,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo world"})),
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -246,7 +249,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
     }
 
     // Claim a ready step
-    let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], worker_id)
+    let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], worker_id)
         .await?
         .expect("Should claim a step");
 
@@ -256,7 +259,7 @@ async fn test_create_steps_and_claim() -> Result<()> {
 
     // Try to claim again - should get None (no more ready steps)
     let claimed_again =
-        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], worker_id).await?;
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], worker_id).await?;
     assert!(claimed_again.is_none());
 
     Ok(())
@@ -291,6 +294,7 @@ async fn test_claim_concurrency() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo test"})),
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -321,13 +325,15 @@ async fn test_claim_concurrency() -> Result<()> {
                 worker_id,
                 &format!("worker-{}", i),
                 &["script".to_string()],
+                &[],
                 None,
             )
             .await
             .unwrap();
 
             // Try to claim
-            JobStepRepo::claim_ready_step(&pool_clone, &["script".to_string()], worker_id).await
+            JobStepRepo::claim_ready_step(&pool_clone, &["script".to_string()], &[], worker_id)
+                .await
         });
         handles.push(handle);
     }
@@ -376,6 +382,7 @@ async fn test_step_lifecycle() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -390,6 +397,7 @@ async fn test_step_lifecycle() -> Result<()> {
         action_spec: Some(serde_json::json!({"script": "echo test"})),
         input: None,
         status: "ready".to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
@@ -465,6 +473,7 @@ async fn test_update_input() -> Result<()> {
         action_spec: None,
         input: None,
         status: "ready".to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
@@ -525,6 +534,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo 1"})),
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -548,6 +558,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo 2"})),
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -571,6 +582,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo 3"})),
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -594,6 +606,7 @@ async fn test_promote_ready_steps() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo 4"})),
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -725,7 +738,7 @@ async fn test_worker_register_and_heartbeat() -> Result<()> {
     let tags = vec!["script".to_string(), "docker".to_string()];
 
     // Register
-    WorkerRepo::register(&pool, worker_id, "test-worker", &tags, None).await?;
+    WorkerRepo::register(&pool, worker_id, "test-worker", &tags, &[], None).await?;
 
     // Get
     let worker = WorkerRepo::get(&pool, worker_id)
@@ -778,6 +791,7 @@ async fn test_all_steps_terminal() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -801,6 +815,7 @@ async fn test_all_steps_terminal() -> Result<()> {
             action_spec: None,
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -861,6 +876,7 @@ async fn test_any_step_failed() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -884,6 +900,7 @@ async fn test_any_step_failed() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -942,6 +959,7 @@ async fn test_mark_failed_stores_error() -> Result<()> {
         action_spec: None,
         input: None,
         status: "ready".to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
@@ -1004,6 +1022,7 @@ async fn test_job_status_transitions() -> Result<()> {
         worker_id,
         "test-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -1073,6 +1092,7 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -1096,7 +1116,8 @@ async fn test_claim_with_capability_filter() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["docker".to_string()],
+            required_ability: "docker".to_string(),
+            required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -1120,12 +1141,13 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         script_worker,
         "script-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
 
     let claimed =
-        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], script_worker).await?;
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], script_worker).await?;
     let claimed = claimed.unwrap();
     assert_eq!(claimed.step_name, "script-step");
     assert_eq!(claimed.action_type, "script");
@@ -1137,19 +1159,20 @@ async fn test_claim_with_capability_filter() -> Result<()> {
         docker_worker,
         "docker-worker",
         &["docker".to_string()],
+        &[],
         None,
     )
     .await?;
 
     let claimed =
-        JobStepRepo::claim_ready_step(&pool, &["docker".to_string()], docker_worker).await?;
+        JobStepRepo::claim_ready_step(&pool, &["docker".to_string()], &[], docker_worker).await?;
     let claimed = claimed.unwrap();
     assert_eq!(claimed.step_name, "docker-step");
     assert_eq!(claimed.action_type, "docker");
 
     // No more steps for either type
     let nothing =
-        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], script_worker).await?;
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], script_worker).await?;
     assert!(nothing.is_none());
 
     Ok(())
@@ -1172,6 +1195,7 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
             "docker".to_string(),
             "gpu".to_string(),
         ],
+        &[],
         None,
     )
     .await?;
@@ -1198,22 +1222,10 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
             action_name: "build".to_string(),
             action_type: "docker".to_string(),
             action_image: Some("alpine:latest".to_string()),
-            action_spec: None,
-            input: None,
             status: "ready".to_string(),
-            required_tags: vec!["docker".to_string()],
+            required_ability: "docker".to_string(),
             runner: "none".to_string(),
-            timeout_secs: None,
-            when_condition: None,
-            for_each_expr: None,
-            loop_source: None,
-            loop_index: None,
-            loop_total: None,
-            loop_item: None,
-            max_retries: None,
-            retry_backoff_secs: None,
-            retry_strategy: None,
-            retry_jitter: false,
+            ..Default::default()
         }],
     )
     .await?;
@@ -1226,6 +1238,7 @@ async fn test_claim_superset_worker_tags_can_claim_subset_step() -> Result<()> {
             "docker".to_string(),
             "gpu".to_string(),
         ],
+        &[],
         worker_id,
     )
     .await?;
@@ -1244,7 +1257,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
 
     // Worker registered with no tags at all
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "tagless-worker", &[], None).await?;
+    WorkerRepo::register(&pool, worker_id, "tagless-worker", &[], &[], None).await?;
 
     let job_id = JobRepo::create(
         &pool,
@@ -1271,6 +1284,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo hi"})),
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -1289,7 +1303,7 @@ async fn test_claim_empty_worker_tags_cannot_claim_tagged_step() -> Result<()> {
     .await?;
 
     // An empty-tag worker must not claim a tagged step
-    let claimed = JobStepRepo::claim_ready_step(&pool, &[], worker_id).await?;
+    let claimed = JobStepRepo::claim_ready_step(&pool, &[], &[], worker_id).await?;
     assert!(
         claimed.is_none(),
         "Empty-tag worker must not claim a tagged step"
@@ -1309,6 +1323,7 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
         worker_id,
         "script-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -1338,6 +1353,7 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
             action_spec: Some(serde_json::json!({"script": "echo ok"})),
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -1356,7 +1372,8 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
     .await?;
 
     // Any worker (regardless of its tags) should be able to claim a step with no required tags
-    let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], worker_id).await?;
+    let claimed =
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], worker_id).await?;
     let claimed = claimed.expect("Any worker should claim a step with empty required_tags");
     assert_eq!(claimed.step_name, "untagged-step");
     assert_eq!(claimed.status, "running");
@@ -1364,6 +1381,11 @@ async fn test_claim_empty_required_tags_claimable_by_any_worker() -> Result<()> 
     Ok(())
 }
 
+/// Post-migration-041 semantics: capabilities and tags are two axes.
+/// A step needing ability=docker + tag=gpu is claimed only by a docker-
+/// capable worker whose tags are a subset of the step's tags. A
+/// gpu-tainted worker matches a gpu-requesting step; an untainted worker
+/// also matches (permissive default).
 #[tokio::test]
 async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1381,7 +1403,7 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
     )
     .await?;
 
-    // Step requires both "docker" and "gpu"
+    // Step: docker action explicitly requesting the "gpu" tag.
     JobStepRepo::create_steps(
         &pool,
         &[NewJobStep {
@@ -1390,58 +1412,55 @@ async fn test_claim_multi_tag_step_requires_all_tags() -> Result<()> {
             action_name: "train".to_string(),
             action_type: "docker".to_string(),
             action_image: Some("pytorch/pytorch:latest".to_string()),
-            action_spec: None,
             input: None,
             status: "ready".to_string(),
-            required_tags: vec!["docker".to_string(), "gpu".to_string()],
+            required_ability: "docker".to_string(),
+            required_tags: vec!["gpu".to_string()],
             runner: "none".to_string(),
-            timeout_secs: None,
-            when_condition: None,
-            for_each_expr: None,
-            loop_source: None,
-            loop_index: None,
-            loop_total: None,
-            loop_item: None,
-            max_retries: None,
-            retry_backoff_secs: None,
-            retry_strategy: None,
-            retry_jitter: false,
+            ..Default::default()
         }],
     )
     .await?;
 
-    // Worker A only has "docker" — missing "gpu"
+    // Worker A: docker-capable but has no `docker` capability. Should not
+    // reach the step because ability check fails.
     let worker_a = Uuid::new_v4();
     WorkerRepo::register(
         &pool,
         worker_a,
-        "docker-only-worker",
-        &["docker".to_string()],
+        "script-only-worker",
+        &["script".to_string()],
+        &[],
         None,
     )
     .await?;
-
-    let claimed_a = JobStepRepo::claim_ready_step(&pool, &["docker".to_string()], worker_a).await?;
+    let claimed_a =
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], worker_a).await?;
     assert!(
         claimed_a.is_none(),
-        "Worker missing 'gpu' tag must not claim step requiring both 'docker' and 'gpu'"
+        "Worker without docker capability must not claim a docker step"
     );
 
-    // Worker B has both "docker" and "gpu"
+    // Worker B: docker-capable, tainted with "gpu". Should reach the
+    // step (tags subset holds: ["gpu"] ⊆ ["gpu"]).
     let worker_b = Uuid::new_v4();
     WorkerRepo::register(
         &pool,
         worker_b,
         "gpu-docker-worker",
-        &["docker".to_string(), "gpu".to_string()],
+        &["docker".to_string()],
+        &["gpu".to_string()],
         None,
     )
     .await?;
-
-    let claimed_b =
-        JobStepRepo::claim_ready_step(&pool, &["docker".to_string(), "gpu".to_string()], worker_b)
-            .await?;
-    let claimed_b = claimed_b.expect("Worker with both tags should claim the step");
+    let claimed_b = JobStepRepo::claim_ready_step(
+        &pool,
+        &["docker".to_string()],
+        &["gpu".to_string()],
+        worker_b,
+    )
+    .await?;
+    let claimed_b = claimed_b.expect("gpu-tainted worker should claim the gpu-requesting step");
     assert_eq!(claimed_b.step_name, "gpu-docker-step");
     assert_eq!(claimed_b.status, "running");
     assert_eq!(claimed_b.worker_id, Some(worker_b));
@@ -1475,46 +1494,25 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
                 step_name: "k8s-step".to_string(),
                 action_name: "deploy".to_string(),
                 action_type: "script".to_string(),
-                action_image: None,
                 action_spec: Some(serde_json::json!({"script": "kubectl apply -f ."})),
-                input: None,
                 status: "ready".to_string(),
-                required_tags: vec!["kubernetes".to_string()],
+                // Under the post-041 model this is now the correct axis:
+                // the k8s step needs the "kubernetes" ability, which a
+                // script-only worker doesn't have.
+                required_ability: "kubernetes".to_string(),
                 runner: "local".to_string(),
-                timeout_secs: None,
-                when_condition: None,
-                for_each_expr: None,
-                loop_source: None,
-                loop_index: None,
-                loop_total: None,
-                loop_item: None,
-                max_retries: None,
-                retry_backoff_secs: None,
-                retry_strategy: None,
-                retry_jitter: false,
+                ..Default::default()
             },
             NewJobStep {
                 job_id,
                 step_name: "script-step".to_string(),
                 action_name: "greet".to_string(),
                 action_type: "script".to_string(),
-                action_image: None,
                 action_spec: Some(serde_json::json!({"script": "echo hello"})),
-                input: None,
                 status: "ready".to_string(),
-                required_tags: vec!["script".to_string()],
+                required_ability: "script".to_string(),
                 runner: "local".to_string(),
-                timeout_secs: None,
-                when_condition: None,
-                for_each_expr: None,
-                loop_source: None,
-                loop_index: None,
-                loop_total: None,
-                loop_item: None,
-                max_retries: None,
-                retry_backoff_secs: None,
-                retry_strategy: None,
-                retry_jitter: false,
+                ..Default::default()
             },
         ],
     )
@@ -1527,11 +1525,13 @@ async fn test_claim_skips_non_matching_step_claims_matching() -> Result<()> {
         worker_id,
         "script-only-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
 
-    let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], worker_id).await?;
+    let claimed =
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], worker_id).await?;
     let claimed = claimed.expect("Worker should claim the matching step");
     assert_eq!(
         claimed.step_name, "script-step",
@@ -1571,6 +1571,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
@@ -1599,6 +1600,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             "docker".to_string(),
             "kubernetes".to_string(),
         ],
+        &[],
         None,
     )
     .await?;
@@ -1610,6 +1612,7 @@ async fn test_claim_task_type_never_claimed() -> Result<()> {
             "docker".to_string(),
             "kubernetes".to_string(),
         ],
+        &[],
         worker_id,
     )
     .await?;
@@ -1635,28 +1638,32 @@ async fn test_worker_list() -> Result<()> {
         w1,
         "worker-alpha",
         &["script".to_string(), "docker".to_string()],
+        &[],
         None,
     )
     .await?;
 
     let w2 = Uuid::new_v4();
-    WorkerRepo::register(&pool, w2, "worker-beta", &["script".to_string()], None).await?;
+    WorkerRepo::register(&pool, w2, "worker-beta", &["script".to_string()], &[], None).await?;
 
     // List all workers
     let workers = WorkerRepo::list(&pool, 50, 0).await?;
     assert_eq!(workers.len(), 2);
 
-    // Verify both workers present with correct tags
+    // Verify both workers present with correct capabilities. Under the
+    // post-041 model, the ability tokens (script/docker/...) live on
+    // `capabilities`, and `tags` is the reservation/taint axis (empty
+    // when no reservation is desired).
     let alpha = workers.iter().find(|w| w.name == "worker-alpha").unwrap();
     assert_eq!(alpha.status, "active");
-    let alpha_tags: Vec<String> = serde_json::from_value(alpha.tags.clone())?;
-    assert!(alpha_tags.contains(&"script".to_string()));
-    assert!(alpha_tags.contains(&"docker".to_string()));
+    let alpha_caps: Vec<String> = serde_json::from_value(alpha.capabilities.clone())?;
+    assert!(alpha_caps.contains(&"script".to_string()));
+    assert!(alpha_caps.contains(&"docker".to_string()));
 
     let beta = workers.iter().find(|w| w.name == "worker-beta").unwrap();
     assert_eq!(beta.status, "active");
-    let beta_tags: Vec<String> = serde_json::from_value(beta.tags.clone())?;
-    assert_eq!(beta_tags, vec!["script".to_string()]);
+    let beta_caps: Vec<String> = serde_json::from_value(beta.capabilities.clone())?;
+    assert_eq!(beta_caps, vec!["script".to_string()]);
 
     // Test pagination
     let page1 = WorkerRepo::list(&pool, 1, 0).await?;
@@ -2370,6 +2377,7 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         action_spec: None,
         input: None,
         status: "ready".to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
@@ -2464,6 +2472,7 @@ async fn test_cancel_job_running() -> Result<()> {
         worker_id,
         "cancel-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -2637,6 +2646,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
         worker_id,
         "cancel-steps-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -2665,6 +2675,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2688,6 +2699,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2711,6 +2723,7 @@ async fn test_cancel_pending_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2762,6 +2775,7 @@ async fn test_get_running_steps() -> Result<()> {
         worker_id,
         "running-steps-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -2790,6 +2804,7 @@ async fn test_get_running_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "pending".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2813,6 +2828,7 @@ async fn test_get_running_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2836,6 +2852,7 @@ async fn test_get_running_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2859,6 +2876,7 @@ async fn test_get_running_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2882,6 +2900,7 @@ async fn test_get_running_steps() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2935,6 +2954,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
         worker_id,
         "mark-cancelled-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -2963,6 +2983,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -2986,6 +3007,7 @@ async fn test_mark_cancelled_only_running() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -3055,6 +3077,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
         worker_id,
         "empty-cancel-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -3083,6 +3106,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -3106,6 +3130,7 @@ async fn test_cancel_pending_steps_empty() -> Result<()> {
             action_spec: None,
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -3179,7 +3204,7 @@ async fn test_get_status_counts() -> Result<()> {
 
     // Mark one job as completed and one as failed
     let worker_id = Uuid::new_v4();
-    WorkerRepo::register(&pool, worker_id, "w1", &["script".to_string()], None).await?;
+    WorkerRepo::register(&pool, worker_id, "w1", &["script".to_string()], &[], None).await?;
 
     let job_ids: Vec<Uuid> = JobRepo::list(&pool, None, None, None, None, 10, 0)
         .await?
@@ -3222,6 +3247,7 @@ async fn test_worker_register_stores_version() -> Result<()> {
         worker_id,
         "versioned-worker",
         &["script".to_string()],
+        &[],
         Some("0.5.9"),
     )
     .await?;
@@ -3238,6 +3264,7 @@ async fn test_worker_register_stores_version() -> Result<()> {
         legacy_id,
         "legacy-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await?;
@@ -3260,6 +3287,7 @@ async fn test_worker_list_includes_version() -> Result<()> {
         worker_id,
         "versioned-worker",
         &["script".to_string()],
+        &[],
         Some("1.2.3"),
     )
     .await?;
@@ -3298,6 +3326,7 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
             action_spec: Some(serde_json::json!({"script": "echo test"})),
             input: None,
             status: "ready".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec!["script".to_string()],
             runner: "local".to_string(),
             timeout_secs: None,
@@ -3326,11 +3355,13 @@ async fn test_claim_random_order_no_duplicates() -> Result<()> {
                 worker_id,
                 &format!("worker-{}", i),
                 &["script".to_string()],
+                &[],
                 None,
             )
             .await
             .unwrap();
-            JobStepRepo::claim_ready_step(&pool_clone, &["script".to_string()], worker_id).await
+            JobStepRepo::claim_ready_step(&pool_clone, &["script".to_string()], &[], worker_id)
+                .await
         }));
     }
 
@@ -3963,6 +3994,7 @@ async fn test_event_source_step_action_type() -> Result<()> {
         action_spec: Some(serde_json::json!({"script": "echo test", "runner": "local"})),
         input: None,
         status: "ready".to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["event_source".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
@@ -4500,6 +4532,122 @@ async fn test_step_duration_stats_handles_partial_coverage() -> Result<()> {
         cleanup.sample_size, 1,
         "cleanup should have exactly 1 sample"
     );
+
+    Ok(())
+}
+
+// ─── Worker reservation via taint tags (post-041) ────────────────────────
+//
+// The core user-facing guarantee of migration 041: if a worker declares a
+// taint tag, ONLY steps that explicitly request that tag can reach it,
+// even if the worker's capabilities would otherwise admit them. This is
+// the "how do I preserve a worker for a specific job" answer.
+
+#[tokio::test]
+async fn test_worker_taint_reserves_worker_for_matching_steps_only() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "reservation-test",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Two steps, both script actions:
+    //   - "generic-step": no tags, an ordinary script step
+    //   - "batch-step":   tags=["batch-runner"], explicitly asking for the reserved worker
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            NewJobStep {
+                job_id,
+                step_name: "generic-step".to_string(),
+                action_name: "hello".to_string(),
+                action_type: "script".to_string(),
+                status: "ready".to_string(),
+                required_ability: "script".to_string(),
+                required_tags: vec![],
+                runner: "local".to_string(),
+                ..Default::default()
+            },
+            NewJobStep {
+                job_id,
+                step_name: "batch-step".to_string(),
+                action_name: "batch".to_string(),
+                action_type: "script".to_string(),
+                status: "ready".to_string(),
+                required_ability: "script".to_string(),
+                required_tags: vec!["batch-runner".to_string()],
+                runner: "local".to_string(),
+                ..Default::default()
+            },
+        ],
+    )
+    .await?;
+
+    // Special worker: script-capable, tainted with "batch-runner".
+    // Only steps requesting "batch-runner" can reach it.
+    let special = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        special,
+        "special-worker",
+        &["script".to_string()],
+        &["batch-runner".to_string()],
+        None,
+    )
+    .await?;
+
+    // Special worker claims → gets the batch-step, NOT the generic one.
+    let first = JobStepRepo::claim_ready_step(
+        &pool,
+        &["script".to_string()],
+        &["batch-runner".to_string()],
+        special,
+    )
+    .await?
+    .expect("special worker should claim the batch step");
+    assert_eq!(
+        first.step_name, "batch-step",
+        "special worker must never touch the generic step"
+    );
+
+    // Claim again → nothing left for the special worker (the generic step
+    // doesn't have the batch-runner tag, so the taint blocks it).
+    let none = JobStepRepo::claim_ready_step(
+        &pool,
+        &["script".to_string()],
+        &["batch-runner".to_string()],
+        special,
+    )
+    .await?;
+    assert!(
+        none.is_none(),
+        "generic step must not leak onto the tainted worker"
+    );
+
+    // A generic worker (no taint) picks up the generic step.
+    let generic = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        generic,
+        "generic-worker",
+        &["script".to_string()],
+        &[],
+        None,
+    )
+    .await?;
+    let claimed = JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], generic)
+        .await?
+        .expect("generic worker should claim the generic step");
+    assert_eq!(claimed.step_name, "generic-step");
 
     Ok(())
 }

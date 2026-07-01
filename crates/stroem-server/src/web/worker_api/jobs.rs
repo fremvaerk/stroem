@@ -18,6 +18,16 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub name: String,
+    /// Runner types this worker supports (any of `"script"`, `"docker"`,
+    /// `"kubernetes"`, `"agent"`). Matched against a step's derived
+    /// `required_ability`. Required — a worker with no capabilities can't
+    /// claim any step.
+    pub capabilities: Vec<String>,
+    /// Free-form taint labels. Empty = no restriction (worker accepts any
+    /// step its capabilities allow). Non-empty = worker ONLY claims steps
+    /// whose `required_tags` include ALL of these labels — the reservation
+    /// mechanism for pinning specific jobs to a specific worker.
+    #[serde(default)]
     pub tags: Vec<String>,
     pub version: Option<String>,
 }
@@ -35,6 +45,8 @@ pub struct HeartbeatRequest {
 #[derive(Debug, Deserialize)]
 pub struct ClaimRequest {
     pub worker_id: String,
+    pub capabilities: Vec<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
 }
 
@@ -175,6 +187,51 @@ pub struct SaveAgentStateRequest {
     pub agent_state: serde_json::Value,
 }
 
+/// The four ability tokens we recognise, in agreement with
+/// `compute_required_ability` in `stroem-common::validation`. Kept in
+/// sync with the worker-side `WorkerConfig::validate` list.
+const KNOWN_ABILITIES: &[&str] = &["script", "docker", "kubernetes", "agent"];
+
+/// Shared implementation of the legacy `tags`-only compat split, used by
+/// both `register_worker` and `claim_job`.
+fn split_legacy_tags(capabilities: &[String], tags: &[String]) -> (Vec<String>, Vec<String>, bool) {
+    if !capabilities.is_empty() {
+        return (capabilities.to_vec(), tags.to_vec(), false);
+    }
+    let has_ability_in_tags = tags.iter().any(|t| KNOWN_ABILITIES.contains(&t.as_str()));
+    if !has_ability_in_tags {
+        return (capabilities.to_vec(), tags.to_vec(), false);
+    }
+    let mut caps: Vec<String> = Vec::new();
+    let mut new_tags: Vec<String> = Vec::new();
+    for t in tags {
+        if KNOWN_ABILITIES.contains(&t.as_str()) {
+            if !caps.iter().any(|c| c == t) {
+                caps.push(t.clone());
+            }
+        } else {
+            new_tags.push(t.clone());
+        }
+    }
+    (caps, new_tags, true)
+}
+
+/// If a legacy worker (pre-041 binary) POSTs `tags: ["script","docker"]`
+/// and no `capabilities:` field, split ability tokens out into
+/// capabilities and demote the rest to taints. This is the rolling-upgrade
+/// compat shim — without it, every old worker fails to register against a
+/// new server and its in-flight steps get failed by the recovery sweep.
+///
+/// Returns `(capabilities, tags, migrated)`. `migrated=true` indicates
+/// legacy input so callers can log a deprecation warning.
+fn migrate_legacy_register(req: &RegisterRequest) -> (Vec<String>, Vec<String>, bool) {
+    split_legacy_tags(&req.capabilities, &req.tags)
+}
+
+fn migrate_legacy_claim(req: &ClaimRequest) -> (Vec<String>, Vec<String>, bool) {
+    split_legacy_tags(&req.capabilities, &req.tags)
+}
+
 /// POST /worker/register - Register a worker
 #[tracing::instrument(skip(state))]
 pub async fn register_worker(
@@ -183,11 +240,50 @@ pub async fn register_worker(
 ) -> Result<impl IntoResponse, AppError> {
     let worker_id = Uuid::new_v4();
 
+    let (capabilities, tags, migrated) = migrate_legacy_register(&req);
+    if migrated {
+        tracing::warn!(
+            worker_name = %req.name,
+            "Registered a pre-041 worker via the legacy `tags` payload. \
+             Update this worker's config to declare `capabilities:` \
+             explicitly — the compat shim will be removed in a future release."
+        );
+    }
+
+    if capabilities.is_empty() {
+        return Err(AppError::BadRequest(
+            "worker registration requires at least one capability \
+             (script, docker, kubernetes, agent)"
+                .to_string(),
+        ));
+    }
+    // Reject unknown capability tokens — otherwise a typo like
+    // `"scipt"` silently persists into `worker.capabilities` and the
+    // worker heartbeats healthy while claiming zero steps (`@>` never
+    // matches). Same posture as the worker-side validate().
+    for c in &capabilities {
+        if !KNOWN_ABILITIES.contains(&c.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "unknown capability '{c}'. Known: {KNOWN_ABILITIES:?}"
+            )));
+        }
+    }
+    // Reject ability tokens accidentally left in tags — same rationale
+    // as the worker-side check: they'd silently starve the worker.
+    for t in &tags {
+        if KNOWN_ABILITIES.contains(&t.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "`tags` entry '{t}' is an ability token, not a taint label. \
+                 Move it into `capabilities`."
+            )));
+        }
+    }
     WorkerRepo::register(
         &state.pool,
         worker_id,
         &req.name,
-        &req.tags,
+        &capabilities,
+        &tags,
         req.version.as_deref(),
     )
     .await
@@ -263,7 +359,29 @@ pub async fn claim_job(
     let worker_id = Uuid::parse_str(&req.worker_id)
         .map_err(|_| AppError::BadRequest("Invalid worker ID".into()))?;
 
-    let step = match JobStepRepo::claim_ready_step(&state.pool, &req.tags, worker_id)
+    // Same compat shim as /worker/register: legacy `tags: ["script",...]`
+    // payloads (pre-041 worker binaries) get split into capabilities +
+    // tags on the fly. This is essential during rolling upgrades — old
+    // workers keep claiming until they're rolled.
+    let (capabilities, tags, migrated) = migrate_legacy_claim(&req);
+    if migrated {
+        tracing::warn!(
+            worker_id = %worker_id,
+            "Claim from a pre-041 worker via the legacy `tags` payload; migrating on the fly."
+        );
+    }
+
+    // Match /worker/register's guardrails: empty capabilities can never
+    // match (SQL `@>` fails), so a request that would silently spin the
+    // poll loop is rejected up front with a clear 400.
+    if capabilities.is_empty() {
+        return Err(AppError::BadRequest(
+            "claim requires at least one capability (script, docker, kubernetes, agent)"
+                .to_string(),
+        ));
+    }
+
+    let step = match JobStepRepo::claim_ready_step(&state.pool, &capabilities, &tags, worker_id)
         .await
         .context("claim ready step")?
     {
@@ -1020,18 +1138,19 @@ mod tests {
     fn test_register_request_deserializes_version() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "tags": ["script"],
+            "capabilities": ["script"],
             "version": "0.5.9"
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.version.as_deref(), Some("0.5.9"));
+        assert!(req.tags.is_empty(), "tags defaults to empty");
     }
 
     #[test]
     fn test_register_request_version_absent_is_none() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "tags": ["script"]
+            "capabilities": ["script"]
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
         assert!(req.version.is_none());
@@ -1041,7 +1160,7 @@ mod tests {
     fn test_register_request_version_null_is_none() {
         let json = serde_json::json!({
             "name": "worker-1",
-            "tags": ["script"],
+            "capabilities": ["script"],
             "version": null
         });
         let req: RegisterRequest = serde_json::from_value(json).unwrap();
@@ -1049,27 +1168,87 @@ mod tests {
     }
 
     #[test]
-    fn test_register_request_missing_tags_fails_deserialization() {
+    fn test_register_request_missing_capabilities_fails_deserialization() {
         let json = serde_json::json!({"name": "worker-1"});
-        let result = serde_json::from_value::<RegisterRequest>(json);
-        assert!(result.is_err(), "missing tags must fail deserialization");
-    }
-
-    #[test]
-    fn test_claim_request_missing_tags_fails_deserialization() {
-        let json = serde_json::json!({"worker_id": "abc"});
-        let result = serde_json::from_value::<ClaimRequest>(json);
-        assert!(result.is_err(), "missing tags must fail deserialization");
-    }
-
-    #[test]
-    fn test_register_request_with_only_capabilities_fails() {
-        let json = serde_json::json!({"name": "old-worker", "capabilities": ["script"]});
         let result = serde_json::from_value::<RegisterRequest>(json);
         assert!(
             result.is_err(),
-            "old payload with capabilities but no tags must fail"
+            "missing capabilities must fail deserialization"
         );
+    }
+
+    #[test]
+    fn test_claim_request_missing_capabilities_fails_deserialization() {
+        let json = serde_json::json!({"worker_id": "abc"});
+        let result = serde_json::from_value::<ClaimRequest>(json);
+        assert!(
+            result.is_err(),
+            "missing capabilities must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_register_request_capabilities_only_is_valid() {
+        // With capabilities-only payload, tags defaults to empty — the
+        // permissive baseline. Post-041 this is the *normal* config for a
+        // worker with no reservation requirements.
+        let json = serde_json::json!({"name": "w", "capabilities": ["script"]});
+        let req: RegisterRequest =
+            serde_json::from_value(json).expect("capabilities is enough; tags optional");
+        assert_eq!(req.capabilities, vec!["script"]);
+        assert!(req.tags.is_empty());
+    }
+
+    /// Regression for review finding #3: pre-041 worker binaries send only
+    /// `tags: ["script", "docker"]` on register. The compat shim splits
+    /// ability tokens out into `capabilities` so those workers keep
+    /// registering during a rolling upgrade.
+    #[test]
+    fn test_migrate_legacy_register_splits_tags_into_capabilities() {
+        let req = RegisterRequest {
+            name: "old-worker".into(),
+            capabilities: vec![],
+            tags: vec!["script".into(), "docker".into(), "gpu".into()],
+            version: Some("0.15.19".into()),
+        };
+        let (caps, tags, migrated) = migrate_legacy_register(&req);
+        assert!(migrated);
+        assert_eq!(caps, vec!["script".to_string(), "docker".to_string()]);
+        assert_eq!(tags, vec!["gpu".to_string()]);
+    }
+
+    /// The compat shim is a no-op when `capabilities` is already set —
+    /// new worker binaries take the direct path.
+    #[test]
+    fn test_migrate_legacy_register_noop_when_capabilities_present() {
+        let req = RegisterRequest {
+            name: "new-worker".into(),
+            capabilities: vec!["script".into()],
+            tags: vec!["gpu".into()],
+            version: None,
+        };
+        let (caps, tags, migrated) = migrate_legacy_register(&req);
+        assert!(!migrated);
+        assert_eq!(caps, vec!["script".to_string()]);
+        assert_eq!(tags, vec!["gpu".to_string()]);
+    }
+
+    /// The shim doesn't trip on legitimate free-form tags on a legacy
+    /// binary — if none of the tags are ability tokens, nothing to
+    /// migrate (worker will fail the `capabilities.is_empty()` guard
+    /// in the handler, surfacing a clear error).
+    #[test]
+    fn test_migrate_legacy_register_no_ability_tokens_leaves_alone() {
+        let req = RegisterRequest {
+            name: "weird".into(),
+            capabilities: vec![],
+            tags: vec!["gpu".into(), "batch".into()],
+            version: None,
+        };
+        let (caps, tags, migrated) = migrate_legacy_register(&req);
+        assert!(!migrated);
+        assert!(caps.is_empty());
+        assert_eq!(tags, vec!["gpu".to_string(), "batch".to_string()]);
     }
 
     #[test]

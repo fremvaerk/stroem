@@ -7,7 +7,7 @@ use stroem_common::models::workflow::{BackoffStrategy, WorkspaceConfig};
 use stroem_common::template::{
     merge_defaults, prepare_action_input, render_input_map, resolve_connection_inputs,
 };
-use stroem_common::validation::{compute_required_tags, derive_runner};
+use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
@@ -195,6 +195,7 @@ fn create_job_for_task_inner<'a>(
             };
 
             let action_spec = serde_json::to_value(action).ok();
+            let required_ability = compute_required_ability(action);
             let required_tags = compute_required_tags(action);
             let runner = derive_runner(action);
             let retry = resolve_step_retry_config(flow_step, action);
@@ -208,6 +209,7 @@ fn create_job_for_task_inner<'a>(
                 action_spec,
                 input: Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
                 status: status.to_string(), // NewJobStep.status is String for DB compatibility
+                required_ability,
                 required_tags,
                 runner,
                 timeout_secs: flow_step
@@ -665,6 +667,7 @@ pub async fn expand_for_each_steps(
                 action_spec: step.action_spec.clone(),
                 input: step.input.clone(),
                 status: instance_status.to_string(),
+                required_ability: step.required_ability.clone(),
                 required_tags: serde_json::from_value(step.required_tags.clone())
                     .unwrap_or_default(),
                 runner: step.runner.clone(),
@@ -1300,33 +1303,13 @@ mod tests {
             step_name: name.to_string(),
             action_name: name.to_string(),
             action_type: "script".to_string(),
-            action_image: None,
-            action_spec: None,
-            input: None,
             output,
             status: status.to_string(),
-            worker_id: None,
-            started_at: None,
-            completed_at: None,
-            error_message: None,
+            required_ability: "script".to_string(),
             required_tags: json!([]),
             runner: "local".to_string(),
-            timeout_secs: None,
-            when_condition: None,
-            for_each_expr: None,
-            loop_source: None,
-            loop_index: None,
-            loop_total: None,
-            loop_item: None,
-            agent_state: None,
-            suspended_at: None,
-            retry_attempt: 0,
-            max_retries: None,
-            retry_backoff_secs: None,
-            retry_strategy: None,
-            retry_jitter: false,
-            retry_history: serde_json::json!([]),
-            retry_at: None,
+            retry_history: json!([]),
+            ..Default::default()
         }
     }
 

@@ -109,7 +109,22 @@ export function WorkerDetailPage() {
             ),
           },
           {
-            label: "Tags",
+            label: "Capabilities",
+            value:
+              (worker.capabilities ?? []).length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {(worker.capabilities ?? []).map((c) => (
+                    <Badge key={c} variant="secondary" className="text-xs">
+                      {c}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">-</span>
+              ),
+          },
+          {
+            label: "Tags (reservation)",
             value:
               worker.tags.length > 0 ? (
                 <div className="flex flex-wrap gap-1">

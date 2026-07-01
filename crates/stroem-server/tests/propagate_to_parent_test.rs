@@ -259,6 +259,7 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
         action_spec: None,
         input: None,
         status: "running".to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec![],
         runner: "none".to_string(),
         timeout_secs: None,
@@ -286,6 +287,7 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         action_spec: Some(json!({"script": "true"})),
         input: None,
         status: status.to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,
@@ -305,7 +307,7 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
 /// Register a worker (needed for `mark_running` FK checks).
 async fn register_worker(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
-    WorkerRepo::register(pool, id, "test-worker", &["script".to_string()], None)
+    WorkerRepo::register(pool, id, "test-worker", &["script".to_string()], &[], None)
         .await
         .expect("worker registration");
     id
@@ -813,6 +815,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             action_spec: None,
             input: None,
             status: "running".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
@@ -842,6 +845,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
             action_spec: None,
             input: None,
             status: "running".to_string(),
+            required_ability: "script".to_string(),
             required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
@@ -1122,6 +1126,7 @@ async fn parent_with_mixed_steps() -> Result<()> {
                 action_spec: None,
                 input: None,
                 status: "pending".to_string(),
+                required_ability: "script".to_string(),
                 required_tags: vec![],
                 runner: "none".to_string(),
                 timeout_secs: None,

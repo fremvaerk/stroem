@@ -12,7 +12,7 @@ The recovery sweeper runs on a configurable interval (default: 60s) and performs
 1. **Stale worker detection**: Workers whose last heartbeat exceeds the timeout are marked `inactive`. Running steps assigned to inactive workers are failed.
 2. **Step timeout enforcement**: Running steps that have exceeded their configured `timeout` are failed.
 3. **Job timeout enforcement**: Running jobs that have exceeded their configured `timeout` are cancelled.
-4. **Unmatched step detection**: Steps stuck in `ready` state beyond `unmatched_step_timeout_secs` are checked against active workers. If no active worker has the required tags to claim the step, it is failed with a clear error message.
+4. **Unmatched step detection**: Steps stuck in `ready` state beyond `unmatched_step_timeout_secs` are checked against active workers. If no active worker has the required capability *and* tags to claim the step, it is failed with a clear error message.
 
 After each failure, the orchestrator cascades: dependent steps are skipped, the job is marked failed, and parent jobs are notified.
 
@@ -31,34 +31,50 @@ When the `recovery` section is omitted, recovery runs with defaults. There is no
 
 The default heartbeat timeout of 120 seconds means a worker must miss 4 consecutive heartbeats (sent every 30s) before being considered stale.
 
-The `unmatched_step_timeout_secs` grace period prevents false positives when workers are temporarily restarting or scaling up. A step is only failed if it has been ready for longer than this timeout **and** no active worker has matching tags.
+The `unmatched_step_timeout_secs` grace period prevents false positives when workers are temporarily restarting or scaling up. A step is only failed if it has been ready for longer than this timeout **and** no active worker matches on both routing dimensions.
 
-### Tag-based worker matching (Phase 4)
+### Capability + tag matching (Phase 4, post-041)
 
-Steps compute a set of `required_tags` based on their action type and runner:
-- `type: script` with `runner: local` → `["script"]`
-- `type: script` with `runner: docker` → `["script", "docker"]`
-- `type: script` with `runner: pod` → `["script", "kubernetes"]`
-- `type: docker` → `["docker"]`
-- `type: pod` → `["kubernetes"]`
-- `type: task` → excluded from Phase 4 (dispatched server-side)
-- Steps with explicit `tags: [...]` include those as well
+Migration 041 split the pre-041 single `tags` axis into two:
 
-Workers declare their capabilities in `worker-config.yaml`:
+* **`required_ability`** on each step (derived from action type + runner). One of: `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. Empty for `task`/`approval` (server-dispatched, excluded from Phase 4).
+* **`required_tags`** on each step — only the user-declared action tags. **No longer contains an ability token prefix.**
+
+| Action | Runner | Required ability |
+|--------|--------|------------------|
+| `script` | `local` (default) | `script` |
+| `script` | `docker` | `docker` |
+| `script` | `pod` | `kubernetes` |
+| `docker` | — | `docker` |
+| `pod` | — | `kubernetes` |
+| `agent` | — | `agent` |
+| `task`, `approval` | — | — (server-dispatched, excluded) |
+
+Workers declare capabilities and (optional) reservation tags in `worker-config.yaml`:
+
 ```yaml
-tags:
+capabilities:                # runners this worker supports (required)
   - script
   - docker
   - kubernetes
+tags: []      # empty = permissive; add labels to reserve this worker
+              # for steps that explicitly request them
 ```
 
-Phase 4 uses a SQL containment check: `required_tags <@ worker_tags` (PostgreSQL). A step is claimable by a worker only if **all required tags are present** in the worker's tag set. If no active worker satisfies this requirement after `unmatched_step_timeout_secs` seconds, the step is failed with error message:
+Phase 4 uses two SQL containment checks in AND:
+
+```sql
+worker.capabilities @> to_jsonb(step.required_ability)   -- ability matches
+AND worker.tags <@ step.required_tags                    -- worker's taints requested
+```
+
+That is, worker's capabilities must **contain** the step's ability, AND the worker's tags must be a **subset of** the step's tags. If no active worker satisfies both after `unmatched_step_timeout_secs`, the step is failed with:
 
 ```
-No active worker with required tags to run this step
+No active worker with required capability/tags to run this step
 ```
 
-`type: task` steps are explicitly excluded from Phase 4 — they are dispatched by the server itself via `handle_task_steps()`, not claimed by workers.
+`task`/`agent`/`approval`/`event_source` steps are excluded from Phase 4 — they are dispatched server-side, not claimed by workers.
 
 ## Recovery strategy
 

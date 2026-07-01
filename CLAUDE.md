@@ -151,10 +151,13 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **KubeRunner**: `WithWorkspace` uses init container + workspace volume; `NoWorkspace` runs directly
 - **Startup scripts**: `docker/entrypoint.sh` sources `*.sh` from `/etc/stroem/startup.d/`. DockerRunner bind-mounts this; KubeRunner uses ConfigMap via `runner_startup_configmap`.
 
-### Tags and Step Claiming
-- Workers declare `tags` — e.g. `["script", "docker", "gpu", "agent"]`
-- Steps compute `required_tags` from action type/runner + explicit tags
-- Claim SQL: `required_tags <@ worker_tags::jsonb` (GIN-indexed containment)
+### Capabilities, Tags, and Step Claiming
+Two independent routing axes (split from the pre-041 single-`tags` model in migration `041_worker_capabilities.sql`):
+- **`capabilities`** on worker — runners supported. Any of `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. Required. Matched against step's `required_ability` (derived from action type + runner).
+- **`tags`** on worker — free-form **reservation labels** (taints). Empty = permissive. Non-empty = worker ONLY claims steps whose `required_tags` include ALL labels here. Matched against step's `required_tags` (user-declared action tags only, no longer prefixed with an ability token).
+- Claim SQL: `worker.capabilities @> to_jsonb(required_ability) AND worker.tags <@ required_tags::jsonb`.
+- User pattern "reserve worker X for step Y": worker `tags: ["some-label"]` + action `tags: ["some-label"]`. Other steps never leak onto worker X.
+- Recovery's unmatched-step sweep applies both checks (`get_unmatched_ready_steps`).
 
 ### Multi-Workspace
 - Server config: `workspaces:` map with named entries (folder or git source)

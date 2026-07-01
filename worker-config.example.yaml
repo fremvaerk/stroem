@@ -19,7 +19,15 @@ poll_interval_secs: 2
 # Directory where steps will be executed
 workspace_dir: "/tmp/stroem-workspace"
 
-# Worker tags for step routing
-# Determines which steps this worker can claim
-tags:
+# Runner types this worker supports. Required.
+# Any of: script, docker, kubernetes, agent. A step's derived
+# `required_ability` must appear in this list for the worker to claim it.
+capabilities:
   - script
+
+# Reservation labels (taints). Empty = permissive; the worker accepts
+# any step its capabilities allow. Non-empty = the worker ONLY claims
+# steps whose action `tags` include ALL of these labels — the mechanism
+# for pinning a specific job to this worker without letting other jobs
+# leak onto it.
+tags: []

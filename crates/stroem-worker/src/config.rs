@@ -13,8 +13,23 @@ pub struct WorkerConfig {
     /// Each workspace gets a subdirectory: `{workspace_cache_dir}/{workspace_name}/`
     #[serde(alias = "workspace_dir")]
     pub workspace_cache_dir: String,
-    /// Worker tags for step routing (e.g. `["script", "docker", "gpu"]`).
-    #[serde(default = "default_tags")]
+    /// Runner types this worker can execute. Required at runtime (see
+    /// `validate`), but declared with `#[serde(default)]` so a pre-041
+    /// YAML that omits the field still deserializes — the validator then
+    /// emits a clear migration hint instead of the raw serde
+    /// "missing field `capabilities`" error.
+    ///
+    /// Any of `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. A step's
+    /// derived `required_ability` must appear in this list for the worker
+    /// to claim it.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+
+    /// Free-form taint labels. Empty (default) = worker accepts any step
+    /// its capabilities allow. Non-empty = worker ONLY claims steps whose
+    /// action `tags` include ALL of these labels — the reservation
+    /// mechanism for pinning a specific job to this worker.
+    #[serde(default)]
     pub tags: Vec<String>,
     /// Default runner image for script-in-container execution
     pub runner_image: Option<String>,
@@ -41,6 +56,42 @@ impl WorkerConfig {
     pub fn validate(&self) -> Result<()> {
         if self.worker_token.len() < 32 {
             anyhow::bail!("worker_token must be at least 32 characters");
+        }
+        if self.capabilities.is_empty() {
+            anyhow::bail!(
+                "capabilities is required and must not be empty. Any of: \
+                 script, docker, kubernetes, agent. If migrating from an \
+                 older version, move ability tokens (script/docker/kubernetes/agent) \
+                 from `tags` into `capabilities`. Remaining tags stay in `tags` \
+                 and now act as reservation labels — see docs."
+            );
+        }
+        const KNOWN_ABILITIES: &[&str] = &["script", "docker", "kubernetes", "agent"];
+        for c in &self.capabilities {
+            if !KNOWN_ABILITIES.contains(&c.as_str()) {
+                anyhow::bail!(
+                    "capabilities entry '{c}' is not a known ability. \
+                     Known abilities: {:?}",
+                    KNOWN_ABILITIES
+                );
+            }
+        }
+        // Reject ability tokens accidentally left in `tags`. Under the
+        // post-041 model tags are reservation labels, and a stray ability
+        // token here would cause the worker to claim ZERO steps (because
+        // `compute_required_tags` never emits ability tokens on new
+        // steps, so `worker.tags <@ required_tags` never holds). Silent
+        // starvation is the worst outcome for a routing bug — surface it
+        // at startup instead.
+        for t in &self.tags {
+            if KNOWN_ABILITIES.contains(&t.as_str()) {
+                anyhow::bail!(
+                    "`tags` entry '{t}' is an ability token, not a taint label. \
+                     Move it into `capabilities:` — tags are now reservation \
+                     labels (steps must request all of them); leaving an ability \
+                     token here would silently stop this worker from claiming any step."
+                );
+            }
         }
         if self.poll_interval_secs == 0 {
             anyhow::bail!("poll_interval_secs must be greater than 0");
@@ -80,10 +131,6 @@ pub struct KubeRunnerConfig {
     pub runner_startup_configmap: Option<String>,
 }
 
-fn default_tags() -> Vec<String> {
-    vec!["script".to_string()]
-}
-
 pub fn load_config(path: &str) -> Result<WorkerConfig> {
     let config: WorkerConfig = config::Config::builder()
         .add_source(config::File::new(path, config::FileFormat::Yaml))
@@ -115,6 +162,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 tags:
   - script
 "#;
@@ -130,7 +179,10 @@ tags:
     }
 
     #[test]
-    fn test_default_tags() {
+    fn test_default_tags_empty() {
+        // Tags default to empty (no reservation). Old versions defaulted to
+        // ["script"], which was the mixed capability/tag semantics — that
+        // model was retired in migration 041.
         let yaml = r#"
 server_url: "http://localhost:8080"
 worker_token: "test-token"
@@ -138,10 +190,13 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.tags, vec!["script"]);
+        assert!(config.tags.is_empty());
+        assert_eq!(config.capabilities, vec!["script"]);
     }
 
     #[test]
@@ -153,6 +208,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 docker:
   host: "tcp://localhost:2376"
 "#;
@@ -171,6 +228,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 kubernetes:
   namespace: "stroem-jobs"
   init_image: "curlimages/curl:8.5.0"
@@ -192,6 +251,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 kubernetes:
   namespace: "stroem-jobs"
   runner_startup_configmap: "stroem-runner-startup"
@@ -208,29 +269,69 @@ kubernetes:
     }
 
     #[test]
-    fn test_config_with_multiple_tags() {
+    fn test_config_multiple_tags_deserializes_but_ability_tokens_rejected() {
+        // Deserialization succeeds — deny_unknown_fields doesn't care about
+        // values. Validation must reject: ability tokens in `tags` would
+        // silently starve the worker (see validate() rationale).
         let yaml = r#"
 server_url: "http://localhost:8080"
-worker_token: "test-token"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 tags:
   - script
   - docker
   - node-20
 "#;
-
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.tags, vec!["script", "docker", "node-20"]);
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("is an ability token"),
+            "expected ability-token rejection, got: {err}"
+        );
     }
 
     #[test]
     fn test_config_with_tags_and_runner_image() {
         let yaml = r#"
 server_url: "http://localhost:8080"
-worker_token: "test-token"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+worker_name: "worker-1"
+max_concurrent: 4
+poll_interval_secs: 2
+workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
+  - docker
+tags:
+  - gpu
+runner_image: "ghcr.io/myorg/stroem-runner:latest"
+"#;
+        let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.capabilities, vec!["script", "docker"]);
+        assert_eq!(config.tags, vec!["gpu"]);
+        assert_eq!(
+            config.runner_image,
+            Some("ghcr.io/myorg/stroem-runner:latest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_config_missing_capabilities_emits_migration_hint() {
+        // Regression for review finding #4: pre-041 YAMLs omit
+        // `capabilities:` entirely. Serde used to bail with the raw
+        // "missing field `capabilities`" error before validate() could
+        // run — the helpful migration hint at validate() was dead code.
+        // With #[serde(default)] on capabilities, the field parses as
+        // empty and validate() catches it with a clear message.
+        let yaml = r#"
+server_url: "http://localhost:8080"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
@@ -238,15 +339,12 @@ workspace_cache_dir: "/tmp/stroem-workspace"
 tags:
   - script
   - docker
-  - gpu
-runner_image: "ghcr.io/myorg/stroem-runner:latest"
 "#;
-
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.tags, vec!["script", "docker", "gpu"]);
-        assert_eq!(
-            config.runner_image,
-            Some("ghcr.io/myorg/stroem-runner:latest".to_string())
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("capabilities is required"),
+            "expected migration hint about capabilities, got: {err}"
         );
     }
 
@@ -259,6 +357,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 capabilities:
   - script
 "#;
@@ -282,6 +382,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let mut file = NamedTempFile::new().unwrap();
@@ -324,6 +426,8 @@ worker_name: "yaml-worker"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let mut file = NamedTempFile::new().unwrap();
@@ -353,6 +457,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
@@ -369,6 +475,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 connect_timeout_secs: 5
 request_timeout_secs: 60
 "#;
@@ -387,6 +495,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
@@ -403,6 +513,8 @@ worker_name: "worker-1"
 max_concurrent: 0
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
@@ -423,6 +535,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 request_timeout_secs: 0
 "#;
 
@@ -444,6 +558,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 connect_timeout_secs: 0
 "#;
 
@@ -465,6 +581,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 connect_timeout_secs: 5
 request_timeout_secs: 60
 "#;
@@ -482,6 +600,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
 
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
@@ -502,6 +622,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 unknown_field: "should fail"
 "#;
         let result = serde_yaml::from_str::<WorkerConfig>(yaml);
@@ -517,6 +639,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#;
         let config: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
@@ -538,6 +662,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 0
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#
         );
         let config: WorkerConfig = serde_yaml::from_str(&yaml).unwrap();
@@ -560,6 +686,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#
         );
         let config: WorkerConfig = serde_yaml::from_str(&yaml).unwrap();
@@ -577,6 +705,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#
         );
         serde_yaml::from_str(&yaml).unwrap()
@@ -594,6 +724,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: {poll_interval_secs}
 workspace_cache_dir: "/tmp/stroem-workspace"
+capabilities:
+  - script
 "#
         );
         serde_yaml::from_str(&yaml).unwrap()

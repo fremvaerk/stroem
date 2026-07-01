@@ -205,8 +205,15 @@ worker:
     max_concurrent: 4
     poll_interval_secs: 2
     workspace_cache_dir: /var/stroem/workspace-cache
-    tags:
+    # Runner types this worker supports (post-041 replacement for the
+    # mixed `tags` field). Any of: script, docker, kubernetes, agent.
+    capabilities:
       - script
+    # Reservation labels (empty = permissive, accepts any step this
+    # worker's capabilities allow). Non-empty tags mean the worker will
+    # ONLY claim steps whose action `tags` include ALL of these labels
+    # — the mechanism for pinning specific jobs to a specific worker.
+    tags: []
   # Extra env vars injected as a Secret
   extraSecretEnv: {}
   #  STROEM__WORKER_TOKEN: "production-secret"

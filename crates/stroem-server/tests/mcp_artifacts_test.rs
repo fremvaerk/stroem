@@ -612,20 +612,21 @@ mod acl_deny {
         })
     }
 
-    async fn login(router: &Router) -> Result<String> {
-        let body = json!({ "email": USER_EMAIL, "password": USER_PASSWORD });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/auth/login")
-            .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::to_string(&body)?))?;
-        let resp = router.clone().oneshot(req).await?;
-        assert_eq!(resp.status(), StatusCode::OK, "login should succeed");
-        let value = body_json(resp).await;
-        Ok(value["access_token"]
-            .as_str()
-            .expect("access_token")
-            .to_string())
+    /// Pool-aware login: mints an API key for the seeded user and returns it.
+    ///
+    /// Post-OAuth-2.1 refactor, login JWTs no longer authenticate `/mcp`
+    /// (only audience-bound OAuth tokens or `strm_*` API keys do). We use
+    /// the API-key path here to keep the artifact tests focused on ACL
+    /// behaviour without dragging in the full OAuth flow.
+    async fn login_with_pool(pool: &sqlx::PgPool) -> Result<String> {
+        let user = stroem_db::UserRepo::get_by_email(pool, USER_EMAIL)
+            .await?
+            .expect("seeded user exists");
+        let (raw_key, key_hash) = stroem_server::auth::generate_api_key();
+        let prefix = raw_key[..12].to_string();
+        stroem_db::ApiKeyRepo::create(pool, &key_hash, user.user_id, "mcp-test", &prefix, None)
+            .await?;
+        Ok(raw_key)
     }
 
     fn mcp_request_with_auth(session_id: Option<&str>, token: &str, body: Value) -> Request<Body> {
@@ -705,7 +706,7 @@ mod acl_deny {
 
         // Sanity: with default-deny ACL, listing under our non-admin user
         // must error (not return `[]`).
-        let token = login(&app.router).await?;
+        let token = login_with_pool(&app.pool).await?;
         let (router, session_id) = initialize_authed(app.router.clone(), &token).await;
 
         let body = json!({

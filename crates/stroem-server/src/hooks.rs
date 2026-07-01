@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use stroem_common::models::job::{ActionType, JobStatus, SourceType, StepStatus};
 use stroem_common::models::workflow::{HookDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::render_input_map;
-use stroem_common::validation::{compute_required_tags, derive_runner};
+use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
 
 /// Context available to `on_suspended` hook templates as `hook.*`
@@ -469,6 +469,7 @@ async fn fire_single_hook(
 
     // Create single step
     let action_spec = serde_json::to_value(action).ok();
+    let required_ability = compute_required_ability(action);
     let required_tags = compute_required_tags(action);
     let runner = derive_runner(action);
 
@@ -481,6 +482,7 @@ async fn fire_single_hook(
         action_spec,
         input: Some(rendered_input),
         status: StepStatus::Ready.to_string(),
+        required_ability,
         required_tags,
         runner,
         timeout_secs: None,

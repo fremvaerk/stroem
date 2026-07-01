@@ -33,7 +33,7 @@ async fn setup_db() -> Result<(PgPool, testcontainers::ContainerAsync<Postgres>)
 /// Register a worker so that `mark_running` foreign-key checks pass.
 async fn register_worker(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
-    WorkerRepo::register(pool, id, "test-worker", &["script".to_string()], None)
+    WorkerRepo::register(pool, id, "test-worker", &["script".to_string()], &[], None)
         .await
         .expect("worker registration");
     id
@@ -67,6 +67,7 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         action_spec: Some(json!({"script": "true"})),
         input: None,
         status: status.to_string(),
+        required_ability: "script".to_string(),
         required_tags: vec!["script".to_string()],
         runner: "local".to_string(),
         timeout_secs: None,

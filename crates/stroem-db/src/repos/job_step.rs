@@ -7,10 +7,10 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at";
 
 /// Job step row from database
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Default, sqlx::FromRow)]
 pub struct JobStepRow {
     pub job_id: Uuid,
     pub step_name: String,
@@ -25,6 +25,13 @@ pub struct JobStepRow {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
+    /// The runner capability this step needs — one of
+    /// `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. Empty for
+    /// server-dispatched actions. Matched against `worker.capabilities`.
+    pub required_ability: String,
+    /// User-declared tags. On the claim side these are the taint labels a
+    /// worker must have set for it to reach this step: `worker.tags` MUST
+    /// be a subset of `required_tags`.
     pub required_tags: JsonValue,
     pub runner: String,
     pub timeout_secs: Option<i32>,
@@ -46,7 +53,7 @@ pub struct JobStepRow {
 }
 
 /// New job step for creation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NewJobStep {
     pub job_id: Uuid,
     pub step_name: String,
@@ -56,6 +63,9 @@ pub struct NewJobStep {
     pub action_spec: Option<JsonValue>,
     pub input: Option<JsonValue>,
     pub status: String, // 'pending' or 'ready'
+    /// See [`JobStepRow::required_ability`].
+    pub required_ability: String,
+    /// See [`JobStepRow::required_tags`].
     pub required_tags: Vec<String>,
     pub runner: String,
     pub timeout_secs: Option<i32>,
@@ -84,6 +94,7 @@ struct StepInsertRow {
     action_spec: Option<JsonValue>,
     input: Option<JsonValue>,
     status: String,
+    required_ability: String,
     required_tags: JsonValue,
     runner: String,
     timeout_secs: Option<i32>,
@@ -163,13 +174,13 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter)
             VALUES
             "#,
         );
 
         let mut rows: Vec<StepInsertRow> = Vec::new();
-        let cols_per_row = 22;
+        let cols_per_row = 23;
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
@@ -198,6 +209,7 @@ impl JobStepRepo {
                 action_spec: step.action_spec.clone(),
                 input: step.input.clone(),
                 status: step.status.clone(),
+                required_ability: step.required_ability.clone(),
                 required_tags,
                 runner: step.runner.clone(),
                 timeout_secs: step.timeout_secs,
@@ -226,6 +238,7 @@ impl JobStepRepo {
                 .bind(row.action_spec)
                 .bind(row.input)
                 .bind(row.status)
+                .bind(row.required_ability)
                 .bind(row.required_tags)
                 .bind(row.runner)
                 .bind(row.timeout_secs)
@@ -248,22 +261,40 @@ impl JobStepRepo {
         Ok(())
     }
 
-    /// Claim a ready step for a worker (SELECT FOR UPDATE SKIP LOCKED)
-    /// This is the key concurrency-safe operation.
-    /// worker_tags: worker's tags as JSONB array — step's required_tags must be a subset
+    /// Claim a ready step for a worker (SELECT FOR UPDATE SKIP LOCKED).
+    ///
+    /// Two-dimensional match:
+    ///
+    /// * `worker_capabilities` — subset check: the step's `required_ability`
+    ///   MUST appear in this list. Filters by what the worker can run.
+    /// * `worker_tags` — reverse subset (taint) check: `worker_tags` MUST
+    ///   be a subset of the step's `required_tags`. If the worker declared
+    ///   any tag, the step had to explicitly ask for all of them.
+    ///
+    /// A worker with `tags: []` accepts any step its capabilities allow —
+    /// the default, permissive case. A worker with `tags: ["batch-runner"]`
+    /// is reserved: only steps whose `required_tags` include `"batch-runner"`
+    /// can reach it.
     pub async fn claim_ready_step(
         pool: &PgPool,
+        worker_capabilities: &[String],
         worker_tags: &[String],
         worker_id: Uuid,
     ) -> Result<Option<JobStepRow>> {
+        let worker_capabilities_json = serde_json::to_value(worker_capabilities)
+            .context("Failed to serialize worker capabilities")?;
         let worker_tags_json =
             serde_json::to_value(worker_tags).context("Failed to serialize worker tags")?;
         let step = sqlx::query_as::<_, JobStepRow>(&format!(
             r#"
-            UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW()
+            UPDATE job_step SET status = 'running', worker_id = $3, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
-                WHERE status = 'ready' AND required_tags <@ $1::jsonb AND action_type NOT IN ('task', 'agent', 'approval', 'event_source') AND (retry_at IS NULL OR retry_at <= NOW())
+                WHERE status = 'ready'
+                  AND $1::jsonb @> to_jsonb(required_ability)
+                  AND $2::jsonb <@ required_tags::jsonb
+                  AND action_type NOT IN ('task', 'agent', 'approval', 'event_source')
+                  AND (retry_at IS NULL OR retry_at <= NOW())
                 ORDER BY random()
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -272,6 +303,7 @@ impl JobStepRepo {
             "#,
             STEP_COLUMNS
         ))
+        .bind(worker_capabilities_json)
         .bind(worker_tags_json)
         .bind(worker_id)
         .fetch_optional(pool)
@@ -888,7 +920,13 @@ impl JobStepRepo {
     }
 
     /// Find ready steps that have been waiting longer than `timeout_secs` and
-    /// have no active worker whose tags satisfy the step's `required_tags`.
+    /// have no active worker matching them on BOTH dimensions:
+    ///   * worker.capabilities contains the step's required_ability, AND
+    ///   * worker.tags is a subset of the step's required_tags (taint).
+    ///
+    /// A step reserved for a specific worker (via a matching taint tag)
+    /// counts as "unmatched" only when no such worker is currently active,
+    /// same as before.
     pub async fn get_unmatched_ready_steps(
         pool: &PgPool,
         timeout_secs: f64,
@@ -898,12 +936,17 @@ impl JobStepRepo {
             SELECT js.job_id, js.step_name, NULL::uuid AS worker_id
             FROM job_step js
             WHERE js.status = 'ready'
-              AND js.action_type NOT IN ('task', 'agent', 'approval')
+              -- Must match the claim SQL's exclusion set exactly. Missing
+              -- `event_source` here would cause the sweep to fail
+              -- server-dispatched consumer steps that no worker was ever
+              -- supposed to claim.
+              AND js.action_type NOT IN ('task', 'agent', 'approval', 'event_source')
               AND js.ready_at < NOW() - make_interval(secs => $1::double precision)
               AND NOT EXISTS (
                   SELECT 1 FROM worker w
                   WHERE w.status = 'active'
-                    AND js.required_tags <@ w.tags
+                    AND w.capabilities @> to_jsonb(js.required_ability)
+                    AND w.tags <@ js.required_tags
               )
             "#,
         )

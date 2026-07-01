@@ -180,6 +180,16 @@ export interface WorkerListItem {
   worker_id: string;
   name: string;
   status: string;
+  /**
+   * Runner types this worker supports — one or more of "script",
+   * "docker", "kubernetes", "agent". Introduced by migration 041; see
+   * `docs/operations/recovery.md`.
+   */
+  capabilities: string[];
+  /**
+   * Reservation labels (taints). Empty = permissive. Non-empty = worker
+   * ONLY claims steps whose action tags include ALL of these labels.
+   */
   tags: string[];
   version: string | null;
   last_heartbeat: string | null;

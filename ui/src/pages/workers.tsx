@@ -59,6 +59,7 @@ export function WorkersPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Version</TableHead>
+                  <TableHead>Capabilities</TableHead>
                   <TableHead>Tags</TableHead>
                   <TableHead>Last Heartbeat</TableHead>
                   <TableHead>Registered</TableHead>
@@ -80,6 +81,15 @@ export function WorkersPage() {
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
                       {w.version ?? <span aria-label="Version unknown">—</span>}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {(w.capabilities ?? []).map((c) => (
+                          <Badge key={c} variant="secondary" className="text-xs">
+                            {c}
+                          </Badge>
+                        ))}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">

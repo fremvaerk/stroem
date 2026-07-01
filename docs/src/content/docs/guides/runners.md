@@ -27,7 +27,7 @@ Container runners are optional features that allow steps to execute inside Docke
 ### Worker config
 
 ```yaml
-tags:
+capabilities:
   - script
   - docker
 docker: {}
@@ -49,7 +49,7 @@ runner_image: "ghcr.io/fremvaerk/stroem-runner:latest"
 ### Worker config
 
 ```yaml
-tags:
+capabilities:
   - script
   - kubernetes
 kubernetes:
@@ -68,7 +68,7 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: /var/stroem/workspace-cache
-tags:
+capabilities:
   - script
   - docker
   - kubernetes
@@ -78,47 +78,64 @@ kubernetes:
   namespace: stroem-jobs
 ```
 
-## Worker tags
+## Worker capabilities and tags
 
-Tags control which steps a worker can claim. Each step automatically computes `required_tags` based on its action type and runner configuration:
+Workers have two independent routing dimensions (introduced in migration 041; the earlier single-`tags` model conflated them):
 
-| Action | Runner | Required tags |
-|--------|--------|--------------|
-| `script` | `local` (default) | `["script"]` |
-| `script` | `docker` | `["docker"]` |
-| `script` | `pod` | `["kubernetes"]` |
-| `docker` | — | `["docker"]` |
-| `pod` | — | `["kubernetes"]` |
-| `task` | — | `[]` (server-dispatched) |
+* **`capabilities`** — what runners the worker supports. Any of `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. Every step derives a **required ability** from its action type and runner; that ability must appear in the worker's `capabilities`. This axis is required.
+* **`tags`** — free-form **reservation labels** (taints). If a worker declares tags, only steps whose `tags` list contains ALL of those labels can reach that worker. Empty = the worker accepts anything its capabilities allow.
 
-### Step tag matching
+| Action | Runner | Required ability |
+|--------|--------|------------------|
+| `script` | `local` (default) | `script` |
+| `script` | `docker` | `docker` |
+| `script` | `pod` | `kubernetes` |
+| `docker` | — | `docker` |
+| `pod` | — | `kubernetes` |
+| `agent` | — | `agent` |
+| `task`, `approval` | — | — (server-dispatched) |
 
-A worker claims a step only when **all** of the step's `required_tags` are present in the worker's `tags` list. This ensures specialized workloads route to capable workers.
+### Reserving a worker for a specific step
 
-**Worker configuration:**
+The most common use of tags: pin a specific job to a specific worker without letting other jobs leak onto it. Add a matching tag on both sides:
+
 ```yaml
+# Worker config
+capabilities:
+  - script
 tags:
-  - script      # can run local scripts
-  - docker      # can run docker steps
-  - kubernetes  # can run pod steps
-  - gpu         # custom tag for GPU-enabled work
+  - batch-runner    # this worker is reserved for batch jobs
 ```
 
-**Step with custom tags:**
+```yaml
+# Action in workflow YAML
+run-batch-job:
+  type: script
+  tags: ["batch-runner"]   # explicitly request the reserved worker
+  script: |
+    ...
+```
+
+Generic script steps (no tags) never reach `batch-runner`; batch steps only reach `batch-runner`.
+
+### Extra capability tags on the step
+
+Tags on the action can also express fine-grained runtime requirements:
+
 ```yaml
 flow:
   train-model:
     action: train-gpu
-    tags: ["gpu"]        # adds to required_tags
+    tags: ["gpu"]
 ```
 
-A step with `type: script, runner: docker, tags: ["gpu"]` requires `["docker", "gpu"]` — only workers with both tags can claim it.
+A step with `type: script, runner: docker, tags: ["gpu"]` requires ability `docker` AND tag `gpu`. Any docker-capable worker whose `tags` are a subset of `["gpu"]` matches — including a worker with `tags: []` (permissive default) and one with `tags: ["gpu"]` (reserved for GPU work). A worker with `tags: ["gpu", "trusted"]` would NOT match, because `"trusted"` isn't in the step's tag list.
 
 ### Unmatched steps
 
-If no active worker has all required tags for a step, the step remains ready but unclaimed. After `unmatched_step_timeout_secs` (default 30 seconds, configurable in server recovery settings), the step fails with error: `"No active worker with required tags to run this step"`.
+If no active worker matches on both axes, the step remains ready but unclaimed. After `unmatched_step_timeout_secs` (default 30 seconds, configurable in server recovery settings), the step fails with error: `"No active worker with required capability/tags to run this step"`.
 
-**Example scenario:** A step requires `["kubernetes"]` but all workers have `["script", "docker"]`. After 30 seconds, the step fails. To fix: add a worker with Kubernetes runner enabled, or remove the `runner: pod` requirement.
+**Example scenario:** A step needs ability `kubernetes` but all workers have `["script", "docker"]`. After 30 seconds, the step fails. To fix: add a worker with `capabilities: ["kubernetes"]`, or remove the `runner: pod` requirement.
 
 ## Pre-installed tools
 

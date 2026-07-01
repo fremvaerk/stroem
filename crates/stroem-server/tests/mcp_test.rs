@@ -490,6 +490,7 @@ async fn register_test_worker(pool: &PgPool) -> Uuid {
         worker_id,
         "test-worker",
         &["script".to_string()],
+        &[],
         None,
     )
     .await

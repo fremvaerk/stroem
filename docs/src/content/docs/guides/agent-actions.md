@@ -28,8 +28,8 @@ agents:
       model: gpt-4o
       max_tokens: 1024
 
-# Worker must also declare agent tag
-tags: ["script", "agent"]
+# Worker must also declare the "agent" capability
+capabilities: ["script", "agent"]
 ```
 
 **Server configuration** (optional, for validation only):

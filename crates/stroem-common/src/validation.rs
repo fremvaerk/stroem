@@ -1792,37 +1792,49 @@ pub fn validate_mcp_servers(
     Ok(warnings)
 }
 
-/// Compute the required worker tags for an action.
-/// These tags must all be present on a worker for it to claim a step using this action.
+/// Compute the required *capability* for an action — the runner the worker
+/// must support to execute it. Returned string is one of:
+///
+///   * `"script"`     — script action with local (or no) runner.
+///   * `"docker"`     — script with `runner: docker`, or `type: docker`.
+///   * `"kubernetes"` — script with `runner: pod`, or `type: pod`.
+///   * `"agent"`      — agent LLM action.
+///   * `""`           — action is server-dispatched (task/approval), no worker.
+///
+/// Paired with [`compute_required_tags`], this replaces the pre-041 model
+/// where the capability token was prepended to the tag list. Now they're
+/// two distinct dimensions on both worker and step:
+///
+///   * worker.capabilities contains the step's `required_ability` (subset).
+///   * worker.tags is a subset of step's `required_tags` (taint semantics).
+pub fn compute_required_ability(action: &ActionDef) -> String {
+    match action.action_type.as_str() {
+        "task" | "approval" => String::new(),
+        "agent" => "agent".to_string(),
+        "script" => match action.runner.as_deref() {
+            Some("docker") => "docker".to_string(),
+            Some("pod") => "kubernetes".to_string(),
+            _ => "script".to_string(),
+        },
+        "docker" => "docker".to_string(),
+        "pod" => "kubernetes".to_string(),
+        _ => "script".to_string(),
+    }
+}
+
+/// Compute the required tags for an action — just the user-declared tags,
+/// no capability prefix. Server-dispatched actions (task/approval) return
+/// empty.
+///
+/// These tags are taints on the worker side: a worker with `tags: ["gpu"]`
+/// only claims steps whose `required_tags` include "gpu". A step with
+/// `required_tags: []` reaches only workers with no tags.
 pub fn compute_required_tags(action: &ActionDef) -> Vec<String> {
-    // Task and approval actions are handled server-side, not by workers
     if action.action_type == "task" || action.action_type == "approval" {
         return vec![];
     }
-
-    // Agent actions require a worker with the "agent" tag
-    if action.action_type == "agent" {
-        let mut tags = vec!["agent".to_string()];
-        for tag in &action.tags {
-            if !tags.contains(tag) {
-                tags.push(tag.clone());
-            }
-        }
-        return tags;
-    }
-
-    let base_tag = match action.action_type.as_str() {
-        "script" => match action.runner.as_deref() {
-            Some("docker") => "docker",
-            Some("pod") => "kubernetes",
-            _ => "script",
-        },
-        "docker" => "docker",
-        "pod" => "kubernetes",
-        _ => "script",
-    };
-
-    let mut tags = vec![base_tag.to_string()];
+    // Dedup while preserving order.
+    let mut tags: Vec<String> = Vec::with_capacity(action.tags.len());
     for tag in &action.tags {
         if !tags.contains(tag) {
             tags.push(tag.clone());
@@ -2810,117 +2822,80 @@ actions:
     }
 
     #[test]
-    fn test_compute_required_tags_script_local() {
+    fn test_compute_required_ability_script_local() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: script
-script: "echo test"
-"#,
-        )
-        .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["script"]);
+        let action: ActionDef =
+            serde_yaml::from_str("type: script\nscript: \"echo test\"\n").unwrap();
+        assert_eq!(compute_required_ability(&action), "script");
+        assert!(compute_required_tags(&action).is_empty());
     }
 
     #[test]
-    fn test_compute_required_tags_script_docker() {
+    fn test_compute_required_ability_script_docker() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: script
-runner: docker
-script: "npm test"
-"#,
-        )
-        .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["docker"]);
+        let action: ActionDef =
+            serde_yaml::from_str("type: script\nrunner: docker\nscript: \"npm test\"\n").unwrap();
+        assert_eq!(compute_required_ability(&action), "docker");
+        assert!(compute_required_tags(&action).is_empty());
     }
 
     #[test]
-    fn test_compute_required_tags_script_docker_with_tags() {
+    fn test_compute_required_ability_script_docker_with_tags() {
         use crate::models::workflow::ActionDef;
+        // Post-041: the ability token is NOT prepended to tags anymore.
+        // Only the user-declared "node-20" is a tag; "docker" is the
+        // ability, and lives on the separate axis.
         let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: script
-runner: docker
-tags: ["node-20"]
-script: "npm test"
-"#,
+            "type: script\nrunner: docker\ntags: [\"node-20\"]\nscript: \"npm test\"\n",
         )
         .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["docker", "node-20"]);
+        assert_eq!(compute_required_ability(&action), "docker");
+        assert_eq!(compute_required_tags(&action), vec!["node-20"]);
     }
 
     #[test]
-    fn test_compute_required_tags_docker() {
+    fn test_compute_required_ability_docker() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: docker
-image: alpine:latest
-"#,
-        )
-        .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["docker"]);
+        let action: ActionDef =
+            serde_yaml::from_str("type: docker\nimage: alpine:latest\n").unwrap();
+        assert_eq!(compute_required_ability(&action), "docker");
+        assert!(compute_required_tags(&action).is_empty());
     }
 
     #[test]
-    fn test_compute_required_tags_pod() {
+    fn test_compute_required_ability_pod() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: pod
-image: alpine:latest
-"#,
-        )
-        .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["kubernetes"]);
+        let action: ActionDef = serde_yaml::from_str("type: pod\nimage: alpine:latest\n").unwrap();
+        assert_eq!(compute_required_ability(&action), "kubernetes");
+        assert!(compute_required_tags(&action).is_empty());
     }
 
     #[test]
-    fn test_compute_required_tags_pod_with_tags() {
+    fn test_compute_required_ability_pod_with_tags() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: pod
-image: alpine:latest
-tags: ["gpu"]
-"#,
-        )
-        .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["kubernetes", "gpu"]);
+        let action: ActionDef =
+            serde_yaml::from_str("type: pod\nimage: alpine:latest\ntags: [\"gpu\"]\n").unwrap();
+        assert_eq!(compute_required_ability(&action), "kubernetes");
+        assert_eq!(compute_required_tags(&action), vec!["gpu"]);
     }
 
     #[test]
-    fn test_compute_required_tags_script_pod() {
+    fn test_compute_required_ability_script_pod() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: script
-runner: pod
-script: "npm test"
-"#,
-        )
-        .unwrap();
-        assert_eq!(compute_required_tags(&action), vec!["kubernetes"]);
+        let action: ActionDef =
+            serde_yaml::from_str("type: script\nrunner: pod\nscript: \"npm test\"\n").unwrap();
+        assert_eq!(compute_required_ability(&action), "kubernetes");
     }
 
     #[test]
-    fn test_compute_required_tags_dedup_base_tag() {
+    fn test_compute_required_tags_dedup() {
         use crate::models::workflow::ActionDef;
-        // If tags already include the base tag, it should not be duplicated
+        // Duplicate tags in the action should be deduped (order preserved).
         let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: docker
-image: alpine:latest
-tags: ["docker", "gpu"]
-"#,
+            "type: docker\nimage: alpine:latest\ntags: [\"gpu\", \"gpu\", \"batch-runner\"]\n",
         )
         .unwrap();
-        let tags = compute_required_tags(&action);
-        assert_eq!(tags, vec!["docker", "gpu"]);
-        // Ensure "docker" appears only once
-        assert_eq!(tags.iter().filter(|t| *t == "docker").count(), 1);
+        assert_eq!(compute_required_tags(&action), vec!["gpu", "batch-runner"]);
     }
 
     #[test]
@@ -6283,36 +6258,28 @@ actions:
     }
 
     #[test]
-    fn test_compute_required_tags_agent() {
+    fn test_compute_required_ability_agent() {
         use crate::models::workflow::ActionDef;
-        let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: agent
-provider: openai
-prompt: "Do something"
-"#,
-        )
-        .unwrap();
-        // Agent steps now require a worker with the "agent" tag
-        assert_eq!(compute_required_tags(&action), vec!["agent".to_string()]);
+        let action: ActionDef =
+            serde_yaml::from_str("type: agent\nprovider: openai\nprompt: \"Do something\"\n")
+                .unwrap();
+        // Agent steps require a worker with the "agent" capability.
+        assert_eq!(compute_required_ability(&action), "agent");
+        assert!(compute_required_tags(&action).is_empty());
     }
 
     #[test]
-    fn test_compute_required_tags_agent_with_extra_tags() {
+    fn test_compute_required_ability_agent_with_extra_tags() {
         use crate::models::workflow::ActionDef;
         let action: ActionDef = serde_yaml::from_str(
-            r#"
-type: agent
-provider: openai
-prompt: "Do something"
-tags: [gpu, custom]
-"#,
+            "type: agent\nprovider: openai\nprompt: \"Do something\"\ntags: [gpu, custom]\n",
         )
         .unwrap();
-        // "agent" tag is always first, extra tags appended
+        // Ability is separate now; tags list is just the user tags.
+        assert_eq!(compute_required_ability(&action), "agent");
         assert_eq!(
             compute_required_tags(&action),
-            vec!["agent".to_string(), "gpu".to_string(), "custom".to_string()]
+            vec!["gpu".to_string(), "custom".to_string()]
         );
     }
 

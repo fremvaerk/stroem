@@ -383,7 +383,6 @@ mod tests {
         ActionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
     };
     use stroem_db::JobStepRow;
-    use uuid::Uuid;
 
     fn field_names(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
@@ -461,37 +460,16 @@ mod tests {
 
     fn make_step_row(step_name: &str, input: Option<serde_json::Value>) -> JobStepRow {
         JobStepRow {
-            job_id: Uuid::nil(),
             step_name: step_name.to_string(),
             action_name: "test-action".to_string(),
             action_type: "script".to_string(),
-            action_image: None,
-            action_spec: None,
             input,
-            output: None,
             status: "ready".to_string(),
-            worker_id: None,
-            started_at: None,
-            completed_at: None,
-            error_message: None,
+            required_ability: "script".to_string(),
             required_tags: json!([]),
             runner: "local".to_string(),
-            timeout_secs: None,
-            when_condition: None,
-            for_each_expr: None,
-            loop_source: None,
-            loop_index: None,
-            loop_total: None,
-            loop_item: None,
-            agent_state: None,
-            suspended_at: None,
-            retry_attempt: 0,
-            max_retries: None,
-            retry_backoff_secs: None,
-            retry_strategy: None,
-            retry_jitter: false,
-            retry_history: serde_json::json!([]),
-            retry_at: None,
+            retry_history: json!([]),
+            ..Default::default()
         }
     }
 

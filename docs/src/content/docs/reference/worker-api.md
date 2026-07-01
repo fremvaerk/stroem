@@ -24,14 +24,16 @@ Registers a worker and returns a unique worker ID. Called once on worker startup
 ```json
 {
   "name": "worker-1",
-  "tags": ["script", "docker"]
+  "capabilities": ["script", "docker"],
+  "tags": []
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Worker display name |
-| `tags` | string[] | Worker tags for step routing |
+| `capabilities` | string[] | Runners the worker supports (`"script"`, `"docker"`, `"kubernetes"`, `"agent"`). Required. |
+| `tags` | string[] | Reservation labels (optional, default `[]`). Non-empty tags reserve the worker for steps that explicitly request them. |
 
 **Response:**
 
@@ -63,18 +65,21 @@ Updates the worker's last-seen timestamp. Called periodically (every 30s). Also 
 POST /worker/jobs/claim
 ```
 
-Claims the next ready step that matches the worker's tags. Uses `SELECT FOR UPDATE SKIP LOCKED` for concurrency safety.
+Claims the next ready step matching the worker on both routing dimensions. Uses `SELECT FOR UPDATE SKIP LOCKED` for concurrency safety.
 
 **Request body:**
 
 ```json
 {
   "worker_id": "w1w2w3w4-...",
-  "tags": ["script", "docker"]
+  "capabilities": ["script", "docker"],
+  "tags": []
 }
 ```
 
-A step is only claimed if all of its `required_tags` are present in the worker's tag set.
+A step is claimed only when BOTH:
+1. The step's `required_ability` is present in the worker's `capabilities`, AND
+2. The worker's `tags` are a subset of the step's `required_tags` (empty worker tags accept anything; non-empty tags reserve the worker for steps that explicitly requested them).
 
 **Response (step available):**
 

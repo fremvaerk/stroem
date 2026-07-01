@@ -235,7 +235,7 @@ async fn sweep(state: &AppState) -> Result<()> {
     let unmatched_timeout = state.config.recovery.unmatched_step_timeout_secs as f64;
     let unmatched = JobStepRepo::get_unmatched_ready_steps(&state.pool, unmatched_timeout).await?;
     for step_info in &unmatched {
-        let error_msg = "No active worker with required tags to run this step";
+        let error_msg = "No active worker with required capability/tags to run this step";
 
         state
             .append_server_log(
