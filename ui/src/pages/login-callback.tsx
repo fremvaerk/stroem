@@ -9,16 +9,24 @@ import { LoadingSpinner } from "@/components/loading-spinner";
 function parseCallbackHash() {
   const hash = window.location.hash.substring(1);
   const params = new URLSearchParams(hash);
+  // Restrict `next` to same-origin paths so a malicious link can't turn
+  // the OIDC callback into an open redirect.
+  const rawNext = params.get("next");
+  const next =
+    rawNext && rawNext.startsWith("/") && !rawNext.startsWith("//")
+      ? rawNext
+      : null;
   return {
     error: params.get("error"),
     accessToken: params.get("access_token"),
+    next,
   };
 }
 
 export function LoginCallbackPage() {
   const navigate = useNavigate();
   const { restoreFromOidc } = useAuth();
-  const { error: urlError, accessToken } = useMemo(() => parseCallbackHash(), []);
+  const { error: urlError, accessToken, next } = useMemo(() => parseCallbackHash(), []);
   const [restoreError, setRestoreError] = useState<string | null>(null);
 
   // The refresh token is delivered as an HttpOnly cookie by the server redirect
@@ -28,10 +36,10 @@ export function LoginCallbackPage() {
   useEffect(() => {
     if (accessToken) {
       restoreFromOidc(accessToken)
-        .then(() => navigate("/", { replace: true }))
+        .then(() => navigate(next ?? "/", { replace: true }))
         .catch(() => setRestoreError("Failed to restore session from OIDC callback"));
     }
-  }, [accessToken, restoreFromOidc, navigate]);
+  }, [accessToken, next, restoreFromOidc, navigate]);
 
   if (!error) {
     return <LoadingSpinner className="flex h-screen items-center justify-center" />;

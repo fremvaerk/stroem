@@ -16,6 +16,7 @@ import { WorkerDetailPage } from "@/pages/worker-detail";
 import { UsersPage } from "@/pages/users";
 import { UserDetailPage } from "@/pages/user-detail";
 import { LoginCallbackPage } from "@/pages/login-callback";
+import { OAuthConsentPage } from "@/pages/oauth-consent";
 import { SettingsPage } from "@/pages/settings";
 import { ApprovalPage } from "@/pages/approval";
 
@@ -27,6 +28,10 @@ export default function App() {
           <Routes>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/login/callback" element={<LoginCallbackPage />} />
+            {/* OAuth 2.1 consent page — does its own auth check + redirect-to-login
+                with `next` so we don't gate it under ProtectedRoute (which would
+                lose the original consent params on the round-trip). */}
+            <Route path="/consent" element={<OAuthConsentPage />} />
             <Route element={<ProtectedRoute />}>
               <Route element={<AppLayout />}>
                 <Route index element={<ErrorBoundary><DashboardPage /></ErrorBoundary>} />

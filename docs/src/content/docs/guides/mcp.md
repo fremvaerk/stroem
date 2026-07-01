@@ -62,6 +62,74 @@ Strøm supports two token types:
 
 MCP clients without an `Authorization` header can still connect if auth is disabled on the server.
 
+### OAuth 2.1 (MCP spec 2025-06-18)
+
+When auth is enabled, Strøm acts as both the OAuth 2.1 **Resource Server** for `/mcp` and the **Authorization Server** that issues tokens for it. A spec-conformant MCP client connects with no manual configuration — it discovers the auth flow on the first 401.
+
+The flow:
+
+1. Client calls `/mcp` without a token.
+2. Strøm responds `401 Unauthorized` with `WWW-Authenticate: Bearer resource_metadata="https://.../.well-known/oauth-protected-resource"`.
+3. Client fetches that document — [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) Protected Resource Metadata — which advertises the authorization server URL.
+4. Client fetches `/.well-known/oauth-authorization-server` — [RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414) — to learn the endpoints, grant types, and PKCE methods. Strøm advertises:
+   - `response_types_supported: ["code"]`
+   - `grant_types_supported: ["authorization_code", "refresh_token"]`
+   - `code_challenge_methods_supported: ["S256"]` (OAuth 2.1 forbids `plain`)
+   - `token_endpoint_auth_methods_supported: ["none", "client_secret_post"]`
+5. Client self-registers via `POST /oauth/register` — [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) Dynamic Client Registration. The response includes a `client_id` (and `client_secret` if the client requested confidential auth).
+6. Client opens the user's browser to `/oauth/authorize?response_type=code&client_id=...&redirect_uri=...&code_challenge=...&code_challenge_method=S256&scope=mcp&resource=https://.../mcp&state=...`.
+7. Strøm validates the request, then redirects to `/consent?...` — the React consent screen. If the user isn't logged in, the SPA bounces them through `/login?next=/consent?...` first.
+8. The user clicks **Allow**. The SPA `POST /api/oauth/consent` mints a single-use authorization code and returns the final redirect URL, which the browser then navigates to: `redirect_uri?code=<code>&state=<state>`.
+9. Client exchanges the code at `POST /oauth/token` with the matching `code_verifier`. Strøm verifies PKCE (`BASE64URL(SHA256(code_verifier)) == stored code_challenge`), then mints:
+   - An **access token** — JWT, 1 hour TTL, `aud` bound to the canonical `/mcp` URL (RFC 8707 Resource Indicators).
+   - A **refresh token** — opaque, DB-backed, 30 day TTL, **rotated** on each use (OAuth 2.1 §4.13).
+10. Client uses the access token as the `Bearer` value on `/mcp`. The MCP middleware enforces the `aud` claim — a token issued for a different resource is rejected, even if signed with the same secret.
+
+#### Dynamic Client Registration (DCR)
+
+`POST /oauth/register` is public — any client can register without an admin step. To limit abuse:
+
+- Each registration expires after **30 days**. Long-running integrations re-register on the first request after expiry; the cost is one automatic POST.
+- Maximum 5 `redirect_uris` per client.
+- Only `https://...` redirects are allowed, except for `http://localhost`, `http://127.0.0.1`, and `http://[::1]` (loopback exceptions per OAuth 2.1 §4.1).
+- Only the `authorization_code` + `refresh_token` grants and the `mcp` scope are permitted.
+
+#### Audience binding
+
+Tokens issued by `/oauth/token` carry an `aud` claim equal to the canonical resource URL (e.g. `https://stroem.example.com/mcp`). The MCP middleware verifies this on every request. A token leaked from one resource server cannot be replayed against another, even if both trust the same issuer.
+
+Legacy `strm_*` API keys and login-flow JWTs predate the OAuth flow and have no `aud` claim — the middleware accepts them unchanged. New integrations should prefer the OAuth flow.
+
+#### Configuration
+
+Set `auth.base_url` in `server-config.yaml` so the discovery documents and `aud` claim resolve to the canonical public URL:
+
+```yaml
+auth:
+  jwt_secret: "..."
+  refresh_secret: "..."
+  base_url: "https://stroem.example.com"
+```
+
+Without `base_url`, Strøm falls back to the request `Host` (respecting `X-Forwarded-Host` / `X-Forwarded-Proto`) — fine for local dev, brittle behind multiple proxy layers.
+
+#### Claude Desktop with auto-discovery
+
+A spec-conformant MCP client only needs the `/mcp` URL. Auth handles itself:
+
+```json
+{
+  "mcpServers": {
+    "stroem": {
+      "url": "https://stroem.example.com/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+The first connection triggers the 401 → discovery → DCR → browser consent → token exchange flow described above. After the user clicks **Allow** once, Claude Desktop refreshes the access token silently for as long as the refresh token is valid (30 days).
+
 ## Connecting from Claude Desktop
 
 To connect Claude Desktop to your Strøm server, add the MCP configuration to `claude_desktop_config.json`:

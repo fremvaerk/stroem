@@ -51,6 +51,7 @@ url.workspace = true
 axum-extra = { version = "0.12", features = ["cookie"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 subtle = "2"
+base64 = "0.22"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 rand = "0.10"

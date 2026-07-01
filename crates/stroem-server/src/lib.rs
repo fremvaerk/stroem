@@ -15,6 +15,8 @@ pub mod log_storage;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod metrics;
+#[cfg(feature = "mcp")]
+pub mod oauth;
 pub mod oidc;
 pub mod orchestrator;
 pub mod recovery;

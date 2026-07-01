@@ -57,7 +57,12 @@ pub async fn job_log_stream(
                     Err(resp) => return resp,
                 }
             }
-            Some(t) => match crate::auth::validate_access_token(&t, &auth_config.jwt_secret) {
+            Some(t) => match crate::auth::validate_access_token(
+                &t,
+                &auth_config.jwt_secret,
+                // REST API surface — reject OAuth-bound tokens (those carry aud).
+                None,
+            ) {
                 Ok(c) => Some(c),
                 Err(_) => {
                     return AppError::Unauthorized("Invalid or expired token".into())

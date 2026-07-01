@@ -109,6 +109,15 @@ pub fn build_router(state: AppState, cancel_token: CancellationToken) -> Router 
         let mcp_routes = crate::mcp::build_mcp_routes(state.clone(), cancel_token);
         router = router.nest("/mcp", mcp_routes);
         tracing::info!("MCP endpoint enabled at /mcp");
+
+        // Spec-compliant OAuth 2.1 discovery is only meaningful when auth is
+        // actually enforced. Without `auth`, the MCP middleware passes every
+        // request through, so there's no 401 for clients to react to and no
+        // reason to advertise an authorization server.
+        if state.config.auth.is_some() {
+            router = router.merge(crate::oauth::build_oauth_routes(state.clone()));
+            tracing::info!("OAuth 2.1 metadata endpoints enabled for MCP");
+        }
     }
 
     router

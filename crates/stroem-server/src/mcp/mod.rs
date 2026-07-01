@@ -4,7 +4,7 @@ mod tools;
 
 use auth::McpAuthContext;
 use axum::body::Body;
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -39,13 +39,44 @@ async fn mcp_auth_middleware(
         }
         Err(msg) => {
             tracing::warn!(error = %msg, "MCP auth failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({"error": msg})),
-            )
-                .into_response()
+            unauthorized_with_metadata(&state, &parts.headers, &msg)
         }
     }
+}
+
+/// Build a 401 with the MCP-spec-mandated `WWW-Authenticate` header.
+///
+/// Per the MCP authorization spec (2025-06-18) and RFC 9728 §5.3, an MCP
+/// server's 401 response MUST include a `WWW-Authenticate: Bearer` header
+/// whose `resource_metadata` parameter points at the protected-resource
+/// metadata document. Spec-conformant clients (Claude Desktop, Cursor, MCP
+/// Inspector) follow that pointer, discover the authorization server, and
+/// run the OAuth flow without any out-of-band configuration.
+///
+/// The header escapes any `"` in `msg` defensively even though the auth
+/// layer never produces one today — quoted-string syntax (RFC 7235) would
+/// otherwise break parsers if a future error message ever contained one.
+fn unauthorized_with_metadata(
+    state: &std::sync::Arc<AppState>,
+    headers: &axum::http::HeaderMap,
+    msg: &str,
+) -> Response {
+    let issuer = crate::oauth::canonical_issuer(state, headers);
+    let resource_metadata = format!("{issuer}/.well-known/oauth-protected-resource");
+    let safe_msg = msg.replace('"', "'");
+    let www_auth = format!(
+        r#"Bearer realm="mcp", resource_metadata="{resource_metadata}", error="invalid_token", error_description="{safe_msg}""#
+    );
+
+    let body = serde_json::to_vec(&serde_json::json!({"error": msg}))
+        .unwrap_or_else(|_| b"{\"error\":\"unauthorized\"}".to_vec());
+
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::WWW_AUTHENTICATE, www_auth)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::UNAUTHORIZED.into_response())
 }
 
 /// Build the MCP routes to be nested in the Axum router at `/mcp`.

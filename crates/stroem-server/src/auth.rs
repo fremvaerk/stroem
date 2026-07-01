@@ -40,6 +40,10 @@ pub fn create_access_token(
         is_admin,
         iat: now,
         exp: now + 900, // 15 minutes
+        // Login JWTs aren't audience-bound; OAuth-issued tokens (Phase 2)
+        // set aud/iss/scope/client_id. MCP middleware treats absent aud
+        // as a legacy token and skips the audience check.
+        ..Default::default()
     };
     jsonwebtoken::encode(
         &Header::default(),
@@ -49,15 +53,55 @@ pub fn create_access_token(
     .context("Failed to create access token")
 }
 
-/// Validate an access token and return claims
-pub fn validate_access_token(token: &str, jwt_secret: &str) -> Result<Claims> {
+/// Validate an access token and return claims.
+///
+/// `expected_aud` enforces audience binding at the resource-server boundary:
+///
+/// * `None` — the token **must NOT carry an `aud` claim**. This is the
+///   posture for login-flow JWTs and the REST API (`/api/*`). An OAuth
+///   token minted for `/mcp` carries `aud=".../mcp"`; it must be rejected
+///   here so the consent-scoped MCP grant does not bleed into the full
+///   REST surface.
+/// * `Some(expected)` — the token **must carry `aud == expected`**. This
+///   is the posture for `/mcp`: tokens from `/oauth/token` set this claim,
+///   and absence (legacy login JWT) is rejected so the consent screen is
+///   actually the only path that authorises an MCP client.
+///
+/// We disable `jsonwebtoken`'s built-in audience check because its
+/// "missing aud is OK" / "any aud is OK if validate_aud=false" modes
+/// don't match the two-direction posture above. We do the comparison
+/// explicitly so the policy is local to one function.
+pub fn validate_access_token(
+    token: &str,
+    jwt_secret: &str,
+    expected_aud: Option<&str>,
+) -> Result<Claims> {
+    let mut validation = Validation::default();
+    validation.validate_aud = false;
     let token_data = jsonwebtoken::decode::<Claims>(
         token,
         &DecodingKey::from_secret(jwt_secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )
     .context("Invalid access token")?;
-    Ok(token_data.claims)
+    let claims = token_data.claims;
+
+    match (expected_aud, claims.aud.as_deref()) {
+        (None, None) => Ok(claims),
+        (None, Some(a)) => {
+            anyhow::bail!(
+                "Token bound to audience '{a}' cannot be used here; \
+                 use the appropriate resource-server endpoint instead"
+            )
+        }
+        (Some(_), None) => {
+            anyhow::bail!("Token is not bound to this resource; obtain one via the OAuth flow")
+        }
+        (Some(expected), Some(actual)) if expected == actual => Ok(claims),
+        (Some(expected), Some(actual)) => {
+            anyhow::bail!("Token audience mismatch (expected '{expected}', got '{actual}')")
+        }
+    }
 }
 
 /// Generate a refresh token: returns (raw_token, token_hash)
@@ -145,7 +189,7 @@ mod tests {
     fn test_jwt_create_and_validate() {
         let secret = "test-jwt-secret";
         let token = create_access_token("user-123", "test@example.com", false, secret).unwrap();
-        let claims = validate_access_token(&token, secret).unwrap();
+        let claims = validate_access_token(&token, secret, None).unwrap();
         assert_eq!(claims.sub, "user-123");
         assert_eq!(claims.email, "test@example.com");
         assert!(!claims.is_admin);
@@ -155,7 +199,7 @@ mod tests {
     fn test_jwt_create_and_validate_admin() {
         let secret = "test-jwt-secret";
         let token = create_access_token("admin-1", "admin@example.com", true, secret).unwrap();
-        let claims = validate_access_token(&token, secret).unwrap();
+        let claims = validate_access_token(&token, secret, None).unwrap();
         assert_eq!(claims.sub, "admin-1");
         assert!(claims.is_admin);
     }
@@ -178,14 +222,14 @@ mod tests {
             &EncodingKey::from_secret(secret.as_bytes()),
         )
         .unwrap();
-        let claims = validate_access_token(&token, secret).unwrap();
+        let claims = validate_access_token(&token, secret, None).unwrap();
         assert!(!claims.is_admin);
     }
 
     #[test]
     fn test_jwt_wrong_secret_fails() {
         let token = create_access_token("user-123", "test@example.com", false, "secret-1").unwrap();
-        let result = validate_access_token(&token, "secret-2");
+        let result = validate_access_token(&token, "secret-2", None);
         assert!(result.is_err());
     }
 

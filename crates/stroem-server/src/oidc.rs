@@ -27,6 +27,12 @@ pub struct OidcStateClaims {
     pub pkce_verifier: String,
     pub provider: String,
     pub exp: i64,
+    /// Same-origin path to land on after the OIDC callback succeeds.
+    /// Used by the consent flow to round-trip `/consent?...` through
+    /// `/login?next=/consent?...` and back. Validated as a same-origin
+    /// path on the callback side; absent or invalid → land at `/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 /// Create a signed JWT for OIDC state (stored in HttpOnly cookie)
@@ -197,6 +203,7 @@ mod tests {
             pkce_verifier: "verifier-789".to_string(),
             provider: "google".to_string(),
             exp: chrono::Utc::now().timestamp() + 600,
+            next: None,
         };
 
         let jwt = create_state_jwt(&claims, secret).unwrap();
@@ -217,6 +224,7 @@ mod tests {
             pkce_verifier: "verifier".to_string(),
             provider: "google".to_string(),
             exp: chrono::Utc::now().timestamp() - 120, // expired (past leeway)
+            next: None,
         };
 
         let jwt = create_state_jwt(&claims, secret).unwrap();
@@ -232,6 +240,7 @@ mod tests {
             pkce_verifier: "verifier".to_string(),
             provider: "google".to_string(),
             exp: chrono::Utc::now().timestamp() + 600,
+            next: None,
         };
 
         let jwt = create_state_jwt(&claims, "secret-1").unwrap();

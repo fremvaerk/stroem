@@ -38,12 +38,30 @@ pub struct CallbackQuery {
     pub error_description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct OidcStartQuery {
+    /// Same-origin path to land on after OIDC succeeds. Used by the OAuth
+    /// consent flow to round-trip `/consent?...` through OIDC sign-in.
+    /// Validated as a same-origin path; anything else is dropped.
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+/// Validate that a `next` parameter is a safe same-origin path. Rejects
+/// protocol-relative URLs (`//evil/`), absolute URLs, anything not starting
+/// with `/`, and the empty string. Returns `None` if not safe.
+fn safe_next(next: Option<&str>) -> Option<String> {
+    next.filter(|n| n.starts_with('/') && !n.starts_with("//"))
+        .map(str::to_string)
+}
+
 /// GET /api/auth/oidc/{provider} — Initiate OIDC login flow
 #[tracing::instrument(skip(state, jar))]
 pub async fn oidc_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(provider_name): Path<String>,
+    Query(query): Query<OidcStartQuery>,
 ) -> Response {
     let auth_config = match &state.config.auth {
         Some(cfg) => cfg,
@@ -91,13 +109,17 @@ pub async fn oidc_start(
         .set_pkce_challenge(pkce_challenge)
         .url();
 
-    // Create state JWT (stored in cookie)
+    // Create state JWT (stored in cookie). `next` is preserved across
+    // the OIDC round-trip so the OAuth consent flow can resume at the
+    // /consent page after the callback (otherwise the user would be
+    // dropped at `/` and the MCP client would never get its code).
     let state_claims = OidcStateClaims {
         state: csrf_token.secret().clone(),
         nonce: nonce.secret().clone(),
         pkce_verifier: pkce_verifier.secret().clone(),
         provider: provider_name,
         exp: Utc::now().timestamp() + 600, // 10 minutes
+        next: safe_next(query.next.as_deref()),
     };
 
     let state_jwt = match create_state_jwt(&state_claims, &auth_config.jwt_secret) {
@@ -293,10 +315,22 @@ pub async fn oidc_callback(
 
     // Redirect to frontend callback with only the access token in hash fragment.
     // The refresh token travels via the Set-Cookie header, not the URL.
-    let redirect_url = format!(
+    // If the start handler captured a `next` path (consent flow), forward it
+    // so the SPA can resume at /consent?... instead of landing at /.
+    let mut redirect_url = format!(
         "/login/callback#access_token={}",
         url::form_urlencoded::byte_serialize(tokens.access_token.as_bytes()).collect::<String>()
     );
+    if let Some(next) = state_claims
+        .next
+        .as_deref()
+        .filter(|n| n.starts_with('/') && !n.starts_with("//"))
+    {
+        redirect_url.push_str(&format!(
+            "&next={}",
+            url::form_urlencoded::byte_serialize(next.as_bytes()).collect::<String>()
+        ));
+    }
 
     Response::builder()
         .status(StatusCode::FOUND)

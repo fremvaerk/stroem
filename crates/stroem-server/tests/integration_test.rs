@@ -12762,7 +12762,7 @@ async fn login_and_get_token(router: &Router) -> Result<(String, String)> {
     let body = body_json(response).await;
     let token = body["access_token"].as_str().unwrap().to_string();
     // Decode user_id from token
-    let claims = stroem_server::auth::validate_access_token(&token, AUTH_JWT_SECRET)?;
+    let claims = stroem_server::auth::validate_access_token(&token, AUTH_JWT_SECRET, None)?;
     Ok((token, claims.sub))
 }
 

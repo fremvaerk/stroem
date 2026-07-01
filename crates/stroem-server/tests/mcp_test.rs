@@ -925,30 +925,28 @@ async fn test_mcp_auth_required_when_enabled() -> Result<()> {
     Ok(())
 }
 
-/// Test 7: valid JWT token grants access to MCP endpoint.
+/// Test 7a: a login-flow JWT (no `aud`) MUST be rejected at /mcp. The
+/// only paths to MCP are the OAuth consent flow (which mints an
+/// audience-bound JWT) or an `strm_*` API key. Without this gate, any
+/// browser session would silently grant MCP access without the user
+/// ever seeing the consent screen.
 #[tokio::test]
-async fn test_mcp_auth_with_valid_token() -> Result<()> {
+async fn test_mcp_login_jwt_rejected() -> Result<()> {
     let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
 
-    // Login to get access token
-    let login_body = json!({
-        "email": AUTH_USER_EMAIL,
-        "password": AUTH_USER_PASSWORD
-    });
     let login_req = Request::builder()
         .method("POST")
         .uri("/api/auth/login")
         .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&login_body).unwrap()))
+        .body(Body::from(
+            json!({"email": AUTH_USER_EMAIL, "password": AUTH_USER_PASSWORD}).to_string(),
+        ))
         .unwrap();
     let login_resp = router.clone().oneshot(login_req).await?;
-    assert_eq!(login_resp.status(), StatusCode::OK, "login should succeed");
+    assert_eq!(login_resp.status(), StatusCode::OK);
     let login_data = body_json(login_resp).await;
-    let access_token = login_data["access_token"]
-        .as_str()
-        .expect("access_token should be present");
+    let access_token = login_data["access_token"].as_str().unwrap();
 
-    // Now send initialize with valid token
     let init_body = json!({
         "jsonrpc": "2.0",
         "method": "initialize",
@@ -962,23 +960,314 @@ async fn test_mcp_auth_with_valid_token() -> Result<()> {
     let response = router
         .oneshot(mcp_request_with_auth(None, access_token, init_body))
         .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "login JWT (no aud) must be rejected — only OAuth tokens or API keys reach /mcp"
+    );
+    Ok(())
+}
 
+/// Test 7b: API keys continue to work at /mcp as a non-interactive
+/// out-of-band credential (CI/CD pipelines, scripts, etc.). The API-key
+/// path doesn't go through JWT validation, so the audience policy
+/// doesn't apply to it.
+#[tokio::test]
+async fn test_mcp_api_key_accepted() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+
+    let user = stroem_db::UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    let (raw_key, key_hash) = stroem_server::auth::generate_api_key();
+    let prefix = raw_key[..12].to_string();
+    stroem_db::ApiKeyRepo::create(&pool, &key_hash, user.user_id, "mcp-test", &prefix, None)
+        .await?;
+
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "id": 0,
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1.0"}
+        }
+    });
+    let response = router
+        .oneshot(mcp_request_with_auth(None, &raw_key, init_body))
+        .await?;
     assert_eq!(
         response.status(),
         StatusCode::OK,
-        "expected 200 with valid token"
+        "API keys must continue to work at /mcp"
     );
     let body = body_json(response).await;
-    // Should have a JSON-RPC result with server info
+    assert!(body.get("result").is_some(), "expected JSON-RPC result");
+    Ok(())
+}
+
+// ─── OAuth 2.1 metadata + WWW-Authenticate tests ────────────────────────────
+
+/// Helper: GET a JSON document with an explicit Host header.
+fn get_json_request(uri: &str, host: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Host", host)
+        .header("Accept", "application/json")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// 401 from /mcp must carry a `WWW-Authenticate: Bearer ...` header whose
+/// `resource_metadata` parameter points at the discovery doc. Spec-conformant
+/// MCP clients use this to bootstrap the OAuth flow without any manual config.
+#[tokio::test]
+async fn test_mcp_401_includes_www_authenticate_with_resource_metadata() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "id": 0,
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1.0"}
+        }
+    });
+    let response = router.oneshot(mcp_request(None, init_body)).await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let www_auth = response
+        .headers()
+        .get(http::header::WWW_AUTHENTICATE)
+        .expect("WWW-Authenticate header MUST be present on 401 per MCP spec")
+        .to_str()?;
+
     assert!(
-        body.get("result").is_some(),
-        "expected JSON-RPC result, got: {body}"
+        www_auth.starts_with("Bearer "),
+        "WWW-Authenticate must use Bearer scheme, got: {www_auth}"
     );
     assert!(
-        body["result"].get("serverInfo").is_some()
-            || body["result"].get("server_info").is_some()
-            || body["result"].get("capabilities").is_some(),
-        "expected server info in result, got: {body}"
+        www_auth.contains(r#"resource_metadata=""#),
+        "WWW-Authenticate must advertise resource_metadata URL, got: {www_auth}"
+    );
+    assert!(
+        www_auth.contains("/.well-known/oauth-protected-resource"),
+        "resource_metadata must point at the well-known doc, got: {www_auth}"
+    );
+
+    Ok(())
+}
+
+/// Discovery doc per RFC 9728: lists the resource URL, authorization servers,
+/// and supported scopes/bearer methods. Claude Desktop, Cursor, and MCP
+/// Inspector all read this before initiating any auth dance.
+#[tokio::test]
+async fn test_protected_resource_metadata_endpoint() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+
+    let response = router
+        .oneshot(get_json_request(
+            "/.well-known/oauth-protected-resource",
+            "stroem.example.com",
+        ))
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+
+    let resource = body["resource"]
+        .as_str()
+        .expect("resource field is required");
+    assert!(
+        resource.ends_with("/mcp"),
+        "resource URL must point at the /mcp endpoint, got: {resource}"
+    );
+
+    let servers = body["authorization_servers"]
+        .as_array()
+        .expect("authorization_servers must be present");
+    assert_eq!(
+        servers.len(),
+        1,
+        "exactly one AS advertised (Strøm self-hosts), got: {servers:?}"
+    );
+
+    assert_eq!(
+        body["scopes_supported"],
+        json!(["mcp"]),
+        "single coarse `mcp` scope as designed"
+    );
+    assert_eq!(
+        body["bearer_methods_supported"],
+        json!(["header"]),
+        "only Authorization header method supported"
+    );
+
+    Ok(())
+}
+
+/// RFC 8414 AS metadata. Crucially, `code_challenge_methods_supported` must
+/// include `S256` — OAuth 2.1 doesn't allow `plain`, and clients use this
+/// list to decide which PKCE method to send.
+#[tokio::test]
+async fn test_authorization_server_metadata_endpoint() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+
+    let response = router
+        .oneshot(get_json_request(
+            "/.well-known/oauth-authorization-server",
+            "stroem.example.com",
+        ))
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+
+    assert!(body["issuer"].is_string(), "issuer must be present");
+    assert!(
+        body["authorization_endpoint"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("/oauth/authorize"),
+        "authorization_endpoint must end with /oauth/authorize, got: {}",
+        body["authorization_endpoint"]
+    );
+    assert!(
+        body["token_endpoint"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("/oauth/token"),
+        "token_endpoint must end with /oauth/token"
+    );
+    assert!(
+        body["registration_endpoint"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("/oauth/register"),
+        "registration_endpoint must end with /oauth/register"
+    );
+
+    assert_eq!(body["response_types_supported"], json!(["code"]));
+    assert_eq!(
+        body["grant_types_supported"],
+        json!(["authorization_code", "refresh_token"])
+    );
+    assert_eq!(
+        body["code_challenge_methods_supported"],
+        json!(["S256"]),
+        "OAuth 2.1 mandates S256 (plain is forbidden)"
+    );
+
+    let auth_methods = body["token_endpoint_auth_methods_supported"]
+        .as_array()
+        .expect("token_endpoint_auth_methods_supported is required");
+    let methods: Vec<&str> = auth_methods.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        methods.contains(&"none"),
+        "public clients (Claude Desktop, Inspector) need `none`"
+    );
+
+    Ok(())
+}
+
+/// Without auth configured, MCP is open and OAuth metadata isn't meaningful —
+/// the routes shouldn't be mounted at all. Verifying 404 prevents accidental
+/// metadata leakage from open dev servers.
+#[tokio::test]
+async fn test_oauth_metadata_not_mounted_without_auth() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+
+    let response = router
+        .clone()
+        .oneshot(get_json_request(
+            "/.well-known/oauth-protected-resource",
+            "localhost",
+        ))
+        .await?;
+    // SPA fallback (StaticFiles) returns 200 with index.html when present, or
+    // 404 when no static files are embedded — either way the OAuth route is
+    // not handling this. We assert it's not the JSON discovery doc.
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        status == StatusCode::NOT_FOUND || !body_str.starts_with("{\"resource\""),
+        "OAuth metadata must not be served when auth is disabled (status={status}, body={body_str})"
+    );
+
+    let response = router
+        .oneshot(get_json_request(
+            "/.well-known/oauth-authorization-server",
+            "localhost",
+        ))
+        .await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        status == StatusCode::NOT_FOUND || !body_str.starts_with("{\"issuer\""),
+        "AS metadata must not be served when auth is disabled (status={status}, body={body_str})"
+    );
+
+    Ok(())
+}
+
+/// Sanity-check the Phase-2 endpoints exist and reject malformed inputs.
+/// Detailed behaviour is covered by `oauth_flow_test.rs`.
+#[tokio::test]
+async fn test_oauth_endpoints_are_mounted() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_auth_and_mcp().await?;
+
+    // /oauth/authorize without required query params must 400 (axum Query
+    // extractor rejects), not 404.
+    let authorize_req = Request::builder()
+        .method("GET")
+        .uri("/oauth/authorize")
+        .header("Host", "localhost")
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(authorize_req).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "/oauth/authorize must be mounted and reject empty params"
+    );
+
+    // /oauth/token with an unknown grant_type must return the
+    // OAuth-standard `unsupported_grant_type` error.
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/oauth/token")
+        .header("Host", "localhost")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(Body::from("grant_type=password"))
+        .unwrap();
+    let response = router.clone().oneshot(token_req).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(response).await;
+    assert_eq!(body["error"], "unsupported_grant_type");
+
+    // /oauth/register: Phase 3 made this real. An empty body fails JSON
+    // deserialization → 422; an empty client_name fails validation → 400
+    // `invalid_client_metadata`. Either way, NOT 501. Detailed behaviour
+    // is covered by oauth_flow_test::test_dcr_*.
+    let register_req = Request::builder()
+        .method("POST")
+        .uri("/oauth/register")
+        .header("Host", "localhost")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = router.oneshot(register_req).await?;
+    assert!(
+        response.status() == StatusCode::BAD_REQUEST
+            || response.status() == StatusCode::UNPROCESSABLE_ENTITY,
+        "/oauth/register must be mounted (Phase 3) — got {}",
+        response.status()
     );
 
     Ok(())

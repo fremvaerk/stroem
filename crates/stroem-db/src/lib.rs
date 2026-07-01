@@ -8,6 +8,9 @@ pub use repos::job::{DurationStatsRow, JobRepo, JobRow, RecentDurationRow, Reten
 pub use repos::job_step::{
     JobStepRepo, JobStepRow, NewJobStep, StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
 };
+pub use repos::oauth_authorization_code::{OAuthAuthorizationCodeRepo, OAuthAuthorizationCodeRow};
+pub use repos::oauth_client::{OAuthClientRepo, OAuthClientRow};
+pub use repos::oauth_refresh_token::{OAuthRefreshTokenRepo, OAuthRefreshTokenRow};
 pub use repos::refresh_token::{RefreshTokenRepo, RefreshTokenRow};
 pub use repos::task_state::{TaskStateRepo, TaskStateRow};
 pub use repos::user::{UserRepo, UserRow};

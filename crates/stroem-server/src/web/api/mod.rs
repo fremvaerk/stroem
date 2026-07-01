@@ -3,6 +3,8 @@ pub mod artifacts;
 pub mod auth;
 pub mod jobs;
 pub mod middleware;
+#[cfg(feature = "mcp")]
+pub mod oauth_consent;
 pub mod oidc;
 pub mod state_upload;
 pub mod tasks;
@@ -38,7 +40,7 @@ use tower_governor::{
 /// production this case should not occur because the server uses
 /// `into_make_service_with_connect_info`.
 #[derive(Clone, Copy, Debug)]
-struct ClientIpExtractor;
+pub struct ClientIpExtractor;
 
 impl KeyExtractor for ClientIpExtractor {
     type Key = IpAddr;
@@ -220,7 +222,7 @@ async fn require_auth(
                 Err(resp) => resp,
             }
         }
-        Some(t) => match crate::auth::validate_access_token(t, &auth_config.jwt_secret) {
+        Some(t) => match crate::auth::validate_access_token(t, &auth_config.jwt_secret, None) {
             Ok(_) => next.run(req).await,
             Err(_) => (
                 StatusCode::UNAUTHORIZED,
@@ -246,6 +248,16 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         )
         .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
         .layer(auth_rate_limit_layer!(12, 5));
+
+    // OAuth consent endpoint — gated on the `mcp` feature because it only
+    // exists to support the OAuth flow that fronts /mcp.
+    #[cfg(feature = "mcp")]
+    let oauth_consent_routes = Router::new()
+        .route("/oauth/consent", post(oauth_consent::consent))
+        .route(
+            "/oauth/clients/{client_id}",
+            get(oauth_consent::describe_client),
+        );
 
     // Routes that require authentication (when auth is enabled).
     let protected = Router::new()
@@ -299,11 +311,15 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             "/jobs/{id}/artifacts/{name}",
             get(artifacts::download_artifact),
         )
-        .merge(api_key_create)
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_auth,
-        ));
+        .merge(api_key_create);
+
+    #[cfg(feature = "mcp")]
+    let protected = protected.merge(oauth_consent_routes);
+
+    let protected = protected.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_auth,
+    ));
 
     // Login rate limit: 20 req/min per IP (one token every 3 s, burst 10).
     let login_routes = Router::new()

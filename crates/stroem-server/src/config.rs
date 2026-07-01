@@ -475,6 +475,19 @@ impl ServerConfig {
             if auth.refresh_secret.len() < 32 {
                 anyhow::bail!("refresh_secret must be at least 32 characters");
             }
+            // OAuth 2.1 audience binding requires a stable, pinned issuer.
+            // Without `base_url`, `canonical_issuer` derives the audience
+            // from request headers — spoofable via `X-Forwarded-Host` and
+            // host-name-dependent (a request via a private DNS name vs. a
+            // public one mints differently-aud'd tokens). Require it
+            // whenever MCP-with-auth is wired up so the policy is one
+            // string in config, not a per-request derivation.
+            if self.mcp.as_ref().is_some_and(|m| m.enabled) && auth.base_url.is_none() {
+                anyhow::bail!(
+                    "auth.base_url is required when mcp.enabled = true \
+                     (it pins the OAuth issuer and audience claims)"
+                );
+            }
         }
         if self.recovery.heartbeat_timeout_secs < 10 {
             anyhow::bail!("heartbeat_timeout_secs must be at least 10");

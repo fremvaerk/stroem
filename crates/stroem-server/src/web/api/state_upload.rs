@@ -909,6 +909,7 @@ mod tests {
                 is_admin: false,
                 iat: now,
                 exp: now + 3600,
+                ..Default::default()
             },
             is_api_key: true,
             api_key_prefix: Some("strm_a1b2c3d".into()),
@@ -930,6 +931,7 @@ mod tests {
                 is_admin: false,
                 iat: now,
                 exp: now + 900,
+                ..Default::default()
             },
             is_api_key: false,
             api_key_prefix: None,
@@ -951,6 +953,7 @@ mod tests {
                 is_admin: false,
                 iat: now,
                 exp: now + 3600,
+                ..Default::default()
             },
             is_api_key: true,
             api_key_prefix: None, // edge case: shouldn't happen, but guard is there

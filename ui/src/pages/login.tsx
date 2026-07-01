@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router";
+import { Navigate, useSearchParams } from "react-router";
 import { Zap } from "lucide-react";
 import { useAuth } from "@/context/auth-context";
 import { useTitle } from "@/hooks/use-title";
@@ -24,12 +24,21 @@ export function LoginPage() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  const [params] = useSearchParams();
+  // `?next=<path>` lets other flows (e.g. /consent for OAuth) bounce
+  // through /login and land back at the original page after authentication.
+  // Restrict to same-origin paths so it can't be used as an open redirect.
+  const rawNext = params.get("next");
+  const next = rawNext && rawNext.startsWith("/") && !rawNext.startsWith("//")
+    ? rawNext
+    : "/";
+
   if (isLoading) {
     return <LoadingSpinner className="flex h-screen items-center justify-center" />;
   }
 
   if (!authRequired || isAuthenticated) {
-    return <Navigate to="/" replace />;
+    return <Navigate to={next} replace />;
   }
 
   const hasOidc = oidcProviders.length > 0;
@@ -119,7 +128,12 @@ export function LoginPage() {
                   variant="outline"
                   className="w-full"
                   onClick={() => {
-                    window.location.href = `/api/auth/oidc/${provider.id}`;
+                    // Forward `next` so the consent flow (or any other
+                    // bounced page) survives the OIDC round-trip.
+                    const target = next && next !== "/"
+                      ? `/api/auth/oidc/${provider.id}?next=${encodeURIComponent(next)}`
+                      : `/api/auth/oidc/${provider.id}`;
+                    window.location.href = target;
                   }}
                 >
                   {provider.display_name}

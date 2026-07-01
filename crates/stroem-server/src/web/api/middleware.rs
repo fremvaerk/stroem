@@ -106,6 +106,7 @@ pub(crate) async fn validate_api_key(
         is_admin: user.is_admin,
         iat: chrono::Utc::now().timestamp(),
         exp: chrono::Utc::now().timestamp() + 3600, // synthetic expiry for Claims struct
+        ..Default::default()
     };
     Ok((claims, prefix))
 }
@@ -160,7 +161,9 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         }
 
         // JWT path
-        match validate_access_token(token, &auth_config.jwt_secret) {
+        // REST API rejects audience-bound tokens — those are minted by
+        // /oauth/token for /mcp only and must not bleed into the full API.
+        match validate_access_token(token, &auth_config.jwt_secret, None) {
             Ok(claims) => Ok(AuthUser {
                 claims,
                 is_api_key: false,
@@ -200,7 +203,7 @@ impl OptionalFromRequestParts<Arc<AppState>> for AuthUser {
                 })),
                 Err(_) => Ok(None),
             },
-            Some(t) => match validate_access_token(t, &auth_config.jwt_secret) {
+            Some(t) => match validate_access_token(t, &auth_config.jwt_secret, None) {
                 Ok(claims) => Ok(Some(AuthUser {
                     claims,
                     is_api_key: false,

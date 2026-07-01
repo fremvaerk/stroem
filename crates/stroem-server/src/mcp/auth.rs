@@ -70,13 +70,28 @@ pub async fn authenticate(
                 is_admin: user.is_admin,
                 iat: now,
                 exp: now + 3600, // Sentinel — API key expiry enforced via DB row above
+                // API keys are pre-OAuth credentials; absent aud signals
+                // "legacy path, no audience check" to the middleware.
+                ..Default::default()
             },
         }));
     }
 
-    // JWT path
-    let claims = validate_access_token(token, &auth_config.jwt_secret)
-        .map_err(|_| "Invalid or expired token".to_string())?;
+    // JWT path — require an audience-bound token. A JWT without `aud` is a
+    // login-session token (issued by /api/auth/login) and must NOT
+    // authenticate /mcp; the OAuth consent flow is the only path that
+    // grants MCP access. `validate_access_token` enforces this when given
+    // a `Some(expected)` audience — absence is rejected.
+    //
+    // The expected resource is derived from the canonical issuer, which
+    // operators MUST pin via `auth.base_url` in production (validated at
+    // startup in `config.rs`).
+    let expected_aud = format!(
+        "{}/mcp",
+        crate::oauth::canonical_issuer(state, &parts.headers)
+    );
+    let claims = validate_access_token(token, &auth_config.jwt_secret, Some(&expected_aud))
+        .map_err(|e| format!("Invalid or unbound token: {e}"))?;
 
     Ok(Some(McpAuthContext { claims }))
 }

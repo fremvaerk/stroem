@@ -85,7 +85,7 @@ export async function tryRestoreSession(): Promise<boolean> {
   return tokenManager.refresh();
 }
 
-async function apiFetch<T>(
+export async function apiFetch<T>(
   url: string,
   options: RequestInit = {},
 ): Promise<T> {
