@@ -386,6 +386,34 @@ export async function getUser(id: string): Promise<UserDetail> {
   return apiFetch<UserDetail>(`/api/users/${id}`);
 }
 
+export interface CreateUserRequest {
+  email: string;
+  name?: string;
+  groups?: string[];
+  is_admin?: boolean;
+}
+
+export interface CreatedUser {
+  user_id: string;
+  email: string;
+  name: string | null;
+  groups: string[];
+  is_admin: boolean;
+}
+
+/**
+ * Create a user record ahead of their first OIDC login. On first
+ * authentication the JIT provisioning path finds them by email and
+ * links the provider — the group memberships set here are already in
+ * place. Admin-only.
+ */
+export async function createUser(req: CreateUserRequest): Promise<CreatedUser> {
+  return apiFetch<CreatedUser>("/api/users", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
 export async function setUserAdmin(userId: string, isAdmin: boolean): Promise<{ status: string }> {
   return apiFetch<{ status: string }>(`/api/users/${encodeURIComponent(userId)}/admin`, {
     method: "PUT",

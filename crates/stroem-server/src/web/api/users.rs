@@ -89,6 +89,107 @@ pub async fn list_users(
     Ok(Json(json!({ "items": users_json, "total": total })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    pub email: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Group memberships to assign on creation. Applied atomically after
+    /// user creation; validation matches [`set_user_groups`].
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub is_admin: bool,
+}
+
+/// POST /api/users — Create a user for OIDC pre-provisioning (admin only).
+///
+/// The created user has no password. When they subsequently authenticate
+/// via OIDC, the JIT provisioning path finds them by email, links the
+/// auth provider, and they're immediately in the pre-assigned groups.
+///
+/// This is the UI-driven alternative to editing YAML: admins add users
+/// via the Users page as their org onboards new people.
+#[tracing::instrument(skip(state, auth, req))]
+pub async fn create_user(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    auth.require_admin()?;
+
+    let email = req.email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(AppError::BadRequest(
+            "A valid email address is required".to_string(),
+        ));
+    }
+    let name = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    // Validate group names with the same rules as set_user_groups so the
+    // create + edit surfaces agree on what's a legal group name.
+    for group in &req.groups {
+        if group.is_empty() || group.len() > 64 {
+            return Err(AppError::BadRequest(format!(
+                "Group name must be 1-64 characters: '{}'",
+                group
+            )));
+        }
+        if !group
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(AppError::BadRequest(format!(
+                "Group name contains invalid characters (only alphanumeric, _, - allowed): '{}'",
+                group
+            )));
+        }
+    }
+
+    if UserRepo::get_by_email(&state.pool, &email)
+        .await
+        .context("check user exists")?
+        .is_some()
+    {
+        return Err(AppError::Conflict(format!(
+            "User with email '{email}' already exists"
+        )));
+    }
+
+    let user_id = Uuid::new_v4();
+    UserRepo::create(&state.pool, user_id, &email, None, name)
+        .await
+        .context("create user")?;
+
+    for group in &req.groups {
+        UserGroupRepo::add(&state.pool, user_id, group)
+            .await
+            .context("add user to group")?;
+    }
+
+    if req.is_admin {
+        UserRepo::set_admin(&state.pool, user_id, true)
+            .await
+            .context("set admin")?;
+    }
+
+    tracing::info!(
+        user_id = %user_id,
+        email = %email,
+        groups = ?req.groups,
+        is_admin = req.is_admin,
+        "Admin created new user"
+    );
+
+    Ok(Json(json!({
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "groups": req.groups,
+        "is_admin": req.is_admin,
+    })))
+}
+
 /// GET /api/users/:id - Get user detail (admin only)
 #[tracing::instrument(skip(state, auth))]
 pub async fn get_user(

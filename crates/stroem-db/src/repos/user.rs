@@ -37,9 +37,18 @@ impl UserRepo {
         Ok(())
     }
 
+    /// Lookup by email, case-insensitive.
+    ///
+    /// OIDC providers may return the email with different case than what
+    /// the admin typed when creating the user via the UI. Doing a
+    /// case-sensitive compare here would cause the JIT provisioner to
+    /// miss the pre-provisioned record and create a duplicate. The
+    /// underlying UNIQUE constraint on `email` is still case-sensitive
+    /// (Postgres default) — this is a lookup-time normalization only.
     pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<UserRow>> {
         let row = sqlx::query_as::<_, UserRow>(
-            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at, is_admin FROM "user" WHERE email = $1"#,
+            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at, is_admin
+               FROM "user" WHERE LOWER(email) = LOWER($1)"#,
         )
         .bind(email)
         .fetch_optional(pool)
@@ -78,8 +87,14 @@ impl UserRepo {
     }
 
     pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<UserRow>> {
+        // Alphabetical by email (case-insensitive) — the users page is a
+        // lookup surface, not an activity feed, so alphabetical scanning
+        // is more useful than reverse-chronological.
         let rows = sqlx::query_as::<_, UserRow>(
-            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at, is_admin FROM "user" ORDER BY created_at DESC LIMIT $1 OFFSET $2"#,
+            r#"SELECT user_id, name, email, password_hash, created_at, last_login_at, is_admin
+               FROM "user"
+               ORDER BY LOWER(email) ASC, user_id ASC
+               LIMIT $1 OFFSET $2"#,
         )
         .bind(limit)
         .bind(offset)

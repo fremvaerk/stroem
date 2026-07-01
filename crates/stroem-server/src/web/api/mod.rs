@@ -289,7 +289,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
             post(state_upload::upload_global_state)
                 .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)),
         )
-        .route("/users", get(users::list_users))
+        .route("/users", get(users::list_users).post(users::create_user))
         .route("/users/{id}", get(users::get_user))
         .route("/users/{id}/admin", put(users::set_user_admin))
         .route(

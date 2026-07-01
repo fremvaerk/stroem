@@ -1816,50 +1816,59 @@ async fn test_user_list() -> Result<()> {
     let empty = UserRepo::list(&pool, 50, 0).await?;
     assert!(empty.is_empty());
 
-    // Create users with mixed auth: some with password, some without
-    for i in 0..5 {
-        let password = if i % 2 == 0 {
-            Some("$argon2id$hashed")
-        } else {
-            None
-        };
+    // Insert in a deliberately-mixed order (alphabetically neither the
+    // insert order nor its reverse) with mixed casing so we can verify
+    // the case-insensitive alphabetical sort — `Charlie` should sort
+    // between `bob` and `dan`, not after all of them.
+    let inserts = [
+        ("dan@example.com", true),
+        ("alice@example.com", false),
+        ("Charlie@example.com", true),
+        ("bob@example.com", false),
+        ("eve@example.com", true),
+    ];
+    for (email, has_password) in inserts {
         UserRepo::create(
             &pool,
             Uuid::new_v4(),
-            &format!("user{}@example.com", i),
-            password,
-            Some(&format!("User {}", i)),
+            email,
+            if has_password {
+                Some("$argon2id$hashed")
+            } else {
+                None
+            },
+            Some(email.split('@').next().unwrap()),
         )
         .await?;
-        // Small sleep so created_at ordering is deterministic
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
-    // List all
+    // List all: alphabetical by email, case-insensitive.
     let users = UserRepo::list(&pool, 50, 0).await?;
     assert_eq!(users.len(), 5);
-    // Newest first
-    assert_eq!(users[0].email, "user4@example.com");
-    assert_eq!(users[4].email, "user0@example.com");
-
-    // Verify password_hash presence matches what we created
-    // Even-indexed users (0,2,4) have passwords; odd (1,3) don't
-    // List is newest-first: user4, user3, user2, user1, user0
-    assert!(users[0].password_hash.is_some()); // user4 (even)
-    assert!(users[1].password_hash.is_none()); // user3 (odd)
-    assert!(users[2].password_hash.is_some()); // user2 (even)
-    assert!(users[3].password_hash.is_none()); // user1 (odd)
-    assert!(users[4].password_hash.is_some()); // user0 (even)
+    let emails: Vec<_> = users.iter().map(|u| u.email.as_str()).collect();
+    assert_eq!(
+        emails,
+        vec![
+            "alice@example.com",
+            "bob@example.com",
+            "Charlie@example.com",
+            "dan@example.com",
+            "eve@example.com",
+        ]
+    );
 
     // Pagination
     let page1 = UserRepo::list(&pool, 2, 0).await?;
     assert_eq!(page1.len(), 2);
+    assert_eq!(page1[0].email, "alice@example.com");
 
     let page2 = UserRepo::list(&pool, 2, 2).await?;
     assert_eq!(page2.len(), 2);
+    assert_eq!(page2[0].email, "Charlie@example.com");
 
     let page3 = UserRepo::list(&pool, 2, 4).await?;
     assert_eq!(page3.len(), 1);
+    assert_eq!(page3[0].email, "eve@example.com");
 
     let empty = UserRepo::list(&pool, 2, 6).await?;
     assert!(empty.is_empty());
