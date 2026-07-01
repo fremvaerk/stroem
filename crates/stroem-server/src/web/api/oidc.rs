@@ -268,13 +268,15 @@ pub async fn oidc_callback(
         return error_redirect("No email in ID token claims");
     }
 
-    // JIT user provisioning
+    // JIT user provisioning — pass this provider's default_groups so a
+    // brand-new user gets them assigned before their first request runs.
     let user = match provision_user(
         &state.pool,
         &provider_name,
         subject,
         &email,
         name.as_deref(),
+        &provider.default_groups,
     )
     .await
     {

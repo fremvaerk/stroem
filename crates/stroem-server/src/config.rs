@@ -203,6 +203,17 @@ pub struct ProviderConfig {
     pub issuer_url: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// Group names to assign to a brand-new user provisioned via this
+    /// provider (JIT step 3 in `oidc::provision_user`).
+    ///
+    /// Applied ONLY when a fresh user record is created — never on
+    /// subsequent logins, never on the "existing user found by email"
+    /// path. This keeps the config declarative and doesn't fight admins
+    /// who edit memberships in the UI later.
+    ///
+    /// Empty (default) = no default groups.
+    #[serde(default)]
+    pub default_groups: Vec<String>,
 }
 
 /// Initial user to seed on startup
@@ -1154,6 +1165,44 @@ worker_token: "token"
             WorkspaceSourceDef::Folder { path } => assert_eq!(path, "/tmp/workflows"),
             _ => panic!("Expected folder"),
         }
+    }
+
+    #[test]
+    fn test_parse_oidc_provider_with_default_groups() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces: {}
+worker_token: "token"
+auth:
+  jwt_secret: "secret"
+  refresh_secret: "refresh"
+  base_url: "https://stroem.company.com"
+  providers:
+    google:
+      provider_type: "oidc"
+      display_name: "Google"
+      issuer_url: "https://accounts.google.com"
+      client_id: "id"
+      client_secret: "secret"
+      default_groups: [employees, deploy]
+    contractors:
+      provider_type: "oidc"
+      issuer_url: "https://contractor-idp.example"
+      client_id: "id"
+      client_secret: "secret"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        let providers = &config.auth.unwrap().providers;
+        assert_eq!(
+            providers["google"].default_groups,
+            vec!["employees", "deploy"]
+        );
+        // Empty by default when omitted — this is the common case.
+        assert!(providers["contractors"].default_groups.is_empty());
     }
 
     #[test]

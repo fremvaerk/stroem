@@ -5,7 +5,7 @@ use openidconnect::{ClientId, ClientSecret, IssuerUrl, RedirectUrl};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use stroem_db::{UserAuthLinkRepo, UserRepo, UserRow};
+use stroem_db::{UserAuthLinkRepo, UserGroupRepo, UserRepo, UserRow};
 use uuid::Uuid;
 
 use crate::config::ProviderConfig;
@@ -17,6 +17,9 @@ pub struct OidcProvider {
     pub client_secret: ClientSecret,
     pub redirect_url: RedirectUrl,
     pub display_name: String,
+    /// Group memberships to assign the first time a user is created via
+    /// this provider. See `ProviderConfig::default_groups`.
+    pub default_groups: Vec<String>,
 }
 
 /// Claims stored in the OIDC state cookie JWT
@@ -109,7 +112,31 @@ pub async fn init_providers(
 
         let display_name = config.display_name.clone().unwrap_or_else(|| name.clone());
 
-        tracing::info!("OIDC provider '{}' initialized successfully", name);
+        // Validate default_groups here rather than at provision time so
+        // a bad config fails startup, not silently the first time
+        // someone logs in via this provider.
+        for g in &config.default_groups {
+            if g.is_empty() || g.len() > 64 {
+                anyhow::bail!(
+                    "OIDC provider '{name}': default_groups entry must be 1-64 chars, got '{g}'"
+                );
+            }
+            if !g
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                anyhow::bail!(
+                    "OIDC provider '{name}': default_groups entry '{g}' has invalid characters \
+                     (only alphanumeric, _, - allowed)"
+                );
+            }
+        }
+
+        tracing::info!(
+            "OIDC provider '{}' initialized successfully ({} default group(s))",
+            name,
+            config.default_groups.len()
+        );
 
         result.insert(
             name.clone(),
@@ -119,6 +146,7 @@ pub async fn init_providers(
                 client_secret: ClientSecret::new(client_secret.clone()),
                 redirect_url,
                 display_name,
+                default_groups: config.default_groups.clone(),
             },
         );
     }
@@ -130,14 +158,20 @@ pub async fn init_providers(
 ///
 /// 1. Check if an auth_link exists for this provider+external_id → return that user
 /// 2. Check if a user with this email already exists → create auth_link → return user
-/// 3. Create a new user (no password) + auth_link → return user
-#[tracing::instrument(skip(pool))]
+/// 3. Create a new user (no password) + auth_link → return user, and assign
+///    `default_groups` (idempotent) so ACL rules apply on the first request.
+///
+/// `default_groups` is only used on path 3. Paths 1 and 2 leave existing
+/// memberships alone — an admin who edits groups in the UI must not have
+/// them silently re-applied on every login.
+#[tracing::instrument(skip(pool, default_groups))]
 pub async fn provision_user(
     pool: &PgPool,
     provider_id: &str,
     external_id: &str,
     email: &str,
     name: Option<&str>,
+    default_groups: &[String],
 ) -> Result<UserRow> {
     // 1. Check existing auth link
     if let Some(link) =
@@ -177,10 +211,27 @@ pub async fn provision_user(
         );
     } else {
         tracing::info!(
-            "Created new user {} via OIDC provider {}",
+            "Created new user {} via OIDC provider {} ({} default group(s))",
             email,
-            provider_id
+            provider_id,
+            default_groups.len()
         );
+    }
+
+    for group in default_groups {
+        if let Err(e) = UserGroupRepo::add(pool, user_id, group).await {
+            // Log but don't fail the login — the user still exists and
+            // an admin can add missing groups later. A hard fail here
+            // would leave the user in an intermediate state (row exists
+            // + auth_link exists but they can't log in).
+            tracing::warn!(
+                user_id = %user_id,
+                email = %email,
+                group = %group,
+                "Failed to add JIT-provisioned user to default group: {:#}",
+                e
+            );
+        }
     }
 
     let user = UserRepo::get_by_id(pool, user_id)

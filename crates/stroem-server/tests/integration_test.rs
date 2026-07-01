@@ -9202,6 +9202,7 @@ async fn test_provision_creates_new_user() -> Result<()> {
         "ext-new-user",
         "new@oidc.com",
         Some("New User"),
+        &[],
     )
     .await?;
 
@@ -9215,6 +9216,74 @@ async fn test_provision_creates_new_user() -> Result<()> {
         .expect("Auth link should exist");
     assert_eq!(link.user_id, user.user_id);
 
+    Ok(())
+}
+
+/// A brand-new user provisioned via OIDC gets any `default_groups`
+/// declared on the provider — applied idempotently, so re-provisioning
+/// won't duplicate memberships.
+#[tokio::test]
+async fn test_provision_new_user_gets_default_groups() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    let defaults = vec!["employees".to_string(), "read-only".to_string()];
+
+    let user = stroem_server::oidc::provision_user(
+        &pool,
+        "google",
+        "ext-with-defaults",
+        "newbie@company.com",
+        Some("Newbie"),
+        &defaults,
+    )
+    .await?;
+
+    let groups = stroem_db::UserGroupRepo::get_groups_for_user(&pool, user.user_id).await?;
+    let mut got: Vec<String> = groups.into_iter().collect();
+    got.sort();
+    assert_eq!(got, vec!["employees".to_string(), "read-only".to_string()]);
+    Ok(())
+}
+
+/// Path 2 (existing user matched by email) MUST NOT re-apply
+/// `default_groups`. Otherwise an admin who removed a group in the UI
+/// would find it re-added on every login.
+#[tokio::test]
+async fn test_provision_existing_user_keeps_own_groups() -> Result<()> {
+    let (_router, pool, _temp, _container) = setup().await?;
+
+    // Pre-existing user with a curated group set (imagine an admin
+    // pruned "read-only" via the UI).
+    let existing_id = Uuid::new_v4();
+    UserRepo::create(
+        &pool,
+        existing_id,
+        "already@company.com",
+        None,
+        Some("Already"),
+    )
+    .await?;
+    stroem_db::UserGroupRepo::add(&pool, existing_id, "custom-team").await?;
+
+    // Provisioner runs with defaults that include a group the admin
+    // explicitly removed.
+    let defaults = vec!["employees".to_string(), "read-only".to_string()];
+    let user = stroem_server::oidc::provision_user(
+        &pool,
+        "google",
+        "ext-existing-with-defaults",
+        "already@company.com",
+        None,
+        &defaults,
+    )
+    .await?;
+    assert_eq!(user.user_id, existing_id);
+
+    let groups = stroem_db::UserGroupRepo::get_groups_for_user(&pool, existing_id).await?;
+    let mut got: Vec<String> = groups.into_iter().collect();
+    got.sort();
+    // Only the curated set — defaults are NOT re-applied.
+    assert_eq!(got, vec!["custom-team".to_string()]);
     Ok(())
 }
 
@@ -9239,6 +9308,7 @@ async fn test_provision_links_existing_email_user() -> Result<()> {
         "ext-existing",
         "existing@test.com",
         None,
+        &[],
     )
     .await?;
 
@@ -9270,6 +9340,7 @@ async fn test_provision_returns_linked_user() -> Result<()> {
         "ext-linked",
         "linked@test.com",
         Some("Different Name"),
+        &[],
     )
     .await?;
 
@@ -9401,6 +9472,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
                     issuer_url: None,
                     client_id: None,
                     client_secret: None,
+                    default_groups: vec![],
                 },
             )]),
             initial_user: None,
@@ -9475,6 +9547,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
                     issuer_url: Some("https://accounts.google.com".to_string()),
                     client_id: Some("id".to_string()),
                     client_secret: Some("secret".to_string()),
+                    default_groups: vec![],
                 },
             )]),
             initial_user: None,

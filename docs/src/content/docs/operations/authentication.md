@@ -67,6 +67,11 @@ providers:
     issuer_url: "https://accounts.google.com"
     client_id: "your-client-id.apps.googleusercontent.com"
     client_secret: "your-client-secret"
+    # Optional: group memberships to assign the first time a user is
+    # JIT-provisioned via this provider. Applied only on brand-new user
+    # creation — never re-applied on subsequent logins or to pre-existing
+    # users matched by email, so admin edits in the UI stick.
+    default_groups: [employees, viewers]
 ```
 
 ### Flow
