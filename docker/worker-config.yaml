@@ -4,5 +4,8 @@ worker_name: "worker-1"
 max_concurrent: 4
 poll_interval_secs: 2
 workspace_cache_dir: /tmp/stroem-workspace
-tags:
+# Post-041 (v0.15.20+): capabilities and tags are separate axes. See
+# docs/operations/migration-041.md.
+capabilities:
   - script
+tags: []
