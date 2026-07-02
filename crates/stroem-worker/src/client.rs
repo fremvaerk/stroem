@@ -99,6 +99,8 @@ struct RegisterRequest {
     name: String,
     capabilities: Vec<String>,
     tags: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    exclusive: bool,
     version: Option<String>,
 }
 
@@ -117,6 +119,8 @@ struct ClaimRequest {
     worker_id: Uuid,
     capabilities: Vec<String>,
     tags: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    exclusive: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +172,7 @@ impl ServerClient {
         name: &str,
         capabilities: &[String],
         tags: &[String],
+        exclusive: bool,
         version: Option<&str>,
     ) -> Result<Uuid> {
         let url = format!("{}/worker/register", self.base_url);
@@ -175,6 +180,7 @@ impl ServerClient {
             name: name.to_string(),
             capabilities: capabilities.to_vec(),
             tags: tags.to_vec(),
+            exclusive,
             version: version.map(|v| v.to_string()),
         };
 
@@ -223,12 +229,14 @@ impl ServerClient {
         worker_id: Uuid,
         capabilities: &[String],
         tags: &[String],
+        exclusive: bool,
     ) -> Result<Option<ClaimedStep>> {
         let url = format!("{}/worker/jobs/claim", self.base_url);
         let req = ClaimRequest {
             worker_id,
             capabilities: capabilities.to_vec(),
             tags: tags.to_vec(),
+            exclusive,
         };
 
         let response = self

@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const WORKER_COLUMNS: &str =
-    "worker_id, name, capabilities, tags, last_heartbeat, registered_at, status, version";
+    "worker_id, name, capabilities, tags, exclusive, last_heartbeat, registered_at, status, version";
 
 /// Worker row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -16,10 +16,12 @@ pub struct WorkerRow {
     /// `{"script","docker","kubernetes","agent"}`. Matched against step's
     /// `required_ability` at claim time.
     pub capabilities: JsonValue,
-    /// Free-form taint labels. If non-empty, the worker ONLY claims steps
-    /// whose `required_tags` include every label listed here — the
-    /// reservation mechanism for pinning specific jobs to specific workers.
+    /// Free-form affinity labels. A step's `required_tags` must be a
+    /// subset of these for this worker to claim it.
     pub tags: JsonValue,
+    /// When true, the worker refuses steps whose `required_tags` don't
+    /// cover its own `tags` — the "reserved worker" pattern.
+    pub exclusive: bool,
     pub last_heartbeat: Option<DateTime<Utc>>,
     pub registered_at: DateTime<Utc>,
     pub status: String,
@@ -37,6 +39,7 @@ impl WorkerRepo {
         name: &str,
         capabilities: &[String],
         tags: &[String],
+        exclusive: bool,
         version: Option<&str>,
     ) -> Result<()> {
         let capabilities_json =
@@ -45,14 +48,15 @@ impl WorkerRepo {
 
         sqlx::query(
             r#"
-            INSERT INTO worker (worker_id, name, capabilities, tags, last_heartbeat, version)
-            VALUES ($1, $2, $3, $4, NOW(), $5)
+            INSERT INTO worker (worker_id, name, capabilities, tags, exclusive, last_heartbeat, version)
+            VALUES ($1, $2, $3, $4, $5, NOW(), $6)
             "#,
         )
         .bind(worker_id)
         .bind(name)
         .bind(capabilities_json)
         .bind(tags_json)
+        .bind(exclusive)
         .bind(version)
         .execute(pool)
         .await

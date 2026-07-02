@@ -47,7 +47,7 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         input: None,
         status: status.to_string(),
         required_ability: "script".to_string(),
-        required_tags: vec!["script".to_string()],
+        required_tags: vec![],
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
@@ -456,6 +456,7 @@ async fn test_step_transition_ready_to_running_to_failed() -> Result<()> {
         "worker-1",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;

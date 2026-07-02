@@ -50,25 +50,29 @@ Migration 041 split the pre-041 single `tags` axis into two:
 | `agent` | — | `agent` |
 | `task`, `approval` | — | — (server-dispatched, excluded) |
 
-Workers declare capabilities and (optional) reservation tags in `worker-config.yaml`:
+Workers declare capabilities and (optional) affinity tags in `worker-config.yaml`:
 
 ```yaml
 capabilities:                # runners this worker supports (required)
   - script
   - docker
   - kubernetes
-tags: []      # empty = permissive; add labels to reserve this worker
-              # for steps that explicitly request them
+tags: []      # empty = no affinity axis; add labels to route matching steps
+              # to this worker.
+exclusive: false             # set true to refuse steps that don't request
+                             # all of this worker's tags — the "reserved
+                             # worker" pattern.
 ```
 
-Phase 4 uses two SQL containment checks in AND:
+Phase 4 uses three SQL clauses in AND (post-042 affinity semantics):
 
 ```sql
-worker.capabilities @> to_jsonb(step.required_ability)   -- ability matches
-AND worker.tags <@ step.required_tags                    -- worker's taints requested
+worker.capabilities @> to_jsonb(step.required_ability)          -- ability matches
+AND step.required_tags <@ worker.tags                            -- affinity: worker offers everything step wants
+AND (NOT worker.exclusive OR worker.tags <@ step.required_tags)  -- reservation clause
 ```
 
-That is, worker's capabilities must **contain** the step's ability, AND the worker's tags must be a **subset of** the step's tags. If no active worker satisfies both after `unmatched_step_timeout_secs`, the step is failed with:
+That is, worker's capabilities must **contain** the step's ability, AND the step's tags must be a **subset of** the worker's tags. If the worker is `exclusive`, the worker's tags must additionally be a subset of the step's tags (i.e., set equality). If no active worker satisfies these after `unmatched_step_timeout_secs`, the step is failed with:
 
 ```
 No active worker with required capability/tags to run this step

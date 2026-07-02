@@ -284,6 +284,7 @@ impl TestEnv {
             workspace_cache_dir: workspace_cache_dir.to_string_lossy().to_string(),
             capabilities: vec!["script".to_string()],
             tags: vec![],
+            exclusive: false,
             runner_image: None,
             docker: None,
             kubernetes: None,

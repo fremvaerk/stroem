@@ -267,18 +267,24 @@ impl JobStepRepo {
     ///
     /// * `worker_capabilities` — subset check: the step's `required_ability`
     ///   MUST appear in this list. Filters by what the worker can run.
-    /// * `worker_tags` — reverse subset (taint) check: `worker_tags` MUST
-    ///   be a subset of the step's `required_tags`. If the worker declared
-    ///   any tag, the step had to explicitly ask for all of them.
+    /// * `worker_tags` — affinity check: the step's `required_tags` MUST be
+    ///   a subset of `worker_tags`. A step with `required_tags: ["claude"]`
+    ///   only reaches workers whose tags include "claude".
+    /// * `worker_exclusive` — reservation flag: when true, adds a reverse
+    ///   subset check (`worker_tags` MUST be a subset of the step's
+    ///   `required_tags`), so a "claude"-tagged exclusive worker refuses
+    ///   any step that didn't request "claude". When false (default), a
+    ///   tagged worker still claims untagged steps opportunistically.
     ///
-    /// A worker with `tags: []` accepts any step its capabilities allow —
-    /// the default, permissive case. A worker with `tags: ["batch-runner"]`
-    /// is reserved: only steps whose `required_tags` include `"batch-runner"`
-    /// can reach it.
+    /// A worker with `tags: []` and `exclusive: false` accepts any step
+    /// its capabilities allow. A worker with `tags: ["claude"], exclusive: true`
+    /// is fully reserved: only steps whose `required_tags` are exactly
+    /// `["claude"]` can reach it.
     pub async fn claim_ready_step(
         pool: &PgPool,
         worker_capabilities: &[String],
         worker_tags: &[String],
+        worker_exclusive: bool,
         worker_id: Uuid,
     ) -> Result<Option<JobStepRow>> {
         let worker_capabilities_json = serde_json::to_value(worker_capabilities)
@@ -287,12 +293,13 @@ impl JobStepRepo {
             serde_json::to_value(worker_tags).context("Failed to serialize worker tags")?;
         let step = sqlx::query_as::<_, JobStepRow>(&format!(
             r#"
-            UPDATE job_step SET status = 'running', worker_id = $3, started_at = NOW()
+            UPDATE job_step SET status = 'running', worker_id = $4, started_at = NOW()
             WHERE (job_id, step_name) = (
                 SELECT job_id, step_name FROM job_step
                 WHERE status = 'ready'
                   AND $1::jsonb @> to_jsonb(required_ability)
-                  AND $2::jsonb <@ required_tags::jsonb
+                  AND required_tags::jsonb <@ $2::jsonb
+                  AND (NOT $3::boolean OR $2::jsonb <@ required_tags::jsonb)
                   AND action_type NOT IN ('task', 'agent', 'approval', 'event_source')
                   AND (retry_at IS NULL OR retry_at <= NOW())
                 ORDER BY random()
@@ -305,6 +312,7 @@ impl JobStepRepo {
         ))
         .bind(worker_capabilities_json)
         .bind(worker_tags_json)
+        .bind(worker_exclusive)
         .bind(worker_id)
         .fetch_optional(pool)
         .await
@@ -920,13 +928,13 @@ impl JobStepRepo {
     }
 
     /// Find ready steps that have been waiting longer than `timeout_secs` and
-    /// have no active worker matching them on BOTH dimensions:
+    /// have no active worker matching them on ALL dimensions:
     ///   * worker.capabilities contains the step's required_ability, AND
-    ///   * worker.tags is a subset of the step's required_tags (taint).
+    ///   * step's required_tags is a subset of worker.tags (affinity), AND
+    ///   * if worker.exclusive, worker.tags is a subset of required_tags.
     ///
-    /// A step reserved for a specific worker (via a matching taint tag)
-    /// counts as "unmatched" only when no such worker is currently active,
-    /// same as before.
+    /// Mirrors the claim SQL exactly so operators never see a step
+    /// declared "unmatched" while a compatible worker exists.
     pub async fn get_unmatched_ready_steps(
         pool: &PgPool,
         timeout_secs: f64,
@@ -946,7 +954,8 @@ impl JobStepRepo {
                   SELECT 1 FROM worker w
                   WHERE w.status = 'active'
                     AND w.capabilities @> to_jsonb(js.required_ability)
-                    AND w.tags <@ js.required_tags
+                    AND js.required_tags <@ w.tags
+                    AND (NOT w.exclusive OR w.tags <@ js.required_tags)
               )
             "#,
         )

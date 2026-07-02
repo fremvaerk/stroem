@@ -1,0 +1,31 @@
+-- Flip `tags` from taint semantics to affinity semantics, and add an
+-- opt-in `exclusive` flag on the worker to restore the "reserved worker"
+-- pattern that pre-042 users got implicitly from tags.
+--
+-- Before this migration (post-041):
+--   Claim SQL:  worker.tags <@ required_tags
+--   Meaning:    worker's tags are TAINTS. A step must have opted into all
+--               of them; steps without the tag were rejected. But a
+--               permissive worker (tags=[]) could claim ANY step, which
+--               made "route this step to a specific worker" impossible
+--               unless every OTHER worker was tainted off it too.
+--
+-- After this migration:
+--   Claim SQL:  required_tags <@ worker.tags                      -- affinity
+--               AND (NOT worker.exclusive OR worker.tags <@ required_tags)
+--   Meaning:    A step with required_tags: ["claude"] runs ONLY on workers
+--               whose tags include "claude". Untagged steps can still land
+--               on any worker unless that worker is `exclusive: true`, in
+--               which case the worker refuses steps that don't request all
+--               of its tags — recovering the "reserved worker" pattern.
+--
+-- Behaviour change (surface in release notes):
+--   1. A worker with tags=["gpu"] that used to REJECT non-gpu steps now
+--      ACCEPTS them by default. To keep the reservation semantics, set
+--      `exclusive: true` in the worker config.
+--   2. A step with required_tags=["gpu"] now REQUIRES a worker whose tags
+--      include "gpu". Under 041, permissive workers (tags=[]) could still
+--      claim it — that behaviour is gone.
+
+ALTER TABLE worker
+    ADD COLUMN exclusive BOOLEAN NOT NULL DEFAULT FALSE;

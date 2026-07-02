@@ -1185,6 +1185,7 @@ async fn register_test_worker(pool: &PgPool) -> Uuid {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await
@@ -1335,7 +1336,7 @@ async fn test_worker_register_and_claim() -> Result<()> {
         input: Some(json!({"name": "{{ input.name }}"})),
         status: "ready".to_string(),
         required_ability: "script".to_string(),
-        required_tags: vec!["script".to_string()],
+        required_tags: vec![],
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
@@ -1408,6 +1409,7 @@ async fn test_step_output_flows_to_next_step() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -1546,6 +1548,7 @@ async fn test_step_failure_blocks_dependents() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -1980,7 +1983,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         input: None,
         status: "ready".to_string(),
         required_ability: "script".to_string(),
-        required_tags: vec!["script".to_string()],
+        required_tags: vec![],
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
@@ -2104,7 +2107,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -2128,7 +2131,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -2152,7 +2155,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -3195,6 +3198,7 @@ async fn test_mixed_static_and_template_input() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3266,6 +3270,7 @@ async fn test_first_step_template_rendering() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3312,6 +3317,7 @@ async fn test_dependency_with_null_output() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3597,6 +3603,7 @@ async fn test_action_env_rendering_at_claim() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3645,6 +3652,7 @@ async fn test_secret_reference_in_env() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3691,6 +3699,7 @@ async fn test_nested_secret_reference_in_env() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3747,6 +3756,7 @@ async fn test_script_rendering_at_claim() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3798,7 +3808,7 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -3822,6 +3832,7 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3896,7 +3907,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -3920,6 +3931,7 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -3985,7 +3997,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -4009,6 +4021,7 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -4081,7 +4094,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "pod".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -4105,6 +4118,7 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -4171,7 +4185,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "none".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -4195,6 +4209,7 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -4261,6 +4276,7 @@ async fn test_render_failure_propagates_to_downstream_steps() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -4509,6 +4525,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -4789,6 +4806,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -4866,6 +4884,7 @@ async fn test_env_and_input_rendering_together() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -5553,7 +5572,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -5577,7 +5596,7 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -5693,7 +5712,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -5717,7 +5736,7 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -5851,7 +5870,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -5875,7 +5894,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -5899,7 +5918,7 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6044,7 +6063,7 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         input: None,
         status: "ready".to_string(),
         required_ability: "script".to_string(),
-        required_tags: vec!["script".to_string()],
+        required_tags: vec![],
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
@@ -6199,7 +6218,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6223,7 +6242,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6362,7 +6381,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6386,7 +6405,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6504,7 +6523,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6528,7 +6547,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6653,7 +6672,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6677,7 +6696,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6801,7 +6820,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6825,7 +6844,7 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6960,7 +6979,7 @@ async fn test_cascading_skip() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -6984,7 +7003,7 @@ async fn test_cascading_skip() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -7008,7 +7027,7 @@ async fn test_cascading_skip() -> Result<()> {
             input: None,
             status: "pending".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -7834,7 +7853,7 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         input: None,
         status: "ready".to_string(),
         required_ability: "script".to_string(),
-        required_tags: vec!["script".to_string()],
+        required_tags: vec![],
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
@@ -8698,7 +8717,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             input: Some(json!({"name": "Test"})),
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -8741,7 +8760,7 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -11234,7 +11253,8 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
     // Register a worker and try to claim
     let worker_id = register_test_worker(&pool).await;
     let claimed =
-        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], worker_id).await?;
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], false, worker_id)
+            .await?;
 
     // Worker should NOT claim the task-type step
     assert!(claimed.is_none(), "Worker should not claim task-type steps");
@@ -11862,7 +11882,7 @@ async fn test_recovery_fails_stale_step() -> Result<()> {
     // Register worker and claim step
     let worker_id = register_test_worker(&pool).await;
     let tags = vec!["script".to_string()];
-    let step = JobStepRepo::claim_ready_step(&pool, &tags, &[], worker_id)
+    let step = JobStepRepo::claim_ready_step(&pool, &tags, &[], false, worker_id)
         .await?
         .expect("Should claim step");
     assert_eq!(step.job_id, job_id);
@@ -11919,7 +11939,7 @@ async fn test_recovery_orchestrates_multi_step_job() -> Result<()> {
     // Claim step1
     let worker_id = register_test_worker(&pool).await;
     let tags = vec!["script".to_string()];
-    let step = JobStepRepo::claim_ready_step(&pool, &tags, &[], worker_id)
+    let step = JobStepRepo::claim_ready_step(&pool, &tags, &[], false, worker_id)
         .await?
         .expect("Should claim step1");
     assert_eq!(step.step_name, "step1");
@@ -12035,7 +12055,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
     // First, complete the "build" step so "run-cleanup" (task step) gets promoted
     let worker_id = register_test_worker(&pool).await;
     let tags = vec!["script".to_string()];
-    let build_step = JobStepRepo::claim_ready_step(&pool, &tags, &[], worker_id)
+    let build_step = JobStepRepo::claim_ready_step(&pool, &tags, &[], false, worker_id)
         .await?
         .expect("Should claim build step");
     assert_eq!(build_step.step_name, "build");
@@ -12074,7 +12094,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
 
     // Claim the child job's "clean" step
     let worker_id2 = register_test_worker(&pool).await;
-    let child_step = JobStepRepo::claim_ready_step(&pool, &tags, &[], worker_id2)
+    let child_step = JobStepRepo::claim_ready_step(&pool, &tags, &[], false, worker_id2)
         .await?
         .expect("Should claim child step");
     assert_eq!(child_step.job_id, child_job_id);
@@ -12470,7 +12490,7 @@ async fn test_get_worker_with_steps() -> Result<()> {
         input: Some(json!({"name": "Test"})),
         status: "ready".to_string(),
         required_ability: "script".to_string(),
-        required_tags: vec!["script".to_string()],
+        required_tags: vec![],
         runner: "local".to_string(),
         timeout_secs: None,
         when_condition: None,
@@ -13972,6 +13992,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         "test-worker",
         &["script".to_string()],
         &[],
+        false,
         None,
     )
     .await?;
@@ -15069,7 +15090,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -15111,7 +15132,7 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             input: None,
             status: "ready".to_string(),
             required_ability: "script".to_string(),
-            required_tags: vec!["script".to_string()],
+            required_tags: vec![],
             runner: "local".to_string(),
             timeout_secs: None,
             when_condition: None,
@@ -15731,8 +15752,9 @@ async fn test_recovery_does_not_fail_matched_ready_step() -> Result<()> {
     )
     .await?;
 
-    // Backdate ready_at but keep tags as ["script"] — worker CAN match
-    set_step_tags_and_backdate(&pool, job_id, "greet", vec!["script".to_string()], 10).await;
+    // Backdate ready_at with no required_tags — an active worker with
+    // matching capability satisfies affinity trivially.
+    set_step_tags_and_backdate(&pool, job_id, "greet", vec![], 10).await;
 
     // Run recovery sweep
     stroem_server::recovery::sweep_once(&state).await?;

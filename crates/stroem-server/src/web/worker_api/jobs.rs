@@ -23,12 +23,17 @@ pub struct RegisterRequest {
     /// `required_ability`. Required — a worker with no capabilities can't
     /// claim any step.
     pub capabilities: Vec<String>,
-    /// Free-form taint labels. Empty = no restriction (worker accepts any
-    /// step its capabilities allow). Non-empty = worker ONLY claims steps
-    /// whose `required_tags` include ALL of these labels — the reservation
-    /// mechanism for pinning specific jobs to a specific worker.
+    /// Free-form affinity labels. A step's `required_tags` must be a
+    /// subset of these for the worker to claim it. Empty = no affinity
+    /// axis; the worker matches steps that request no tags.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Reserve this worker for steps that request all of its tags. When
+    /// `false` (default), a tagged worker still claims untagged steps
+    /// opportunistically. When `true`, the worker refuses any step whose
+    /// `required_tags` don't cover its own `tags`.
+    #[serde(default)]
+    pub exclusive: bool,
     pub version: Option<String>,
 }
 
@@ -48,6 +53,11 @@ pub struct ClaimRequest {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Mirror of the worker's exclusive flag. Sent on every claim so the
+    /// claim SQL can enforce the reservation clause without a per-claim
+    /// worker-row lookup.
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -284,6 +294,7 @@ pub async fn register_worker(
         &req.name,
         &capabilities,
         &tags,
+        req.exclusive,
         req.version.as_deref(),
     )
     .await
@@ -381,9 +392,15 @@ pub async fn claim_job(
         ));
     }
 
-    let step = match JobStepRepo::claim_ready_step(&state.pool, &capabilities, &tags, worker_id)
-        .await
-        .context("claim ready step")?
+    let step = match JobStepRepo::claim_ready_step(
+        &state.pool,
+        &capabilities,
+        &tags,
+        req.exclusive,
+        worker_id,
+    )
+    .await
+    .context("claim ready step")?
     {
         Some(step) => step,
         None => {
@@ -1209,6 +1226,7 @@ mod tests {
             name: "old-worker".into(),
             capabilities: vec![],
             tags: vec!["script".into(), "docker".into(), "gpu".into()],
+            exclusive: false,
             version: Some("0.15.19".into()),
         };
         let (caps, tags, migrated) = migrate_legacy_register(&req);
@@ -1225,6 +1243,7 @@ mod tests {
             name: "new-worker".into(),
             capabilities: vec!["script".into()],
             tags: vec!["gpu".into()],
+            exclusive: false,
             version: None,
         };
         let (caps, tags, migrated) = migrate_legacy_register(&req);
@@ -1243,6 +1262,7 @@ mod tests {
             name: "weird".into(),
             capabilities: vec![],
             tags: vec!["gpu".into(), "batch".into()],
+            exclusive: false,
             version: None,
         };
         let (caps, tags, migrated) = migrate_legacy_register(&req);

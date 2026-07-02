@@ -152,12 +152,14 @@ See `docs/internal/stroem-v2-plan.md` Section 2 for the full YAML format.
 - **Startup scripts**: `docker/entrypoint.sh` sources `*.sh` from `/etc/stroem/startup.d/`. DockerRunner bind-mounts this; KubeRunner uses ConfigMap via `runner_startup_configmap`.
 
 ### Capabilities, Tags, and Step Claiming
-Two independent routing axes (split from the pre-041 single-`tags` model in migration `041_worker_capabilities.sql`):
+Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics on `tags`, plus an optional exclusive flag for reserved workers.
 - **`capabilities`** on worker — runners supported. Any of `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. Required. Matched against step's `required_ability` (derived from action type + runner).
-- **`tags`** on worker — free-form **reservation labels** (taints). Empty = permissive. Non-empty = worker ONLY claims steps whose `required_tags` include ALL labels here. Matched against step's `required_tags` (user-declared action tags only, no longer prefixed with an ability token).
-- Claim SQL: `worker.capabilities @> to_jsonb(required_ability) AND worker.tags <@ required_tags::jsonb`.
-- User pattern "reserve worker X for step Y": worker `tags: ["some-label"]` + action `tags: ["some-label"]`. Other steps never leak onto worker X.
-- Recovery's unmatched-step sweep applies both checks (`get_unmatched_ready_steps`).
+- **`tags`** on worker — free-form **affinity labels**. A step's `required_tags` MUST be a subset of these for the worker to claim it. Empty = no affinity axis.
+- **`exclusive`** on worker — bool (default `false`). When `true`, the worker also refuses any step whose `required_tags` don't cover its own `tags` — the "reserved worker" pattern.
+- Claim SQL: `worker.capabilities @> to_jsonb(required_ability) AND required_tags::jsonb <@ worker.tags AND (NOT worker.exclusive OR worker.tags <@ required_tags::jsonb)`.
+- User pattern "reserve worker X for step Y": worker `tags: ["some-label"], exclusive: true` + action `tags: ["some-label"]`. Untagged steps never leak onto worker X.
+- Behaviour flip from 041: an untagged step (`required_tags: []`) NO LONGER reaches a tagged non-exclusive worker's *tagged* peers — a step needs `required_tags: ["claude"]` to be routed to a `tags: ["claude"]` worker. Under 041 a permissive (empty-tag) worker could still snap up any step; that leak is gone.
+- Recovery's unmatched-step sweep mirrors the claim SQL (`get_unmatched_ready_steps`).
 
 ### Multi-Workspace
 - Server config: `workspaces:` map with named entries (folder or git source)

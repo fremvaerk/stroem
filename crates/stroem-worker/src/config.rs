@@ -25,12 +25,20 @@ pub struct WorkerConfig {
     #[serde(default)]
     pub capabilities: Vec<String>,
 
-    /// Free-form taint labels. Empty (default) = worker accepts any step
-    /// its capabilities allow. Non-empty = worker ONLY claims steps whose
-    /// action `tags` include ALL of these labels — the reservation
-    /// mechanism for pinning a specific job to this worker.
+    /// Free-form affinity labels. A step's `required_tags` must be a
+    /// subset of these for this worker to claim it — the routing hint.
+    /// Empty (default) = no affinity axis; the worker matches steps with
+    /// no `required_tags`.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Reserve this worker for steps that request all of its tags. When
+    /// `false` (default), a tagged worker still claims untagged steps
+    /// opportunistically. When `true`, the worker refuses any step whose
+    /// `required_tags` don't cover its `tags` — restoring the pre-042
+    /// "specialized worker" pattern (e.g., a machine dedicated to the
+    /// "claude" workload).
+    #[serde(default)]
+    pub exclusive: bool,
     /// Default runner image for script-in-container execution
     pub runner_image: Option<String>,
     /// Docker runner configuration (requires `docker` feature)
@@ -63,7 +71,8 @@ impl WorkerConfig {
                  script, docker, kubernetes, agent. If migrating from an \
                  older version, move ability tokens (script/docker/kubernetes/agent) \
                  from `tags` into `capabilities`. Remaining tags stay in `tags` \
-                 and now act as reservation labels — see docs."
+                 and now act as affinity labels — set `exclusive: true` on this \
+                 worker if you want to keep the pre-042 reservation behaviour."
             );
         }
         const KNOWN_ABILITIES: &[&str] = &["script", "docker", "kubernetes", "agent"];
@@ -86,10 +95,11 @@ impl WorkerConfig {
         for t in &self.tags {
             if KNOWN_ABILITIES.contains(&t.as_str()) {
                 anyhow::bail!(
-                    "`tags` entry '{t}' is an ability token, not a taint label. \
-                     Move it into `capabilities:` — tags are now reservation \
-                     labels (steps must request all of them); leaving an ability \
-                     token here would silently stop this worker from claiming any step."
+                    "`tags` entry '{t}' is an ability token, not an affinity label. \
+                     Move it into `capabilities:` — tags are now affinity labels \
+                     (a step's `required_tags` must be a subset); leaving an \
+                     ability token here would silently stop this worker from \
+                     claiming any step."
                 );
             }
         }

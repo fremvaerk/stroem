@@ -80,10 +80,11 @@ kubernetes:
 
 ## Worker capabilities and tags
 
-Workers have two independent routing dimensions (introduced in migration 041; the earlier single-`tags` model conflated them):
+Workers have three routing knobs (migration 041 split capability from tags; migration 042 flipped `tags` from taint to affinity semantics and added `exclusive`):
 
 * **`capabilities`** — what runners the worker supports. Any of `"script"`, `"docker"`, `"kubernetes"`, `"agent"`. Every step derives a **required ability** from its action type and runner; that ability must appear in the worker's `capabilities`. This axis is required.
-* **`tags`** — free-form **reservation labels** (taints). If a worker declares tags, only steps whose `tags` list contains ALL of those labels can reach that worker. Empty = the worker accepts anything its capabilities allow.
+* **`tags`** — free-form **affinity labels**. A step's `tags` list must be a subset of the worker's `tags` for it to reach the worker. Empty = no affinity axis; the worker matches only steps that request no tags (unless combined with `exclusive`, see below).
+* **`exclusive`** — bool (default `false`). When `true`, the worker also refuses any step whose `tags` don't cover *all* of the worker's own tags. This restores the pre-042 "reserved worker" behaviour: a `tags: ["claude"], exclusive: true` worker accepts *only* steps that ask for `"claude"`.
 
 | Action | Runner | Required ability |
 |--------|--------|------------------|
@@ -97,7 +98,7 @@ Workers have two independent routing dimensions (introduced in migration 041; th
 
 ### Reserving a worker for a specific step
 
-The most common use of tags: pin a specific job to a specific worker without letting other jobs leak onto it. Add a matching tag on both sides:
+Pin a specific job to a specific worker without letting other jobs leak onto it. Add a matching tag on both sides AND set `exclusive: true` on the worker:
 
 ```yaml
 # Worker config
@@ -105,6 +106,7 @@ capabilities:
   - script
 tags:
   - batch-runner    # this worker is reserved for batch jobs
+exclusive: true     # refuse anything that doesn't request "batch-runner"
 ```
 
 ```yaml
@@ -116,7 +118,9 @@ run-batch-job:
     ...
 ```
 
-Generic script steps (no tags) never reach `batch-runner`; batch steps only reach `batch-runner`.
+Untagged script steps never reach `batch-runner`; batch steps only reach `batch-runner` (assuming no other worker has that tag).
+
+Without `exclusive: true`, the tagged worker would still opportunistically claim untagged steps — useful when the worker has spare capacity, but wrong for a dedicated machine.
 
 ### Extra capability tags on the step
 
@@ -129,7 +133,7 @@ flow:
     tags: ["gpu"]
 ```
 
-A step with `type: script, runner: docker, tags: ["gpu"]` requires ability `docker` AND tag `gpu`. Any docker-capable worker whose `tags` are a subset of `["gpu"]` matches — including a worker with `tags: []` (permissive default) and one with `tags: ["gpu"]` (reserved for GPU work). A worker with `tags: ["gpu", "trusted"]` would NOT match, because `"trusted"` isn't in the step's tag list.
+A step with `type: script, runner: docker, tags: ["gpu"]` requires ability `docker` AND affinity `gpu`. It reaches any docker-capable worker whose `tags` include `"gpu"` — a `tags: ["gpu"]` or `tags: ["gpu", "trusted"]` worker qualifies; a worker with `tags: []` does NOT (affinity fails).
 
 ### Unmatched steps
 

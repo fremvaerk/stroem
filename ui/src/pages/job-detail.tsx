@@ -131,6 +131,69 @@ export function JobDetailPage() {
     return job.steps.some((s) => s.loop_source === null);
   }, [job]);
 
+  // Which workers touched this job? Distributed jobs may span multiple
+  // workers (each step claimed independently), so aggregate the set of
+  // worker_ids observed across steps. Falls back to `job.worker_id` for
+  // the legacy single-worker path or when no steps have run yet.
+  const workerSummary = useMemo<{
+    label: string;
+    value: React.ReactNode;
+  }>(() => {
+    if (!job) return { label: "Worker", value: "—" };
+    const ids = Array.from(
+      new Set(
+        job.steps
+          .map((s) => s.worker_id)
+          .filter((id): id is string => !!id),
+      ),
+    );
+    // Job-level worker_id survives for legacy/single-worker cases where
+    // no per-step worker was recorded yet.
+    if (ids.length === 0 && job.worker_id) ids.push(job.worker_id);
+
+    if (ids.length === 0) {
+      return { label: "Worker", value: "—" };
+    }
+    if (ids.length === 1) {
+      const wid = ids[0];
+      const name = workerNames?.get(wid) ?? wid.substring(0, 8);
+      return {
+        label: "Worker",
+        value: (
+          <Link
+            to={`/workers/${wid}`}
+            className="font-mono text-xs text-primary hover:underline"
+            title={wid}
+          >
+            {name}
+          </Link>
+        ),
+      };
+    }
+    // Multiple workers — show each linked, comma-separated.
+    return {
+      label: `Workers (${ids.length})`,
+      value: (
+        <span className="flex flex-wrap gap-x-1.5 gap-y-0.5">
+          {ids.map((wid, i) => (
+            <span key={wid}>
+              <Link
+                to={`/workers/${wid}`}
+                className="font-mono text-xs text-primary hover:underline"
+                title={wid}
+              >
+                {workerNames?.get(wid) ?? wid.substring(0, 8)}
+              </Link>
+              {i < ids.length - 1 && (
+                <span className="text-muted-foreground">,</span>
+              )}
+            </span>
+          ))}
+        </span>
+      ),
+    };
+  }, [job, workerNames]);
+
   if (loading) {
     return <LoadingSpinner />;
   }
@@ -157,6 +220,13 @@ export function JobDetailPage() {
         <div className="flex-1">
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight">
+              <Link
+                to="/workspaces"
+                className="text-muted-foreground hover:text-foreground hover:underline"
+              >
+                {job.workspace}
+              </Link>
+              <span className="mx-2 text-muted-foreground">/</span>
               {job.task_name}
             </h1>
             <StatusBadge status={job.status} />
@@ -235,7 +305,10 @@ export function JobDetailPage() {
       <InfoGrid
         columns={6}
         items={[
-          { label: "Workspace", value: job.workspace },
+          {
+            label: workerSummary.label,
+            value: workerSummary.value,
+          },
           {
             label: "Source",
             value: job.source_id
