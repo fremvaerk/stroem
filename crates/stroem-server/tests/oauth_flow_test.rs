@@ -96,7 +96,10 @@ async fn setup() -> Result<(
         recovery: Default::default(),
         retention: RetentionConfig::default(),
         acl: None,
-        mcp: Some(McpConfig { enabled: true }),
+        mcp: Some(McpConfig {
+            enabled: true,
+            ..Default::default()
+        }),
         metrics: None,
         agents: None,
         state_storage: None,

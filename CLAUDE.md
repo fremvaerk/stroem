@@ -262,6 +262,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Endpoint: `/mcp` via Streamable HTTP. Crate: `rmcp` with `#[tool_router]` / `#[tool]` macros
 - 8 tools: `list_workspaces`, `list_tasks`, `get_task`, `execute_task`, `get_job_status`, `get_job_logs`, `list_jobs`, `cancel_job`
 - Auth: Bearer token (API key or JWT) via `tokio::task_local!`. Per-tool ACL checks.
+- **Host allow-list**: rmcp's Streamable-HTTP transport enforces a DNS-rebinding `Host` allow-list (loopback-only by default — would reject all proxy traffic *after* auth passes). `build_mcp_routes` calls `resolve_allowed_hosts()` to allow loopback + the `auth.base_url` host + optional `mcp.allowed_hosts`. `mcp.allowed_origins` (default empty = Origin check off) for browser clients. Middleware order: auth runs outer, rmcp transport (host check) inner — so tokenless probes get 401 while a *valid-token* request to a non-allowed host hits the transport-level Host rejection.
 
 ### Prometheus Metrics
 - `crates/stroem-server/src/metrics.rs` — recorder install + `gather_gauges` + metric name constants (`STROEM_*`) + RED tower middleware (`track_http_metrics`)

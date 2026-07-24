@@ -296,12 +296,26 @@ pub struct AclConfig {
 }
 
 /// MCP server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
     /// Whether the MCP endpoint is enabled (default: false)
     #[serde(default)]
     pub enabled: bool,
+    /// Extra hostnames (or `host:port` authorities) accepted by the MCP
+    /// Streamable-HTTP transport's DNS-rebinding guard, in addition to the
+    /// loopback defaults and the host derived from `auth.base_url`.
+    ///
+    /// Only needed when the server is reachable under more than one public
+    /// hostname (e.g. an alias domain or a separate ingress). The canonical
+    /// `auth.base_url` host is allow-listed automatically.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Allowed browser `Origin` values for the MCP transport. Empty (default)
+    /// disables Origin validation — correct for non-browser MCP clients such
+    /// as Claude Code. Set this only when browser-based clients connect.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 /// Prometheus `/metrics` endpoint configuration.

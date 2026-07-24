@@ -32,6 +32,30 @@ The MCP endpoint is served at `http://localhost:8080/mcp` using Streamable HTTP 
 No additional configuration is required beyond enabling MCP. The endpoint automatically exposes all available workspaces, tasks, and jobs accessible to the authenticated user.
 :::
 
+### Host allow-list (public deployments)
+
+The MCP Streamable-HTTP transport validates the request `Host` header to prevent
+DNS-rebinding attacks, accepting loopback hosts by default. Strøm automatically
+allow-lists the host from `auth.base_url`, so a standard reverse-proxy deployment
+works out of the box (this is also why `auth.base_url` is required when
+`mcp.enabled: true`).
+
+If the server is reachable under **additional** hostnames (an alias domain, a
+second ingress), list them explicitly — otherwise requests to those hosts are
+rejected before authentication with a `disallowed Host header` warning:
+
+```yaml
+mcp:
+  enabled: true
+  # Extra hostnames beyond auth.base_url's host and loopback. Include a port
+  # only for non-default ports, e.g. "stroem.internal:8080".
+  allowed_hosts:
+    - alias.example.com
+  # Browser Origin allow-list. Leave empty (default) for non-browser clients
+  # like Claude Code; set it only when browser-based MCP clients connect.
+  allowed_origins: []
+```
+
 ## Available Tools
 
 The MCP server provides eight tools for interacting with Strøm:

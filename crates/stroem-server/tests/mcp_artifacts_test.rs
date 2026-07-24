@@ -77,7 +77,10 @@ async fn build_test_app() -> Result<TestApp> {
         recovery: Default::default(),
         retention: RetentionConfig::default(),
         acl: None,
-        mcp: Some(McpConfig { enabled: true }),
+        mcp: Some(McpConfig {
+            enabled: true,
+            ..Default::default()
+        }),
         metrics: None,
         agents: None,
         state_storage: None,
@@ -574,7 +577,10 @@ mod acl_deny {
                 default: AclAction::Deny,
                 rules: vec![],
             }),
-            mcp: Some(McpConfig { enabled: true }),
+            mcp: Some(McpConfig {
+                enabled: true,
+                ..Default::default()
+            }),
             metrics: None,
             agents: None,
             state_storage: None,

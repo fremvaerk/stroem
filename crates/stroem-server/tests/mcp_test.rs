@@ -290,7 +290,10 @@ async fn setup_with_mcp() -> Result<(
         recovery: Default::default(),
         retention: RetentionConfig::default(),
         acl: None,
-        mcp: Some(McpConfig { enabled: true }),
+        mcp: Some(McpConfig {
+            enabled: true,
+            ..Default::default()
+        }),
         metrics: None,
         agents: None,
         state_storage: None,
@@ -409,7 +412,10 @@ async fn setup_with_auth_and_mcp() -> Result<(
         recovery: Default::default(),
         retention: RetentionConfig::default(),
         acl: None,
-        mcp: Some(McpConfig { enabled: true }),
+        mcp: Some(McpConfig {
+            enabled: true,
+            ..Default::default()
+        }),
         metrics: None,
         agents: None,
         state_storage: None,
@@ -1474,7 +1480,10 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
         recovery: Default::default(),
         retention: RetentionConfig::default(),
         acl: None,
-        mcp: Some(McpConfig { enabled: true }),
+        mcp: Some(McpConfig {
+            enabled: true,
+            ..Default::default()
+        }),
         metrics: None,
         agents: None,
         state_storage: None,

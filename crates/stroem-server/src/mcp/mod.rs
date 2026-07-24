@@ -85,12 +85,43 @@ fn unauthorized_with_metadata(
 /// The middleware validates auth and stores the context in a task-local,
 /// which the handler factory reads when constructing per-request handlers.
 pub fn build_mcp_routes(state: Arc<AppState>, ct: CancellationToken) -> Router {
-    let config = StreamableHttpServerConfig::default()
+    // rmcp's Streamable-HTTP transport rejects any request whose `Host` is not
+    // in `allowed_hosts` (DNS-rebinding protection), defaulting to loopback
+    // only. Behind a reverse proxy at a public host that silently drops every
+    // real request *after* auth passes. Allow-list the canonical `base_url`
+    // host (plus loopback for local dev / `kubectl port-forward`).
+    let allowed_hosts = resolve_allowed_hosts(
+        state
+            .config
+            .auth
+            .as_ref()
+            .and_then(|a| a.base_url.as_deref()),
+        state
+            .config
+            .mcp
+            .as_ref()
+            .map(|m| m.allowed_hosts.as_slice())
+            .unwrap_or(&[]),
+    );
+    let mut config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
         .with_json_response(true)
         .with_sse_keep_alive(None)
         .with_sse_retry(None)
-        .with_cancellation_token(ct);
+        .with_cancellation_token(ct)
+        .with_allowed_hosts(allowed_hosts);
+
+    // Origin validation stays off by default (non-browser MCP clients like
+    // Claude Code send no Origin); enable it only if operators opt in.
+    let allowed_origins = state
+        .config
+        .mcp
+        .as_ref()
+        .map(|m| m.allowed_origins.clone())
+        .unwrap_or_default();
+    if !allowed_origins.is_empty() {
+        config = config.with_allowed_origins(allowed_origins);
+    }
 
     let factory_state = state.clone();
     let mcp_service = StreamableHttpService::new(
@@ -109,4 +140,88 @@ pub fn build_mcp_routes(state: Arc<AppState>, ct: CancellationToken) -> Router {
             let st = middleware_state.clone();
             mcp_auth_middleware(st, req, next)
         }))
+}
+
+/// Resolve the `Host` allow-list for the MCP transport's DNS-rebinding guard.
+///
+/// Always keeps the loopback authorities (local dev, `kubectl port-forward`),
+/// adds the host — and `host:port` when a non-default port is present — parsed
+/// from `auth.base_url`, then appends any operator-supplied `extra` entries.
+/// Order is preserved and duplicates removed.
+fn resolve_allowed_hosts(base_url: Option<&str>, extra: &[String]) -> Vec<String> {
+    let mut hosts: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+
+    if let Some(base) = base_url {
+        if let Ok(parsed) = url::Url::parse(base) {
+            if let Some(host) = parsed.host_str() {
+                hosts.push(host.to_string());
+                if let Some(port) = parsed.port() {
+                    hosts.push(format!("{host}:{port}"));
+                }
+            }
+        }
+    }
+
+    for h in extra {
+        let h = h.trim();
+        if !h.is_empty() {
+            hosts.push(h.to_string());
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    hosts.retain(|h| seen.insert(h.clone()));
+    hosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_allowed_hosts;
+
+    #[test]
+    fn keeps_loopback_when_no_base_url() {
+        let hosts = resolve_allowed_hosts(None, &[]);
+        assert_eq!(hosts, vec!["localhost", "127.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn adds_base_url_host_without_default_port() {
+        let hosts = resolve_allowed_hosts(Some("https://jobs.allunite.com"), &[]);
+        assert!(hosts.contains(&"jobs.allunite.com".to_string()));
+        // No explicit port on a default-443 URL, so no `host:port` entry.
+        assert!(!hosts.iter().any(|h| h.contains("jobs.allunite.com:")));
+    }
+
+    #[test]
+    fn adds_host_and_host_port_for_non_default_port() {
+        let hosts = resolve_allowed_hosts(Some("http://stroem.internal:8080"), &[]);
+        assert!(hosts.contains(&"stroem.internal".to_string()));
+        assert!(hosts.contains(&"stroem.internal:8080".to_string()));
+    }
+
+    #[test]
+    fn appends_extra_hosts_and_dedups() {
+        let hosts = resolve_allowed_hosts(
+            Some("https://jobs.allunite.com"),
+            &[
+                "alias.allunite.com".to_string(),
+                "  ".to_string(),                // blank ignored
+                "jobs.allunite.com".to_string(), // duplicate collapsed
+            ],
+        );
+        assert!(hosts.contains(&"alias.allunite.com".to_string()));
+        assert_eq!(
+            hosts.iter().filter(|h| *h == "jobs.allunite.com").count(),
+            1,
+            "duplicate host must be collapsed"
+        );
+        assert!(!hosts.iter().any(|h| h.trim().is_empty()));
+    }
+
+    #[test]
+    fn ignores_unparseable_base_url() {
+        // Must not panic and must still return the loopback defaults.
+        let hosts = resolve_allowed_hosts(Some("not a url"), &[]);
+        assert!(hosts.contains(&"localhost".to_string()));
+    }
 }
