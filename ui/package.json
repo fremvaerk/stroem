@@ -27,7 +27,7 @@
     "@radix-ui/react-tabs": "^1.1.15",
     "@radix-ui/react-tooltip": "^1.2.10",
     "@xyflow/react": "^12.11.1",
-    "brace-expansion": "^5.0.6",
+    "brace-expansion": "^5.0.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -63,7 +63,7 @@
     "vitest": "^4.1.9"
   },
   "overrides": {
-    "brace-expansion": "^5.0.6",
+    "brace-expansion": "^5.0.7",
     "flatted": "^3.4.2",
     "picomatch": "^4.0.4",
     "undici": "^7.28.0",
