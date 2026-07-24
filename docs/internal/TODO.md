@@ -942,6 +942,7 @@ Last updated: 2026-06-03.
 
 ## Bugs Found & Fixed
 
+- [x] MCP unreachable behind reverse proxy at a public host: rmcp 1.8 Streamable-HTTP transport's DNS-rebinding `Host` allow-list defaulted to loopback-only, rejecting all real traffic *after* OAuth/auth succeeded (surfaced to clients as "credentials rejected on reconnect"). Fixed by deriving `allowed_hosts` from `auth.base_url` + loopback + optional `mcp.allowed_hosts`/`allowed_origins` in `build_mcp_routes`.
 - [x] Workspace-level hooks not firing for authenticated API jobs — `source_type = "user"` missing from `is_top_level` check (v0.5.9)
 - [x] Template render errors passed raw templates instead of failing steps (v0.5.8)
 - [x] Worker `report_step_start` sent no JSON body → steps stuck
