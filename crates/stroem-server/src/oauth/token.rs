@@ -548,12 +548,11 @@ async fn issue_tokens(
     let claims = Claims {
         sub: user.user_id.to_string(),
         email: user.email,
-        // Defense in depth: OAuth tokens never carry admin powers, even
-        // for users who have the flag elsewhere. MCP tools authorize via
-        // ACL; admin-bearing tokens would let a compromised MCP client
-        // reach beyond the per-tool ACL checks (e.g. /api/users/{id}/admin)
-        // if any future leak in the audience-binding gate exposed them
-        // outside /mcp.
+        // The OAuth access token is intentionally minted WITHOUT admin (defense
+        // in depth — the bearer credential itself carries no privilege). MCP
+        // still gives admins their full ACL bypass: `mcp/auth.rs` re-derives
+        // `is_admin` from the DB on every request, so access mirrors the user's
+        // current privileges and admin revocation takes effect immediately.
         is_admin: false,
         iat: now,
         exp: now + ACCESS_TOKEN_TTL_SECS,
@@ -649,12 +648,8 @@ async fn mint_access_token(
     let claims = Claims {
         sub: user.user_id.to_string(),
         email: user.email,
-        // Defense in depth: OAuth tokens never carry admin powers, even
-        // for users who have the flag elsewhere. MCP tools authorize via
-        // ACL; admin-bearing tokens would let a compromised MCP client
-        // reach beyond the per-tool ACL checks (e.g. /api/users/{id}/admin)
-        // if any future leak in the audience-binding gate exposed them
-        // outside /mcp.
+        // Unprivileged, like the grant path above: admin is re-derived from the
+        // DB per request in `mcp/auth.rs`, never carried in the token.
         is_admin: false,
         iat: now,
         exp: now + ACCESS_TOKEN_TTL_SECS,

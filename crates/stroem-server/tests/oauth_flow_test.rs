@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_db::{create_pool, run_migrations, OAuthClientRepo, UserRepo};
-use stroem_server::auth::hash_password;
+use stroem_server::auth::{hash_password, validate_access_token};
 use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, LogStorageConfig, McpConfig, RetentionConfig,
     ServerConfig, WorkspaceSourceDef,
@@ -167,6 +167,107 @@ async fn login(router: &Router) -> String {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     body["access_token"].as_str().unwrap().to_string()
+}
+
+/// Run the full authorization_code + PKCE exchange for USER_EMAIL and return
+/// the parsed `/oauth/token` JSON response (access_token, refresh_token, …).
+async fn run_pkce_flow(router: &Router, client_id: &str) -> Value {
+    let access_jwt = login(router).await;
+    let verifier = "AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYy".to_string();
+    let challenge = s256_challenge(&verifier);
+    let resource = format!("{BASE_URL}/mcp");
+
+    let consent_body = json!({
+        "client_id": client_id,
+        "redirect_uri": REDIRECT_URI,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "scope": "mcp",
+        "resource": resource,
+        "state": "csrf-state"
+    });
+    let consent_req = Request::builder()
+        .method("POST")
+        .uri("/api/oauth/consent")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {access_jwt}"))
+        .body(Body::from(consent_body.to_string()))
+        .unwrap();
+    let consent_resp = router.clone().oneshot(consent_req).await.unwrap();
+    assert_eq!(consent_resp.status(), StatusCode::OK);
+    let consent_data = body_json(consent_resp).await;
+    let redirect_url = consent_data["redirect_url"].as_str().unwrap();
+    let code = redirect_url
+        .split_once("code=")
+        .unwrap()
+        .1
+        .split('&')
+        .next()
+        .unwrap();
+
+    let token_body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={ru}\
+         &code_verifier={v}&client_id={client_id}",
+        ru = url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>(),
+        v = verifier,
+    );
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/oauth/token")
+        .header("Host", "stroem.test")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(Body::from(token_body))
+        .unwrap();
+    let token_resp = router.clone().oneshot(token_req).await.unwrap();
+    assert_eq!(token_resp.status(), StatusCode::OK);
+    body_json(token_resp).await
+}
+
+/// The OAuth access token is unprivileged by design: it never carries admin,
+/// even for an admin user. MCP re-derives `is_admin` from the DB per request
+/// (see `mcp/auth.rs`), so the token itself stays a non-privileged, audience-
+/// bound credential. This holds across the refresh path too.
+#[tokio::test]
+async fn test_oauth_token_never_carries_admin() -> Result<()> {
+    let (router, pool, _tmp, _c) = setup().await?;
+    let client_id = register_public_client(&pool).await?;
+
+    // Promote the test user to admin — the minted token must STILL be unprivileged.
+    let user = UserRepo::get_by_email(&pool, USER_EMAIL)
+        .await?
+        .expect("test user exists");
+    UserRepo::set_admin(&pool, user.user_id, true).await?;
+
+    let token_data = run_pkce_flow(&router, &client_id).await;
+    let resource = format!("{BASE_URL}/mcp");
+
+    let access_token = token_data["access_token"].as_str().unwrap();
+    let claims = validate_access_token(access_token, JWT_SECRET, Some(&resource))?;
+    assert!(
+        !claims.is_admin,
+        "OAuth token must never carry admin, even for an admin user"
+    );
+
+    // The refresh path is unprivileged too.
+    let refresh_token = token_data["refresh_token"].as_str().unwrap();
+    let refresh_body =
+        format!("grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}");
+    let refresh_req = Request::builder()
+        .method("POST")
+        .uri("/oauth/token")
+        .header("Host", "stroem.test")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(Body::from(refresh_body))?;
+    let refresh_resp = router.clone().oneshot(refresh_req).await?;
+    assert_eq!(refresh_resp.status(), StatusCode::OK);
+    let refresh_data = body_json(refresh_resp).await;
+    let refreshed = refresh_data["access_token"].as_str().unwrap();
+    let refreshed_claims = validate_access_token(refreshed, JWT_SECRET, Some(&resource))?;
+    assert!(
+        !refreshed_claims.is_admin,
+        "refreshed OAuth token must also be unprivileged"
+    );
+    Ok(())
 }
 
 /// `/oauth/authorize` with a valid PKCE request redirects to the SPA
@@ -632,64 +733,10 @@ async fn test_dcr_rejects_http_non_loopback_redirect() -> Result<()> {
 async fn test_mcp_token_rejected_by_rest_api() -> Result<()> {
     let (router, pool, _tmp, _c) = setup().await?;
     let client_id = register_public_client(&pool).await?;
-    let access_jwt = login(&router).await;
-    let verifier = "AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYy".to_string();
-    let challenge = s256_challenge(&verifier);
-    let resource = format!("{BASE_URL}/mcp");
 
-    // Drive the consent flow to get an audience-bound token.
-    let consent_resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/oauth/consent")
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {access_jwt}"))
-                .body(Body::from(
-                    json!({
-                        "client_id": client_id,
-                        "redirect_uri": REDIRECT_URI,
-                        "code_challenge": challenge,
-                        "code_challenge_method": "S256",
-                        "scope": "mcp",
-                        "resource": resource,
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    assert_eq!(consent_resp.status(), StatusCode::OK);
-    let code = body_json(consent_resp).await["redirect_url"]
-        .as_str()
-        .unwrap()
-        .split_once("code=")
-        .unwrap()
-        .1
-        .split('&')
-        .next()
-        .unwrap()
-        .to_string();
-    let token_resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/oauth/token")
-                .header("Host", "stroem.test")
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "grant_type=authorization_code&code={code}&redirect_uri={ru}&code_verifier={v}&client_id={client_id}",
-                    ru = url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>(),
-                    v = verifier,
-                )))?,
-        )
-        .await?;
-    assert_eq!(token_resp.status(), StatusCode::OK);
-    let mcp_access = body_json(token_resp).await["access_token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Drive the full PKCE flow to get an audience-bound MCP access token.
+    let token_data = run_pkce_flow(&router, &client_id).await;
+    let mcp_access = token_data["access_token"].as_str().unwrap().to_string();
 
     // Present the MCP-bound token to a REST endpoint — must be rejected.
     let resp = router
@@ -754,57 +801,10 @@ async fn test_consent_rejects_unexpected_resource() -> Result<()> {
 async fn test_refresh_reuse_revokes_entire_chain() -> Result<()> {
     let (router, pool, _tmp, _c) = setup().await?;
     let client_id = register_public_client(&pool).await?;
-    let access_jwt = login(&router).await;
-    let verifier = "x".repeat(64);
-    let challenge = s256_challenge(&verifier);
-    let resource = format!("{BASE_URL}/mcp");
 
-    // Get initial token pair.
-    let consent_resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/oauth/consent")
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {access_jwt}"))
-                .body(Body::from(
-                    json!({
-                        "client_id": client_id, "redirect_uri": REDIRECT_URI,
-                        "code_challenge": challenge, "code_challenge_method": "S256",
-                        "scope": "mcp", "resource": resource,
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    let code = body_json(consent_resp).await["redirect_url"]
-        .as_str()
-        .unwrap()
-        .split_once("code=")
-        .unwrap()
-        .1
-        .split('&')
-        .next()
-        .unwrap()
-        .to_string();
-    let token_resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/oauth/token")
-                .header("Host", "stroem.test")
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "grant_type=authorization_code&code={code}&redirect_uri={ru}&code_verifier={v}&client_id={client_id}",
-                    ru = url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>(),
-                    v = verifier,
-                )))?,
-        )
-        .await?;
-    let data = body_json(token_resp).await;
-    let r1 = data["refresh_token"].as_str().unwrap().to_string();
+    // Get an initial token pair via the full PKCE flow.
+    let token_data = run_pkce_flow(&router, &client_id).await;
+    let r1 = token_data["refresh_token"].as_str().unwrap().to_string();
 
     // Legitimate rotation: r1 → r2.
     let rotate_resp = router
@@ -901,59 +901,10 @@ async fn test_refresh_rejects_cross_client_binding() -> Result<()> {
     let (router, pool, _tmp, _c) = setup().await?;
     let client_y = register_public_client(&pool).await?;
     let client_x = register_public_client(&pool).await?;
-    let access_jwt = login(&router).await;
-    let verifier = "q".repeat(64);
-    let challenge = s256_challenge(&verifier);
-    let resource = format!("{BASE_URL}/mcp");
 
-    // Get a refresh token belonging to client Y.
-    let consent_resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/oauth/consent")
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {access_jwt}"))
-                .body(Body::from(
-                    json!({
-                        "client_id": client_y, "redirect_uri": REDIRECT_URI,
-                        "code_challenge": challenge, "code_challenge_method": "S256",
-                        "scope": "mcp", "resource": resource,
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    let code = body_json(consent_resp).await["redirect_url"]
-        .as_str()
-        .unwrap()
-        .split_once("code=")
-        .unwrap()
-        .1
-        .split('&')
-        .next()
-        .unwrap()
-        .to_string();
-    let token_resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/oauth/token")
-                .header("Host", "stroem.test")
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!(
-                    "grant_type=authorization_code&code={code}&redirect_uri={ru}&code_verifier={v}&client_id={client_y}",
-                    ru = url::form_urlencoded::byte_serialize(REDIRECT_URI.as_bytes()).collect::<String>(),
-                    v = verifier,
-                )))?,
-        )
-        .await?;
-    let r_y = body_json(token_resp).await["refresh_token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Get a refresh token belonging to client Y via the full PKCE flow.
+    let token_data = run_pkce_flow(&router, &client_y).await;
+    let r_y = token_data["refresh_token"].as_str().unwrap().to_string();
 
     // Attacker (client X, authenticated as itself) tries to refresh Y's token.
     let resp = router

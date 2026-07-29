@@ -324,6 +324,8 @@ When ACL is configured on your Strøm server, MCP tools enforce the same permiss
 
 The `list_tasks` response includes a `can_execute` field indicating whether the user can execute each task (`true` for `Run`, `false` for `View`).
 
+**Admin users bypass ACL over MCP**, exactly as they do in the UI and REST API. Access mirrors the user's actual privileges: an admin sees every workspace, task, and job, while a non-admin is limited to what the ACL grants their email or groups. This holds for **both** authentication methods — API keys and the OAuth flow. If you authenticate as an admin and still see empty lists, confirm you connected as an admin user (see Troubleshooting below).
+
 Jobs created via MCP are tagged with `source_type = "mcp"` and the authenticated user's email as `source_id` for audit trail.
 
 ## Best Practices
@@ -351,6 +353,10 @@ Ensure MCP is enabled in `server-config.yaml` and your server has been restarted
 ### Workspace or Task Not Found
 
 Verify the workspace and task names are correct (case-sensitive). Use `list_workspaces` and `list_tasks` to confirm availability.
+
+### Empty Lists / "Not Found" for Everything
+
+If every list tool returns empty and reads/executes report "not found", the authenticated identity has no ACL grants. MCP access mirrors the user's actual privileges, so check: (1) you are connected as an **admin** user (admins bypass ACL), or (2) your email or a group you belong to is granted access in the server's `acl` configuration. Note that the DB `is_admin` flag is what matters — it is honored for both API keys and OAuth-authenticated sessions.
 
 ## See Also
 

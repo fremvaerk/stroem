@@ -90,8 +90,23 @@ pub async fn authenticate(
         "{}/mcp",
         crate::oauth::canonical_issuer(state, &parts.headers)
     );
-    let claims = validate_access_token(token, &auth_config.jwt_secret, Some(&expected_aud))
+    let mut claims = validate_access_token(token, &auth_config.jwt_secret, Some(&expected_aud))
         .map_err(|e| format!("Invalid or unbound token: {e}"))?;
+
+    // The OAuth access token is minted without admin (defense in depth — see
+    // `oauth/token.rs`). Re-derive `is_admin` from the DB on every request so
+    // MCP mirrors the user's *current* privileges: admins get the same ACL
+    // bypass they have in the UI, and revoking admin takes effect immediately
+    // rather than lingering until the token's TTL expires. This matches the
+    // API-key path, which also reads `is_admin` fresh from the user row.
+    claims.is_admin = match claims.sub.parse::<uuid::Uuid>() {
+        Ok(user_id) => stroem_db::UserRepo::get_by_id(&state.pool, user_id)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?
+            .map(|u| u.is_admin)
+            .unwrap_or(false),
+        Err(_) => false,
+    };
 
     Ok(Some(McpAuthContext { claims }))
 }

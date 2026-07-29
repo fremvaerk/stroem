@@ -12,8 +12,8 @@ use stroem_common::models::workflow::{
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, UserRepo, WorkerRepo};
 use stroem_server::auth::hash_password;
 use stroem_server::config::{
-    AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, McpConfig,
-    RetentionConfig, ServerConfig, WorkspaceSourceDef,
+    AclAction, AclConfig, AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig,
+    McpConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::job_creator::create_job_for_task;
 use stroem_server::log_storage::LogStorage;
@@ -372,6 +372,21 @@ async fn setup_with_auth_and_mcp() -> Result<(
     TempDir,
     testcontainers::ContainerAsync<Postgres>,
 )> {
+    setup_with_auth_and_mcp_cfg(None, None).await
+}
+
+/// Like [`setup_with_auth_and_mcp`] but lets a test configure ACL and pin the
+/// canonical issuer via `base_url` (so audience-bound tokens can be forged with
+/// a deterministic `aud`).
+async fn setup_with_auth_and_mcp_cfg(
+    acl: Option<AclConfig>,
+    base_url: Option<String>,
+) -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
     let container = Postgres::default().start().await?;
     let port = container.get_host_port_ipv4(5432).await?;
     let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
@@ -402,7 +417,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
         auth: Some(AuthConfig {
             jwt_secret: AUTH_JWT_SECRET.to_string(),
             refresh_secret: AUTH_REFRESH_SECRET.to_string(),
-            base_url: None,
+            base_url,
             providers: HashMap::new(),
             initial_user: Some(InitialUserConfig {
                 email: AUTH_USER_EMAIL.to_string(),
@@ -411,7 +426,7 @@ async fn setup_with_auth_and_mcp() -> Result<(
         }),
         recovery: Default::default(),
         retention: RetentionConfig::default(),
-        acl: None,
+        acl,
         mcp: Some(McpConfig {
             enabled: true,
             ..Default::default()
@@ -1012,6 +1027,105 @@ async fn test_mcp_api_key_accepted() -> Result<()> {
     );
     let body = body_json(response).await;
     assert!(body.get("result").is_some(), "expected JSON-RPC result");
+    Ok(())
+}
+
+/// Pinned issuer for the ACL/OAuth-derivation test, so a forged access token
+/// can carry the exact `aud` the MCP auth layer expects.
+const ACL_BASE_URL: &str = "http://localhost";
+
+/// Forge an OAuth-style MCP access token: audience-bound to `/mcp` and
+/// deliberately unprivileged (`is_admin: false`), exactly like the tokens
+/// `/oauth/token` mints. The MCP layer must derive real admin from the DB.
+fn forge_mcp_access_token(user_id: Uuid) -> String {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use stroem_common::models::auth::Claims;
+    let now = chrono::Utc::now().timestamp();
+    let claims = Claims {
+        sub: user_id.to_string(),
+        email: AUTH_USER_EMAIL.to_string(),
+        is_admin: false,
+        iat: now,
+        exp: now + 3600,
+        aud: Some(format!("{ACL_BASE_URL}/mcp")),
+        iss: Some(ACL_BASE_URL.to_string()),
+        scope: Some("mcp".to_string()),
+        client_id: None,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(AUTH_JWT_SECRET.as_bytes()),
+    )
+    .expect("failed to forge token")
+}
+
+/// Call `list_tasks` with the given bearer token and return the number of
+/// tasks visible to that identity.
+async fn list_tasks_count(router: &Router, token: &str) -> usize {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": { "name": "list_tasks", "arguments": {} }
+    });
+    let resp = router
+        .clone()
+        .oneshot(mcp_request_with_auth(None, token, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    let text = v["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text should be a string");
+    let arr: Value = serde_json::from_str(text).unwrap();
+    arr.as_array().expect("tasks should be an array").len()
+}
+
+/// Option B: MCP derives `is_admin` from the DB per request, not from the
+/// (unprivileged) OAuth token. An admin bypasses ACL over MCP exactly as in the
+/// UI, and revoking admin takes effect immediately on a still-live token —
+/// closing the token-TTL revocation gap that baking `is_admin` into the JWT
+/// would open. The workspace has 2 tasks; the ACL defaults to deny with no
+/// rules, so a non-admin sees none.
+#[tokio::test]
+async fn test_mcp_admin_derived_from_db_not_token() -> Result<()> {
+    let acl = AclConfig {
+        default: AclAction::Deny,
+        rules: vec![],
+    };
+    let (router, pool, _tmp, _container) =
+        setup_with_auth_and_mcp_cfg(Some(acl), Some(ACL_BASE_URL.to_string())).await?;
+
+    let user = UserRepo::get_by_email(&pool, AUTH_USER_EMAIL)
+        .await?
+        .expect("seeded user exists");
+    // A real OAuth token is unprivileged; admin must come from the DB, not here.
+    let token = forge_mcp_access_token(user.user_id);
+
+    // Baseline: non-admin under default-deny ACL sees no tasks.
+    assert_eq!(
+        list_tasks_count(&router, &token).await,
+        0,
+        "non-admin under default-deny ACL must see no tasks"
+    );
+
+    // Promote to admin in the DB → the SAME unprivileged token now bypasses ACL.
+    UserRepo::set_admin(&pool, user.user_id, true).await?;
+    assert_eq!(
+        list_tasks_count(&router, &token).await,
+        2,
+        "admin (per DB) must bypass ACL over MCP even though the token is unprivileged"
+    );
+
+    // Revoke admin → the same live token is denied immediately (no TTL lag).
+    UserRepo::set_admin(&pool, user.user_id, false).await?;
+    assert_eq!(
+        list_tasks_count(&router, &token).await,
+        0,
+        "revoking admin must take effect immediately on a live MCP token"
+    );
     Ok(())
 }
 
