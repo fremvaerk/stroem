@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, ConnectionDef, FlowStep, HookDef, InputFieldDef, TaskDef, TriggerDef,
-    WorkspaceConfig,
+    ActionDef, ConnectionDef, ConnectionTypeDef, FlowStep, HookDef, InputFieldDef, TaskDef,
+    TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -1175,6 +1175,176 @@ async fn setup() -> Result<(
     Ok((router, pool, temp_dir, container))
 }
 
+/// Build a minimal workspace with a task ("needs-conn") whose input declares a
+/// connection-typed field defaulting to a connection name that does not exist.
+/// Used to verify that connection-resolution failures at job-creation time
+/// surface as 400 Bad Request, not 500 Internal.
+fn test_workspace_with_missing_connection() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    // Connection type exists, but no connection of that type is defined.
+    workspace.connection_types.insert(
+        "myconntype".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::new(),
+        },
+    );
+
+    // Trivial action used by the task's single step.
+    workspace.actions.insert(
+        "noop".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo noop".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+
+    let mut task_input = HashMap::new();
+    task_input.insert(
+        "conn".to_string(),
+        InputFieldDef {
+            field_type: "myconntype".to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: Some(json!("does-not-exist")),
+            options: None,
+            allow_custom: false,
+            multiple: false,
+            order: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "needs-conn".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: task_input,
+            flow,
+            timeout: None,
+            retry: None,
+
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    workspace
+}
+
+/// Variant of `setup()` whose workspace contains the "needs-conn" task from
+/// `test_workspace_with_missing_connection()`.
+async fn setup_with_task_needing_missing_connection() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let workspace = test_workspace_with_missing_connection();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
 /// Register a test worker in the DB and return its UUID.
 /// Use this to satisfy foreign key constraints when calling `mark_running`.
 async fn register_test_worker(pool: &PgPool) -> Uuid {
@@ -1302,6 +1472,27 @@ async fn test_execute_task_creates_job_and_steps() -> Result<()> {
     assert_eq!(steps[0].step_name, "greet");
     assert_eq!(steps[0].action_name, "greet");
     assert_eq!(steps[0].status, "ready");
+
+    Ok(())
+}
+
+// ─── Test 1b: Missing connection surfaces as 400, not 500 ─────────────
+
+#[tokio::test]
+async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_task_needing_missing_connection().await?;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workspaces/default/tasks/needs-conn/execute")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     Ok(())
 }
