@@ -1720,6 +1720,63 @@ async fn test_cross_workspace_action_stamps_owner_on_step() -> Result<()> {
     Ok(())
 }
 
+// ─── Test 1a2: Claim returns the OWNER workspace + pinned revision ────
+
+#[tokio::test]
+async fn test_cross_workspace_claim_returns_owner_workspace_and_revision() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+
+    // Execute A/caller — creates a job whose `run` step is owned by B@rev-b-1.
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/caller/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    // Register a worker capable of running script steps.
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-xws", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Claim the ready step.
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    // The claim must point the worker at the OWNER (B) tarball at B's pinned
+    // revision, not the caller (A) — even though the job lives in workspace A.
+    assert_eq!(body["job_id"].as_str().unwrap(), job_id.to_string());
+    assert_eq!(body["step_name"].as_str().unwrap(), "run");
+    assert_eq!(body["workspace"].as_str().unwrap(), "B");
+    assert_eq!(body["revision"].as_str().unwrap(), "rev-b-1");
+    // Action body is B's `remote` script.
+    assert_eq!(body["action_spec"]["script"], "echo hi");
+
+    Ok(())
+}
+
 // ─── Test 1b: Missing connection surfaces as 400, not 500 ─────────────
 
 #[tokio::test]

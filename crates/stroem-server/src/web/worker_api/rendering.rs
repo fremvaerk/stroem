@@ -19,6 +19,11 @@ pub struct RenderContext<'a> {
     /// Structured global state from the workspace-scoped snapshot (state.json contents).
     /// Available in Tera templates as `{{ global_state.some_key }}`.
     pub global_state_json: Option<&'a serde_json::Value>,
+    /// Owner workspace config for cross-workspace steps. When set, the action
+    /// definition + connection-typed inputs are resolved against this workspace
+    /// (the action body's owner) instead of the caller `workspace`. `None` ⇒
+    /// local step: resolve against `workspace` (byte-for-byte today's behaviour).
+    pub action_workspace: Option<&'a WorkspaceConfig>,
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -135,7 +140,14 @@ pub fn prepare_step_action_input(
             None => return Ok(rendered_input),
         },
     };
-    let action = match ctx.workspace.actions.get(&flow_step.action) {
+    // The action body (defaults + connection-typed inputs) belongs to the OWNER
+    // workspace for cross-workspace steps. `action_workspace` is `Some` only when
+    // the step references `owner.action`; for local steps it falls back to the
+    // caller `workspace`, keeping today's behaviour byte-for-byte. The action is
+    // looked up by its BARE name (the owner stores it unqualified).
+    let action_ws = ctx.action_workspace.unwrap_or(ctx.workspace);
+    let (_, bare_action) = stroem_common::template::parse_qualified_ref(&flow_step.action);
+    let action = match action_ws.actions.get(bare_action) {
         Some(a) => a,
         None => return Ok(rendered_input),
     };
@@ -150,7 +162,7 @@ pub fn prepare_step_action_input(
     // (e.g. a connection input), but the job-level input has it resolved.
     merge_missing_action_fields(&mut input_val, ctx.job_input, action.input.keys());
 
-    let prepared = prepare_action_input(&input_val, &action.input, ctx.workspace)
+    let prepared = prepare_action_input(&input_val, &action.input, action_ws)
         .context("Failed to prepare action input")?;
     Ok(Some(prepared))
 }
@@ -489,6 +501,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -527,6 +540,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -567,6 +581,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -605,6 +620,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -647,6 +663,7 @@ mod tests {
             completed_steps: &completed_steps,
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -691,6 +708,7 @@ mod tests {
             completed_steps: &completed_steps,
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -731,6 +749,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -1141,6 +1160,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1180,6 +1200,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1233,6 +1254,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
         // rendered_input only contains "sql"
         let rendered_input = Some(json!({"sql": "SELECT 1"}));
@@ -1243,6 +1265,78 @@ mod tests {
 
         assert_eq!(result["sql"], "SELECT 1");
         assert_eq!(result["extra"], "from-job");
+    }
+
+    #[test]
+    fn test_prepare_step_action_input_resolves_against_owner_workspace() {
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
+
+        // Owner workspace B: action `remote` with a connection-typed input
+        // `conn: pg`, connection_type `pg`, and connection `prod` carrying a host.
+        let mut owner_action = make_action("script");
+        owner_action
+            .input
+            .insert("conn".to_string(), make_input_field("pg"));
+        let mut owner = WorkspaceConfig::default();
+        owner.actions.insert("remote".to_string(), owner_action);
+        owner.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        owner.connections.insert(
+            "prod".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".to_string()),
+                values: HashMap::from([("host".to_string(), json!("db.owner.internal"))]),
+            },
+        );
+
+        // Caller workspace A: task `t`, flow step `s` referencing `B.remote`,
+        // mapping input `{ conn: "prod" }`. The caller has NO `prod` connection,
+        // so a correct resolution can only come from the OWNER workspace.
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        let flow_input = HashMap::from([("conn".to_string(), json!("prod"))]);
+        task.flow
+            .insert("s".to_string(), make_flow_step("B.remote", flow_input));
+        let mut caller = WorkspaceConfig::default();
+        caller.tasks.insert("t".to_string(), task);
+
+        let step = make_step_row("s", None);
+        let ctx = RenderContext {
+            workspace: &caller,
+            task_name: "t",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+            action_workspace: Some(&owner),
+        };
+        // Rendered input mirrors the caller flow-step input.
+        let rendered_input = Some(json!({"conn": "prod"}));
+
+        let result = prepare_step_action_input(rendered_input, &ctx)
+            .unwrap()
+            .unwrap();
+
+        // Resolution used the OWNER's `prod` connection → replaced with its
+        // values object (host present). Proves OWNER-context resolution.
+        assert_eq!(result["conn"]["host"], "db.owner.internal");
     }
 
     #[test]
@@ -1477,6 +1571,7 @@ mod tests {
             completed_steps: &[],
             state_json: Some(&state_json),
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1518,6 +1613,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1564,6 +1660,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: Some(&global_state_json),
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1604,6 +1701,7 @@ mod tests {
             completed_steps: &[],
             state_json: None,
             global_state_json: None,
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1650,6 +1748,7 @@ mod tests {
             completed_steps: &[],
             state_json: Some(&state_json),
             global_state_json: Some(&global_state_json),
+            action_workspace: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();

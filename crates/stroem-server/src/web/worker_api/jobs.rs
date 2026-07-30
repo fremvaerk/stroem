@@ -458,6 +458,20 @@ pub async fn claim_job(
     // Fetch workspace config once — used for template rendering, secrets, and action defaults
     let ws_config = state.get_workspace(&job.workspace).await;
 
+    // Determine the workspace whose config + tarball this step's action belongs
+    // to. For a cross-workspace step (action `owner.name`) that's the OWNER; for
+    // a local step `action_workspace` is NULL so it resolves to the caller and
+    // everything below is byte-for-byte identical to today's behaviour.
+    let owner_ws_name = step
+        .action_workspace
+        .clone()
+        .unwrap_or_else(|| job.workspace.clone());
+    let owner_config = if owner_ws_name == job.workspace {
+        ws_config.clone()
+    } else {
+        state.get_workspace(&owner_ws_name).await
+    };
+
     // Fetch all steps once — reused for both completed-step template context and agent rendering.
     let all_steps_for_job = JobStepRepo::get_steps_for_job(&state.pool, step.job_id)
         .await
@@ -557,6 +571,7 @@ pub async fn claim_job(
             completed_steps: &completed_steps,
             state_json: state_json_value.as_ref(),
             global_state_json: global_state_json_value.as_ref(),
+            action_workspace: owner_config.as_deref(),
         };
 
         let raw_input = match rendering::render_step_input(&ctx) {
@@ -578,8 +593,10 @@ pub async fn claim_job(
         step.input.clone()
     };
 
-    // Build secrets value for action_spec and image rendering
-    let secrets_value = ws_config
+    // Build secrets value for action_spec and image rendering. The action body
+    // belongs to the OWNER workspace, so its `{{ secret.* }}` references must
+    // resolve against the OWNER's secrets (== caller's for local steps).
+    let secrets_value = owner_config
         .as_ref()
         .and_then(|w| {
             if w.secrets.is_empty() {
@@ -767,7 +784,9 @@ pub async fn claim_job(
     };
 
     Ok(Json(ClaimResponse {
-        workspace: Some(job.workspace),
+        // Tell the worker which workspace tarball to fetch: the action's OWNER
+        // (== caller for local steps) at the pinned revision recorded on the step.
+        workspace: Some(owner_ws_name),
         job_id: Some(step.job_id.to_string()),
         task_name: Some(job.task_name),
         step_name: Some(step.step_name),
@@ -778,7 +797,10 @@ pub async fn claim_job(
         input: rendered_input,
         runner: Some(step.runner),
         timeout_secs: step.timeout_secs,
-        revision: job.revision.clone(),
+        revision: step
+            .action_revision
+            .clone()
+            .or_else(|| job.revision.clone()),
         agent_provider_name,
         agent_prompt,
         agent_system_prompt,
