@@ -15,5 +15,10 @@ uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-testcontainers = { version = "0.27", features = ["watchdog"] }
+# NOTE: the "watchdog" feature is intentionally NOT enabled. Its
+# `conquer_once::Lazy` signal-cleanup thread races on concurrent init and panics
+# ("entered unreachable code", conquer-once cell.rs) under parallel testcontainer
+# startup, flaking CI (testcontainers' own docs note the watchdog "may panic").
+# RAII Drop cleans up on normal exit; CI runners are ephemeral.
+testcontainers = { version = "0.27" }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
