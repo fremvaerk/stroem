@@ -986,6 +986,7 @@ pub async fn agent_task_tool(
     let source_id = format!("{}/{}", job_id, step_name);
 
     let child_job_id = crate::job_creator::create_child_job_for_task(
+        &state.workspaces,
         &state.pool,
         &workspace,
         &job.workspace,

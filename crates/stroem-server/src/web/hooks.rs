@@ -99,6 +99,7 @@ async fn webhook_handler(
     let revision = state.workspaces.get_revision(&wh.ws_name);
 
     let job_id = match create_job_for_task(
+        &state.workspaces,
         &state.pool,
         &config,
         &wh.ws_name,

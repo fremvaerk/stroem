@@ -590,6 +590,7 @@ async fn create_event_source_job(
     });
 
     let job_id = crate::job_creator::create_job_for_task(
+        &state.workspaces,
         &state.pool,
         &workspace_config,
         &des.workspace,

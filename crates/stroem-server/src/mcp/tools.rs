@@ -425,6 +425,7 @@ impl StromMcpHandler {
         let source_id = source_id_for_audit(&self.auth);
         let revision = self.state.workspaces.get_revision(&params.workspace);
         let job_id = crate::job_creator::create_job_for_task(
+            &self.state.workspaces,
             &self.state.pool,
             &ws_config,
             &params.workspace,

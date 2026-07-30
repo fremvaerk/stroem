@@ -12,6 +12,7 @@ use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
+use crate::workspace::WorkspaceManager;
 
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
 const MAX_TASK_DEPTH: u32 = 10;
@@ -26,8 +27,9 @@ const MAX_TASK_DEPTH: u32 = 10;
 /// Sentinel values in `input` are resolved against the source job's `raw_input`,
 /// and both `raw_input` and `source_job_id` are persisted on the new job row.
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip(pool, workspace_config, agents_config, input))]
+#[tracing::instrument(skip(pool, workspaces, workspace_config, agents_config, input))]
 pub async fn create_job_for_task(
+    workspaces: &WorkspaceManager,
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
@@ -41,6 +43,7 @@ pub async fn create_job_for_task(
     defaults: JobDefaults,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
+        workspaces,
         pool,
         workspace_config,
         workspace_name,
@@ -64,6 +67,7 @@ pub async fn create_job_for_task(
 /// sub-jobs that propagate back to the parent step on completion.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_child_job_for_task(
+    workspaces: &WorkspaceManager,
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
@@ -77,6 +81,7 @@ pub async fn create_child_job_for_task(
     defaults: JobDefaults,
 ) -> Result<Uuid> {
     create_job_for_task_inner(
+        workspaces,
         pool,
         workspace_config,
         workspace_name,
@@ -97,6 +102,7 @@ pub async fn create_child_job_for_task(
 /// Create a job with parent tracking (for type: task sub-jobs).
 #[allow(clippy::too_many_arguments)]
 fn create_job_for_task_inner<'a>(
+    workspaces: &'a WorkspaceManager,
     pool: &'a PgPool,
     workspace_config: &'a WorkspaceConfig,
     workspace_name: &'a str,
@@ -172,16 +178,55 @@ fn create_job_for_task_inner<'a>(
         let job_id = Uuid::new_v4();
 
         for (step_name, flow_step) in &task.flow {
-            let action = match workspace_config.actions.get(&flow_step.action) {
-                Some(a) => a,
-                None => {
-                    bail!(
-                        "Action '{}' not found in workspace '{}'",
+            // flow_step.action may be "owner_ws.action" (cross-workspace) or a local name.
+            let (owner_ws, bare_action) =
+                stroem_common::template::parse_qualified_ref(&flow_step.action);
+            // Cross-workspace only when it isn't already a local/library-flattened key
+            // AND the named workspace exists (library precedence + backward compat).
+            let is_cross = owner_ws.is_some()
+                && !workspace_config.actions.contains_key(&flow_step.action)
+                && owner_ws
+                    .map(|ws| workspaces.has_workspace(ws))
+                    .unwrap_or(false);
+
+            let (owned_action, action_workspace, action_revision, action_name) = if is_cross {
+                let ws = owner_ws.unwrap();
+                let owner_cfg = workspaces.get_config(ws).await.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "action '{}': workspace '{}' is not available",
                         flow_step.action,
-                        workspace_name
-                    );
-                }
+                        ws
+                    )
+                })?;
+                let a = owner_cfg.actions.get(bare_action).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "action '{}': workspace '{}' has no action '{}'",
+                        flow_step.action,
+                        ws,
+                        bare_action
+                    )
+                })?;
+                (
+                    a,
+                    Some(ws.to_string()),
+                    workspaces.get_revision(ws),
+                    bare_action.to_string(),
+                )
+            } else {
+                let a = workspace_config
+                    .actions
+                    .get(&flow_step.action)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Action '{}' not found in workspace '{}'",
+                            flow_step.action,
+                            workspace_name
+                        )
+                    })?;
+                (a, None, None, flow_step.action.clone())
             };
+            let action = &owned_action;
 
             let status = if flow_step.for_each.is_some() {
                 // For-each steps always start pending — expanded at promotion time
@@ -203,7 +248,7 @@ fn create_job_for_task_inner<'a>(
             new_steps.push(NewJobStep {
                 job_id,
                 step_name: step_name.clone(),
-                action_name: flow_step.action.clone(),
+                action_name,
                 action_type: action.action_type.clone(),
                 action_image: action.image.clone(),
                 action_spec,
@@ -242,8 +287,8 @@ fn create_job_for_task_inner<'a>(
                     }
                 }),
                 retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
-                action_workspace: None,
-                action_revision: None,
+                action_workspace,
+                action_revision,
             });
         }
 
@@ -326,7 +371,15 @@ fn create_job_for_task_inner<'a>(
         }
 
         // Handle any initially-ready type: task steps
-        handle_task_steps(pool, workspace_config, workspace_name, job_id, defaults).await?;
+        handle_task_steps(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            job_id,
+            defaults,
+        )
+        .await?;
 
         // Handle any initially-ready type: approval steps
         if let Err(e) =
@@ -357,8 +410,9 @@ fn create_job_for_task_inner<'a>(
 ///
 /// Called after job creation and after orchestrator promotes steps.
 /// This is the server-side dispatch for task-action steps — workers never claim them.
-#[tracing::instrument(skip(pool, workspace_config))]
+#[tracing::instrument(skip(workspaces, pool, workspace_config))]
 pub async fn handle_task_steps(
+    workspaces: &WorkspaceManager,
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
@@ -471,6 +525,7 @@ pub async fn handle_task_steps(
         // when it processes the child job's ready steps. `defaults` is threaded
         // through so sub-jobs inherit the server-level timeout defaults.
         match create_job_for_task_inner(
+            workspaces,
             pool,
             workspace_config,
             workspace_name,

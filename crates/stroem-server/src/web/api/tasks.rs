@@ -485,6 +485,7 @@ pub async fn execute_task(
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
     let job_id = create_job_for_task(
+        &state.workspaces,
         &state.pool,
         &workspace,
         &ws,

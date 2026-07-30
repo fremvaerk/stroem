@@ -130,6 +130,10 @@ impl std::fmt::Debug for WorkspaceEntry {
 /// In-memory workspace source for testing
 struct InMemorySource {
     config: tokio::sync::RwLock<WorkspaceConfig>,
+    /// Optional pinned revision. `None` mirrors the historic behaviour of
+    /// `from_config`; `from_configs` can supply an explicit revision so tests
+    /// exercising cross-workspace pinning observe a concrete value.
+    revision: Option<String>,
 }
 
 #[async_trait]
@@ -143,7 +147,7 @@ impl WorkspaceSource for InMemorySource {
     }
 
     fn revision(&self) -> Option<String> {
-        None
+        self.revision.clone()
     }
 
     fn peek_revision(&self) -> Option<String> {
@@ -284,6 +288,7 @@ impl WorkspaceManager {
     pub fn from_config(name: &str, config: WorkspaceConfig) -> Self {
         let source = Arc::new(InMemorySource {
             config: tokio::sync::RwLock::new(config.clone()),
+            revision: None,
         });
         let mut entries = HashMap::new();
         entries.insert(
@@ -298,6 +303,36 @@ impl WorkspaceManager {
                 reload_state: Arc::new(Mutex::new(ReloadState::default())),
             },
         );
+        Self {
+            entries,
+            load_errors: HashMap::new(),
+            resolved_libraries: HashMap::new(),
+        }
+    }
+
+    /// Create a WorkspaceManager from several in-memory configs, each with an
+    /// optional explicit revision (for testing multi-workspace behaviour such
+    /// as cross-workspace action resolution).
+    pub fn from_configs(configs: Vec<(String, WorkspaceConfig, Option<String>)>) -> Self {
+        let mut entries = HashMap::new();
+        for (name, config, revision) in configs {
+            let source = Arc::new(InMemorySource {
+                config: tokio::sync::RwLock::new(config.clone()),
+                revision,
+            });
+            entries.insert(
+                name.clone(),
+                WorkspaceEntry {
+                    config: Arc::new(RwLock::new(Arc::new(config))),
+                    source: source as Arc<dyn WorkspaceSource>,
+                    name,
+                    source_path: PathBuf::from("/dev/null"),
+                    load_error: Arc::new(std::sync::RwLock::new(None)),
+                    load_warnings: Arc::new(std::sync::RwLock::new(Vec::new())),
+                    reload_state: Arc::new(Mutex::new(ReloadState::default())),
+                },
+            );
+        }
         Self {
             entries,
             load_errors: HashMap::new(),

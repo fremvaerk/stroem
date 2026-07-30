@@ -199,6 +199,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
 
     // Handle any newly-promoted type: task steps (including loop instances)
     if let Err(e) = crate::job_creator::handle_task_steps(
+        &state.workspaces,
         &state.pool,
         &workspace,
         &job.workspace,
@@ -542,6 +543,7 @@ async fn propagate_to_parent(
 
             // Handle any newly-promoted task steps in the parent
             crate::job_creator::handle_task_steps(
+                &state.workspaces,
                 &state.pool,
                 &parent_ws,
                 &parent_job.workspace,
@@ -903,6 +905,7 @@ async fn try_retry_job(
 
     let input = failed_job.input.clone().unwrap_or_default();
     let retry_job_id = crate::job_creator::create_job_for_task(
+        &state.workspaces,
         &state.pool,
         workspace,
         &failed_job.workspace,
