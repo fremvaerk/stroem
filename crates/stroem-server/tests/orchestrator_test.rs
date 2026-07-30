@@ -89,6 +89,8 @@ fn step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }
 }
 

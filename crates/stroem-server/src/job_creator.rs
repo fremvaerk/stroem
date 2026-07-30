@@ -242,6 +242,8 @@ fn create_job_for_task_inner<'a>(
                     }
                 }),
                 retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
+                action_workspace: None,
+                action_revision: None,
             });
         }
 
@@ -683,6 +685,10 @@ pub async fn expand_for_each_steps(
                 retry_backoff_secs: step.retry_backoff_secs,
                 retry_strategy: step.retry_strategy.clone(),
                 retry_jitter: step.retry_jitter,
+                // Instances inherit the owning workspace/revision from the
+                // placeholder step row, same as action_name/action_type/runner.
+                action_workspace: step.action_workspace.clone(),
+                action_revision: step.action_revision.clone(),
             });
         }
 

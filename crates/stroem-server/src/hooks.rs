@@ -496,6 +496,8 @@ async fn fire_single_hook(
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     };
 
     JobStepRepo::create_steps(pool, &[step])

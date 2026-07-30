@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision";
 
 /// Job step row from database
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
@@ -50,6 +50,12 @@ pub struct JobStepRow {
     pub retry_jitter: bool,
     pub retry_history: JsonValue,
     pub retry_at: Option<DateTime<Utc>>,
+    /// Workspace that owns the action this step executes. `None` ⇒ the
+    /// step's action belongs to the job's own workspace (existing behaviour).
+    pub action_workspace: Option<String>,
+    /// Pinned revision of `action_workspace` at job-creation time. `None`
+    /// when `action_workspace` is `None`.
+    pub action_revision: Option<String>,
 }
 
 /// New job step for creation
@@ -79,6 +85,10 @@ pub struct NewJobStep {
     pub retry_backoff_secs: Option<i32>,
     pub retry_strategy: Option<String>,
     pub retry_jitter: bool,
+    /// See [`JobStepRow::action_workspace`].
+    pub action_workspace: Option<String>,
+    /// See [`JobStepRow::action_revision`].
+    pub action_revision: Option<String>,
 }
 
 /// Bind parameters for a single row in the batch INSERT inside [`JobStepRepo::create_steps_tx`].
@@ -109,6 +119,8 @@ struct StepInsertRow {
     retry_backoff_secs: Option<i32>,
     retry_strategy: Option<String>,
     retry_jitter: bool,
+    action_workspace: Option<String>,
+    action_revision: Option<String>,
 }
 
 /// A stale running step with its job info for recovery.
@@ -174,13 +186,13 @@ impl JobStepRepo {
         // Build a batch insert query
         let mut query = String::from(
             r#"
-            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter)
+            INSERT INTO job_step (job_id, step_name, action_name, action_type, action_image, action_spec, input, status, required_ability, required_tags, runner, timeout_secs, ready_at, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, action_workspace, action_revision)
             VALUES
             "#,
         );
 
         let mut rows: Vec<StepInsertRow> = Vec::new();
-        let cols_per_row = 23;
+        let cols_per_row = 25;
         for (i, step) in steps.iter().enumerate() {
             if i > 0 {
                 query.push_str(", ");
@@ -224,6 +236,8 @@ impl JobStepRepo {
                 retry_backoff_secs: step.retry_backoff_secs,
                 retry_strategy: step.retry_strategy.clone(),
                 retry_jitter: step.retry_jitter,
+                action_workspace: step.action_workspace.clone(),
+                action_revision: step.action_revision.clone(),
             });
         }
 
@@ -252,7 +266,9 @@ impl JobStepRepo {
                 .bind(row.max_retries)
                 .bind(row.retry_backoff_secs)
                 .bind(row.retry_strategy)
-                .bind(row.retry_jitter);
+                .bind(row.retry_jitter)
+                .bind(row.action_workspace)
+                .bind(row.action_revision);
         }
 
         q.execute(executor)

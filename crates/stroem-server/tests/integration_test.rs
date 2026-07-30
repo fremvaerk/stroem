@@ -1540,6 +1540,8 @@ async fn test_worker_register_and_claim() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -2187,6 +2189,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -2311,6 +2315,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -2335,6 +2341,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -2359,6 +2367,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -4012,6 +4022,8 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4111,6 +4123,8 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4201,6 +4215,8 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4298,6 +4314,8 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4389,6 +4407,8 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -5776,6 +5796,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -5800,6 +5822,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5916,6 +5940,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -5940,6 +5966,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6074,6 +6102,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6098,6 +6128,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6122,6 +6154,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6267,6 +6301,8 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -6422,6 +6458,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6446,6 +6484,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6585,6 +6625,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6609,6 +6651,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6727,6 +6771,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6751,6 +6797,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6876,6 +6924,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6900,6 +6950,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -7024,6 +7076,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -7048,6 +7102,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -7183,6 +7239,8 @@ async fn test_cascading_skip() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -7207,6 +7265,8 @@ async fn test_cascading_skip() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -7231,6 +7291,8 @@ async fn test_cascading_skip() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -8057,6 +8119,8 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -8921,6 +8985,8 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -8964,6 +9030,8 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -11438,6 +11506,8 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     };
     JobStepRepo::create_steps(&pool, &[step]).await?;
 
@@ -12694,6 +12764,8 @@ async fn test_get_worker_with_steps() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
     JobStepRepo::mark_running(&pool, job_id, "say-hello", worker_id).await?;
@@ -15294,6 +15366,8 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -15336,6 +15410,8 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
