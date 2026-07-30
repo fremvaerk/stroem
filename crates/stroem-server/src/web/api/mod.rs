@@ -239,15 +239,22 @@ async fn require_auth(
 }
 
 pub fn build_api_routes(state: Arc<AppState>) -> Router {
-    // Rate-limited API key creation (strict: 5 req/min — one token every 12 s, burst 5).
-    // Sits inside the protected router so auth is verified before the rate limit check.
+    // Rate limit on the API-key routes. The layer covers GET (list), POST
+    // (create) AND DELETE on this router, and the UI issues list+create+reload
+    // per key operation — so the previous strict (12 s / burst 5 ≈ 5 req/min)
+    // budget was exhausted by *legitimate* use: opening Settings and creating a
+    // couple of keys already 429s (and flaked the e2e suite, which creates
+    // several keys quickly). Loosen to burst 60, one token/s (~60 req/min
+    // sustained) — still bounds runaway/abusive creation on this
+    // already-authenticated endpoint, but comfortably fits normal UI sessions.
+    // Sits inside the protected router so auth is verified before the check.
     let api_key_create = Router::new()
         .route(
             "/auth/api-keys",
             get(api_keys::list_api_keys).post(api_keys::create_api_key),
         )
         .route("/auth/api-keys/{prefix}", delete(api_keys::delete_api_key))
-        .layer(auth_rate_limit_layer!(12, 5));
+        .layer(auth_rate_limit_layer!(1, 60));
 
     // OAuth consent endpoint — gated on the `mcp` feature because it only
     // exists to support the OAuth flow that fronts /mcp.
