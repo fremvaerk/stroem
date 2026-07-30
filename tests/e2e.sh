@@ -558,6 +558,56 @@ fi
 pass "Downloaded artifact '$ART_NAME' ($(wc -c < "$DL_PATH") bytes)"
 rm -f "$DL_PATH"
 
+# --- 17. Cross-workspace action reference ---
+# xref (in "default") has a single step whose action is "test.remote-cat":
+# it must execute using the "test" workspace's files (data/marker.txt),
+# which does not exist in "default". This proves the worker executed
+# the step with the owner workspace's tarball, not the caller's.
+info "Triggering xref task (cross-workspace action reference)..."
+EXEC_RESP_XREF=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/xref/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+
+XREF_JOB_ID=$(echo "$EXEC_RESP_XREF" | jq -r '.job_id')
+if [ -z "$XREF_JOB_ID" ] || [ "$XREF_JOB_ID" = "null" ]; then
+    fail "xref execute failed: $EXEC_RESP_XREF"
+fi
+pass "xref job created: $XREF_JOB_ID"
+
+info "Waiting for xref job to complete..."
+XREF_POLLED=0
+XREF_STATUS="pending"
+while [ "$XREF_STATUS" != "completed" ] && [ "$XREF_STATUS" != "failed" ]; do
+    sleep 2
+    XREF_POLLED=$((XREF_POLLED + 2))
+    if [ "$XREF_POLLED" -ge "$MAX_POLL" ]; then
+        acurl "$BASE_URL/api/jobs/$XREF_JOB_ID" | jq .
+        fail "xref job did not reach terminal state within ${MAX_POLL}s (status: $XREF_STATUS)"
+    fi
+    XREF_DETAIL=$(acurl "$BASE_URL/api/jobs/$XREF_JOB_ID")
+    XREF_STATUS=$(echo "$XREF_DETAIL" | jq -r '.status')
+    printf "."
+done
+echo ""
+
+if [ "$XREF_STATUS" != "completed" ]; then
+    echo "$XREF_DETAIL" | jq .
+    fail "xref job failed (status: $XREF_STATUS)"
+fi
+pass "xref job completed (${XREF_POLLED}s)"
+
+info "Checking xref job logs for cross-workspace file content..."
+XREF_LOGS_RESP=$(acurl "$BASE_URL/api/jobs/$XREF_JOB_ID/logs")
+XREF_LOGS=$(echo "$XREF_LOGS_RESP" | jq -r '.logs')
+
+if echo "$XREF_LOGS" | grep -q "CROSS_WS_OK"; then
+    pass "xref logs contain CROSS_WS_OK - proves the step ran with the 'test' workspace's files"
+else
+    echo "Logs:"
+    echo "$XREF_LOGS"
+    fail "xref logs missing CROSS_WS_OK - cross-workspace action did not use owner workspace's files"
+fi
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"
