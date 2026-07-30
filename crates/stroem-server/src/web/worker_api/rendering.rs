@@ -143,11 +143,20 @@ pub fn prepare_step_action_input(
     // The action body (defaults + connection-typed inputs) belongs to the OWNER
     // workspace for cross-workspace steps. `action_workspace` is `Some` only when
     // the step references `owner.action`; for local steps it falls back to the
-    // caller `workspace`, keeping today's behaviour byte-for-byte. The action is
-    // looked up by its BARE name (the owner stores it unqualified).
+    // caller `workspace`, keeping today's behaviour byte-for-byte.
+    //
+    // Lookup key: only strip to the BARE name for genuine cross-workspace steps
+    // (the owner stores the action unqualified). For LOCAL steps we MUST use the
+    // full key — a library-imported action is stored under its dotted name
+    // (e.g. `common.pg-query`) and never under the bare `pg-query`, so stripping
+    // would miss it and skip default-merge + connection resolution.
     let action_ws = ctx.action_workspace.unwrap_or(ctx.workspace);
-    let (_, bare_action) = stroem_common::template::parse_qualified_ref(&flow_step.action);
-    let action = match action_ws.actions.get(bare_action) {
+    let lookup: &str = if ctx.action_workspace.is_some() {
+        stroem_common::template::parse_qualified_ref(&flow_step.action).1
+    } else {
+        &flow_step.action
+    };
+    let action = match action_ws.actions.get(lookup) {
         Some(a) => a,
         None => return Ok(rendered_input),
     };
@@ -1337,6 +1346,81 @@ mod tests {
         // Resolution used the OWNER's `prod` connection → replaced with its
         // values object (host present). Proves OWNER-context resolution.
         assert_eq!(result["conn"]["host"], "db.owner.internal");
+    }
+
+    #[test]
+    fn test_prepare_step_action_input_resolves_local_library_dotted_action() {
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
+
+        // A LOCAL library-imported action is stored under its full DOTTED key
+        // (`common.pg-query`) — library flattening never stores the bare name.
+        // The step references it by the dotted name and is LOCAL
+        // (`action_workspace: None`). Resolution must use the FULL key, not the
+        // bare `pg-query`, or connection-typed inputs would silently pass through
+        // unresolved. This is the byte-for-byte backward-compat guarantee.
+        let mut lib_action = make_action("script");
+        lib_action
+            .input
+            .insert("conn".to_string(), make_input_field("pg"));
+
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        let flow_input = HashMap::from([("conn".to_string(), json!("prod"))]);
+        task.flow.insert(
+            "s".to_string(),
+            make_flow_step("common.pg-query", flow_input),
+        );
+
+        let mut workspace = WorkspaceConfig::default();
+        workspace
+            .actions
+            .insert("common.pg-query".to_string(), lib_action);
+        workspace.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        workspace.connections.insert(
+            "prod".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".to_string()),
+                values: HashMap::from([("host".to_string(), json!("db.local.internal"))]),
+            },
+        );
+        workspace.tasks.insert("t".to_string(), task);
+
+        let step = make_step_row("s", None);
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "t",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+            action_workspace: None, // LOCAL step
+        };
+        let rendered_input = Some(json!({"conn": "prod"}));
+
+        let result = prepare_step_action_input(rendered_input, &ctx)
+            .unwrap()
+            .unwrap();
+
+        // Connection resolved via the full dotted key → values object with host.
+        assert_eq!(result["conn"]["host"], "db.local.internal");
     }
 
     #[test]
