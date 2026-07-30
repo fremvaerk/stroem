@@ -1,11 +1,22 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { login } from "./helpers";
+
+// Scope a dialog by its heading. During Radix open/close transitions two
+// dialogs can briefly coexist in the DOM (the exiting one is still animating
+// while the next mounts), so a bare `getByRole("dialog")` can match multiple
+// elements (strict-mode violation) or the wrong, closing dialog. Filtering by
+// the unique heading targets exactly one dialog and eliminates that race.
+const dialogByHeading = (page: Page, name: string) =>
+  page
+    .getByRole("dialog")
+    .filter({ has: page.getByRole("heading", { name }) });
 
 test.describe("Settings - API Key Management", () => {
   test.beforeEach(async ({ page }) => {
     await login(page);
     await page.goto("/settings");
-    await page.waitForLoadState("networkidle");
+    // Assert the page is ready via a concrete element rather than the flaky
+    // `networkidle` load state.
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   });
 
@@ -24,11 +35,8 @@ test.describe("Settings - API Key Management", () => {
   test("create API key dialog opens and closes", async ({ page }) => {
     await page.getByRole("button", { name: "Create API Key" }).click();
 
-    const dialog = page.getByRole("dialog");
+    const dialog = dialogByHeading(page, "Create API Key");
     await expect(dialog).toBeVisible();
-    await expect(
-      dialog.getByRole("heading", { name: "Create API Key" }),
-    ).toBeVisible();
     await expect(dialog.locator('input[id="key-name"]')).toBeVisible();
     await expect(dialog.locator('input[id="key-expiry"]')).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Create" })).toBeVisible();
@@ -36,13 +44,13 @@ test.describe("Settings - API Key Management", () => {
 
     // Cancel closes the dialog
     await dialog.getByRole("button", { name: "Cancel" }).click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(dialog).toBeHidden();
   });
 
   test("create button is disabled when name is empty", async ({ page }) => {
     await page.getByRole("button", { name: "Create API Key" }).click();
 
-    const dialog = page.getByRole("dialog");
+    const dialog = dialogByHeading(page, "Create API Key");
     await expect(dialog).toBeVisible();
 
     // Submit button should be disabled with empty name
@@ -66,7 +74,7 @@ test.describe("Settings - API Key Management", () => {
 
     // Open create dialog
     await page.getByRole("button", { name: "Create API Key" }).click();
-    const createDialog = page.getByRole("dialog");
+    const createDialog = dialogByHeading(page, "Create API Key");
     await expect(createDialog).toBeVisible();
 
     // Fill in name
@@ -75,12 +83,10 @@ test.describe("Settings - API Key Management", () => {
     // Submit the form
     await createDialog.getByRole("button", { name: "Create" }).click();
 
-    // Reveal dialog should open showing the key
-    const revealDialog = page.getByRole("dialog");
+    // The create dialog closes and the reveal dialog opens. Scope each by its
+    // heading so the transition overlap can't confuse the locator.
+    const revealDialog = dialogByHeading(page, "API Key Created");
     await expect(revealDialog).toBeVisible();
-    await expect(
-      revealDialog.getByRole("heading", { name: "API Key Created" }),
-    ).toBeVisible();
     await expect(
       revealDialog.getByText("Copy your API key now. You won't be able to see it again."),
     ).toBeVisible();
@@ -91,13 +97,16 @@ test.describe("Settings - API Key Management", () => {
     const keyText = await keyCode.textContent();
     expect(keyText).toMatch(/^strm_/);
 
-    // Copy button and Done button are present
-    await expect(revealDialog.getByRole("button", { name: /Copy/ })).toBeVisible();
+    // Copy button and Done button are present. Use an exact name for Copy so it
+    // doesn't also match a "Copied" state.
+    await expect(
+      revealDialog.getByRole("button", { name: "Copy", exact: true }),
+    ).toBeVisible();
     await expect(revealDialog.getByRole("button", { name: "Done" })).toBeVisible();
 
     // Dismiss reveal dialog
     await revealDialog.getByRole("button", { name: "Done" }).click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(revealDialog).toBeHidden();
 
     // The new key should now appear in the table. Extended timeout: the
     // create handler awaits `load()` before opening the reveal dialog, so
@@ -124,7 +133,7 @@ test.describe("Settings - API Key Management", () => {
     const keyName = `e2e-expiry-key-${Date.now()}`;
 
     await page.getByRole("button", { name: "Create API Key" }).click();
-    const createDialog = page.getByRole("dialog");
+    const createDialog = dialogByHeading(page, "Create API Key");
     await expect(createDialog).toBeVisible();
 
     await createDialog.locator('input[id="key-name"]').fill(keyName);
@@ -132,10 +141,10 @@ test.describe("Settings - API Key Management", () => {
     await createDialog.getByRole("button", { name: "Create" }).click();
 
     // Dismiss reveal dialog
-    const revealDialog = page.getByRole("dialog");
+    const revealDialog = dialogByHeading(page, "API Key Created");
     await expect(revealDialog).toBeVisible();
     await revealDialog.getByRole("button", { name: "Done" }).click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(revealDialog).toBeHidden();
 
     // Row should exist and not show "Never" in expires column.
     // Extended timeout for the same CI-runner race documented above.
@@ -155,12 +164,12 @@ test.describe("Settings - API Key Management", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
 
     await page.getByRole("button", { name: "Create API Key" }).click();
-    const createDialog = page.getByRole("dialog");
+    const createDialog = dialogByHeading(page, "Create API Key");
     await expect(createDialog).toBeVisible();
     await createDialog.locator('input[id="key-name"]').fill(keyName);
     await createDialog.getByRole("button", { name: "Create" }).click();
 
-    const revealDialog = page.getByRole("dialog");
+    const revealDialog = dialogByHeading(page, "API Key Created");
     await expect(revealDialog).toBeVisible();
 
     // The key should be displayed in a code element starting with strm_
@@ -172,12 +181,12 @@ test.describe("Settings - API Key Management", () => {
     // Click Copy button. In headless Docker without clipboard support,
     // navigator.clipboard.writeText() may throw synchronously, preventing
     // the UI from updating to "Copied". Accept either outcome.
-    const copyBtn = revealDialog.getByRole("button", { name: /Copy/ });
+    const copyBtn = revealDialog.getByRole("button", { name: "Copy", exact: true });
     await copyBtn.click();
 
     // Verify either "Copied" feedback OR the button is still "Copy" (clipboard unavailable)
     const copiedBtn = revealDialog.getByRole("button", { name: /Copied/ });
-    const copyStillBtn = revealDialog.getByRole("button", { name: /Copy/ });
+    const copyStillBtn = revealDialog.getByRole("button", { name: "Copy", exact: true });
     await expect(copiedBtn.or(copyStillBtn)).toBeVisible();
 
     // If clipboard worked, verify the content
@@ -199,16 +208,16 @@ test.describe("Settings - API Key Management", () => {
 
     // Create a key first
     await page.getByRole("button", { name: "Create API Key" }).click();
-    const createDialog = page.getByRole("dialog");
+    const createDialog = dialogByHeading(page, "Create API Key");
     await expect(createDialog).toBeVisible();
     await createDialog.locator('input[id="key-name"]').fill(keyName);
     await createDialog.getByRole("button", { name: "Create" }).click();
 
     // Dismiss reveal dialog
-    const revealDialog = page.getByRole("dialog");
+    const revealDialog = dialogByHeading(page, "API Key Created");
     await expect(revealDialog).toBeVisible();
     await revealDialog.getByRole("button", { name: "Done" }).click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(revealDialog).toBeHidden();
 
     // Wait for the key to appear in the table (load() runs async after dialog close)
     const row = page.locator("table tbody tr").filter({ hasText: keyName });
@@ -218,11 +227,8 @@ test.describe("Settings - API Key Management", () => {
     await row.getByRole("button").click();
 
     // Confirmation dialog should open
-    const confirmDialog = page.getByRole("dialog");
+    const confirmDialog = dialogByHeading(page, "Revoke API Key");
     await expect(confirmDialog).toBeVisible();
-    await expect(
-      confirmDialog.getByRole("heading", { name: "Revoke API Key" }),
-    ).toBeVisible();
     await expect(
       confirmDialog.getByText(
         "Are you sure you want to revoke this API key?",
@@ -239,12 +245,12 @@ test.describe("Settings - API Key Management", () => {
     await confirmDialog.getByRole("button", { name: "Revoke" }).click();
 
     // Confirmation dialog should close
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(confirmDialog).toBeHidden();
 
     // The row should be gone from the table
     await expect(
       page.locator("table tbody tr").filter({ hasText: keyName }),
-    ).not.toBeVisible();
+    ).toBeHidden();
   });
 
   test("cancel in revoke confirmation keeps the key", async ({ page }) => {
@@ -252,16 +258,16 @@ test.describe("Settings - API Key Management", () => {
 
     // Create a key first
     await page.getByRole("button", { name: "Create API Key" }).click();
-    const createDialog = page.getByRole("dialog");
+    const createDialog = dialogByHeading(page, "Create API Key");
     await expect(createDialog).toBeVisible();
     await createDialog.locator('input[id="key-name"]').fill(keyName);
     await createDialog.getByRole("button", { name: "Create" }).click();
 
     // Dismiss reveal dialog
-    const revealDialog = page.getByRole("dialog");
+    const revealDialog = dialogByHeading(page, "API Key Created");
     await expect(revealDialog).toBeVisible();
     await revealDialog.getByRole("button", { name: "Done" }).click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(revealDialog).toBeHidden();
 
     // Key should be in the table — extended timeout for CI-runner race.
     const row = page.locator("table tbody tr").filter({ hasText: keyName });
@@ -271,10 +277,10 @@ test.describe("Settings - API Key Management", () => {
     await row.getByRole("button").click();
 
     // Cancel the confirmation
-    const confirmDialog = page.getByRole("dialog");
+    const confirmDialog = dialogByHeading(page, "Revoke API Key");
     await expect(confirmDialog).toBeVisible();
     await confirmDialog.getByRole("button", { name: "Cancel" }).click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(confirmDialog).toBeHidden();
 
     // Key should still be in the table
     await expect(
@@ -286,11 +292,9 @@ test.describe("Settings - API Key Management", () => {
       .locator("table tbody tr")
       .filter({ hasText: keyName });
     await rowAgain.getByRole("button").click();
-    await page
-      .getByRole("dialog")
-      .getByRole("button", { name: "Revoke" })
-      .click();
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    const cleanupDialog = dialogByHeading(page, "Revoke API Key");
+    await cleanupDialog.getByRole("button", { name: "Revoke" }).click();
+    await expect(cleanupDialog).toBeHidden();
   });
 
   test("settings page is protected and redirects to login when unauthenticated", async ({
