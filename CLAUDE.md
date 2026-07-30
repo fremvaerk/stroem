@@ -178,6 +178,16 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Internal reference rewriting: action refs in flow steps, task refs, hook actions, connection-type input fields
 - CLI `stroem validate` skips `.`-containing names with a warning; server validates fully after resolution
 
+### Cross-Workspace References
+- A flow step's `action:` may be `owner_ws.action` — resolved live against the OWNER workspace's config at job creation. No library registration needed (unlike Libraries above).
+- **Precedence**: a dotted name resolves as a library item first (libraries are flattened into the local config at load time), then as a `workspace.item` cross-workspace reference on local miss (split on first `.`). Unqualified names stay local. Fully backward-compatible.
+- **Owner-context execution**: the action runs with the OWNER workspace's tarball (files), secrets, and connections; the caller's flow-step `input:` map still renders in the caller's context (previous outputs, caller job input). Connection-typed inputs of a cross-workspace action resolve by bare name against the owner — the caller needs no local connection/type/secret.
+- **Data model** (migration `043_job_step_action_workspace.sql`, additive/nullable): `job_step.action_workspace` (owner workspace, NULL ⇒ job's own workspace) + `job_step.action_revision` (owner's pinned revision, NULL ⇒ job's revision). Stamped at job creation from the resolved action; `action_spec`/`required_ability`/`required_tags`/`runner`/retry derive from the owner action definition.
+- **Claim-time**: `claim_job` derives the owner ws/config, threads it through `RenderContext.action_workspace` so `prepare_step_action_input` resolves the action + its connections against the owner (bare-name lookup), and returns `ClaimResponse.workspace`/`revision` pointing at the owner — the worker (unchanged) fetches the owner's tarball at the pinned revision. A step downloads exactly one workspace (its owner), never two.
+- **Open access**: any workspace may reference any other; no ACL gate. A cross-workspace connection reference resolves and exposes the owner's secret values to the caller's job — intentional, not a leak, but every workspace author can read any connection's effective values this way.
+- **Errors**: unresolvable dotted reference (no library, no such workspace, no such item) → `BadRequest` (400), never 500 — same fix applied independently to missing/misnamed local connection references.
+- **Deferred** (not yet supported): qualified connection references used outside a cross-workspace action's own inputs (e.g. `jobs.clickhouse-prod` from an arbitrary field); qualified connection-type references (`type: jobs.clickhouse`); cross-workspace `type: task` actions; cross-workspace `agent` steps still render prompt/system_prompt/MCP/task-tools against the CALLER's config, not the owner's; workspace-config validation (`validate_workflow_config_with_libraries`) is not wired into any server load/reload path for ANY action ref (pre-existing gap, not introduced by this feature) — job-creation-time resolution is the real safety net today.
+
 ### Scheduler (Cron Triggers)
 - `scheduler.rs` — background task, smart sleep (wakes at next fire time), config hot-reload, `CancellationToken`
 - `job_creator.rs` — shared job+step creation for API handler and scheduler

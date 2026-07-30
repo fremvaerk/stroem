@@ -1432,3 +1432,31 @@ Five-agent review (security-auditor, rust-engineer, database-optimizer, react-sp
 - `DockerRunner::build_container_config` mounts `/artifacts:rw` in both WithWorkspace and NoWorkspace modes.
 - `hook.artifacts` Tera iteration and field access.
 - E2E shell + Playwright happy-path coverage.
+
+## Cross-Workspace References (2026-07-30)
+
+Feature: a flow step's `action:` may be `owner_ws.action`, resolved live against the owner workspace's config at job creation, no library needed. Owner-context execution (files/secrets/connections resolve against the owner); precedence is library-first then workspace; open access (no ACL gate); 400 (not 500) on unresolvable references.
+
+- Spec: `docs/superpowers/specs/2026-07-29-cross-workspace-references-design.md`
+- Plan: `docs/superpowers/plans/2026-07-30-cross-workspace-references.md`
+- Commits: `073f9f1` (400-not-500 connection fix) .. `1a54ba1` (e2e test), migration `043_job_step_action_workspace.sql`
+- Docs: `docs/src/content/docs/guides/cross-workspace-references.md`, `CLAUDE.md` "Cross-Workspace References" subsection
+
+### Done
+- [x] `parse_qualified_ref` (stroem-common) + connection-error 500→400 fix
+- [x] `job_step.action_workspace`/`action_revision` columns (migration 043)
+- [x] Job-creation-time cross-workspace action resolution, stamps owner ws + pinned revision
+- [x] Claim-time owner-context rendering (`RenderContext.action_workspace`, bare-name lookup, owner secrets/connections) + worker fetches owner tarball (no worker code change)
+- [x] Local-library dotted-action regression from the claim-time change (bare-name strip was unconditional) — fixed, regression test added
+- [x] Validation accepts cross-workspace `workspace.item` action references (`validate_workflow_config_with_cross_workspace_resolver`)
+- [x] E2E test: `test.remote-cat` cross-workspace action reference proves owner-workspace files are used (added to `tests/e2e.sh`, NOT run locally — Docker disk exhaustion in dev env, not a code defect; **must verify in CI before merge**)
+- [x] Guide + CLAUDE.md documentation (this task)
+
+### Deferred follow-ups
+- [ ] Qualified connection references used outside a cross-workspace action's own input resolution (e.g. an explicit `jobs.clickhouse-prod` from an arbitrary field, not the connection input of a `jobs`-owned action) — `resolve_connection_inputs` still takes a single `&WorkspaceConfig`, not a resolver
+- [ ] Qualified connection-type references (`type: jobs.clickhouse` on a caller-declared input)
+- [ ] Cross-workspace `type: task` actions — `task: owner_ws.some_task` is not resolved; `handle_task_steps` (`job_creator.rs:490`) only looks up tasks locally
+- [ ] Cross-workspace `agent` steps render prompt/system_prompt/MCP/task-tools against the CALLER's workspace config, not the owner's (only script/docker/pod action bodies + their connection inputs are owner-aware)
+- [ ] Cross-workspace hook actions — `hooks.rs` has no `parse_qualified_ref` usage; hook action validation (`validate_hook_action_exists`) was deliberately left untouched to match
+- [ ] Wire workspace-config validation (`validate_workflow_config_with_libraries` / the new cross-workspace-resolver variant) into the server's actual load/reload pipeline — pre-existing gap for ANY action reference (not introduced by this feature); today job-creation-time resolution is the only real safety net, giving a precise 400 rather than a validation-time error
+- [ ] Confirm `./tests/e2e.sh` section 17 (cross-workspace action) actually passes in CI — it was written and is believed correct by construction but was never observed to run to completion locally
