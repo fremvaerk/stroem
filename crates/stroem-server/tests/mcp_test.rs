@@ -15,7 +15,6 @@ use stroem_server::config::{
     AclAction, AclConfig, AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig,
     McpConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
-use stroem_server::job_creator::create_job_for_task;
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
@@ -35,6 +34,41 @@ const AUTH_USER_EMAIL: &str = "mcp-admin@test.com";
 const AUTH_USER_PASSWORD: &str = "mcp-test-password-123";
 
 // ─── Minimal workspace for MCP tests ────────────────────────────────────────
+
+// Thin wrapper preserving the pre-Task-4 call shape (Task 4 added a leading
+// `&WorkspaceManager` for cross-workspace action resolution). Builds a one-entry
+// manager from the passed config so single-workspace tests behave identically.
+#[allow(clippy::too_many_arguments)]
+async fn create_job_for_task(
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    source_job_id: Option<Uuid>,
+    agents_config: Option<&stroem_server::config::AgentsConfig>,
+    defaults: JobDefaults,
+) -> Result<Uuid> {
+    let mgr = WorkspaceManager::from_config(workspace_name, workspace_config.clone());
+    stroem_server::job_creator::create_job_for_task(
+        &mgr,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        revision,
+        source_job_id,
+        agents_config,
+        defaults,
+    )
+    .await
+}
 
 fn mcp_test_workspace() -> WorkspaceConfig {
     let mut workspace = WorkspaceConfig::default();

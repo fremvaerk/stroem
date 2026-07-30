@@ -411,6 +411,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
     };
 
     match create_job_for_task(
+        workspaces,
         &app_state.pool,
         &config,
         &tstate.workspace,

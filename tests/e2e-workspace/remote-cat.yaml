@@ -1,0 +1,5 @@
+actions:
+  remote-cat:
+    type: script
+    runner: local
+    script: "cat data/marker.txt"

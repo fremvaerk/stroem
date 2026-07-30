@@ -85,6 +85,16 @@ pub fn render_template(template: &str, context: &serde_json::Value) -> Result<St
         .context("Failed to render template")
 }
 
+/// Split a possibly-qualified reference `workspace.item` on the FIRST `.`.
+/// Returns `(Some(workspace), item)` for a qualified name, or `(None, name)`
+/// for a local name or a degenerate form (empty workspace/item).
+pub fn parse_qualified_ref(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('.') {
+        Some((ws, item)) if !ws.is_empty() && !item.is_empty() => (Some(ws), item),
+        _ => (None, name),
+    }
+}
+
 /// Evaluate a `when` condition template against a JSON context.
 ///
 /// Returns `true` (step should run) if the rendered result is truthy:
@@ -2153,5 +2163,19 @@ mod tests {
         let source_raw = json!({"note": "previous"});
         let result = resolve_rerun_sentinels(&incoming, &source_raw, &schema).unwrap();
         assert_eq!(result, json!({"note": "••••••"}));
+    }
+
+    #[test]
+    fn test_parse_qualified_ref() {
+        assert_eq!(
+            parse_qualified_ref("jobs.recalc-agg-sessions"),
+            (Some("jobs"), "recalc-agg-sessions")
+        );
+        assert_eq!(parse_qualified_ref("score-all"), (None, "score-all"));
+        // Only the first dot splits (action names may contain dots via libraries).
+        assert_eq!(parse_qualified_ref("a.b.c"), (Some("a"), "b.c"));
+        // Degenerate forms are treated as local.
+        assert_eq!(parse_qualified_ref(".foo"), (None, ".foo"));
+        assert_eq!(parse_qualified_ref("foo."), (None, "foo."));
     }
 }

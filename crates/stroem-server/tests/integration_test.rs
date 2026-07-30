@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, ConnectionDef, FlowStep, HookDef, InputFieldDef, TaskDef, TriggerDef,
-    WorkspaceConfig,
+    ActionDef, ConnectionDef, ConnectionTypeDef, FlowStep, HookDef, InputFieldDef, TaskDef,
+    TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -19,7 +19,6 @@ use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, RetentionConfig,
     ServerConfig, WorkspaceSourceDef,
 };
-use stroem_server::job_creator::create_job_for_task;
 use stroem_server::log_storage::LogStorage;
 use stroem_server::orchestrator;
 use stroem_server::state::AppState;
@@ -33,6 +32,64 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 // ─── Test helpers ───────────────────────────────────────────────────────
+
+// Task 4 threaded a leading `&WorkspaceManager` through job creation to support
+// cross-workspace action resolution. These thin wrappers preserve the historic
+// call shape for the many single-workspace tests below: they build a one-entry
+// manager from the passed config so a dotted action name never resolves as
+// cross-workspace (identical behaviour to the pre-Task-4 lookup). Tests that
+// need genuine multi-workspace behaviour call the real function directly (see
+// `test_cross_workspace_action_stamps_owner_on_step`, which goes through HTTP).
+#[allow(clippy::too_many_arguments)]
+async fn create_job_for_task(
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    source_job_id: Option<Uuid>,
+    agents_config: Option<&stroem_server::config::AgentsConfig>,
+    defaults: JobDefaults,
+) -> Result<Uuid> {
+    let mgr = WorkspaceManager::from_config(workspace_name, workspace_config.clone());
+    stroem_server::job_creator::create_job_for_task(
+        &mgr,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        revision,
+        source_job_id,
+        agents_config,
+        defaults,
+    )
+    .await
+}
+
+async fn handle_task_steps(
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job_id: Uuid,
+    defaults: JobDefaults,
+) -> Result<()> {
+    let mgr = WorkspaceManager::from_config(workspace_name, workspace_config.clone());
+    stroem_server::job_creator::handle_task_steps(
+        &mgr,
+        pool,
+        workspace_config,
+        workspace_name,
+        job_id,
+        defaults,
+    )
+    .await
+}
 
 fn test_workspace() -> WorkspaceConfig {
     let mut workspace = WorkspaceConfig::default();
@@ -1175,6 +1232,367 @@ async fn setup() -> Result<(
     Ok((router, pool, temp_dir, container))
 }
 
+/// A trivial `type: script` / `runner: local` action with all optional fields
+/// defaulted — used by the cross-workspace resolution test.
+fn trivial_script_action(script: &str) -> ActionDef {
+    ActionDef {
+        action_type: "script".to_string(),
+        name: None,
+        description: None,
+        task: None,
+        cmd: None,
+        script: Some(script.to_string()),
+        source: None,
+        runner: Some("local".to_string()),
+        language: None,
+        dependencies: vec![],
+        interpreter: None,
+        args: vec![],
+        tags: vec![],
+        image: None,
+        command: None,
+        entrypoint: None,
+        env: None,
+        workdir: None,
+        resources: None,
+        input: HashMap::new(),
+        output: None,
+        manifest: None,
+        provider: None,
+        model: None,
+        system_prompt: None,
+        prompt: None,
+        temperature: None,
+        max_tokens: None,
+        tools: vec![],
+        max_turns: None,
+        interactive: false,
+        message: None,
+        retry: None,
+    }
+}
+
+/// Two-workspace setup for cross-workspace action resolution:
+/// - Workspace `A` has task `caller` with a single flow step `run` whose
+///   `action` is the qualified reference `"B.remote"`.
+/// - Workspace `B` owns action `remote` (a trivial local script), pinned at a
+///   known revision so the created step records `action_revision`.
+async fn setup_two_workspaces() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // Workspace B: owns action `remote`.
+    let mut ws_b = WorkspaceConfig::default();
+    ws_b.actions
+        .insert("remote".to_string(), trivial_script_action("echo hi"));
+
+    // Workspace A: task `caller` references `B.remote` from its single step.
+    let mut ws_a = WorkspaceConfig::default();
+    let mut caller_flow = HashMap::new();
+    caller_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "B.remote".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    ws_a.tasks.insert(
+        "caller".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: caller_flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    // Task `caller-bad-action`: references `B.nonexistent` — workspace B EXISTS
+    // but has no such action. Used to verify this surfaces as 400, not 500.
+    let mut caller_bad_flow = HashMap::new();
+    caller_bad_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "B.nonexistent".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    ws_a.tasks.insert(
+        "caller-bad-action".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: caller_bad_flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([
+            (
+                "A".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "B".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+        ]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let mgr = WorkspaceManager::from_configs(vec![
+        ("A".to_string(), ws_a, None),
+        ("B".to_string(), ws_b, Some("rev-b-1".to_string())),
+    ]);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
+/// Build a minimal workspace with a task ("needs-conn") whose input declares a
+/// connection-typed field defaulting to a connection name that does not exist.
+/// Used to verify that connection-resolution failures at job-creation time
+/// surface as 400 Bad Request, not 500 Internal.
+fn test_workspace_with_missing_connection() -> WorkspaceConfig {
+    let mut workspace = WorkspaceConfig::default();
+
+    // Connection type exists, but no connection of that type is defined.
+    workspace.connection_types.insert(
+        "myconntype".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::new(),
+        },
+    );
+
+    // Trivial action used by the task's single step.
+    workspace.actions.insert(
+        "noop".to_string(),
+        ActionDef {
+            action_type: "script".to_string(),
+            name: None,
+            description: None,
+            task: None,
+            cmd: None,
+            script: Some("echo noop".to_string()),
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::new(),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+
+    let mut task_input = HashMap::new();
+    task_input.insert(
+        "conn".to_string(),
+        InputFieldDef {
+            field_type: "myconntype".to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: Some(json!("does-not-exist")),
+            options: None,
+            allow_custom: false,
+            multiple: false,
+            order: None,
+        },
+    );
+
+    workspace.tasks.insert(
+        "needs-conn".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: task_input,
+            flow,
+            timeout: None,
+            retry: None,
+
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    workspace
+}
+
+/// Variant of `setup()` whose workspace contains the "needs-conn" task from
+/// `test_workspace_with_missing_connection()`.
+async fn setup_with_task_needing_missing_connection() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let workspace = test_workspace_with_missing_connection();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
 /// Register a test worker in the DB and return its UUID.
 /// Use this to satisfy foreign key constraints when calling `mark_running`.
 async fn register_test_worker(pool: &PgPool) -> Uuid {
@@ -1306,6 +1724,348 @@ async fn test_execute_task_creates_job_and_steps() -> Result<()> {
     Ok(())
 }
 
+// ─── Test 1a: Cross-workspace action stamps owner ws + revision ───────
+
+#[tokio::test]
+async fn test_cross_workspace_action_stamps_owner_on_step() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_two_workspaces().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/caller/execute",
+            json!({}),
+        ))
+        .await?;
+
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+
+    // The step is stamped with the OWNER workspace (B), its pinned revision,
+    // the bare action name, and the spec derived from B's `remote` action.
+    assert_eq!(run.action_workspace.as_deref(), Some("B"));
+    assert_eq!(run.action_revision.as_deref(), Some("rev-b-1"));
+    assert_eq!(run.action_name, "remote");
+    assert_eq!(run.action_type, "script");
+    assert_eq!(run.runner, "local");
+    let spec = run.action_spec.as_ref().unwrap();
+    assert_eq!(spec["script"], "echo hi");
+
+    Ok(())
+}
+
+// ─── Test 1a2: Claim returns the OWNER workspace + pinned revision ────
+
+#[tokio::test]
+async fn test_cross_workspace_claim_returns_owner_workspace_and_revision() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+
+    // Execute A/caller — creates a job whose `run` step is owned by B@rev-b-1.
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/caller/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let job_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    // Register a worker capable of running script steps.
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-xws", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Claim the ready step.
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    // The claim must point the worker at the OWNER (B) tarball at B's pinned
+    // revision, not the caller (A) — even though the job lives in workspace A.
+    assert_eq!(body["job_id"].as_str().unwrap(), job_id.to_string());
+    assert_eq!(body["step_name"].as_str().unwrap(), "run");
+    assert_eq!(body["workspace"].as_str().unwrap(), "B");
+    assert_eq!(body["revision"].as_str().unwrap(), "rev-b-1");
+    // Action body is B's `remote` script.
+    assert_eq!(body["action_spec"]["script"], "echo hi");
+
+    Ok(())
+}
+
+// ─── Test 1a3: LOCAL dotted library action resolves connection at claim ──
+//
+// Regression: `claim_job` used to pass `owner_config.as_deref()` (== Some(caller)
+// for a LOCAL step) as `RenderContext.action_workspace`. That made
+// `prepare_step_action_input` strip a dotted library action name to its bare form
+// (`common.pg-query` → `pg-query`), miss the action, and return the raw step input
+// WITHOUT connection resolution — the worker then received the raw connection NAME
+// (`"prod"`) instead of the resolved values object. The fix gates
+// `action_workspace` on the DB column (the true cross-workspace signal), so a LOCAL
+// step gets `None` and the FULL dotted key is used.
+async fn setup_with_library_dotted_action() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // A single workspace holding a library-flattened action stored under its
+    // DOTTED key `common.pg-query` with a connection-typed input `conn: pg`.
+    let mut workspace = WorkspaceConfig::default();
+
+    let mut lib_action = trivial_script_action("echo hi");
+    lib_action.input.insert(
+        "conn".to_string(),
+        InputFieldDef {
+            field_type: "pg".to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            multiple: false,
+            order: None,
+        },
+    );
+    workspace
+        .actions
+        .insert("common.pg-query".to_string(), lib_action);
+
+    workspace.connection_types.insert(
+        "pg".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::new(),
+        },
+    );
+    workspace.connections.insert(
+        "prod".to_string(),
+        ConnectionDef {
+            connection_type: Some("pg".to_string()),
+            values: HashMap::from([("host".to_string(), json!("db.local.internal"))]),
+        },
+    );
+
+    // Task `t`: LOCAL step `run` references the dotted action, mapping the
+    // connection input to the connection NAME `"prod"`.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "common.pg-query".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::from([("conn".to_string(), json!("prod"))]),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "t".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
+#[tokio::test]
+async fn test_local_dotted_library_action_resolves_connection_on_claim() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_library_dotted_action().await?;
+
+    // Execute the task — creates a LOCAL job (`action_workspace` column NULL).
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/t/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // Sanity: the created step is LOCAL (column NULL), stored under the dotted key.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(
+        run.action_workspace, None,
+        "local dotted-library step must have NULL action_workspace"
+    );
+    assert_eq!(run.action_name, "common.pg-query");
+
+    // Register a script-capable worker and claim the ready step.
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-lib", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    assert_eq!(body["step_name"].as_str().unwrap(), "run");
+    // The claimed input's `conn` MUST be the resolved connection VALUES object
+    // (host present), NOT the raw connection name `"prod"`. Before the fix the
+    // dotted action was missed and this stayed the string `"prod"`.
+    assert!(
+        body["input"]["conn"].is_object(),
+        "conn should be a resolved object, got: {}",
+        body["input"]["conn"]
+    );
+    assert_eq!(body["input"]["conn"]["host"], "db.local.internal");
+
+    Ok(())
+}
+
+// ─── Test 1b: Missing connection surfaces as 400, not 500 ─────────────
+
+#[tokio::test]
+async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_task_needing_missing_connection().await?;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workspaces/default/tasks/needs-conn/execute")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+// ─── Test 1c: Unknown action in a KNOWN owner workspace surfaces as 400 ───
+
+#[tokio::test]
+async fn test_execute_task_cross_workspace_unknown_action_returns_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+
+    // `caller-bad-action` references `B.nonexistent`: workspace B exists, but
+    // has no action named `nonexistent`. This must be a 400 (precise user
+    // error), not a 500 — distinct from the "no such workspace at all" case,
+    // which already returns 400 via the local-lookup "not found" fallback.
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/caller-bad-action/execute",
+            json!({}),
+        ))
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
 // ─── Test 2: Worker register and claim ────────────────────────────────
 
 #[tokio::test]
@@ -1349,6 +2109,8 @@ async fn test_worker_register_and_claim() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -1996,6 +2758,8 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -2120,6 +2884,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -2144,6 +2910,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -2168,6 +2936,8 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -3821,6 +4591,8 @@ async fn test_script_rendering_failure_fails_step_inline() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -3920,6 +4692,8 @@ async fn test_env_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4010,6 +4784,8 @@ async fn test_script_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4107,6 +4883,8 @@ async fn test_manifest_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -4198,6 +4976,8 @@ async fn test_image_rendering_failure_fails_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -5585,6 +6365,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -5609,6 +6391,8 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5725,6 +6509,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -5749,6 +6535,8 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -5883,6 +6671,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -5907,6 +6697,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -5931,6 +6723,8 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6076,6 +6870,8 @@ async fn test_failing_job_status_with_jsonl_logs() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -6231,6 +7027,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6255,6 +7053,8 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6394,6 +7194,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6418,6 +7220,8 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6536,6 +7340,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6560,6 +7366,8 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6685,6 +7493,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6709,6 +7519,8 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6833,6 +7645,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -6857,6 +7671,8 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -6992,6 +7808,8 @@ async fn test_cascading_skip() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -7016,6 +7834,8 @@ async fn test_cascading_skip() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
         NewJobStep {
             job_id,
@@ -7040,6 +7860,8 @@ async fn test_cascading_skip() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         },
     ];
     JobStepRepo::create_steps(&pool, &steps).await?;
@@ -7866,6 +8688,8 @@ async fn test_worker_claim_has_workspace_field() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
 
@@ -8730,6 +9554,8 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -8773,6 +9599,8 @@ async fn test_worker_claim_across_workspaces() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -11128,7 +11956,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
     orchestrator::on_step_completed(&pool, parent_job_id, "build", task, None).await?;
 
     // Now handle_task_steps should dispatch the cleanup step
-    stroem_server::job_creator::handle_task_steps(
+    handle_task_steps(
         &pool,
         &workspace,
         "default",
@@ -11247,6 +12075,8 @@ async fn test_task_action_not_claimed_by_worker() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     };
     JobStepRepo::create_steps(&pool, &[step]).await?;
 
@@ -12074,7 +12904,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
     .await?;
 
     // Handle task steps (creates child job)
-    stroem_server::job_creator::handle_task_steps(
+    handle_task_steps(
         &pool,
         &workspace,
         "default",
@@ -12503,6 +13333,8 @@ async fn test_get_worker_with_steps() -> Result<()> {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }];
     JobStepRepo::create_steps(&pool, &steps).await?;
     JobStepRepo::mark_running(&pool, job_id, "say-hello", worker_id).await?;
@@ -15103,6 +15935,8 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -15145,6 +15979,8 @@ async fn test_multi_workspace_worker_claims_from_correct_workspace() -> Result<(
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -21384,14 +22220,7 @@ async fn test_sub_task_inherits_defaults() -> Result<()> {
     assert_eq!(parent_job.timeout_secs, Some(90), "parent inherits default");
 
     // Trigger sub-job creation
-    stroem_server::job_creator::handle_task_steps(
-        &pool,
-        &workspace,
-        "default",
-        parent_job_id,
-        defaults,
-    )
-    .await?;
+    handle_task_steps(&pool, &workspace, "default", parent_job_id, defaults).await?;
 
     // The child job is the one whose parent_job_id matches.
     let children = JobRepo::get_child_jobs(&pool, parent_job_id).await?;

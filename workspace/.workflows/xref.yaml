@@ -1,0 +1,6 @@
+tasks:
+  xref:
+    mode: distributed
+    flow:
+      run:
+        action: test.remote-cat

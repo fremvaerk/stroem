@@ -93,6 +93,7 @@ pub async fn emit_event(
     let revision = state.workspaces.get_revision(&req.workspace);
 
     let job_id = crate::job_creator::create_job_for_task(
+        &state.workspaces,
         &state.pool,
         &workspace_config,
         &req.workspace,

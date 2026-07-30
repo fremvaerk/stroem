@@ -60,6 +60,8 @@ fn make_step(job_id: Uuid, step_name: &str, status: &str) -> NewJobStep {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }
 }
 
@@ -909,6 +911,68 @@ async fn test_skip_unreachable_steps_does_not_block_on_skipped_dep() -> Result<(
     assert_eq!(
         b.status, "pending",
         "b must remain pending — a skipped dep is not a blocking dep"
+    );
+
+    Ok(())
+}
+
+// ─── action_workspace / action_revision round-trip (migration 043) ────
+
+/// A step created with `action_workspace` / `action_revision` set (a
+/// cross-workspace action reference) round-trips both values through
+/// `create_steps` and `get_steps_for_job` unchanged.
+#[tokio::test]
+async fn test_action_workspace_and_revision_round_trip_when_set() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = make_job(&pool, "cross-workspace-owner").await?;
+    let step = NewJobStep {
+        action_workspace: Some("jobs".to_string()),
+        action_revision: Some("abc123".to_string()),
+        ..make_step(job_id, "step1", "ready")
+    };
+    JobStepRepo::create_steps(&pool, &[step]).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 1);
+    let step = &steps[0];
+
+    assert_eq!(
+        step.action_workspace.as_deref(),
+        Some("jobs"),
+        "action_workspace must survive the round-trip"
+    );
+    assert_eq!(
+        step.action_revision.as_deref(),
+        Some("abc123"),
+        "action_revision must survive the round-trip"
+    );
+
+    Ok(())
+}
+
+/// A step created without `action_workspace` / `action_revision` (the
+/// default — action belongs to the job's own workspace) round-trips both
+/// as NULL, not empty strings or some other sentinel.
+#[tokio::test]
+async fn test_action_workspace_and_revision_round_trip_when_null() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = make_job(&pool, "same-workspace-owner").await?;
+    // make_step already leaves action_workspace/action_revision as None.
+    JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps.len(), 1);
+    let step = &steps[0];
+
+    assert!(
+        step.action_workspace.is_none(),
+        "action_workspace must be NULL when not set (job's own workspace)"
+    );
+    assert!(
+        step.action_revision.is_none(),
+        "action_revision must be NULL when not set"
     );
 
     Ok(())

@@ -485,6 +485,7 @@ pub async fn execute_task(
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
     let job_id = create_job_for_task(
+        &state.workspaces,
         &state.pool,
         &workspace,
         &ws,
@@ -501,11 +502,14 @@ pub async fn execute_task(
     .map_err(|e| {
         let msg = e.to_string();
         // Surface validation errors as 400; keep infrastructure errors as 500.
-        if msg.contains("not found")
+        let is_user_error = msg.contains("not found")
+            || msg.contains("does not exist") // connection/action missing
+            || msg.contains("resolve connection") // resolve_connection_inputs context
+            || msg.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
             || msg.contains("required")
             || msg.contains("invalid")
-            || msg.contains("validation")
-        {
+            || msg.contains("validation");
+        if is_user_error {
             AppError::BadRequest(msg)
         } else {
             AppError::Internal(e)

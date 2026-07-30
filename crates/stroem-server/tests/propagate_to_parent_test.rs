@@ -273,6 +273,8 @@ fn task_step(job_id: Uuid, name: &str) -> NewJobStep {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }
 }
 
@@ -301,6 +303,8 @@ fn shell_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     }
 }
 
@@ -837,6 +841,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -867,6 +873,8 @@ async fn deep_nesting_three_levels() -> Result<()> {
             retry_backoff_secs: None,
             retry_strategy: None,
             retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
         }],
     )
     .await?;
@@ -1148,6 +1156,8 @@ async fn parent_with_mixed_steps() -> Result<()> {
                 retry_backoff_secs: None,
                 retry_strategy: None,
                 retry_jitter: false,
+                action_workspace: None,
+                action_revision: None,
             },
         ],
     )

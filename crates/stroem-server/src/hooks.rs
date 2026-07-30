@@ -150,6 +150,7 @@ pub async fn fire_hooks(
         let source_id = job.job_id.to_string();
 
         if let Err(e) = fire_single_hook(
+            &state.workspaces,
             &state.pool,
             workspace_config,
             &job.workspace,
@@ -246,6 +247,7 @@ pub async fn fire_suspended_hooks(
     let defaults = crate::config::JobDefaults::from(state.config.as_ref());
     for (i, hook) in hooks.iter().enumerate() {
         if let Err(e) = fire_single_hook(
+            &state.workspaces,
             &state.pool,
             workspace_config,
             &job.workspace,
@@ -378,6 +380,7 @@ async fn build_hook_context(
 
 #[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
+    workspaces: &crate::workspace::WorkspaceManager,
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
     workspace: &str,
@@ -425,6 +428,7 @@ async fn fire_single_hook(
             .context("type: task action missing task field")?;
 
         let job_id = crate::job_creator::create_job_for_task(
+            workspaces,
             pool,
             workspace_config,
             workspace,
@@ -496,6 +500,8 @@ async fn fire_single_hook(
         retry_backoff_secs: None,
         retry_strategy: None,
         retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
     };
 
     JobStepRepo::create_steps(pool, &[step])

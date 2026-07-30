@@ -13,6 +13,10 @@ pub const MAX_STEP_TIMEOUT_SECS: u64 = 86_400;
 /// Also the upper bound for `ServerConfig.default_job_timeout`.
 pub const MAX_JOB_TIMEOUT_SECS: u64 = 604_800;
 
+/// Resolves whether a workspace has a given action, for cross-workspace action
+/// reference validation (`owner_ws.action`). `(workspace, action) -> exists`.
+pub type CrossWorkspaceActionResolver<'a> = &'a dyn Fn(&str, &str) -> bool;
+
 /// Validates a workflow config and returns list of warnings.
 /// Errors are returned as Err.
 ///
@@ -21,18 +25,34 @@ pub const MAX_JOB_TIMEOUT_SECS: u64 = 604_800;
 /// When false (CLI validation without server context), library references
 /// are skipped with a warning.
 pub fn validate_workflow_config(config: &WorkspaceConfig) -> Result<Vec<String>> {
-    validate_workflow_config_inner(config, false)
+    validate_workflow_config_inner(config, false, None)
 }
 
 /// Validates a workflow config with full library validation.
 /// Use this after libraries have been resolved and merged into the config.
 pub fn validate_workflow_config_with_libraries(config: &WorkspaceConfig) -> Result<Vec<String>> {
-    validate_workflow_config_inner(config, true)
+    validate_workflow_config_inner(config, true, None)
+}
+
+/// Validates a workflow config with full library validation, plus resolution of
+/// cross-workspace action references (`owner_ws.action` in a flow step's `action`
+/// field).
+///
+/// `resolve_cross_workspace_action(workspace, action)` should return `true` when
+/// `workspace` exists and has an action named `action`. Intended for the server
+/// layer, which has access to all loaded workspace configs — mirrors how
+/// library-prefixed action keys are only accepted once merged into `config.actions`.
+pub fn validate_workflow_config_with_cross_workspace_resolver(
+    config: &WorkspaceConfig,
+    resolve_cross_workspace_action: CrossWorkspaceActionResolver,
+) -> Result<Vec<String>> {
+    validate_workflow_config_inner(config, true, Some(resolve_cross_workspace_action))
 }
 
 fn validate_workflow_config_inner(
     config: &WorkspaceConfig,
     libraries_resolved: bool,
+    resolve_cross_workspace_action: Option<CrossWorkspaceActionResolver>,
 ) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
@@ -107,9 +127,27 @@ fn validate_workflow_config_inner(
                     "Task '{}' step '{}' references library action '{}' - validation skipped",
                     task_name, step_name, action_ref
                 ));
-            } else {
-                // Local action (or resolved library action) - must exist in this config
-                if !config.actions.contains_key(action_ref) {
+            } else if !config.actions.contains_key(action_ref) {
+                // Not a known local/library key. It may still be a valid
+                // cross-workspace reference (`owner_ws.action`) — ask the resolver
+                // if one was provided (server layer, with access to all workspaces).
+                let (owner_ws, bare_action) = crate::template::parse_qualified_ref(action_ref);
+                let cross_workspace_ok = match (owner_ws, resolve_cross_workspace_action) {
+                    (Some(ws), Some(resolver)) => {
+                        if resolver(ws, bare_action) {
+                            true
+                        } else {
+                            bail!(
+                                "action '{}': workspace '{}' has no action '{}'",
+                                action_ref,
+                                ws,
+                                bare_action
+                            );
+                        }
+                    }
+                    _ => false,
+                };
+                if !cross_workspace_ok {
                     bail!(
                         "Task '{}' step '{}' references non-existent action '{}'",
                         task_name,
@@ -4963,6 +5001,78 @@ tasks:
             result.is_ok(),
             "Expected Ok when library task ref is present, got: {:?}",
             result.unwrap_err()
+        );
+    }
+
+    // --- cross-workspace action reference tests ---
+
+    #[test]
+    fn test_validate_with_resolver_accepts_cross_workspace_action() {
+        // Flow step references "B.remote" — not a local/library action, but the
+        // resolver confirms workspace "B" has an action named "remote".
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: B.remote
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let resolver = |ws: &str, action: &str| ws == "B" && action == "remote";
+        let result = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver);
+        assert!(
+            result.is_ok(),
+            "Expected Ok for valid cross-workspace action, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_validate_with_resolver_rejects_unknown_cross_workspace_action() {
+        // Resolver reports workspace "B" does NOT have an action named "remote".
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: B.remote
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let resolver = |_ws: &str, _action: &str| false;
+        let result = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver);
+        assert!(
+            result.is_err(),
+            "Expected Err when resolver reports no match"
+        );
+        let err = result.unwrap_err().to_string();
+        assert_eq!(
+            err, "action 'B.remote': workspace 'B' has no action 'remote'",
+            "Error message should match the precise cross-workspace format, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_with_libraries_still_rejects_dotted_action_without_resolver() {
+        // Sanity check: validate_workflow_config_with_libraries (no resolver) must
+        // keep treating an unresolved dotted action as a plain missing-action error,
+        // not silently accept it as a cross-workspace reference.
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: B.remote
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_workflow_config_with_libraries(&config);
+        assert!(
+            result.is_err(),
+            "Expected Err without a cross-workspace resolver"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("non-existent action"),
+            "Error should mention 'non-existent action', got: {err}"
         );
     }
 

@@ -47,6 +47,10 @@ export default defineConfig({
               slug: "guides/secrets",
             },
             { label: "Libraries", slug: "guides/libraries" },
+            {
+              label: "Cross-Workspace References",
+              slug: "guides/cross-workspace-references",
+            },
             { label: "Task State", slug: "guides/task-state" },
             { label: "Artifacts", slug: "guides/artifacts" },
             { label: "Event Sources", slug: "guides/event-sources" },
