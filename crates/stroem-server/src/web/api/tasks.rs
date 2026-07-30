@@ -505,6 +505,7 @@ pub async fn execute_task(
         let is_user_error = msg.contains("not found")
             || msg.contains("does not exist") // connection/action missing
             || msg.contains("resolve connection") // resolve_connection_inputs context
+            || msg.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
             || msg.contains("required")
             || msg.contains("invalid")
             || msg.contains("validation");

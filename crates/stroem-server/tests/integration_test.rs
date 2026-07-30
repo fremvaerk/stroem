@@ -1336,6 +1336,44 @@ async fn setup_two_workspaces() -> Result<(
         },
     );
 
+    // Task `caller-bad-action`: references `B.nonexistent` — workspace B EXISTS
+    // but has no such action. Used to verify this surfaces as 400, not 500.
+    let mut caller_bad_flow = HashMap::new();
+    caller_bad_flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "B.nonexistent".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    ws_a.tasks.insert(
+        "caller-bad-action".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: caller_bad_flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
     let config = ServerConfig {
         listen: "127.0.0.1:0".to_string(),
         db: DbConfig { url },
@@ -1791,6 +1829,29 @@ async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
                 .header("Content-Type", "application/json")
                 .body(Body::from("{}"))?,
         )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+// ─── Test 1c: Unknown action in a KNOWN owner workspace surfaces as 400 ───
+
+#[tokio::test]
+async fn test_execute_task_cross_workspace_unknown_action_returns_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+
+    // `caller-bad-action` references `B.nonexistent`: workspace B exists, but
+    // has no action named `nonexistent`. This must be a 400 (precise user
+    // error), not a 500 — distinct from the "no such workspace at all" case,
+    // which already returns 400 via the local-lookup "not found" fallback.
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/caller-bad-action/execute",
+            json!({}),
+        ))
         .await?;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);

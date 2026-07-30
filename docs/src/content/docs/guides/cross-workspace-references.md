@@ -108,6 +108,12 @@ tasks:
 - The `recalc` step is stamped with the owner workspace (`jobs`) and its pinned revision.
 - The worker fetches the `jobs` tarball for that step, so files like `agg_sessions_4.sql` are present, and `clickhouse-prod` resolves using `jobs`' own secrets.
 
+## Errors
+
+An unresolvable action reference — either the named workspace doesn't exist, or the workspace exists but has no action by that name (for example a typo like `jobs.recalc-agg-session`, missing the trailing `s`) — returns `400 Bad Request` with a precise message, never a `500`. The same fix applies to a missing/misnamed local connection reference.
+
+This does **not** cover the owner workspace being transiently unavailable (for example, a Git-backed workspace that failed to load on its last poll) — that's a server/load-health condition, not a caller mistake, and still surfaces as `500`.
+
 ## Not yet supported
 
 The following are deliberately out of scope for this release:
@@ -116,4 +122,4 @@ The following are deliberately out of scope for this release:
 - **Qualified connection-type references** (for example, a caller declaring an input `type: jobs.clickhouse`) are not yet supported.
 - **Cross-workspace `type: task` actions.** A `task:` action referencing another workspace's task (`task: jobs.some-task`) is not yet resolved — only flow-step `action:` references are cross-workspace-aware today.
 - **Cross-workspace agent actions.** An `agent` step that is a cross-workspace reference still renders its prompt, system prompt, and MCP/task tools against the *caller's* workspace config, not the owner's — only script/docker/pod action bodies (and their connection-typed inputs) render in the owner context.
-- **Error responses.** An unresolvable dotted reference (no such library, no such workspace, or no such item in the named workspace) returns `400 Bad Request` with a precise message, never a `500` — this applies to both action lookups and connection-input resolution.
+- **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are.

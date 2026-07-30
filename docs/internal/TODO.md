@@ -1435,7 +1435,7 @@ Five-agent review (security-auditor, rust-engineer, database-optimizer, react-sp
 
 ## Cross-Workspace References (2026-07-30)
 
-Feature: a flow step's `action:` may be `owner_ws.action`, resolved live against the owner workspace's config at job creation, no library needed. Owner-context execution (files/secrets/connections resolve against the owner); precedence is library-first then workspace; open access (no ACL gate); 400 (not 500) on unresolvable references.
+Feature: a flow step's `action:` may be `owner_ws.action`, resolved live against the owner workspace's config at job creation, no library needed. Owner-context execution (files/secrets/connections resolve against the owner); precedence is library-first then workspace; open access (no ACL gate); an unresolvable action reference — unknown workspace, or a known workspace with no such action — returns 400, not 500 (transient owner-workspace-unavailable is still 500, that's a load/health condition, not a caller error).
 
 - Spec: `docs/superpowers/specs/2026-07-29-cross-workspace-references-design.md`
 - Plan: `docs/superpowers/plans/2026-07-30-cross-workspace-references.md`
@@ -1451,6 +1451,7 @@ Feature: a flow step's `action:` may be `owner_ws.action`, resolved live against
 - [x] Validation accepts cross-workspace `workspace.item` action references (`validate_workflow_config_with_cross_workspace_resolver`)
 - [x] E2E test: `test.remote-cat` cross-workspace action reference proves owner-workspace files are used (added to `tests/e2e.sh`, NOT run locally — Docker disk exhaustion in dev env, not a code defect; **must verify in CI before merge**)
 - [x] Guide + CLAUDE.md documentation (this task)
+- [x] Doc-review fix: `web/api/tasks.rs::is_user_error` didn't match the cross-workspace "workspace has no action" error message, so a typo'd cross-workspace action reference (owner workspace exists, action doesn't) returned 500 instead of 400 — added `"has no action"` to the substring allowlist; regression test `test_execute_task_cross_workspace_unknown_action_returns_400` (RED on 500, GREEN after the fix)
 
 ### Deferred follow-ups
 - [ ] Qualified connection references used outside a cross-workspace action's own input resolution (e.g. an explicit `jobs.clickhouse-prod` from an arbitrary field, not the connection input of a `jobs`-owned action) — `resolve_connection_inputs` still takes a single `&WorkspaceConfig`, not a resolver
