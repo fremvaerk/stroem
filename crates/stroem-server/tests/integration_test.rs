@@ -1815,6 +1815,213 @@ async fn test_cross_workspace_claim_returns_owner_workspace_and_revision() -> Re
     Ok(())
 }
 
+// ─── Test 1a3: LOCAL dotted library action resolves connection at claim ──
+//
+// Regression: `claim_job` used to pass `owner_config.as_deref()` (== Some(caller)
+// for a LOCAL step) as `RenderContext.action_workspace`. That made
+// `prepare_step_action_input` strip a dotted library action name to its bare form
+// (`common.pg-query` → `pg-query`), miss the action, and return the raw step input
+// WITHOUT connection resolution — the worker then received the raw connection NAME
+// (`"prod"`) instead of the resolved values object. The fix gates
+// `action_workspace` on the DB column (the true cross-workspace signal), so a LOCAL
+// step gets `None` and the FULL dotted key is used.
+async fn setup_with_library_dotted_action() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    // A single workspace holding a library-flattened action stored under its
+    // DOTTED key `common.pg-query` with a connection-typed input `conn: pg`.
+    let mut workspace = WorkspaceConfig::default();
+
+    let mut lib_action = trivial_script_action("echo hi");
+    lib_action.input.insert(
+        "conn".to_string(),
+        InputFieldDef {
+            field_type: "pg".to_string(),
+            name: None,
+            description: None,
+            required: false,
+            secret: false,
+            default: None,
+            options: None,
+            allow_custom: false,
+            multiple: false,
+            order: None,
+        },
+    );
+    workspace
+        .actions
+        .insert("common.pg-query".to_string(), lib_action);
+
+    workspace.connection_types.insert(
+        "pg".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::new(),
+        },
+    );
+    workspace.connections.insert(
+        "prod".to_string(),
+        ConnectionDef {
+            connection_type: Some("pg".to_string()),
+            values: HashMap::from([("host".to_string(), json!("db.local.internal"))]),
+        },
+    );
+
+    // Task `t`: LOCAL step `run` references the dotted action, mapping the
+    // connection input to the connection NAME `"prod"`.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "common.pg-query".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::from([("conn".to_string(), json!("prod"))]),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "t".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
+#[tokio::test]
+async fn test_local_dotted_library_action_resolves_connection_on_claim() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_library_dotted_action().await?;
+
+    // Execute the task — creates a LOCAL job (`action_workspace` column NULL).
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/t/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // Sanity: the created step is LOCAL (column NULL), stored under the dotted key.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(
+        run.action_workspace, None,
+        "local dotted-library step must have NULL action_workspace"
+    );
+    assert_eq!(run.action_name, "common.pg-query");
+
+    // Register a script-capable worker and claim the ready step.
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-lib", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+
+    assert_eq!(body["step_name"].as_str().unwrap(), "run");
+    // The claimed input's `conn` MUST be the resolved connection VALUES object
+    // (host present), NOT the raw connection name `"prod"`. Before the fix the
+    // dotted action was missed and this stayed the string `"prod"`.
+    assert!(
+        body["input"]["conn"].is_object(),
+        "conn should be a resolved object, got: {}",
+        body["input"]["conn"]
+    );
+    assert_eq!(body["input"]["conn"]["host"], "db.local.internal");
+
+    Ok(())
+}
+
 // ─── Test 1b: Missing connection surfaces as 400, not 500 ─────────────
 
 #[tokio::test]

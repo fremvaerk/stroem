@@ -571,7 +571,17 @@ pub async fn claim_job(
             completed_steps: &completed_steps,
             state_json: state_json_value.as_ref(),
             global_state_json: global_state_json_value.as_ref(),
-            action_workspace: owner_config.as_deref(),
+            // Gate on the DB column (the TRUE cross-workspace signal), NOT on
+            // whether `owner_config` is populated. For a LOCAL step the column is
+            // NULL but `owner_config == Some(caller)`; passing that here would make
+            // `prepare_step_action_input` strip a dotted library action name to its
+            // bare form and miss it, silently skipping default-merge + connection
+            // resolution. `None` for local steps ⇒ full-key lookup (today's behaviour).
+            action_workspace: if step.action_workspace.is_some() {
+                owner_config.as_deref()
+            } else {
+                None
+            },
         };
 
         let raw_input = match rendering::render_step_input(&ctx) {
