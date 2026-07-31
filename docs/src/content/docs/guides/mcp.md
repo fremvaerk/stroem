@@ -58,7 +58,7 @@ mcp:
 
 ## Available Tools
 
-The MCP server provides eight tools for interacting with Strøm:
+The MCP server provides ten tools for interacting with Strøm:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
@@ -70,6 +70,14 @@ The MCP server provides eight tools for interacting with Strøm:
 | `get_job_logs` | Get formatted log output | `job_id`, `step?` (optional; all steps if omitted) |
 | `list_jobs` | List recent jobs with optional filters | `workspace?`, `task_name?`, `status?`, `limit?` |
 | `cancel_job` | Cancel a running or pending job | `job_id` |
+| `list_artifacts` | List a job's artifacts (name, content type, size, download URL) | `job_id` |
+| `get_artifact` | Fetch one artifact's content | `job_id`, `name` |
+
+`get_artifact` returns content shaped to the artifact's type: textual artifacts
+(text, JSON, YAML, XML) come back as inline text, `image/*` artifacts as image
+blocks the agent can view, and any other binary (PDF, archives, …) as a base64
+blob resource. Artifacts larger than 1 MiB are not inlined — download them via
+the HTTP artifact API (the URL is in `list_artifacts`) instead.
 
 ## Authentication
 

@@ -340,10 +340,10 @@ async fn get_artifact_returns_json_content() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn get_artifact_rejects_binary_content_type() -> Result<()> {
+async fn get_artifact_returns_image_as_image_block() -> Result<()> {
     let app = build_test_app().await?;
     let job_id = seed_job(&app.pool, "default", "task1").await?;
-    // PNG magic header. Tiny payload — we want the content-type check to win.
+    // PNG magic header — a real (tiny) image payload.
     let payload = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     seed_artifact(&app, job_id, "step", "logo.png", "image/png", &payload).await?;
 
@@ -356,9 +356,60 @@ async fn get_artifact_rejects_binary_content_type() -> Result<()> {
     )
     .await?;
 
+    assert!(!is_error(&resp), "expected success for image, got: {resp}");
+    let c = &resp["result"]["content"][0];
+    assert_eq!(
+        c["type"], "image",
+        "image must return an image block: {resp}"
+    );
+    assert_eq!(c["mimeType"], "image/png");
     assert!(
-        is_error(&resp),
-        "expected error for binary content_type, got: {resp}"
+        c["data"].as_str().is_some_and(|s| !s.is_empty()),
+        "image block must carry base64 data, got: {resp}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_artifact_returns_binary_as_blob_resource() -> Result<()> {
+    let app = build_test_app().await?;
+    let job_id = seed_job(&app.pool, "default", "task1").await?;
+    let payload = b"%PDF-1.4\n binary \x00\x01\x02 body";
+    seed_artifact(
+        &app,
+        job_id,
+        "step",
+        "report.pdf",
+        "application/pdf",
+        payload,
+    )
+    .await?;
+
+    let (router, session_id) = mcp_initialize(app.router.clone()).await;
+    let resp = call_tool(
+        &router,
+        session_id.as_deref(),
+        "get_artifact",
+        json!({ "job_id": job_id.to_string(), "name": "report.pdf" }),
+    )
+    .await?;
+
+    assert!(!is_error(&resp), "expected success for binary, got: {resp}");
+    let c = &resp["result"]["content"][0];
+    assert_eq!(
+        c["type"], "resource",
+        "non-image binary must return a resource block: {resp}"
+    );
+    let res = &c["resource"];
+    assert_eq!(res["mimeType"], "application/pdf");
+    assert!(
+        res["blob"].as_str().is_some_and(|s| !s.is_empty()),
+        "blob resource must carry base64 data, got: {resp}"
+    );
+    let uri = res["uri"].as_str().unwrap_or_default();
+    assert!(
+        uri.starts_with(&format!("stroem://artifacts/{job_id}/")),
+        "blob resource uri should identify the artifact, got: {uri}"
     );
     Ok(())
 }

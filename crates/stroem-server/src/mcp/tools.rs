@@ -14,9 +14,10 @@ use stroem_db::{JobRepo, JobStepRepo};
 /// context window.
 const MCP_ARTIFACT_MAX_BYTES: i64 = 1024 * 1024;
 
-/// Content-type prefixes considered "textual" for `get_artifact`. Anything else
-/// is rejected so binary blobs (images, archives, executables) cannot be smuggled
-/// into the agent's prompt.
+/// Content-type prefixes considered "textual" for `get_artifact`. Textual
+/// artifacts are returned inline as text; `image/*` types are returned as MCP
+/// image blocks; every other content-type is returned as a base64 blob
+/// resource. The `MCP_ARTIFACT_MAX_BYTES` cap bounds all of these.
 const MCP_TEXT_PREFIXES: &[&str] = &[
     "text/",
     "application/json",
@@ -209,6 +210,48 @@ fn normalize_task_input(
         ));
     }
     Ok(value)
+}
+
+/// Turn an artifact's raw bytes into the appropriate MCP content block.
+///
+/// - Textual content-types (`MCP_TEXT_PREFIXES`) → inline `text` block.
+/// - `image/*` → native `image` block (base64) the agent can render.
+/// - Anything else → base64 `resource` blob, tagged with its mime type and a
+///   stable `stroem://` uri.
+///
+/// Size is bounded upstream by `MCP_ARTIFACT_MAX_BYTES`, so base64 expansion of
+/// the returned payload stays proportional to that cap.
+fn artifact_content(content_type: &str, bytes: &[u8], uri: String) -> rmcp::model::Content {
+    use base64::Engine;
+
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+
+    if MCP_TEXT_PREFIXES.iter().any(|p| ct.starts_with(p)) {
+        return rmcp::model::Content::text(String::from_utf8_lossy(bytes).into_owned());
+    }
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    if ct.starts_with("image/") {
+        rmcp::model::Content::image(b64, ct)
+    } else {
+        let mime = if ct.is_empty() {
+            "application/octet-stream".to_string()
+        } else {
+            ct
+        };
+        rmcp::model::Content::resource(rmcp::model::ResourceContents::BlobResourceContents {
+            uri,
+            mime_type: Some(mime),
+            blob: b64,
+            meta: None,
+        })
+    }
 }
 
 /// Resolve the ACL scope for the current user and return it as a lookup set.
@@ -808,29 +851,14 @@ impl StromMcpHandler {
             .map_err(|e| internal_err(format!("get artifact: {e}")))?
             .ok_or_else(|| not_found("Artifact"))?;
 
-        // SECURITY: enforce size + content-type guards BEFORE reading the blob.
+        // SECURITY: enforce the size guard BEFORE reading the blob. Larger
+        // artifacts must be fetched out-of-band via the HTTP artifact API to
+        // avoid blowing the agent's context window (base64 inflates ~33%).
         if rec.size_bytes > MCP_ARTIFACT_MAX_BYTES {
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "artifact {} is {} bytes; MCP get_artifact caps at {}",
+                    "artifact {} is {} bytes; MCP get_artifact caps at {} — download it via the HTTP artifact API instead",
                     rec.name, rec.size_bytes, MCP_ARTIFACT_MAX_BYTES
-                ),
-                None,
-            ));
-        }
-        let ct = rec
-            .content_type
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        let is_text = MCP_TEXT_PREFIXES.iter().any(|p| ct.starts_with(p));
-        if !is_text {
-            return Err(rmcp::ErrorData::invalid_params(
-                format!(
-                    "artifact {} has content_type {}; MCP get_artifact only returns textual content",
-                    rec.name, rec.content_type
                 ),
                 None,
             ));
@@ -847,8 +875,10 @@ impl StromMcpHandler {
             .map_err(|e| internal_err(format!("blob fetch: {e:#}")))?
             .ok_or_else(|| internal_err(format!("blob missing for artifact {}", rec.name)))?;
 
-        let text = String::from_utf8_lossy(&stored.bytes).into_owned();
-        Ok(text_result(text))
+        // Text → inline text; images → image block; other binary → base64 blob.
+        let uri = format!("stroem://artifacts/{}/{}", job_id, rec.name);
+        let content = artifact_content(&rec.content_type, &stored.bytes, uri);
+        Ok(CallToolResult::success(vec![content]))
     }
 }
 
@@ -946,6 +976,73 @@ mod tests {
             "got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn test_artifact_content_text_is_inline() {
+        let c = artifact_content("text/plain", b"hello", "stroem://a".into());
+        assert_eq!(c.as_text().map(|t| t.text.as_str()), Some("hello"));
+
+        // Structured text types (with a charset param) are still inline text.
+        let c = artifact_content(
+            "application/json; charset=utf-8",
+            b"{}",
+            "stroem://a".into(),
+        );
+        assert_eq!(c.as_text().map(|t| t.text.as_str()), Some("{}"));
+    }
+
+    #[test]
+    fn test_artifact_content_image_is_image_block() {
+        use base64::Engine;
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        let c = artifact_content("image/png", bytes, "stroem://a".into());
+        let img = c.as_image().expect("should be an image block");
+        assert_eq!(img.mime_type, "image/png");
+        assert_eq!(
+            img.data,
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+    }
+
+    #[test]
+    fn test_artifact_content_binary_is_blob_resource() {
+        use base64::Engine;
+        let bytes = b"%PDF-1.4 binary\x00\x01\x02";
+        let c = artifact_content(
+            "application/pdf",
+            bytes,
+            "stroem://artifacts/j/report.pdf".into(),
+        );
+        let res = c.as_resource().expect("should be a resource block");
+        match &res.resource {
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                assert_eq!(uri, "stroem://artifacts/j/report.pdf");
+                assert_eq!(mime_type.as_deref(), Some("application/pdf"));
+                assert_eq!(
+                    blob,
+                    &base64::engine::general_purpose::STANDARD.encode(bytes)
+                );
+            }
+            other => panic!("expected blob resource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_artifact_content_unknown_type_defaults_to_octet_stream() {
+        let c = artifact_content("", b"\x00\x01", "stroem://a".into());
+        let res = c.as_resource().expect("should be a resource block");
+        match &res.resource {
+            rmcp::model::ResourceContents::BlobResourceContents { mime_type, .. } => {
+                assert_eq!(mime_type.as_deref(), Some("application/octet-stream"));
+            }
+            other => panic!("expected blob resource, got {other:?}"),
+        }
     }
 
     #[test]

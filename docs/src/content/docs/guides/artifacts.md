@@ -76,7 +76,7 @@ on_success:
         {% for a in hook.artifacts %}- <{{ a.url }}|{{ a.name }}> ({{ a.size_bytes }} B)\n{% endfor %}
 ```
 
-MCP: `list_artifacts(job_id)` and `get_artifact(job_id, name)` (text/JSON/YAML/XML up to 1 MB only — binaries should be linked via URL, not embedded in the agent's context).
+MCP: `list_artifacts(job_id)` and `get_artifact(job_id, name)`. `get_artifact` returns text/JSON/YAML/XML as inline text, `image/*` as image blocks the agent can view, and other binary (PDF, archives, …) as a base64 blob resource — all capped at 1 MiB. Larger artifacts must be fetched via the HTTP artifact URL from `list_artifacts` rather than embedded in the agent's context.
 
 ## Retention
 
