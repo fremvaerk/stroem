@@ -767,6 +767,98 @@ async fn test_mcp_execute_and_check_status() -> Result<()> {
     Ok(())
 }
 
+/// Test 3b (regression): execute_task with `input` sent as a JSON-encoded
+/// STRING (as some MCP clients do) must be parsed back into an object, not
+/// silently dropped in favour of schema defaults.
+///
+/// Reproduces the production bug where a job was created with defaults-only
+/// input because the client double-encoded `input` as a string and
+/// `merge_defaults` treated the non-object value as empty.
+#[tokio::test]
+async fn test_mcp_execute_with_stringified_input() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_mcp().await?;
+
+    let (router, session_id) = mcp_initialize(router).await;
+
+    // `input` is a JSON-encoded STRING, not an object.
+    let exec_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "execute_task",
+            "arguments": {
+                "workspace": "default",
+                "task_name": "hello-world",
+                "input": "{\"name\": \"stringy\"}"
+            }
+        }
+    });
+    let response = router
+        .clone()
+        .oneshot(mcp_request(session_id.as_deref(), exec_body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let exec_resp = body_json(response).await;
+    let content_text = exec_resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text should be a string");
+    let exec_result: Value = serde_json::from_str(content_text)?;
+    let job_id = exec_result["job_id"]
+        .as_str()
+        .expect("job_id should be present");
+    let job_uuid: Uuid = job_id.parse()?;
+
+    // The stored, resolved input must contain the user-provided `name`, proving
+    // the stringified input was parsed rather than dropped.
+    let stored_input: Value = sqlx::query_scalar("SELECT input FROM job WHERE job_id = $1")
+        .bind(job_uuid)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        stored_input["name"].as_str(),
+        Some("stringy"),
+        "stringified input should be parsed into the job input, got: {stored_input}"
+    );
+
+    Ok(())
+}
+
+/// Test 3c (regression): execute_task with a non-object `input` (e.g. a JSON
+/// array) is rejected with an error rather than silently running with defaults.
+#[tokio::test]
+async fn test_mcp_execute_with_non_object_input_errors() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_with_mcp().await?;
+
+    let (router, session_id) = mcp_initialize(router).await;
+
+    let exec_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+            "name": "execute_task",
+            "arguments": {
+                "workspace": "default",
+                "task_name": "hello-world",
+                "input": [1, 2, 3]
+            }
+        }
+    });
+    let response = router
+        .oneshot(mcp_request(session_id.as_deref(), exec_body))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp = body_json(response).await;
+    // JSON-RPC error surfaces in the `error` field (not a tool result).
+    assert!(
+        resp.get("error").is_some(),
+        "non-object input must produce a JSON-RPC error, got: {resp}"
+    );
+
+    Ok(())
+}
+
 /// Test 4: list_tasks and list_workspaces return expected results.
 #[tokio::test]
 async fn test_mcp_list_tasks_and_workspaces() -> Result<()> {

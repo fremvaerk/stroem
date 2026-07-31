@@ -169,6 +169,48 @@ fn acl_err(msg: impl Into<String>) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(msg.into(), None)
 }
 
+/// Coerce the MCP `execute_task` `input` argument into a JSON object.
+///
+/// The `input` param is schema-typed as free-form JSON, which gives clients no
+/// signal that it should be a nested object. Some MCP clients therefore send it
+/// as a JSON-*encoded string* (`"{\"k\":\"v\"}"`) rather than an object. Left as
+/// a `Value::String`, downstream `merge_defaults` (`stroem_common::template`)
+/// calls `.as_object().unwrap_or(&empty)` and silently runs the task with
+/// defaults only — the user's input vanishes with no error. Parse such strings
+/// back into JSON here, and reject anything that still isn't an object so the
+/// failure is loud instead of silent.
+fn normalize_task_input(
+    input: Option<serde_json::Value>,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let value = match input {
+        None | Some(serde_json::Value::Null) => {
+            return Ok(serde_json::Value::Object(Default::default()))
+        }
+        // Client double-encoded the object as a string — parse it back.
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(serde_json::Value::Object(Default::default()));
+            }
+            serde_json::from_str(trimmed).map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!("`input` was a string but is not valid JSON: {e}"),
+                    None,
+                )
+            })?
+        }
+        Some(other) => other,
+    };
+
+    if !value.is_object() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "`input` must be a JSON object mapping task field names to values".to_string(),
+            None,
+        ));
+    }
+    Ok(value)
+}
+
 /// Resolve the ACL scope for the current user and return it as a lookup set.
 /// Returns `None` when no filtering is needed (no auth, no ACL, or admin).
 async fn resolve_scope(
@@ -418,9 +460,7 @@ impl StromMcpHandler {
             TaskPermission::Run => {}
         }
 
-        let input = params
-            .input
-            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let input = normalize_task_input(params.input)?;
 
         let source_id = source_id_for_audit(&self.auth);
         let revision = self.state.workspaces.get_revision(&params.workspace);
@@ -865,6 +905,56 @@ mod tests {
     fn test_format_logs_empty() {
         assert_eq!(format_logs(""), "(no logs available)");
         assert_eq!(format_logs("   \n  "), "(no logs available)");
+    }
+
+    #[test]
+    fn test_normalize_task_input_object_passthrough() {
+        let obj = serde_json::json!({"name": "test", "count": 3});
+        let out = normalize_task_input(Some(obj.clone())).unwrap();
+        assert_eq!(out, obj);
+    }
+
+    #[test]
+    fn test_normalize_task_input_stringified_object_is_parsed() {
+        // The bug: clients send the object as a JSON-encoded string.
+        let stringified = serde_json::Value::String(r#"{"name": "test", "n": 3}"#.to_string());
+        let out = normalize_task_input(Some(stringified)).unwrap();
+        assert_eq!(out, serde_json::json!({"name": "test", "n": 3}));
+    }
+
+    #[test]
+    fn test_normalize_task_input_none_and_null_become_empty_object() {
+        assert_eq!(normalize_task_input(None).unwrap(), serde_json::json!({}));
+        assert_eq!(
+            normalize_task_input(Some(serde_json::Value::Null)).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn test_normalize_task_input_empty_string_becomes_empty_object() {
+        let out = normalize_task_input(Some(serde_json::Value::String("   ".to_string()))).unwrap();
+        assert_eq!(out, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_normalize_task_input_invalid_json_string_errors() {
+        let err = normalize_task_input(Some(serde_json::Value::String("not json".to_string())))
+            .unwrap_err();
+        assert!(
+            err.message.contains("not valid JSON"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_normalize_task_input_non_object_json_errors() {
+        // A bare array or number must be rejected loudly, not silently dropped.
+        assert!(normalize_task_input(Some(serde_json::json!([1, 2, 3]))).is_err());
+        assert!(normalize_task_input(Some(serde_json::json!(42))).is_err());
+        // A string that parses to a non-object JSON value is also rejected.
+        assert!(normalize_task_input(Some(serde_json::Value::String("42".to_string()))).is_err());
     }
 
     #[test]

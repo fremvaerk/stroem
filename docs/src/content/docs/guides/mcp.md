@@ -268,6 +268,11 @@ Returns:
 }
 ```
 
+`input` must be a JSON object mapping the task's field names to values. If your
+MCP client serializes it as a JSON-encoded string (some clients do), the server
+parses it back into an object automatically; anything that isn't a JSON object
+is rejected with an error rather than silently run with default values.
+
 ### 5. Monitor job status
 
 ```
