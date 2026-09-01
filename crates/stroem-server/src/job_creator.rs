@@ -1228,6 +1228,14 @@ pub fn build_step_render_context(
     if let Some(ref input) = job.input {
         ctx.insert("input".to_string(), input.clone());
     }
+    // Job metadata: always present so `when` expressions and step inputs can
+    // reference `{{ job.revision }}` without undefined-variable errors.
+    // Inserted BEFORE step outputs so a step literally named `job` shadows it
+    // (backward compatibility for workflows predating job metadata).
+    ctx.insert(
+        "job".to_string(),
+        crate::web::worker_api::rendering::job_context(job.revision.as_deref()),
+    );
     for s in steps {
         // Skip loop instance steps — only the placeholder's aggregated output
         // should be in the context (under the original step name)
@@ -1660,5 +1668,52 @@ mod tests {
 
         // The aggregated output (an array) should be accessible
         assert_eq!(ctx["process"]["output"], json!(["result1", "result2"]));
+    }
+
+    // --- build_step_render_context: job metadata ---
+
+    #[test]
+    fn test_build_step_render_context_includes_job_revision() {
+        let mut job = make_job(None);
+        job.revision = Some("abc123def".to_string());
+        let ws = WorkspaceConfig::default();
+
+        let ctx = build_step_render_context(&job, &[], &ws);
+
+        assert_eq!(ctx["job"]["revision"], json!("abc123def"));
+    }
+
+    #[test]
+    fn test_build_step_render_context_job_revision_null_when_missing() {
+        // `job` must always be present (with revision: null) so `when`
+        // expressions referencing job.revision never hit an undefined variable.
+        let job = make_job(None);
+        let ws = WorkspaceConfig::default();
+
+        let ctx = build_step_render_context(&job, &[], &ws);
+
+        let job_obj = ctx
+            .get("job")
+            .expect("`job` must always be present in the render context");
+        assert_eq!(job_obj["revision"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_build_step_render_context_step_named_job_shadows_job_metadata() {
+        // A completed step literally named `job` must keep its output —
+        // backward compatibility for workflows predating job metadata.
+        let mut job = make_job(None);
+        job.revision = Some("abc123def".to_string());
+        let steps = vec![make_step(
+            job.job_id,
+            "job",
+            "completed",
+            Some(json!({"result": "step-wins"})),
+        )];
+        let ws = WorkspaceConfig::default();
+
+        let ctx = build_step_render_context(&job, &steps, &ws);
+
+        assert_eq!(ctx["job"]["output"]["result"], json!("step-wins"));
     }
 }

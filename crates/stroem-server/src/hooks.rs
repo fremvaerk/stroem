@@ -18,6 +18,8 @@ pub struct SuspendedHookContext {
     pub message: String,
     pub source_type: String,
     pub source_id: Option<String>,
+    /// Workspace revision pinned on the job (git SHA or folder hash).
+    pub revision: Option<String>,
 }
 
 /// Context available to hook templates as `hook.*`
@@ -36,6 +38,8 @@ pub struct HookContext {
     pub duration_secs: Option<f64>,
     pub failed_steps: Vec<FailedStepInfo>,
     pub artifacts: Vec<HookArtifactMeta>,
+    /// Workspace revision pinned on the job (git SHA or folder hash).
+    pub revision: Option<String>,
 }
 
 /// Info about a single failed step, available in `hook.failed_steps`
@@ -227,6 +231,7 @@ pub async fn fire_suspended_hooks(
         message: rendered_message.to_string(),
         source_type: job.source_type.clone(),
         source_id: job.source_id.clone(),
+        revision: job.revision.clone(),
     };
 
     let ctx_value = match serde_json::to_value(&ctx) {
@@ -375,6 +380,7 @@ async fn build_hook_context(
         duration_secs,
         failed_steps,
         artifacts,
+        revision: job.revision.clone(),
     })
 }
 
@@ -583,6 +589,7 @@ mod tests {
                 continue_on_failure: false,
             }],
             artifacts: vec![],
+            revision: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -608,6 +615,7 @@ mod tests {
             duration_secs: Some(42.5),
             failed_steps: vec![],
             artifacts: vec![],
+            revision: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -621,6 +629,38 @@ mod tests {
 
         let result = render_input_map(&input, &template_context).unwrap();
         assert_eq!(result["message"], "Job abc-123 in prod completed");
+    }
+
+    #[test]
+    fn test_hook_revision_available_in_template() {
+        let ctx = HookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            status: "completed".to_string(),
+            is_success: true,
+            error_message: None,
+            source_type: "api".to_string(),
+            source_id: None,
+            started_at: None,
+            completed_at: None,
+            duration_secs: None,
+            failed_steps: vec![],
+            artifacts: vec![],
+            revision: Some("abc123def".to_string()),
+        };
+
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        let template_context = json!({ "hook": ctx_value });
+
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "message".to_string(),
+            json!("Deployed revision {{ hook.revision }}"),
+        );
+
+        let result = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(result["message"], "Deployed revision abc123def");
     }
 
     #[test]
@@ -646,6 +686,7 @@ mod tests {
                 continue_on_failure: false,
             }],
             artifacts: vec![],
+            revision: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -679,6 +720,7 @@ mod tests {
             duration_secs: None,
             failed_steps: vec![],
             artifacts: vec![],
+            revision: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -725,6 +767,7 @@ mod tests {
             duration_secs: None,
             failed_steps: vec![],
             artifacts: vec![],
+            revision: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -781,6 +824,7 @@ mod tests {
                         .to_string(),
                 },
             ],
+            revision: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -836,6 +880,7 @@ mod tests {
                 url: "/api/jobs/00000000-0000-0000-0000-000000000999/artifacts/dist.zip"
                     .to_string(),
             }],
+            revision: None,
         };
 
         let ctx_value = serde_json::to_value(&ctx).unwrap();
@@ -1163,6 +1208,7 @@ mod tests {
             message: "Please approve the deployment to production".to_string(),
             source_type: "api".to_string(),
             source_id: Some("user@example.com".to_string()),
+            revision: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
@@ -1188,10 +1234,37 @@ mod tests {
             message: String::new(),
             source_type: "trigger".to_string(),
             source_id: None,
+            revision: None,
         };
 
         let value = serde_json::to_value(&ctx).unwrap();
         assert!(value["source_id"].is_null());
+    }
+
+    #[test]
+    fn test_suspended_hook_revision_available_in_template() {
+        let ctx = SuspendedHookContext {
+            workspace: "prod".to_string(),
+            task_name: "deploy".to_string(),
+            job_id: "abc-123".to_string(),
+            step_name: "gate".to_string(),
+            message: "Approve?".to_string(),
+            source_type: "api".to_string(),
+            source_id: None,
+            revision: Some("abc123def".to_string()),
+        };
+
+        let ctx_value = serde_json::to_value(&ctx).unwrap();
+        let template_context = json!({ "hook": ctx_value });
+
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "message".to_string(),
+            json!("Awaiting approval at revision {{ hook.revision }}"),
+        );
+
+        let result = render_input_map(&input, &template_context).unwrap();
+        assert_eq!(result["message"], "Awaiting approval at revision abc123def");
     }
 
     /// Regression test for F8: a DB failure while listing artifacts must

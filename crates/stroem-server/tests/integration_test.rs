@@ -2144,6 +2144,93 @@ async fn test_worker_register_and_claim() -> Result<()> {
     Ok(())
 }
 
+// ─── Test 2b: job.revision reaches rendered action spec + image at claim ──
+// Guards the wiring in claim_job: `job.revision` must be threaded from the
+// persisted job row into `render_action_spec` / `render_image`. Would fail
+// if the claim site passed `None` (or the wrong field) for `job_revision`.
+
+#[tokio::test]
+async fn test_claim_renders_job_revision_in_action_spec_and_image() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-abc123"),
+        None, // raw_input
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "greet".to_string(),
+        action_name: "greet".to_string(),
+        action_type: "script".to_string(),
+        action_image: Some("registry/app:{{ job.revision }}".to_string()),
+        action_spec: Some(json!({"script": "echo revision {{ job.revision }}"})),
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-rev", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let worker_id = body["worker_id"].as_str().unwrap().to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert_eq!(body["job_id"].as_str().unwrap(), job_id.to_string());
+    // The revision pinned on the job must reach the rendered templates…
+    assert_eq!(
+        body["action_spec"]["script"].as_str().unwrap(),
+        "echo revision rev-abc123"
+    );
+    assert_eq!(
+        body["action_image"].as_str().unwrap(),
+        "registry/app:rev-abc123"
+    );
+    // …and the claim response itself still carries it for tarball pinning.
+    assert_eq!(body["revision"].as_str().unwrap(), "rev-abc123");
+
+    Ok(())
+}
+
 // ─── Test 3: Step output flows to next step (template rendering) ──────
 
 #[tokio::test]

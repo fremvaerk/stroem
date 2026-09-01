@@ -73,6 +73,7 @@ Maintain `docs/internal/TODO.md` as the consolidated task tracker:
 ### Tera Templating
 - Step names with hyphens (e.g., `say-hello`) are sanitized to underscores (`say_hello`) in the template context because Tera interprets hyphens as subtraction.
 - Workflow YAML must use underscored names in template references: `{{ say_hello.output.greeting }}`, not `{{ say-hello.output.greeting }}`.
+- **Job metadata**: `{{ job.revision }}` (workspace revision pinned at job creation) is available in all template contexts — step inputs, `when` conditions, action bodies (script/cmd/env/args/image/manifest), agent prompts, approval messages. Always inserted (null → renders as `""` for pre-migration jobs). Hooks get the same value as `hook.revision` (both `HookContext` and `SuspendedHookContext`). Single source: `rendering::job_context()`; server-side contexts get it via `build_step_render_context`, claim-time contexts via `RenderContext.job_revision` + the `job_revision` params on `render_action_spec`/`render_image`. `job` is inserted BEFORE completed-step outputs in every builder, so a step literally named `job` shadows the metadata (backward compat) — keep that ordering when adding context variables.
 
 ## Build & Test
 

@@ -14,6 +14,10 @@ Inside a step's `input` templates and `when` conditions, you have access to:
 | `input.*` | Job-level input (from the API call or trigger) |
 | `<step_name>.output.*` | Output from a completed upstream step |
 | `secret.*` | Resolved workspace secrets |
+| `job.revision` | Workspace revision (git SHA or folder hash) pinned on the job at creation |
+| `state.*` | Previous [task state snapshot](/guides/task-state/) |
+| `global_state.*` | Previous [global workspace state](/guides/task-state/#global-workspace-state) |
+| `each.*` | Loop variables inside [`for_each` steps](/guides/loops/) |
 
 ## Basic usage
 
@@ -61,6 +65,28 @@ tasks:
           # say-hello -> say_hello (hyphens become underscores)
           message: "{{ say_hello.output.greeting }}"
 ```
+
+## Job metadata
+
+Every job pins the workspace revision (git commit SHA for git workspaces, content hash for folder workspaces) at creation time. It is available as `{{ job.revision }}` in step inputs, `when` conditions, action bodies (`script`, `cmd`, `env`, `args`, `image`, `manifest`), agent prompts, and approval messages:
+
+```yaml
+actions:
+  deploy:
+    type: docker
+    # Deploy the image built from the exact commit this job runs at
+    image: "my-registry/app:{{ job.revision }}"
+
+  report:
+    type: script
+    script: "echo Deployed revision {{ job.revision }}"
+```
+
+The value is identical for every step of a job (sub-jobs and hook jobs inherit the parent's revision). For jobs created before revision tracking existed it renders as an empty string. In hooks, the same value is available as `hook.revision` — see [Hooks](/guides/hooks/).
+
+:::note
+A flow step literally named `job` shadows the job metadata: `{{ job.output.* }}` keeps referring to that step's output, and `{{ job.revision }}` is unavailable in that task. Avoid naming a step `job` if you want the metadata.
+:::
 
 ## Step name rules
 

@@ -24,6 +24,9 @@ pub struct RenderContext<'a> {
     /// (the action body's owner) instead of the caller `workspace`. `None` ⇒
     /// local step: resolve against `workspace` (byte-for-byte today's behaviour).
     pub action_workspace: Option<&'a WorkspaceConfig>,
+    /// Workspace revision pinned on the job at creation (git SHA or folder hash).
+    /// Available in Tera templates as `{{ job.revision }}`.
+    pub job_revision: Option<&'a str>,
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -84,6 +87,12 @@ pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value
         context.insert("global_state".to_string(), global_state_json.clone());
     }
 
+    // Job metadata: always present so `{{ job.revision }}` never hits a
+    // Tera undefined-variable error (revision is null for pre-migration jobs).
+    // Inserted BEFORE step outputs so a step literally named `job` shadows it
+    // (backward compatibility for workflows predating job metadata).
+    context.insert("job".to_string(), job_context(ctx.job_revision));
+
     // Add completed step outputs to context.
     // Step names are sanitized (hyphens → underscores) so Tera can resolve
     // dotted paths like {{ step_name.output.key }}.
@@ -112,6 +121,11 @@ pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value
     let rendered = render_input_map(&flow_step.input, &context_value)
         .context("Failed to render step input template")?;
     Ok(Some(rendered))
+}
+
+/// Build the `job` template variable: `{{ job.revision }}` etc.
+pub(crate) fn job_context(revision: Option<&str>) -> serde_json::Value {
+    serde_json::json!({ "revision": revision })
 }
 
 /// Merge action-level input defaults and prepare final input.
@@ -191,6 +205,7 @@ pub fn render_action_spec(
     loop_total: Option<i32>,
     state_json: Option<&serde_json::Value>,
     global_state_json: Option<&serde_json::Value>,
+    job_revision: Option<&str>,
 ) -> Result<Option<serde_json::Value>> {
     let original_spec = match action_spec {
         Some(s) => s,
@@ -216,6 +231,8 @@ pub fn render_action_spec(
     if let Some(global_state_val) = global_state_json {
         spec_ctx.insert("global_state".to_string(), global_state_val.clone());
     }
+    // Before step outputs: a step named `job` shadows the job metadata.
+    spec_ctx.insert("job".to_string(), job_context(job_revision));
     for (step_name, output) in completed_steps {
         let mut step_ctx = serde_json::Map::new();
         if let Some(output) = output {
@@ -321,6 +338,7 @@ pub fn render_action_spec(
 /// Render image template (e.g. `{{ input.image_tag }}`).
 ///
 /// Returns the image unchanged if it contains no template syntax.
+#[allow(clippy::too_many_arguments)]
 pub fn render_image(
     image: Option<&str>,
     rendered_input: Option<&serde_json::Value>,
@@ -329,6 +347,7 @@ pub fn render_image(
     loop_item: Option<&serde_json::Value>,
     loop_index: Option<i32>,
     loop_total: Option<i32>,
+    job_revision: Option<&str>,
 ) -> Result<Option<String>> {
     let image_str = match image {
         Some(s) => s,
@@ -343,6 +362,8 @@ pub fn render_image(
         spec_ctx.insert("input".to_string(), input_val.clone());
     }
     spec_ctx.insert("secret".to_string(), secrets.clone());
+    // Before step outputs: a step named `job` shadows the job metadata.
+    spec_ctx.insert("job".to_string(), job_context(job_revision));
     for (step_name, output) in completed_steps {
         let mut step_ctx = serde_json::Map::new();
         if let Some(output) = output {
@@ -511,6 +532,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -550,6 +572,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -591,6 +614,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -630,6 +654,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -673,6 +698,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -718,6 +744,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -759,6 +786,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap();
@@ -772,8 +800,19 @@ mod tests {
     #[test]
     fn test_render_action_spec_none_returns_none() {
         let secrets = json!({});
-        let result =
-            render_action_spec(None, None, &secrets, &[], None, None, None, None, None).unwrap();
+        let result = render_action_spec(
+            None,
+            None,
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(result.is_none());
     }
 
@@ -786,6 +825,7 @@ mod tests {
             None,
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -807,6 +847,7 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -835,6 +876,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -853,6 +895,7 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -887,6 +930,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -904,7 +948,7 @@ mod tests {
     #[test]
     fn test_render_image_none_returns_none() {
         let secrets = json!({});
-        let result = render_image(None, None, &secrets, &[], None, None, None).unwrap();
+        let result = render_image(None, None, &secrets, &[], None, None, None, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -916,6 +960,7 @@ mod tests {
             None,
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -936,6 +981,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(result, Some("my-registry/app:v1.2.3".to_string()));
@@ -950,6 +996,7 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -975,6 +1022,7 @@ mod tests {
             Some(&rendered_input),
             &secrets,
             &completed_steps,
+            None,
             None,
             None,
             None,
@@ -1006,6 +1054,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1024,6 +1073,7 @@ mod tests {
             None,
             &secrets,
             &completed_steps,
+            None,
             None,
             None,
             None,
@@ -1050,6 +1100,7 @@ mod tests {
             Some(&input),
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -1087,6 +1138,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1108,6 +1160,7 @@ mod tests {
             Some(&input),
             &secrets,
             &[],
+            None,
             None,
             None,
             None,
@@ -1145,6 +1198,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1170,6 +1224,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1210,6 +1265,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
@@ -1264,6 +1320,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
         // rendered_input only contains "sql"
         let rendered_input = Some(json!({"sql": "SELECT 1"}));
@@ -1335,6 +1392,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: Some(&owner),
+            job_revision: None,
         };
         // Rendered input mirrors the caller flow-step input.
         let rendered_input = Some(json!({"conn": "prod"}));
@@ -1412,6 +1470,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None, // LOCAL step
+            job_revision: None,
         };
         let rendered_input = Some(json!({"conn": "prod"}));
 
@@ -1573,6 +1632,7 @@ mod tests {
             Some(5),
             None,
             None,
+            None,
         )
         .unwrap()
         .unwrap();
@@ -1603,6 +1663,7 @@ mod tests {
             Some(&loop_item),
             Some(3),
             Some(10),
+            None,
             None,
             None,
         )
@@ -1656,6 +1717,7 @@ mod tests {
             state_json: Some(&state_json),
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1698,6 +1760,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1745,6 +1808,7 @@ mod tests {
             state_json: None,
             global_state_json: Some(&global_state_json),
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1786,6 +1850,7 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
@@ -1833,10 +1898,188 @@ mod tests {
             state_json: Some(&state_json),
             global_state_json: Some(&global_state_json),
             action_workspace: None,
+            job_revision: None,
         };
 
         let result = render_step_input(&ctx).unwrap().unwrap();
         assert_eq!(result["task_cursor"], "task-cursor-val");
         assert_eq!(result["global_cursor"], "global-cursor-val");
+    }
+
+    // -------------------------------------------------------------------------
+    // job.revision in template contexts
+    // -------------------------------------------------------------------------
+
+    fn make_workspace_with_step(flow_input: HashMap<String, serde_json::Value>) -> WorkspaceConfig {
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow
+            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
+        let mut workspace = WorkspaceConfig::default();
+        workspace.tasks.insert("my-task".to_string(), task);
+        workspace
+    }
+
+    #[test]
+    fn test_render_step_input_exposes_job_revision() {
+        let flow_input = HashMap::from([("rev".to_string(), json!("{{ job.revision }}"))]);
+        let workspace = make_workspace_with_step(flow_input);
+        let step = make_step_row("step1", None);
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+            action_workspace: None,
+            job_revision: Some("abc123def"),
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"rev": "abc123def"})));
+    }
+
+    #[test]
+    fn test_render_step_input_job_revision_none_renders_empty() {
+        // Jobs created before revisions existed have NULL revision — the
+        // template must still render (empty string), not error.
+        let flow_input = HashMap::from([("rev".to_string(), json!("{{ job.revision }}"))]);
+        let workspace = make_workspace_with_step(flow_input);
+        let step = make_step_row("step1", None);
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+            action_workspace: None,
+            job_revision: None,
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"rev": ""})));
+    }
+
+    #[test]
+    fn test_render_action_spec_exposes_job_revision() {
+        let spec = json!({"script": "echo building {{ job.revision }}"});
+        let secrets = json!({});
+        let result = render_action_spec(
+            Some(&spec),
+            None,
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("abc123def"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result["script"], "echo building abc123def");
+    }
+
+    #[test]
+    fn test_render_image_exposes_job_revision() {
+        let secrets = json!({});
+        let result = render_image(
+            Some("my-registry/app:{{ job.revision }}"),
+            None,
+            &secrets,
+            &[],
+            None,
+            None,
+            None,
+            Some("abc123def"),
+        )
+        .unwrap();
+
+        assert_eq!(result, Some("my-registry/app:abc123def".to_string()));
+    }
+
+    // A completed step literally named `job` must keep its output in the
+    // context — the step shadows the job metadata (backward compatibility).
+
+    #[test]
+    fn test_render_step_input_step_named_job_shadows_job_metadata() {
+        let flow_input = HashMap::from([("value".to_string(), json!("{{ job.output.result }}"))]);
+        let workspace = make_workspace_with_step(flow_input);
+        let step = make_step_row("step1", None);
+        let completed_steps = vec![("job".to_string(), Some(json!({"result": "step-wins"})))];
+        let ctx = RenderContext {
+            workspace: &workspace,
+            task_name: "my-task",
+            step: &step,
+            job_input: None,
+            completed_steps: &completed_steps,
+            state_json: None,
+            global_state_json: None,
+            action_workspace: None,
+            job_revision: Some("abc123def"),
+        };
+
+        let result = render_step_input(&ctx).unwrap();
+        assert_eq!(result, Some(json!({"value": "step-wins"})));
+    }
+
+    #[test]
+    fn test_render_action_spec_step_named_job_shadows_job_metadata() {
+        let spec = json!({"script": "echo {{ job.output.result }}"});
+        let secrets = json!({});
+        let completed_steps = vec![("job".to_string(), Some(json!({"result": "step-wins"})))];
+        let result = render_action_spec(
+            Some(&spec),
+            None,
+            &secrets,
+            &completed_steps,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("abc123def"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result["script"], "echo step-wins");
+    }
+
+    #[test]
+    fn test_render_image_step_named_job_shadows_job_metadata() {
+        let secrets = json!({});
+        let completed_steps = vec![("job".to_string(), Some(json!({"tag": "step-wins"})))];
+        let result = render_image(
+            Some("registry/app:{{ job.output.tag }}"),
+            None,
+            &secrets,
+            &completed_steps,
+            None,
+            None,
+            None,
+            Some("abc123def"),
+        )
+        .unwrap();
+
+        assert_eq!(result, Some("registry/app:step-wins".to_string()));
     }
 }

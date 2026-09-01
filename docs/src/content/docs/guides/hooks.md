@@ -46,6 +46,7 @@ Hook input values are Tera templates with access to a `hook` object containing j
 | `hook.completed_at` | string/null | ISO 8601 timestamp |
 | `hook.duration_secs` | number/null | Execution duration in seconds |
 | `hook.failed_steps` | array | Failed step details (see below) |
+| `hook.revision` | string/null | Workspace revision (git SHA or folder hash) pinned on the job |
 
 Each entry in `hook.failed_steps` contains:
 
@@ -109,17 +110,18 @@ tasks:
 
 ### Available variables
 
-`on_suspended` hooks use the same template context as `on_success` and `on_error`:
+`on_suspended` hooks get a `hook` object describing the suspended step:
 
 | Variable | Type | Description |
 |----------|------|-------------|
 | `hook.workspace` | string | Workspace name |
 | `hook.task_name` | string | Task containing the suspended step |
 | `hook.job_id` | string | UUID of the job |
-| `hook.status` | string | Always `"suspended"` |
+| `hook.step_name` | string | Name of the suspended approval step |
+| `hook.message` | string | Rendered approval message shown to approvers |
 | `hook.source_type` | string | Original job source (`"api"`, `"trigger"`, etc.) |
 | `hook.source_id` | string/null | Original job source ID |
-| `hook.started_at` | string/null | ISO 8601 timestamp |
+| `hook.revision` | string/null | Workspace revision (git SHA or folder hash) pinned on the job |
 
 ### Practical examples
 

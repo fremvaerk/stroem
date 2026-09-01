@@ -582,6 +582,7 @@ pub async fn claim_job(
             } else {
                 None
             },
+            job_revision: job.revision.as_deref(),
         };
 
         let raw_input = match rendering::render_step_input(&ctx) {
@@ -628,6 +629,7 @@ pub async fn claim_job(
         step.loop_total,
         state_json_value.as_ref(),
         global_state_json_value.as_ref(),
+        job.revision.as_deref(),
     ) {
         Ok(spec) => spec,
         Err(e) => {
@@ -645,6 +647,7 @@ pub async fn claim_job(
         step.loop_item.as_ref(),
         step.loop_index,
         step.loop_total,
+        job.revision.as_deref(),
     ) {
         Ok(img) => img,
         Err(e) => {
