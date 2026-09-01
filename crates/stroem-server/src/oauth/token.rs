@@ -431,6 +431,7 @@ async fn refresh_grant(
 ///
 /// Confidential clients: `client_secret` MUST be presented (POST body for
 /// `client_secret_post`).
+#[allow(clippy::result_large_err)] // Err is a ready axum Response; boxing would churn every caller
 async fn authenticate_client(
     state: &Arc<AppState>,
     req: &TokenRequest,
@@ -610,6 +611,7 @@ async fn issue_tokens(
 }
 
 /// Build the access-token-only response for the refresh path.
+#[allow(clippy::result_large_err)] // Err is a ready axum Response; boxing would churn every caller
 async fn mint_access_token(
     state: &Arc<AppState>,
     headers: &HeaderMap,

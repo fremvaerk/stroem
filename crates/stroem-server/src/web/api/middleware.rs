@@ -55,6 +55,7 @@ impl AuthUser {
 ///
 /// The returned prefix is the DB-stored short identifier (e.g. `"strm_a1b2c3d"`)
 /// used to attribute audit-trail `source_id` values.
+#[allow(clippy::result_large_err)] // Err is a ready axum Response; boxing would churn every caller
 pub(crate) async fn validate_api_key(
     token: &str,
     state: &Arc<AppState>,
