@@ -5341,7 +5341,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-agent"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5359,7 +5359,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-cli"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "clap",
@@ -5381,7 +5381,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-common"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5400,7 +5400,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-db"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5417,7 +5417,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-e2e"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "axum",
@@ -5440,7 +5440,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-runner"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5462,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-server"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5528,7 +5528,7 @@ dependencies = [
 
 [[package]]
 name = "stroem-worker"
-version = "0.15.27"
+version = "0.15.28"
 dependencies = [
  "anyhow",
  "async-trait",
