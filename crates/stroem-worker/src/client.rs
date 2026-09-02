@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use stroem_common::secret::Secret;
 use uuid::Uuid;
 
 /// HTTP client for communicating with the Strøm server
@@ -23,8 +24,16 @@ pub struct ClaimedStep {
     pub action_name: String,
     pub action_type: String,
     pub action_image: Option<String>,
-    pub action_spec: Option<serde_json::Value>,
-    pub input: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub action_spec: Option<Secret<serde_json::Value>>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub input: Option<Secret<serde_json::Value>>,
     pub runner: Option<String>,
     pub timeout_secs: Option<i32>,
     pub revision: Option<String>,
@@ -32,24 +41,43 @@ pub struct ClaimedStep {
     #[serde(default)]
     pub agent_provider_name: Option<String>,
     /// Rendered prompt for agent steps.
-    #[serde(default)]
-    pub agent_prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_prompt: Option<Secret<String>>,
     /// Rendered system prompt for agent steps.
-    #[serde(default)]
-    pub agent_system_prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_system_prompt: Option<Secret<String>>,
     /// MCP server definitions for agent steps with MCP tools.
-    #[serde(default)]
-    pub mcp_servers:
-        Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub mcp_servers: Option<
+        Secret<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    >,
     /// Persisted conversation state for resuming suspended agent steps.
-    #[serde(default)]
-    pub agent_state: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_state: Option<Secret<serde_json::Value>>,
     /// Task tool metadata keyed by task name.
-    #[serde(default)]
-    pub agent_tool_tasks: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_tool_tasks: Option<Secret<serde_json::Value>>,
     /// Event source configuration, present when this is an event source consumer job.
-    #[serde(default)]
-    pub event_source_config: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub event_source_config: Option<Secret<serde_json::Value>>,
     /// Storage key for the previous state snapshot (worker downloads to populate /state).
     #[serde(default)]
     pub state_storage_key: Option<String>,
@@ -75,19 +103,20 @@ struct ClaimResponse {
     pub action_name: Option<String>,
     pub action_type: Option<String>,
     pub action_image: Option<String>,
-    pub action_spec: Option<serde_json::Value>,
-    pub input: Option<serde_json::Value>,
+    pub action_spec: Option<Secret<serde_json::Value>>,
+    pub input: Option<Secret<serde_json::Value>>,
     pub runner: Option<String>,
     pub timeout_secs: Option<i32>,
     pub revision: Option<String>,
     pub agent_provider_name: Option<String>,
-    pub agent_prompt: Option<String>,
-    pub agent_system_prompt: Option<String>,
-    pub mcp_servers:
-        Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
-    pub agent_state: Option<serde_json::Value>,
-    pub agent_tool_tasks: Option<serde_json::Value>,
-    pub event_source_config: Option<serde_json::Value>,
+    pub agent_prompt: Option<Secret<String>>,
+    pub agent_system_prompt: Option<Secret<String>>,
+    pub mcp_servers: Option<
+        Secret<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    >,
+    pub agent_state: Option<Secret<serde_json::Value>>,
+    pub agent_tool_tasks: Option<Secret<serde_json::Value>>,
+    pub event_source_config: Option<Secret<serde_json::Value>>,
     pub state_storage_key: Option<String>,
     pub state_has_json: Option<bool>,
     pub global_state_storage_key: Option<String>,
@@ -891,6 +920,65 @@ mod tests {
         });
         let resp: ClaimResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.revision, Some("abc123".to_string()));
+    }
+
+    /// Security regression (prod 2026-09-02): `execute_step` is instrumented on the
+    /// full `ClaimedStep`, so anything its `Debug` prints lands in every worker log
+    /// line. Rendered secrets live in `action_spec.env`, resolved connection values
+    /// in `input`, and prompts/state/MCP definitions can embed credentials too.
+    /// `Debug` must never print any of them.
+    #[test]
+    fn test_claimed_step_debug_redacts_sensitive_fields() {
+        const SENTINEL: &str = "SUPER-SECRET-VALUE-7f3a";
+        let mut mcp = std::collections::HashMap::new();
+        mcp.insert(
+            "srv".to_string(),
+            stroem_common::models::workflow::McpServerDef {
+                transport: "stdio".to_string(),
+                auth_token: Some(SENTINEL.to_string()),
+                ..Default::default()
+            },
+        );
+        let step = ClaimedStep {
+            job_id: Uuid::new_v4(),
+            workspace: "default".to_string(),
+            task_name: "deploy".to_string(),
+            step_name: "publish".to_string(),
+            action_name: "publish".to_string(),
+            action_type: "script".to_string(),
+            action_image: None,
+            action_spec: Some(Secret::new(
+                serde_json::json!({"env": {"DB_PASSWORD": SENTINEL}}),
+            )),
+            input: Some(Secret::new(
+                serde_json::json!({"conn": {"password": SENTINEL}}),
+            )),
+            runner: Some("local".to_string()),
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: Some(Secret::new(format!("use {SENTINEL}"))),
+            agent_system_prompt: Some(Secret::new(format!("key={SENTINEL}"))),
+            mcp_servers: Some(Secret::new(mcp)),
+            agent_state: Some(Secret::new(serde_json::json!({"tool_result": SENTINEL}))),
+            agent_tool_tasks: Some(Secret::new(serde_json::json!({"t": SENTINEL}))),
+            event_source_config: Some(Secret::new(serde_json::json!({"env": {"K": SENTINEL}}))),
+            state_storage_key: None,
+            state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
+        };
+
+        let dbg = format!("{step:?}");
+        assert!(
+            !dbg.contains(SENTINEL),
+            "Debug output leaked a secret: {dbg}"
+        );
+        // Identity fields must survive so logs stay correlatable.
+        assert!(
+            dbg.contains("publish"),
+            "step identity missing from Debug: {dbg}"
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ Phase 7: AI agent actions & MCP integration.
 - **Error handling**: `anyhow::Result` everywhere. Use `.context("msg")` for error chain.
 - **Async runtime**: tokio
 - **Logging**: `tracing` crate. Use `#[tracing::instrument]` on public functions.
+- **Secrets in logs**: wrap any field that can carry a rendered secret (action specs with `env`, resolved connection inputs, agent prompts/state, MCP server defs, step output, log lines) in `stroem_common::secret::Secret<T>` (re-export of the `redact` crate). `Debug` prints `[REDACTED T]`, reads go through `.expose_secret()`, `Serialize` needs `#[serde(serialize_with = "stroem_common::secret::serialize_opt_secret")]` so the wire format is unchanged. Never put a whole request/step struct into an `#[instrument]` span — use `skip(state, req)` / `skip_all` + explicit id fields. Regression tests: `test_claimed_step_debug_redacts_sensitive_fields` (worker), `test_worker_api_structs_debug_redacts_sensitive_fields` (server).
 - **YAML parsing**: `serde_yaml` (direct parsing in tests/models), `config` crate (loading with env var overrides)
 - **Database**: sqlx with runtime queries (`sqlx::query()` / `sqlx::query_as()`), NOT compile-time macros.
 - **Tests**: Unit tests in-module (`#[cfg(test)] mod tests`). Integration tests in `tests/` dirs using `testcontainers` for Postgres.

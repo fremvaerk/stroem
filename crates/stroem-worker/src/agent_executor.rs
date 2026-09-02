@@ -150,7 +150,7 @@ pub async fn execute_agent_step(
     };
 
     // Require a rendered prompt
-    let prompt = match &step.agent_prompt {
+    let prompt = match step.agent_prompt.as_ref().map(|p| p.expose_secret()) {
         Some(p) if !p.trim().is_empty() => p.clone(),
         _ => {
             return AgentResult::Failed {
@@ -159,11 +159,14 @@ pub async fn execute_agent_step(
         }
     };
 
-    let system_prompt = step.agent_system_prompt.as_deref();
+    let system_prompt = step
+        .agent_system_prompt
+        .as_ref()
+        .map(|s| s.expose_secret().as_str());
 
     // Deserialise the action spec for agent-specific fields
     let action_spec: stroem_common::models::workflow::ActionDef = match &step.action_spec {
-        Some(spec) => match serde_json::from_value(spec.clone()) {
+        Some(spec) => match serde_json::from_value(spec.expose_secret().clone()) {
             Ok(a) => a,
             Err(e) => {
                 return AgentResult::Failed {
@@ -189,10 +192,11 @@ pub async fn execute_agent_step(
     let resume_state: Option<AgentConversationState> = step
         .agent_state
         .as_ref()
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
+        .and_then(|v| serde_json::from_value(v.expose_secret().clone()).ok());
 
     // Build task tool metadata from claim response
-    let task_tool_infos = build_task_tool_infos(step.agent_tool_tasks.as_ref());
+    let task_tool_infos =
+        build_task_tool_infos(step.agent_tool_tasks.as_ref().map(|t| t.expose_secret()));
 
     // Connect MCP clients if any MCP tool references are present.
     // The `mcp` feature on this crate forwards to stroem-agent/mcp, so
@@ -211,7 +215,11 @@ pub async fn execute_agent_step(
             .collect();
 
         if !mcp_server_names.is_empty() {
-            let mcp_servers = step.mcp_servers.as_ref().cloned().unwrap_or_default();
+            let mcp_servers = step
+                .mcp_servers
+                .as_ref()
+                .map(|m| m.expose_secret().clone())
+                .unwrap_or_default();
             match stroem_agent::mcp_client::McpClientManager::connect(
                 &mcp_servers,
                 &mcp_server_names,
@@ -437,6 +445,7 @@ mod tests {
     use super::*;
 
     fn make_test_step() -> ClaimedStep {
+        use stroem_common::secret::Secret;
         ClaimedStep {
             job_id: uuid::Uuid::new_v4(),
             workspace: "default".to_string(),
@@ -445,17 +454,17 @@ mod tests {
             action_name: "my-agent".to_string(),
             action_type: "agent".to_string(),
             action_image: None,
-            action_spec: Some(serde_json::json!({
+            action_spec: Some(Secret::new(serde_json::json!({
                 "type": "agent",
                 "provider": "anthropic",
                 "prompt": "Hello"
-            })),
+            }))),
             input: None,
             runner: None,
             timeout_secs: None,
             revision: None,
             agent_provider_name: Some("anthropic".to_string()),
-            agent_prompt: Some("Hello world".to_string()),
+            agent_prompt: Some(Secret::new("Hello world".to_string())),
             agent_system_prompt: None,
             mcp_servers: None,
             agent_state: None,
@@ -567,7 +576,7 @@ mod tests {
     async fn test_execute_agent_step_empty_prompt() {
         let client = ServerClient::new("http://localhost:1", "token", None, None);
         let mut step = make_test_step();
-        step.agent_prompt = Some("   ".to_string()); // whitespace-only is also rejected
+        step.agent_prompt = Some(stroem_common::secret::Secret::new("   ".to_string())); // whitespace-only is also rejected
         let cancel = tokio_util::sync::CancellationToken::new();
         let agents = stroem_agent::config::AgentsConfig {
             providers: make_providers(),

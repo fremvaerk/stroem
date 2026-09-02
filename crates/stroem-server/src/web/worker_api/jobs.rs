@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use stroem_common::models::job::StepStatus;
+use stroem_common::secret::{into_exposed, Secret};
 use stroem_db::{JobRepo, JobStepRepo, TaskStateRepo, WorkerRepo, WorkspaceStateRepo};
 use uuid::Uuid;
 
@@ -69,8 +70,16 @@ pub struct ClaimResponse {
     pub action_name: Option<String>,
     pub action_type: Option<String>,
     pub action_image: Option<String>,
-    pub action_spec: Option<serde_json::Value>,
-    pub input: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub action_spec: Option<Secret<serde_json::Value>>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub input: Option<Secret<serde_json::Value>>,
     pub runner: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<i32>,
@@ -86,20 +95,41 @@ pub struct ClaimResponse {
     pub agent_provider_name: Option<String>,
     /// Rendered prompt for agent steps.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_prompt: Option<Secret<String>>,
     /// Rendered system prompt for agent steps.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_system_prompt: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_system_prompt: Option<Secret<String>>,
     /// MCP server definitions from workspace config (for agent steps).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mcp_servers:
-        Option<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub mcp_servers: Option<
+        Secret<std::collections::HashMap<String, stroem_common::models::workflow::McpServerDef>>,
+    >,
     /// Saved conversation state for resuming multi-turn agents.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_state: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_state: Option<Secret<serde_json::Value>>,
     /// Task tool schemas — task name → {description, input schema}.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_tool_tasks: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub agent_tool_tasks: Option<Secret<serde_json::Value>>,
 
     // ── Event source step fields ───────────────────────────────────
     /// Present when this step belongs to an event source consumer job.
@@ -107,7 +137,11 @@ pub struct ClaimResponse {
     /// and `env`. The worker uses this to activate stdout JSON-line interception
     /// and reads env directly from `event_source_config.env`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_source_config: Option<serde_json::Value>,
+    #[serde(
+        default,
+        serialize_with = "stroem_common::secret::serialize_opt_secret"
+    )]
+    pub event_source_config: Option<Secret<serde_json::Value>>,
 
     // ── Task state fields ──────────────────────────────────────────
     /// Storage key for the most recent task state snapshot (if any).
@@ -141,7 +175,7 @@ pub struct StartStepRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CompleteStepRequest {
-    pub output: Option<serde_json::Value>,
+    pub output: Option<Secret<serde_json::Value>>,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
 }
@@ -155,7 +189,7 @@ pub struct LogLineEntry {
 
 #[derive(Debug, Deserialize)]
 pub struct AppendLogRequest {
-    pub lines: Vec<LogLineEntry>,
+    pub lines: Secret<Vec<LogLineEntry>>,
     pub step_name: Option<String>,
 }
 
@@ -169,14 +203,14 @@ struct LogEntry<'a> {
 
 #[derive(Debug, Deserialize)]
 pub struct CompleteJobRequest {
-    pub output: Option<serde_json::Value>,
+    pub output: Option<Secret<serde_json::Value>>,
 }
 
 /// POST /worker/jobs/:id/steps/:step/task-tool — Worker requests child job creation
 #[derive(Debug, Deserialize)]
 pub struct TaskToolRequest {
     pub task_name: String,
-    pub input: serde_json::Value,
+    pub input: Secret<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,14 +221,14 @@ pub struct TaskToolResponse {
 /// POST /worker/jobs/:id/steps/:step/suspend — Worker suspends step for ask_user
 #[derive(Debug, Deserialize)]
 pub struct SuspendStepRequest {
-    pub agent_state: serde_json::Value,
+    pub agent_state: Secret<serde_json::Value>,
     pub message: String,
 }
 
 /// POST /worker/jobs/:id/steps/:step/agent-state — Worker saves intermediate agent state
 #[derive(Debug, Deserialize)]
 pub struct SaveAgentStateRequest {
-    pub agent_state: serde_json::Value,
+    pub agent_state: Secret<serde_json::Value>,
 }
 
 /// The four ability tokens we recognise, in agreement with
@@ -806,8 +840,8 @@ pub async fn claim_job(
         action_name: Some(step.action_name),
         action_type: Some(step.action_type),
         action_image: rendered_image,
-        action_spec: rendered_action_spec,
-        input: rendered_input,
+        action_spec: rendered_action_spec.map(Secret::new),
+        input: rendered_input.map(Secret::new),
         runner: Some(step.runner),
         timeout_secs: step.timeout_secs,
         revision: step
@@ -815,12 +849,12 @@ pub async fn claim_job(
             .clone()
             .or_else(|| job.revision.clone()),
         agent_provider_name,
-        agent_prompt,
-        agent_system_prompt,
-        mcp_servers: mcp_servers_val,
-        agent_state: agent_state_val,
-        agent_tool_tasks,
-        event_source_config,
+        agent_prompt: agent_prompt.map(Secret::new),
+        agent_system_prompt: agent_system_prompt.map(Secret::new),
+        mcp_servers: mcp_servers_val.map(Secret::new),
+        agent_state: agent_state_val.map(Secret::new),
+        agent_tool_tasks: agent_tool_tasks.map(Secret::new),
+        event_source_config: event_source_config.map(Secret::new),
         state_storage_key,
         state_has_json,
         global_state_storage_key,
@@ -852,7 +886,7 @@ pub async fn start_step(
 }
 
 /// POST /worker/jobs/:id/steps/:step/complete - Mark step as completed
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, req))]
 pub async fn complete_step(
     State(state): State<Arc<AppState>>,
     Path((job_id, step_name)): Path<(Uuid, String)>,
@@ -869,9 +903,14 @@ pub async fn complete_step(
             .await
             .context("mark step failed")?;
     } else {
-        JobStepRepo::mark_completed(&state.pool, job_id, &step_name, req.output)
-            .await
-            .context("mark step completed")?;
+        JobStepRepo::mark_completed(
+            &state.pool,
+            job_id,
+            &step_name,
+            req.output.map(into_exposed),
+        )
+        .await
+        .context("mark step completed")?;
     }
 
     // Orchestrate: promote steps, skip unreachable, propagate to parent, fire hooks
@@ -883,7 +922,7 @@ pub async fn complete_step(
 }
 
 /// POST /worker/jobs/:id/logs - Append log chunk
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, req))]
 pub async fn append_log(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<Uuid>,
@@ -893,6 +932,7 @@ pub async fn append_log(
     let step = req.step_name.as_deref().unwrap_or("");
     let jsonl_chunk: String = req
         .lines
+        .expose_secret()
         .iter()
         .map(|entry| {
             serde_json::to_string(&LogEntry {
@@ -960,13 +1000,13 @@ pub async fn check_cancelled(
 }
 
 /// POST /worker/jobs/:id/complete - Mark job as completed (for local mode)
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, req))]
 pub async fn complete_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<Uuid>,
     Json(req): Json<CompleteJobRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    JobRepo::mark_completed(&state.pool, job_id, req.output)
+    JobRepo::mark_completed(&state.pool, job_id, req.output.map(into_exposed))
         .await
         .context("mark job completed")?;
 
@@ -980,7 +1020,7 @@ pub async fn complete_job(
 
 /// POST /worker/jobs/:id/steps/:step/task-tool
 /// Worker requests child job creation for a task tool call.
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, req))]
 pub async fn agent_task_tool(
     State(state): State<Arc<AppState>>,
     Path((job_id, step_name)): Path<(Uuid, String)>,
@@ -1026,7 +1066,7 @@ pub async fn agent_task_tool(
         &workspace,
         &job.workspace,
         &req.task_name,
-        req.input,
+        into_exposed(req.input),
         "agent_tool",
         Some(&source_id),
         job_id,
@@ -1052,16 +1092,21 @@ pub async fn agent_task_tool(
 
 /// POST /worker/jobs/:id/steps/:step/suspend
 /// Worker suspends step for ask_user.
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, req))]
 pub async fn agent_suspend_step(
     State(state): State<Arc<AppState>>,
     Path((job_id, step_name)): Path<(Uuid, String)>,
     Json(req): Json<SuspendStepRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Save agent state
-    stroem_db::JobStepRepo::update_agent_state(&state.pool, job_id, &step_name, req.agent_state)
-        .await
-        .context("save agent state")?;
+    stroem_db::JobStepRepo::update_agent_state(
+        &state.pool,
+        job_id,
+        &step_name,
+        into_exposed(req.agent_state),
+    )
+    .await
+    .context("save agent state")?;
 
     // Atomically set output and transition from running to suspended
     let output = serde_json::json!({ "approval_message": req.message });
@@ -1109,15 +1154,20 @@ pub async fn agent_suspend_step(
 
 /// POST /worker/jobs/:id/steps/:step/agent-state
 /// Worker saves intermediate agent state before releasing step.
-#[tracing::instrument(skip(state))]
+#[tracing::instrument(skip(state, req))]
 pub async fn agent_save_state(
     State(state): State<Arc<AppState>>,
     Path((job_id, step_name)): Path<(Uuid, String)>,
     Json(req): Json<SaveAgentStateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    stroem_db::JobStepRepo::update_agent_state(&state.pool, job_id, &step_name, req.agent_state)
-        .await
-        .context("save agent state")?;
+    stroem_db::JobStepRepo::update_agent_state(
+        &state.pool,
+        job_id,
+        &step_name,
+        into_exposed(req.agent_state),
+    )
+    .await
+    .context("save agent state")?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
@@ -1155,6 +1205,103 @@ fn format_ha_mirror_failure_message(failed_segments: usize, last_error: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Security regression (prod 2026-09-02): worker-API request/response structs
+    /// are recorded in `#[instrument]` spans. Anything their `Debug` prints lands in
+    /// server logs, so rendered specs, inputs, outputs, agent state and log lines
+    /// must be redacted — while the wire format (Serialize) stays unchanged.
+    #[test]
+    fn test_worker_api_structs_debug_redacts_sensitive_fields() {
+        const SENTINEL: &str = "SUPER-SECRET-VALUE-7f3a";
+        let resp = ClaimResponse {
+            workspace: Some("default".to_string()),
+            job_id: Some("abc-123".to_string()),
+            task_name: Some("deploy".to_string()),
+            step_name: Some("publish".to_string()),
+            action_name: Some("publish".to_string()),
+            action_type: Some("script".to_string()),
+            action_image: None,
+            action_spec: Some(Secret::new(
+                serde_json::json!({"env": {"DB_PASSWORD": SENTINEL}}),
+            )),
+            input: Some(Secret::new(
+                serde_json::json!({"conn": {"password": SENTINEL}}),
+            )),
+            runner: Some("local".to_string()),
+            timeout_secs: None,
+            revision: None,
+            agent_provider_name: None,
+            agent_prompt: Some(Secret::new(format!("use {SENTINEL}"))),
+            agent_system_prompt: Some(Secret::new(format!("key={SENTINEL}"))),
+            mcp_servers: None,
+            agent_state: Some(Secret::new(serde_json::json!({"tool_result": SENTINEL}))),
+            agent_tool_tasks: Some(Secret::new(serde_json::json!({"t": SENTINEL}))),
+            event_source_config: Some(Secret::new(serde_json::json!({"env": {"K": SENTINEL}}))),
+            state_storage_key: None,
+            state_has_json: None,
+            global_state_storage_key: None,
+            global_state_has_json: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(!dbg.contains(SENTINEL), "ClaimResponse Debug leaked: {dbg}");
+        assert!(dbg.contains("publish"), "identity missing: {dbg}");
+
+        // Wire format must still carry the real values to the worker.
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["action_spec"]["env"]["DB_PASSWORD"], SENTINEL);
+        assert_eq!(json["agent_prompt"], format!("use {SENTINEL}"));
+        assert_eq!(json["agent_state"]["tool_result"], SENTINEL);
+
+        let complete: CompleteStepRequest = serde_json::from_value(serde_json::json!({
+            "output": {"token": SENTINEL}, "exit_code": 0
+        }))
+        .unwrap();
+        assert!(
+            !format!("{complete:?}").contains(SENTINEL),
+            "CompleteStepRequest leaked"
+        );
+
+        let complete_job: CompleteJobRequest =
+            serde_json::from_value(serde_json::json!({"output": {"token": SENTINEL}})).unwrap();
+        assert!(
+            !format!("{complete_job:?}").contains(SENTINEL),
+            "CompleteJobRequest leaked"
+        );
+
+        let logs: AppendLogRequest = serde_json::from_value(serde_json::json!({
+            "lines": [{"ts": "t", "stream": "stdout", "line": SENTINEL}], "step_name": "publish"
+        }))
+        .unwrap();
+        assert!(
+            !format!("{logs:?}").contains(SENTINEL),
+            "AppendLogRequest leaked"
+        );
+
+        let tool: TaskToolRequest = serde_json::from_value(serde_json::json!({
+            "task_name": "t", "input": {"k": SENTINEL}
+        }))
+        .unwrap();
+        assert!(
+            !format!("{tool:?}").contains(SENTINEL),
+            "TaskToolRequest leaked"
+        );
+
+        let suspend: SuspendStepRequest = serde_json::from_value(serde_json::json!({
+            "agent_state": {"k": SENTINEL}, "message": "need input"
+        }))
+        .unwrap();
+        assert!(
+            !format!("{suspend:?}").contains(SENTINEL),
+            "SuspendStepRequest leaked"
+        );
+
+        let save: SaveAgentStateRequest =
+            serde_json::from_value(serde_json::json!({"agent_state": {"k": SENTINEL}})).unwrap();
+        assert!(
+            !format!("{save:?}").contains(SENTINEL),
+            "SaveAgentStateRequest leaked"
+        );
+    }
 
     #[test]
     fn test_claim_response_serializes_task_name() {
@@ -1475,7 +1622,7 @@ mod tests {
             mcp_servers: None,
             agent_state: None,
             agent_tool_tasks: None,
-            event_source_config: Some(config),
+            event_source_config: Some(Secret::new(config)),
             state_storage_key: None,
             state_has_json: None,
             global_state_storage_key: None,

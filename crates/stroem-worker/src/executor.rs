@@ -109,7 +109,12 @@ impl StepExecutor {
     /// artifact mount is configured. The caller owns the tempdir's lifetime so it survives the
     /// post-execution scan/upload phase.
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, client, log_buffer, cancel_token))]
+    // `skip_all`: the full `ClaimedStep` must never be a span field — its spec/input
+    // carry rendered secrets (they are `Secret`-wrapped, but keep logs lean too).
+    #[tracing::instrument(
+        skip_all,
+        fields(job_id = %step.job_id, step_name = %step.step_name, action = %step.action_name)
+    )]
     pub async fn execute_step(
         &self,
         step: &ClaimedStep,
@@ -191,7 +196,7 @@ impl StepExecutor {
         // Set up event source OUTPUT interception when configured
         let (emit_tx_opt, emit_handle_opt) = 'emit_setup: {
             let es = match step.event_source_config.as_ref() {
-                Some(es) => es,
+                Some(es) => es.expose_secret(),
                 None => break 'emit_setup (None, None),
             };
 
@@ -344,6 +349,7 @@ impl StepExecutor {
         let action_spec = step
             .action_spec
             .as_ref()
+            .map(|s| s.expose_secret())
             .context("Missing action_spec in claimed step")?;
 
         let runner_field = step.runner.as_deref().unwrap_or("local");
@@ -510,6 +516,7 @@ mod tests {
     use uuid::Uuid;
 
     fn test_step(action_spec: Option<serde_json::Value>) -> ClaimedStep {
+        use stroem_common::secret::Secret;
         ClaimedStep {
             job_id: Uuid::new_v4(),
             workspace: "default".to_string(),
@@ -518,7 +525,7 @@ mod tests {
             action_name: "test-action".to_string(),
             action_type: "script".to_string(),
             action_image: None,
-            action_spec,
+            action_spec: action_spec.map(Secret::new),
             input: None,
             runner: None,
             timeout_secs: None,

@@ -7,7 +7,9 @@ Last updated: 2026-06-03.
 
 ## Security
 
-- [ ] **Worker logs rendered secret values at INFO/WARN** — `execute_step` is `#[tracing::instrument]`ed on the full `ClaimedStep`, whose `action_spec.env` already contains rendered secrets (DB passwords, SMTP creds, API keys). Every log line inside the span carries them in plaintext (seen in prod `stroem-worker` pod logs 2026-09-02). Fix: `skip(step)` in the instrument attribute and log only `job_id`/`step_name`/`action_name` fields, or implement a redacting `Debug` for `ClaimedStep`.
+- [x] **Worker logs rendered secret values at INFO/WARN** — `execute_step` is `#[tracing::instrument]`ed on the full `ClaimedStep`, whose `action_spec.env` already contains rendered secrets (DB passwords, SMTP creds, API keys). Every log line inside the span carries them in plaintext (seen in prod `stroem-worker` pod logs 2026-09-02). Fixed: sensitive fields on `ClaimedStep`/`ClaimResponse` and the worker-API request bodies are `stroem_common::secret::Secret<T>` (`redact` crate) so `Debug` is redacted by construction; `execute_step` span is `skip_all` with id fields; server handlers `skip(state, req)`. Wire format unchanged (`serialize_opt_secret`).
+- [ ] **Config secrets are plain `String`s** — `AgentProviderConfig.api_key` (stroem-agent), `WorkerConfig.worker_token`, server `jwt_secret`/`refresh_secret`/OIDC `client_secret`/`worker_token`. Nothing `Debug`-logs the config today, but a stray `{:?}` would leak them. Wrap in `stroem_common::secret::Secret<String>` (config crate deserialize is transparent) — follow-up to the worker-log fix.
+- [ ] **Rendered secrets in Kube pod spec `env`** — the Kube runner passes rendered `env` (incl. secrets) as plain pod env vars, readable via `kubectl describe pod` by anyone with pod read access in the runner namespace. Consider projecting them through a per-step ephemeral `Secret` object (owner-ref'd to the pod) instead.
 - [x] Worker token exposed in K8s pod spec — moved to env var
 - [x] WebSocket log streaming has no auth — added AuthUser extractor
 - [x] CORS allows Any origin — restricted to configured base_url

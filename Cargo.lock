@@ -4183,6 +4183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redact"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcecefd225c2fb69914585a7a6f8878929feb316a7ecb61c07d79e361d46d8ac"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5378,6 +5387,7 @@ dependencies = [
  "chrono",
  "chrono-tz 0.10.4",
  "croner",
+ "redact",
  "serde",
  "serde_json",
  "tempfile",
