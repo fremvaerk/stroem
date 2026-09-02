@@ -216,6 +216,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Sequential: `[i+1]` promoted after `[i]` completes. Output aggregated as ordered array on placeholder.
 - `when` + `for_each`: `when` evaluated first; if falsy, step skipped without expansion
 - Empty array → skipped; non-array → fails; instance failure → placeholder fails (unless `continue_on_failure`)
+- **Placeholder resolution lives inside the orchestrator cascade**: `promote_ready_steps` / `skip_unreachable_steps` deliberately ignore `for_each` placeholders; `job_creator::expand_for_each_steps` (expand / cascade-skip / fail) is called inside the promote→skip→expand loop in `orchestrator::on_step_completed` (and the creation-time loop in `create_job_for_task_inner`), so a placeholder skipped because its upstream failed is seen by the terminal check and the job closes. Do NOT call `expand_for_each_steps` after `on_step_completed` as a separate pass — that ordering left jobs stuck `running` (2026-09-02).
 
 ### Task State Snapshots
 - Immutable state snapshots persisted across job runs per workspace+task

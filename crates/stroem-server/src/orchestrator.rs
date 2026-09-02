@@ -33,10 +33,16 @@ pub async fn on_step_completed(
     //    Loop because conditional skips may cascade and unblock further steps.
     //    Rebuild the render context each iteration so newly-skipped steps are
     //    visible to subsequent `when` condition evaluations.
-    //    Safety bound: at most (flow length + 1) iterations — each iteration
-    //    must promote or skip at least one step, so this bound can never be
-    //    reached in correct operation.
-    let max_iterations = task.flow.len() + 1;
+    //    `for_each` placeholders are deliberately ignored by both
+    //    `promote_ready_steps` and `skip_unreachable_steps`; they are resolved
+    //    (expanded, skipped, or failed) by `expand_for_each_steps`, which must
+    //    therefore run INSIDE this cascade — otherwise a placeholder skipped
+    //    because its upstream failed is never seen by the terminal check below
+    //    and the job stays `running` forever (prod job 54b3c7b8, 2026-09-02).
+    //    Mirrors the creation-time loop in `create_job_for_task_inner`.
+    //    Safety bound: each iteration must change at least one step; the bound
+    //    is generous to accommodate expansion cascades.
+    let max_iterations = task.flow.len() * 2 + 10;
     for _iteration in 0..max_iterations {
         // Rebuild render context from fresh step data each iteration
         let render_ctx = if let Some(ws_config) = workspace_config {
@@ -72,8 +78,28 @@ pub async fn on_step_completed(
             tracing::info!("Skipped unreachable steps: {:?}", skipped);
         }
 
+        // Resolve for_each placeholders whose dependencies are now terminal.
+        // Needs a workspace config (for template rendering); without one the
+        // placeholders stay pending, same as `when`-conditioned steps.
+        let expanded = match (workspace_config, job_row.as_ref()) {
+            (Some(ws_config), Some(job)) => crate::job_creator::expand_for_each_steps(
+                pool,
+                ws_config,
+                &job.workspace,
+                job_id,
+                task,
+            )
+            .await
+            .context("Failed to expand for_each steps")?,
+            _ => Vec::new(),
+        };
+
+        if !expanded.is_empty() {
+            tracing::info!("Expanded/resolved for_each steps: {:?}", expanded);
+        }
+
         // If nothing changed in this iteration, we're stable
-        if changed.is_empty() && skipped.is_empty() {
+        if changed.is_empty() && skipped.is_empty() && expanded.is_empty() {
             break;
         }
 

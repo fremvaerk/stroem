@@ -1485,3 +1485,120 @@ async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<(
 
     Ok(())
 }
+
+// ─── Regression: for_each placeholder cascade-skipped after upstream failure ──
+
+/// Build a `FlowStep` with a `for_each` expression.
+fn flow_step_for_each(depends_on: Vec<&str>, expr: &str) -> FlowStep {
+    FlowStep {
+        for_each: Some(json!(expr)),
+        ..flow_step(depends_on)
+    }
+}
+
+/// Build a `NewJobStep` placeholder with a `for_each_expr` set.
+fn step_for_each(job_id: Uuid, name: &str, status: &str, expr: &str) -> NewJobStep {
+    NewJobStep {
+        for_each_expr: Some(expr.to_string()),
+        ..step(job_id, name, status)
+    }
+}
+
+/// Prod regression (job 54b3c7b8, 2026-09-02): `sources` → `publish` →
+/// `recalc` (for_each over `publish.output`). When `sources` fails, `publish`
+/// is cascade-skipped; `recalc` is a for_each placeholder, which the plain
+/// promote/skip cascade ignores. The orchestrator must still recognise that
+/// the placeholder is unreachable, skip it, and mark the job `failed` — not
+/// leave the job `running` with every step terminal.
+#[tokio::test]
+async fn test_failed_upstream_skips_for_each_placeholder_and_fails_job() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let expr = "{{ publish.output.periods | json_encode() }}";
+    let mut flow = HashMap::new();
+    flow.insert("sources".to_string(), flow_step(vec![]));
+    flow.insert("publish".to_string(), flow_step(vec!["sources"]));
+    flow.insert(
+        "recalc".to_string(),
+        flow_step_for_each(vec!["publish"], expr),
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "sources", "ready"),
+            step(job_id, "publish", "pending"),
+            step_for_each(job_id, "recalc", "pending", expr),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_failed(&pool, job_id, "sources", "exit 1").await?;
+    on_step_completed(&pool, job_id, "sources", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["publish"], "skipped");
+    assert_eq!(
+        statuses["recalc"], "skipped",
+        "for_each placeholder with a skipped-only dependency must be cascade-skipped"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.expect("job exists");
+    assert_eq!(
+        job.status, "failed",
+        "job must be failed once every step (incl. the for_each placeholder) is terminal"
+    );
+    assert!(job.completed_at.is_some(), "completed_at must be set");
+
+    Ok(())
+}
+
+/// A step downstream of a cascade-skipped for_each placeholder must itself be
+/// cascade-skipped in the same orchestration pass (all-deps-skipped rule), so
+/// the job closes instead of waiting on a step that can never be promoted.
+#[tokio::test]
+async fn test_for_each_placeholder_skip_cascades_to_downstream_step() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let expr = "{{ b.output.items | json_encode() }}";
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step(vec!["a"]));
+    flow.insert("c".to_string(), flow_step_for_each(vec!["b"], expr));
+    flow.insert("d".to_string(), flow_step(vec!["c"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "pending"),
+            step_for_each(job_id, "c", "pending", expr),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "skipped");
+    assert_eq!(statuses["c"], "skipped");
+    assert_eq!(
+        statuses["d"], "skipped",
+        "step depending only on the skipped placeholder must be cascade-skipped"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.expect("job exists");
+    assert_eq!(job.status, "failed");
+
+    Ok(())
+}
