@@ -459,44 +459,22 @@ pub async fn get_job(
         max_retries: job.max_retries,
     };
 
-    // Redact workspace secrets and ref+ patterns from response
-    let secret_values = workspace
-        .map(|ws| collect_secret_values(&ws.secrets))
-        .unwrap_or_default();
+    // Redact secrets from EVERY loaded workspace plus values of connection
+    // properties marked `secret: true` — a cross-workspace connection's values
+    // are persisted in this job's input and provenance is not recoverable.
+    let ws_set = crate::workspace_set::WorkspaceSet::load(
+        &state.workspaces,
+        &response.workspace,
+        workspace.as_deref(),
+    )
+    .await;
+    let secret_values = crate::workspace_set::collect_redaction_values(&ws_set);
     redact_response(&mut response, &secret_values);
 
     Ok(Json(response))
 }
 
 const REDACTED: &str = "••••••";
-
-/// Collect all leaf string values from the secrets map (flattening nested objects).
-/// Filters out short values (<=3 chars) to avoid false positives.
-fn collect_secret_values(secrets: &HashMap<String, serde_json::Value>) -> Vec<String> {
-    let mut values = Vec::new();
-    for value in secrets.values() {
-        collect_strings(value, &mut values);
-    }
-    values.retain(|v| v.len() > 3);
-    values
-}
-
-fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(s) => out.push(s.clone()),
-        serde_json::Value::Object(map) => {
-            for v in map.values() {
-                collect_strings(v, out);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_strings(v, out);
-            }
-        }
-        _ => {}
-    }
-}
 
 /// Replace secret values and `ref+` references in a JSON tree with REDACTED.
 fn redact_json(value: &mut serde_json::Value, secret_values: &[String]) {
@@ -1037,28 +1015,6 @@ async fn resolve_acl_scope(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn test_collect_secret_values() {
-        let mut secrets = HashMap::new();
-        secrets.insert("password".to_string(), json!("s3cr3t-value"));
-        secrets.insert("token".to_string(), json!("tok_abc123"));
-        // Nested object
-        secrets.insert(
-            "db".to_string(),
-            json!({"host": "db.example.com", "pass": "db-pass-xyz"}),
-        );
-        // Short value should be filtered out
-        secrets.insert("pin".to_string(), json!("12"));
-
-        let values = collect_secret_values(&secrets);
-        assert!(values.contains(&"s3cr3t-value".to_string()));
-        assert!(values.contains(&"tok_abc123".to_string()));
-        assert!(values.contains(&"db.example.com".to_string()));
-        assert!(values.contains(&"db-pass-xyz".to_string()));
-        // Short value filtered
-        assert!(!values.contains(&"12".to_string()));
-    }
 
     #[test]
     fn test_redact_json_exact_match() {

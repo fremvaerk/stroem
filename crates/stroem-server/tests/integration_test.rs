@@ -1681,6 +1681,47 @@ async fn test_task_detail_lists_shared_foreign_connections_only() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn test_job_detail_redacts_foreign_connection_secrets() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+
+    // use-shared resolves owner.shared-conn at creation → job.input holds
+    // {"conn": {"host": "shared.host", "token": "owner-token-secret-value"}}
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/use-shared/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(api_request(
+            "GET",
+            &format!("/api/jobs/{job_id}"),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_json(response).await.to_string();
+    assert!(
+        !text.contains("owner-token-secret-value"),
+        "owner's secret-marked token leaked: {text}"
+    );
+    assert!(
+        text.contains("shared.host"),
+        "non-secret host must stay visible: {text}"
+    );
+    assert!(text.contains("••••••"));
+    Ok(())
+}
+
 /// Build a minimal workspace with a task ("needs-conn") whose input declares a
 /// connection-typed field defaulting to a connection name that does not exist.
 /// Used to verify that connection-resolution failures at job-creation time
