@@ -768,9 +768,35 @@ pub fn merge_action_defaults(
     action_input_schema: &HashMap<String, InputFieldDef>,
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    let empty = serde_json::Map::new();
+    let input_map = rendered_input.as_object().unwrap_or(&empty);
+
     let merged = merge_defaults(rendered_input, action_input_schema, context)
         .context("Failed to merge action input defaults")?;
-    render_value_deep(&merged, context).context("Failed to render templates in action defaults")
+    let mut merged_map = merged.as_object().cloned().unwrap_or_default();
+
+    // Only fields absent from the caller-supplied input were filled in from
+    // schema defaults above; render templates in those alone. A value the
+    // caller supplied (including a connection object an earlier resolver
+    // pass already substituted in) must never be re-rendered here — doing so
+    // against, e.g., the action owner's `secret` context would let a caller
+    // smuggle out owner secrets via a Tera string-literal trick
+    // (`'{{ "{{ secret.TOKEN }}" }}'`).
+    let mut defaults_only = serde_json::Map::new();
+    for (key, value) in merged_map.iter() {
+        if !input_map.contains_key(key) {
+            defaults_only.insert(key.clone(), value.clone());
+        }
+    }
+    let rendered_defaults = render_value_deep(&serde_json::Value::Object(defaults_only), context)
+        .context("Failed to render templates in action defaults")?;
+    if let serde_json::Value::Object(rendered_map) = rendered_defaults {
+        for (key, value) in rendered_map {
+            merged_map.insert(key, value);
+        }
+    }
+
+    Ok(serde_json::Value::Object(merged_map))
 }
 
 /// Prepare action input: merge defaults, resolve connection references, all
@@ -2029,6 +2055,34 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_caller_value_is_not_rendered_against_owner_secrets() {
+        let mut ws = three_workspaces();
+        ws.configs
+            .get_mut("jobs")
+            .unwrap()
+            .secrets
+            .insert("TOKEN".to_string(), json!("owner-secret"));
+
+        let mut schema = HashMap::new();
+        schema.insert("ch".to_string(), field("clickhouse", false, None));
+        schema.insert("note".to_string(), field("string", false, None));
+
+        let out = prepare_action_input_cross(
+            &json!({"ch": "clickhouse-prod", "note": "{{ secret.TOKEN }}"}),
+            &schema,
+            &ws,
+            "caller",
+            "jobs",
+        )
+        .unwrap();
+
+        // Caller-supplied "note" must pass through verbatim, never rendered
+        // against the owner's secrets.
+        assert_eq!(out["note"], "{{ secret.TOKEN }}");
+        assert_eq!(out["ch"]["host"], "ch.jobs.internal");
+    }
+
+    #[test]
     fn test_prepare_action_input_local_unchanged() {
         let ws = make_ws_with_connection();
         let single = SingleWorkspace {
@@ -2699,6 +2753,25 @@ mod tests {
         let context = json!({});
         let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
         assert_eq!(result, json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_merge_action_defaults_does_not_rerender_caller_values() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            "a".to_string(),
+            field("string", false, Some(json!("{{ secret.x }}"))),
+        );
+        schema.insert("b".to_string(), field("string", false, None));
+
+        let context = json!({"secret": {"x": "OWNER_SECRET", "y": "OTHER"}});
+        let rendered_input = json!({"b": "{{ secret.y }}"});
+        let result = merge_action_defaults(&rendered_input, &schema, &context).unwrap();
+
+        // "a" was filled from the schema default → rendered.
+        assert_eq!(result["a"], "OWNER_SECRET");
+        // "b" was caller-supplied → passed through verbatim, NOT re-rendered.
+        assert_eq!(result["b"], "{{ secret.y }}");
     }
 
     #[test]
