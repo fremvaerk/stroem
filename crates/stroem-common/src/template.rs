@@ -640,12 +640,19 @@ pub fn resolve_connection_inputs_scoped(
                         .get(&conn_ct.name)
                         .with_context(|| format!("connection type '{}' vanished", conn_ct))?;
                     let with_defaults = resolved.def.values_with_type_defaults(type_def);
-                    crate::validation::check_connection_values(
+                    let warnings = crate::validation::check_connection_values(
                         &format!("{}.{}", resolved.workspace, resolved.name),
                         &with_defaults,
                         &conn_ct.to_string(),
                         type_def,
                     )?;
+                    for w in warnings {
+                        tracing::warn!(
+                            connection = %format!("{}.{}", resolved.workspace, resolved.name),
+                            "{}",
+                            w
+                        );
+                    }
                     with_defaults
                 } else {
                     resolved.def.values.clone()
@@ -755,7 +762,9 @@ pub fn render_value_deep(
 /// Merge action-level input defaults into already-rendered step input.
 ///
 /// 1. Calls `merge_defaults()` to fill missing fields from the action's input schema
-/// 2. Calls `render_value_deep()` on the result to render templates inside object/array defaults
+/// 2. Calls `render_value_deep()` ONLY on the fields that step 1 filled in from
+///    defaults (a field already present in `rendered_input` is never touched
+///    again, no matter what `merge_defaults()` returns for it)
 ///
 /// This handles the case where an action defines a default like:
 /// ```yaml
@@ -766,8 +775,19 @@ pub fn render_value_deep(
 ///       host: "{{ secret.clickhouse.host }}"
 ///       port: 8443
 /// ```
-/// The object default is inserted by `merge_defaults()` as-is, then `render_value_deep()`
-/// walks it to render the `{{ secret.clickhouse.host }}` template.
+/// The object default is inserted by `merge_defaults()` as-is, then
+/// `render_value_deep()` walks it to render the `{{ secret.clickhouse.host }}`
+/// template.
+///
+/// Values already present in `rendered_input` are deliberately excluded from
+/// that second pass and passed through byte-for-byte: they were rendered once
+/// already, in the caller's own context. Re-rendering them here — against
+/// this call's context, which for a cross-workspace action is the *owner's*
+/// `secret` map — would let a caller smuggle out the owner's secrets with a
+/// Tera string-literal trick (a value like `'{{ "{{ secret.TOKEN }}" }}'`
+/// renders to a literal `{{ secret.TOKEN }}` on the first, caller-side pass,
+/// then would render again to the real secret value if this function
+/// re-rendered already-resolved fields).
 pub fn merge_action_defaults(
     rendered_input: &serde_json::Value,
     action_input_schema: &HashMap<String, InputFieldDef>,
