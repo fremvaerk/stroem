@@ -717,13 +717,21 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
                 )?);
                 continue;
             }
-            bail!(
-                "Connection '{}' references non-existent connection type '{}'",
-                conn_name,
-                type_name
-            );
+            if type_name.contains('.') {
+                warnings.push(format!(
+                    "Connection '{}': type '{}' is a cross-workspace reference; validated at job creation",
+                    conn_name, type_name
+                ));
+                // Still reject empty strings below.
+            } else {
+                bail!(
+                    "Connection '{}' references non-existent connection type '{}'",
+                    conn_name,
+                    type_name
+                );
+            }
         }
-        // Untyped: still reject empty strings.
+        // Untyped, or typed-but-unresolved (cross-workspace): still reject empty strings.
         for (key, value) in &conn.values {
             if let Some(s) = value.as_str() {
                 if s.is_empty() {
@@ -860,21 +868,32 @@ fn check_input_field_options(
 /// For each task input where `field_type` is not a primitive type (string/integer/number/boolean),
 /// it's treated as a connection type reference and must exist in `connection_types`.
 fn validate_connection_inputs(config: &WorkspaceConfig) -> Result<Vec<String>> {
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
     let primitives = [
         "string", "text", "integer", "number", "boolean", "date", "datetime",
     ];
 
-    let check = |scope: &str,
-                 owner: &str,
-                 field_name: &str,
-                 field_def: &crate::models::workflow::InputFieldDef|
-     -> Result<()> {
+    fn check(
+        config: &WorkspaceConfig,
+        warnings: &mut Vec<String>,
+        primitives: &[&str],
+        scope: &str,
+        owner: &str,
+        field_name: &str,
+        field_def: &crate::models::workflow::InputFieldDef,
+    ) -> Result<()> {
         if primitives.contains(&field_def.field_type.as_str()) {
             return Ok(());
         }
         // Non-primitive type — must be a connection type reference
         if !config.connection_types.contains_key(&field_def.field_type) {
+            if field_def.field_type.contains('.') {
+                warnings.push(format!(
+                    "{} '{}' input '{}': type '{}' is a cross-workspace reference; validated at job creation",
+                    scope, owner, field_name, field_def.field_type
+                ));
+                return Ok(());
+            }
             bail!(
                 "{} '{}' input '{}' references unknown type '{}' (not a primitive or connection type)",
                 scope, owner, field_name, field_def.field_type
@@ -890,17 +909,33 @@ fn validate_connection_inputs(config: &WorkspaceConfig) -> Result<Vec<String>> {
             );
         }
         Ok(())
-    };
+    }
 
     for (action_name, action) in &config.actions {
         for (field_name, field_def) in &action.input {
-            check("Action", action_name, field_name, field_def)?;
+            check(
+                config,
+                &mut warnings,
+                &primitives,
+                "Action",
+                action_name,
+                field_name,
+                field_def,
+            )?;
         }
     }
 
     for (task_name, task) in &config.tasks {
         for (field_name, field_def) in &task.input {
-            check("Task", task_name, field_name, field_def)?;
+            check(
+                config,
+                &mut warnings,
+                &primitives,
+                "Task",
+                task_name,
+                field_name,
+                field_def,
+            )?;
         }
     }
 
@@ -7415,5 +7450,94 @@ triggers:
         let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
         let result = validate_workflow_config(&config);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_dotted_input_type_is_warning_not_error() {
+        let yaml = r#"
+tasks:
+  t:
+    input:
+      ch: { type: jobs.clickhouse }
+    flow:
+      s:
+        action: a
+actions:
+  a:
+    type: script
+    script: echo hi
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("jobs.clickhouse") && w.contains("cross-workspace")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_dotted_connection_type_is_warning_not_error() {
+        let yaml = r#"
+connections:
+  ch-eu:
+    type: jobs.clickhouse
+    shared: true
+    host: ch.eu
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("ch-eu") && w.contains("cross-workspace")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_literal_library_type_key_is_not_warned() {
+        let yaml = r#"
+connection_types:
+  common.pg:
+    host: { type: string }
+tasks:
+  t:
+    input:
+      db: { type: common.pg }
+    flow:
+      s:
+        action: a
+actions:
+  a:
+    type: script
+    script: echo hi
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.contains("cross-workspace")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_bare_unknown_type_is_still_an_error() {
+        let yaml = r#"
+tasks:
+  t:
+    input:
+      ch: { type: clickhouse }
+    flow:
+      s:
+        action: a
+actions:
+  a:
+    type: script
+    script: echo hi
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(validate_workflow_config(&config).is_err());
     }
 }
