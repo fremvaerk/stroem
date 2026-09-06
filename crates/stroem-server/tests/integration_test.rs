@@ -1295,8 +1295,27 @@ async fn setup_two_workspaces() -> Result<(
 
     // Workspace B: owns action `remote`.
     let mut ws_b = WorkspaceConfig::default();
-    ws_b.actions
-        .insert("remote".to_string(), trivial_script_action("echo hi"));
+    ws_b.connection_types.insert(
+        "pg".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::new(),
+        },
+    );
+    ws_b.connections.insert(
+        "prod".to_string(),
+        ConnectionDef {
+            connection_type: Some("pg".to_string()),
+            shared: false,
+            values: HashMap::from([("host".to_string(), json!("db.owner.internal"))]),
+        },
+    );
+    let mut remote_def = trivial_script_action("echo hi");
+    remote_def.input.insert("conn".to_string(), {
+        let mut f: InputFieldDef = serde_yaml::from_str("type: pg").unwrap();
+        f.default = Some(json!("prod"));
+        f
+    });
+    ws_b.actions.insert("remote".to_string(), remote_def);
 
     // Workspace A: task `caller` references `B.remote` from its single step.
     let mut ws_a = WorkspaceConfig::default();
@@ -1659,6 +1678,237 @@ async fn setup_shared_connections() -> Result<(
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
     Ok((router, pool, temp_dir, container))
+}
+
+#[tokio::test]
+async fn test_execute_with_shared_foreign_connection_resolves_values() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/use-shared/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    let job = stroem_db::JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.input.unwrap()["conn"]["host"], "shared.host");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_with_unshared_foreign_connection_is_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/use-private/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_json(response).await.to_string();
+    assert!(text.contains("is not shared"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_with_two_hop_connection_declaring_foreign_type() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/use-infra/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    let job = stroem_db::JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.input.unwrap()["conn"]["host"], "eu.host");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_local_type_with_foreign_connection_is_400_mismatch() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/bad-type/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_json(response).await.to_string();
+    assert!(text.contains("expects type 'caller.clickhouse'"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_execute_unknown_workspace_prefix_is_400() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/use-shared/execute",
+            json!({"input": {"conn": "nope.thing"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_json(response).await.to_string();
+    assert!(text.contains("unknown workspace"), "{text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_literal_flow_step_ref_to_unshared_connection_is_400_at_creation() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/literal-bad/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_templated_flow_step_ref_fails_step_at_claim_not_creation() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    // Creation succeeds: the value is a template.
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/templated/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // Register a worker and claim — the claim endpoint fails the step in place
+    // (`fail_claimed_step`) and answers 422 Unprocessable Entity: the step was
+    // claimed successfully but its input could not be rendered/resolved, so
+    // `claim_job` marks it failed in-place and reports the render error rather
+    // than handing the worker an action to run.
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-xconn", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "claim status {}",
+        response.status()
+    );
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed");
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("is not shared"),
+        "{:?}",
+        run.error_message
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_claim() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/via-action/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    // `private-conn` is a literal → pre-check rejects at creation.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let text = body_json(response).await.to_string();
+    assert!(
+        text.contains("'owner.private-conn' exists but is not shared"),
+        "{text}"
+    );
+    let _ = pool;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cross_workspace_action_owner_default_resolves_ungated() -> Result<()> {
+    // B.remote's own default `prod` (UNSHARED in B) must still resolve at claim
+    // time — the owner reading its own config is not gated.
+    let (router, _pool, _tmp, _container) = setup_two_workspaces().await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/caller/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-xws-default", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let claim = body_json(response).await;
+    assert_eq!(claim["workspace"].as_str().unwrap(), "B");
+    assert_eq!(claim["input"]["conn"]["host"], "db.owner.internal");
+    Ok(())
 }
 
 #[tokio::test]
