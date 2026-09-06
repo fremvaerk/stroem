@@ -506,6 +506,8 @@ pub async fn execute_task(
             || msg.contains("does not exist") // connection/action missing
             || msg.contains("resolve connection") // resolve_connection_inputs context
             || msg.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
+            || msg.contains("is not shared") // cross-workspace connection gate
+            || msg.contains("unknown workspace") // qualified ref to a workspace that is not configured
             || msg.contains("required")
             || msg.contains("invalid")
             || msg.contains("validation");

@@ -3,9 +3,10 @@ use sqlx::{self, PgPool};
 use std::collections::HashMap;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::resolve_step_retry_config;
-use stroem_common::models::workflow::{BackoffStrategy, WorkspaceConfig};
+use stroem_common::models::workflow::{ActionDef, BackoffStrategy, FlowStep, WorkspaceConfig};
 use stroem_common::template::{
     merge_defaults, prepare_action_input, render_input_map, resolve_connection_inputs,
+    resolve_connection_inputs_scoped, ResolveScope,
 };
 use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
@@ -13,6 +14,7 @@ use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
 use crate::workspace::WorkspaceManager;
+use crate::workspace_set::WorkspaceSet;
 
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
 const MAX_TASK_DEPTH: u32 = 10;
@@ -167,10 +169,11 @@ fn create_job_for_task_inner<'a>(
         let merged_input = merge_defaults(&effective_input, &task.input, &secrets_ctx)
             .context("Failed to merge input defaults")?;
 
-        // Resolve connection inputs (replace connection names with full objects)
-        let resolved_input =
-            resolve_connection_inputs(&merged_input, &task.input, workspace_config)
-                .context("Failed to resolve connection inputs")?;
+        // Resolve connection inputs (replace connection names with full objects).
+        // Qualified names (`ws.conn`) resolve against other workspaces, gated by `shared`.
+        let ws_set = WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;
+        let resolved_input = resolve_connection_inputs(&merged_input, &task.input, &ws_set)
+            .context("Failed to resolve connection inputs")?;
 
         // Build job steps from the task flow
         let mut new_steps = Vec::new();
@@ -227,6 +230,17 @@ fn create_job_for_task_inner<'a>(
                 (a, None, None, flow_step.action.clone())
             };
             let action = &owned_action;
+
+            // Fail fast (400) on literal connection references the worker would
+            // otherwise reject at claim time. Templated values cannot be checked here.
+            precheck_literal_connection_inputs(
+                step_name,
+                flow_step,
+                action,
+                &ws_set,
+                workspace_name,
+                action_workspace.as_deref(),
+            )?;
 
             let status = if flow_step.for_each.is_some() {
                 // For-each steps always start pending — expanded at promotion time
@@ -489,7 +503,9 @@ pub async fn handle_task_steps(
         // Merge action-level input defaults and resolve connection inputs
         let rendered_input = if let Some(action) = workspace_config.actions.get(&step.action_name) {
             if !action.input.is_empty() {
-                match prepare_action_input(&rendered_input, &action.input, workspace_config) {
+                let ws_set =
+                    WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;
+                match prepare_action_input(&rendered_input, &action.input, &ws_set) {
                     Ok(prepared) => prepared,
                     Err(e) => {
                         tracing::warn!("Failed to prepare action input: {:#}", e);
@@ -1325,6 +1341,52 @@ async fn compute_depth(pool: &PgPool, job: &JobRow) -> Result<u32> {
     Ok(depth)
 }
 
+/// Resolve the flow step's connection-typed inputs that are plain string
+/// literals (no `{{`), using the same scope the claim path will use, so an
+/// author mistake surfaces as a job-creation error instead of a failed step.
+fn precheck_literal_connection_inputs(
+    step_name: &str,
+    flow_step: &FlowStep,
+    action: &ActionDef,
+    set: &WorkspaceSet,
+    caller_ws: &str,
+    owner_ws: Option<&str>,
+) -> Result<()> {
+    let owner_ws = owner_ws.unwrap_or(caller_ws);
+    let mut literal_schema = HashMap::new();
+    let mut literal_values = serde_json::Map::new();
+    for (field, def) in &action.input {
+        if stroem_common::template::PRIMITIVE_TYPES.contains(&def.field_type.as_str()) {
+            continue;
+        }
+        if let Some(serde_json::Value::String(s)) = flow_step.input.get(field) {
+            if !s.contains("{{") {
+                literal_schema.insert(field.clone(), def.clone());
+                literal_values.insert(field.clone(), serde_json::Value::String(s.clone()));
+            }
+        }
+    }
+    if literal_schema.is_empty() {
+        return Ok(());
+    }
+    resolve_connection_inputs_scoped(
+        &serde_json::Value::Object(literal_values),
+        &literal_schema,
+        &ResolveScope {
+            lookup: set,
+            schema_ws: owner_ws,
+            value_ws: caller_ws,
+            fallback_ws: if owner_ws == caller_ws {
+                None
+            } else {
+                Some(owner_ws)
+            },
+        },
+    )
+    .with_context(|| format!("step '{}': failed to resolve connection inputs", step_name))
+    .map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1715,5 +1777,83 @@ mod tests {
         let ctx = build_step_render_context(&job, &steps, &ws);
 
         assert_eq!(ctx["job"]["output"]["result"], json!("step-wins"));
+    }
+
+    #[test]
+    fn precheck_rejects_literal_unshared_ref_and_ignores_templates() {
+        use crate::workspace_set::WorkspaceSet;
+        use std::sync::Arc;
+        use stroem_common::models::workflow::{
+            ActionDef, ConnectionDef, ConnectionTypeDef, FlowStep, InputFieldDef, WorkspaceConfig,
+        };
+
+        let mut owner = WorkspaceConfig::default();
+        owner.connection_types.insert(
+            "ch".to_string(),
+            ConnectionTypeDef {
+                properties: Default::default(),
+            },
+        );
+        owner.connections.insert(
+            "private".to_string(),
+            ConnectionDef {
+                connection_type: Some("ch".into()),
+                shared: false,
+                values: Default::default(),
+            },
+        );
+        owner.connections.insert(
+            "open".to_string(),
+            ConnectionDef {
+                connection_type: Some("ch".into()),
+                shared: true,
+                values: Default::default(),
+            },
+        );
+        let caller = WorkspaceConfig::default();
+        let set = WorkspaceSet::from_parts(
+            "caller",
+            Some(&caller),
+            vec![("owner".to_string(), Arc::new(owner))],
+            vec![],
+        );
+
+        let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
+        action.input.insert(
+            "conn".to_string(),
+            InputFieldDef {
+                field_type: "owner.ch".to_string(),
+                ..serde_yaml::from_str("type: string").unwrap()
+            },
+        );
+
+        let step = |v: &str| -> FlowStep {
+            serde_yaml::from_str(&format!("action: a\ninput:\n  conn: \"{v}\"")).unwrap()
+        };
+
+        // Literal, unshared → error mentioning "is not shared"
+        let err = precheck_literal_connection_inputs(
+            "s",
+            &step("owner.private"),
+            &action,
+            &set,
+            "caller",
+            None,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+        // Literal, shared → ok
+        precheck_literal_connection_inputs("s", &step("owner.open"), &action, &set, "caller", None)
+            .unwrap();
+        // Templated → skipped (no error even though it would not resolve)
+        precheck_literal_connection_inputs(
+            "s",
+            &step("{{ input.pick }}"),
+            &action,
+            &set,
+            "caller",
+            None,
+        )
+        .unwrap();
     }
 }
