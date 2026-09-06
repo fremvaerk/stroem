@@ -499,24 +499,7 @@ pub async fn execute_task(
         JobDefaults::from(state.config.as_ref()),
     )
     .await
-    .map_err(|e| {
-        let msg = e.to_string();
-        // Surface validation errors as 400; keep infrastructure errors as 500.
-        let is_user_error = msg.contains("not found")
-            || msg.contains("does not exist") // connection/action missing
-            || msg.contains("resolve connection") // resolve_connection_inputs context
-            || msg.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
-            || msg.contains("is not shared") // cross-workspace connection gate
-            || msg.contains("unknown workspace") // qualified ref to a workspace that is not configured
-            || msg.contains("required")
-            || msg.contains("invalid")
-            || msg.contains("validation");
-        if is_user_error {
-            AppError::BadRequest(msg)
-        } else {
-            AppError::Internal(e)
-        }
-    })?;
+    .map_err(classify_execute_error)?;
 
     // 6. Fire on_suspended hooks for any root-level approval steps that were
     //    suspended during job creation (FIX 2).
@@ -526,4 +509,72 @@ pub async fn execute_task(
     Ok(Json(ExecuteTaskResponse {
         job_id: job_id.to_string(),
     }))
+}
+
+/// Classify a `create_job_for_task` failure as a 400 (author mistake) or a 500
+/// (server/infra condition).
+///
+/// Matches on the FULL context chain (`{:#}`), not just the outermost
+/// wrapper: `create_job_for_task` wraps the author-facing phrase (e.g. "is
+/// not shared") several `.context()` layers deep (e.g. "step '...': failed
+/// to resolve connection inputs" -> "Input field '...' references
+/// connection '...'" -> the actual cause), and `anyhow::Error`'s plain
+/// `Display` only renders the outermost layer.
+///
+/// A configured-but-unavailable workspace (`"is not available"`, from
+/// `Lookup::Unavailable` in `stroem_common::template`) is a transient server
+/// condition, not an author mistake, and always stays a 500 even though its
+/// message also contains substrings like "workspace" that could otherwise
+/// look user-facing.
+fn classify_execute_error(e: anyhow::Error) -> AppError {
+    let msg = format!("{:#}", e);
+    // A configured-but-unloaded workspace is a server condition, never a 400.
+    let is_infra = msg.contains("is not available");
+    let is_user_error = !is_infra
+        && (msg.contains("not found")
+            || msg.contains("does not exist") // connection/action missing
+            || msg.contains("resolve connection") // resolve_connection_inputs context
+            || msg.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
+            || msg.contains("is not shared") // cross-workspace connection gate
+            || msg.contains("unknown workspace") // qualified ref to a workspace that is not configured
+            || msg.contains("required")
+            || msg.contains("invalid")
+            || msg.contains("validation"));
+    if is_user_error {
+        AppError::BadRequest(msg)
+    } else {
+        AppError::Internal(e)
+    }
+}
+
+#[cfg(test)]
+mod classify_execute_error_tests {
+    use super::*;
+
+    #[test]
+    fn unshared_cross_workspace_connection_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
+        )
+        .context("Input field 'conn' references connection 'owner.private'")
+        .context("Failed to resolve connection inputs");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unavailable_owner_workspace_is_internal() {
+        let e = anyhow::anyhow!("connection 'owner.x': workspace 'owner' is not available")
+            .context("Failed to resolve connection inputs");
+
+        let err = classify_execute_error(e);
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+    }
 }
