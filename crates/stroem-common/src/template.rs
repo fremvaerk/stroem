@@ -106,7 +106,12 @@ pub enum Lookup<'a> {
 
 /// Access to workspace configs by name. The server implements this over its
 /// in-memory `WorkspaceManager` snapshot; the CLI over the single local config.
-pub trait WorkspaceLookup {
+///
+/// `Send + Sync` supertraits: server-side callers hold a `&dyn WorkspaceLookup`
+/// (e.g. `RenderContext::lookup`) across `.await` points in async handlers —
+/// without these bounds the trait object itself isn't `Send`/`Sync` even when
+/// every concrete implementor is, and the handler's future fails to be `Send`.
+pub trait WorkspaceLookup: Send + Sync {
     /// The workspace the caller's YAML lives in.
     fn local_name(&self) -> &str;
     fn get(&self, name: &str) -> Lookup<'_>;

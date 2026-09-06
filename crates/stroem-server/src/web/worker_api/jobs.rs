@@ -595,6 +595,15 @@ pub async fn claim_job(
             (None, None, None)
         };
 
+    // Snapshot of every workspace config: cross-workspace connection references
+    // in this step's input resolve against it (gated by `shared`).
+    let ws_set = crate::workspace_set::WorkspaceSet::load(
+        &state.workspaces,
+        &job.workspace,
+        ws_config.as_deref(),
+    )
+    .await;
+
     // Render step input and apply action defaults
     let rendered_input = if let Some(ref workspace) = ws_config {
         let ctx = rendering::RenderContext {
@@ -616,6 +625,12 @@ pub async fn claim_job(
             } else {
                 None
             },
+            action_workspace_name: if step.action_workspace.is_some() {
+                step.action_workspace.as_deref()
+            } else {
+                None
+            },
+            lookup: &ws_set,
             job_revision: job.revision.as_deref(),
         };
 

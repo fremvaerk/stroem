@@ -24,6 +24,10 @@ pub struct RenderContext<'a> {
     /// (the action body's owner) instead of the caller `workspace`. `None` ⇒
     /// local step: resolve against `workspace` (byte-for-byte today's behaviour).
     pub action_workspace: Option<&'a WorkspaceConfig>,
+    /// Name of the owner workspace when `action_workspace` is set.
+    pub action_workspace_name: Option<&'a str>,
+    /// Snapshot of all workspace configs for cross-workspace connection resolution.
+    pub lookup: &'a dyn stroem_common::template::WorkspaceLookup,
     /// Workspace revision pinned on the job at creation (git SHA or folder hash).
     /// Available in Tera templates as `{{ job.revision }}`.
     pub job_revision: Option<&'a str>,
@@ -185,8 +189,17 @@ pub fn prepare_step_action_input(
     // (e.g. a connection input), but the job-level input has it resolved.
     merge_missing_action_fields(&mut input_val, ctx.job_input, action.input.keys());
 
-    let prepared = prepare_action_input(&input_val, &action.input, action_ws)
-        .context("Failed to prepare action input")?;
+    let prepared = match ctx.action_workspace_name {
+        Some(owner_name) => stroem_common::template::prepare_action_input_cross(
+            &input_val,
+            &action.input,
+            ctx.lookup,
+            ctx.lookup.local_name(),
+            owner_name,
+        ),
+        None => prepare_action_input(&input_val, &action.input, ctx.lookup),
+    }
+    .context("Failed to prepare action input")?;
     Ok(Some(prepared))
 }
 
@@ -532,6 +545,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -572,6 +590,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -614,6 +637,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -654,6 +682,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -698,6 +731,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -744,6 +782,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -786,6 +829,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -1224,6 +1272,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
@@ -1265,6 +1318,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
@@ -1320,6 +1378,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
         // rendered_input only contains "sql"
@@ -1335,10 +1398,13 @@ mod tests {
 
     #[test]
     fn test_prepare_step_action_input_resolves_against_owner_workspace() {
+        use crate::workspace_set::WorkspaceSet;
+        use std::sync::Arc;
         use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
 
         // Owner workspace B: action `remote` with a connection-typed input
         // `conn: pg`, connection_type `pg`, and connection `prod` carrying a host.
+        // `prod` must be `shared` for a caller-supplied bare name to resolve it.
         let mut owner_action = make_action("script");
         owner_action
             .input
@@ -1355,7 +1421,7 @@ mod tests {
             "prod".to_string(),
             ConnectionDef {
                 connection_type: Some("pg".to_string()),
-                shared: false,
+                shared: true,
                 values: HashMap::from([("host".to_string(), json!("db.owner.internal"))]),
             },
         );
@@ -1383,6 +1449,12 @@ mod tests {
         let mut caller = WorkspaceConfig::default();
         caller.tasks.insert("t".to_string(), task);
 
+        let set = WorkspaceSet::from_parts(
+            "A",
+            Some(&caller),
+            vec![("B".to_string(), Arc::new(owner.clone()))],
+            vec![],
+        );
         let step = make_step_row("s", None);
         let ctx = RenderContext {
             workspace: &caller,
@@ -1393,6 +1465,8 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: Some(&owner),
+            action_workspace_name: Some("B"),
+            lookup: &set,
             job_revision: None,
         };
         // Rendered input mirrors the caller flow-step input.
@@ -1405,6 +1479,132 @@ mod tests {
         // Resolution used the OWNER's `prod` connection → replaced with its
         // values object (host present). Proves OWNER-context resolution.
         assert_eq!(result["conn"]["host"], "db.owner.internal");
+
+        // With `prod` NOT shared, the same caller-supplied bare name is rejected.
+        let mut owner_unshared = owner.clone();
+        owner_unshared.connections.insert(
+            "prod".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".to_string()),
+                shared: false,
+                values: HashMap::from([("host".to_string(), json!("db.owner.internal"))]),
+            },
+        );
+        let set_unshared = WorkspaceSet::from_parts(
+            "A",
+            Some(&caller),
+            vec![("B".to_string(), Arc::new(owner_unshared.clone()))],
+            vec![],
+        );
+        let ctx_unshared = RenderContext {
+            workspace: &caller,
+            task_name: "t",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+            action_workspace: Some(&owner_unshared),
+            action_workspace_name: Some("B"),
+            lookup: &set_unshared,
+            job_revision: None,
+        };
+        let err =
+            prepare_step_action_input(Some(json!({"conn": "prod"})), &ctx_unshared).unwrap_err();
+        assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+    }
+
+    #[test]
+    fn test_prepare_step_action_input_cross_caller_bare_name_requires_shared() {
+        use crate::workspace_set::WorkspaceSet;
+        use std::sync::Arc;
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef};
+
+        // Owner B: action `remote` with connection-typed input `conn` (type pg),
+        // connections `prod` (unshared) and `open` (shared).
+        let mut remote = make_action("script");
+        remote
+            .input
+            .insert("conn".to_string(), make_input_field("pg"));
+        let mut owner = WorkspaceConfig::default();
+        owner.actions.insert("remote".to_string(), remote);
+        owner.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::new(),
+            },
+        );
+        owner.connections.insert(
+            "prod".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".to_string()),
+                shared: false,
+                values: HashMap::from([("host".to_string(), json!("db.owner.internal"))]),
+            },
+        );
+        owner.connections.insert(
+            "open".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".to_string()),
+                shared: true,
+                values: HashMap::from([("host".to_string(), json!("db.open.internal"))]),
+            },
+        );
+
+        let mut task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::new(),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        task.flow.insert(
+            "s".to_string(),
+            make_flow_step(
+                "B.remote",
+                HashMap::from([("conn".to_string(), json!("prod"))]),
+            ),
+        );
+        let mut caller = WorkspaceConfig::default();
+        caller.tasks.insert("t".to_string(), task);
+
+        let set = WorkspaceSet::from_parts(
+            "A",
+            Some(&caller),
+            vec![("B".to_string(), Arc::new(owner.clone()))],
+            vec![],
+        );
+        let step = make_step_row("s", None);
+        let ctx = RenderContext {
+            workspace: &caller,
+            task_name: "t",
+            step: &step,
+            job_input: None,
+            completed_steps: &[],
+            state_json: None,
+            global_state_json: None,
+            action_workspace: Some(&owner),
+            action_workspace_name: Some("B"),
+            lookup: &set,
+            job_revision: None,
+        };
+
+        // Caller-supplied bare `prod` (unshared in B) → rejected.
+        let err = prepare_step_action_input(Some(json!({"conn": "prod"})), &ctx).unwrap_err();
+        assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+
+        // Caller-supplied bare `open` (shared in B) → resolves in B.
+        let out = prepare_step_action_input(Some(json!({"conn": "open"})), &ctx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(out["conn"]["host"], "db.open.internal");
     }
 
     #[test]
@@ -1472,6 +1672,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None, // LOCAL step
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
         let rendered_input = Some(json!({"conn": "prod"}));
@@ -1719,6 +1924,11 @@ mod tests {
             state_json: Some(&state_json),
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -1762,6 +1972,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -1810,6 +2025,11 @@ mod tests {
             state_json: None,
             global_state_json: Some(&global_state_json),
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -1852,6 +2072,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -1900,6 +2125,11 @@ mod tests {
             state_json: Some(&state_json),
             global_state_json: Some(&global_state_json),
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -1948,6 +2178,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: Some("abc123def"),
         };
 
@@ -1971,6 +2206,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: None,
         };
 
@@ -2036,6 +2276,11 @@ mod tests {
             state_json: None,
             global_state_json: None,
             action_workspace: None,
+            action_workspace_name: None,
+            lookup: &stroem_common::template::SingleWorkspace {
+                name: "default",
+                config: &workspace,
+            },
             job_revision: Some("abc123def"),
         };
 
