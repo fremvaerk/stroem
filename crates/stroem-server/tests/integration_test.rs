@@ -1494,6 +1494,23 @@ async fn setup_shared_connections() -> Result<(
             ),
         ]),
     };
+    // Owner-only variant with a secret property supplied ONLY via the type's
+    // `default:` — never set explicitly by any connection. Regression for:
+    // redaction must mask a secret value that only comes from a foreign
+    // type's default (see `collect_redaction_values`).
+    let ch_type_with_api_key_default = || {
+        let mut t = ch_type();
+        t.properties.insert(
+            "api_key".to_string(),
+            ConnectionPropertyDef {
+                property_type: "string".into(),
+                required: false,
+                default: Some(json!("owner-default-api-key-value")),
+                secret: true,
+            },
+        );
+        t
+    };
     let conn = |shared: bool, host: &str, token: &str, ty: &str| ConnectionDef {
         connection_type: Some(ty.to_string()),
         shared,
@@ -1540,7 +1557,7 @@ async fn setup_shared_connections() -> Result<(
     let mut owner = WorkspaceConfig::default();
     owner
         .connection_types
-        .insert("clickhouse".into(), ch_type());
+        .insert("clickhouse".into(), ch_type_with_api_key_default());
     owner.connections.insert(
         "shared-conn".into(),
         conn(
@@ -1621,6 +1638,16 @@ async fn setup_shared_connections() -> Result<(
             HashMap::from([(
                 "pick".to_string(),
                 field("string", Some("owner.private-conn")),
+            )]),
+            flow_step("echo-conn", "{{ input.pick }}"),
+        ),
+    );
+    caller.tasks.insert(
+        "templated-shared".into(),
+        task(
+            HashMap::from([(
+                "pick".to_string(),
+                field("string", Some("owner.shared-conn")),
             )]),
             flow_step("echo-conn", "{{ input.pick }}"),
         ),
@@ -1846,8 +1873,9 @@ async fn test_templated_flow_step_ref_fails_step_at_claim_not_creation() -> Resu
 }
 
 #[tokio::test]
-async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_claim() -> Result<()> {
-    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_creation_precheck(
+) -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
     let response = router
         .clone()
         .oneshot(api_request(
@@ -1863,7 +1891,6 @@ async fn test_cross_workspace_action_caller_bare_unshared_name_fails_at_claim() 
         text.contains("'owner.private-conn' exists but is not shared"),
         "{text}"
     );
-    let _ = pool;
     Ok(())
 }
 
@@ -1908,6 +1935,52 @@ async fn test_cross_workspace_action_owner_default_resolves_ungated() -> Result<
     let claim = body_json(response).await;
     assert_eq!(claim["workspace"].as_str().unwrap(), "B");
     assert_eq!(claim["input"]["conn"]["host"], "db.owner.internal");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_templated_shared_foreign_connection_resolves_at_claim() -> Result<()> {
+    // `templated-shared`'s flow-step value is a Tera template
+    // (`"{{ input.pick }}"`), not a literal, so it is not pre-checked at job
+    // creation; it resolves against the SHARED owner connection when the
+    // step is claimed.
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/templated-shared/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-templated-shared", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let claim = body_json(response).await;
+    assert_eq!(claim["workspace"].as_str().unwrap(), "caller");
+    assert_eq!(claim["input"]["conn"]["host"], "shared.host");
     Ok(())
 }
 
@@ -1969,6 +2042,48 @@ async fn test_job_detail_redacts_foreign_connection_secrets() -> Result<()> {
         "non-secret host must stay visible: {text}"
     );
     assert!(text.contains("••••••"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_job_detail_redacts_secret_from_foreign_type_default() -> Result<()> {
+    // `infra.ch-eu` declares `owner.clickhouse` but never sets `api_key`, so
+    // the resolver fills it in from the type's own `default:` at job
+    // creation. That value must still be masked in job detail even though it
+    // never appears literally on any connection.
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/use-infra/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(api_request(
+            "GET",
+            &format!("/api/jobs/{job_id}"),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_json(response).await.to_string();
+    assert!(
+        !text.contains("owner-default-api-key-value"),
+        "type-defaulted secret leaked: {text}"
+    );
+    assert!(
+        text.contains("eu.host"),
+        "non-secret host must stay visible: {text}"
+    );
     Ok(())
 }
 
