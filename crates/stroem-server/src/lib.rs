@@ -26,3 +26,4 @@ pub mod state_storage;
 pub mod tarball_cache;
 pub mod web;
 pub mod workspace;
+pub mod workspace_set;
