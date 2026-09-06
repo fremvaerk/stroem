@@ -69,7 +69,7 @@ connections:
     password: "{{ secret.ch_password }}"
 ```
 
-A reference to an unshared connection from another workspace is rejected with `400 Bad Request`. See [Cross-Workspace References](/guides/cross-workspace-references/#connections) for the full rules, including how connection types are matched across workspaces.
+A reference to an unshared connection from another workspace is rejected with `400 Bad Request` at job creation for literal references; a templated flow-step value that resolves to an unshared connection is instead resolved at claim time and fails that step. See [Cross-Workspace References](/guides/cross-workspace-references/#connections) for the full rules, including the claim-time case and how connection types are matched across workspaces.
 
 ### Untyped Connections
 

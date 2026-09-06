@@ -83,9 +83,21 @@ connections:
     password: "{{ secret.ch_password }}"
 ```
 
-Unshared connections are private to their workspace. A reference to one from
-elsewhere fails at job creation with `400 Bad Request` and a message ending in
-`is not shared`. Inside its own workspace the flag is ignored.
+Unshared connections are private to their workspace. Whether — and when — a
+reference to one from elsewhere is rejected depends on where the reference
+appears:
+
+- **Literal references** — task input defaults, and a flow-step value written
+  as a plain string — are checked at job creation and fail immediately with
+  `400 Bad Request` and a message ending in `is not shared`.
+- **Templated flow-step values** (anything containing `{{ ... }}`) can't be
+  checked before the job runs, since the template may resolve to a different
+  connection depending on prior step output. These are resolved when the step
+  is claimed and fail that step instead — the job is created successfully,
+  and the reason ("... exists but is not shared") appears in the step's error
+  message.
+
+Inside its own workspace the flag is ignored.
 
 ### How types match
 
@@ -133,6 +145,12 @@ workspace's `secrets` values and every connection property whose type marks it
 with View permission on a task that uses it, in any workspace — mark
 credentials `secret: true` in the connection type.
 
+- Redaction is computed from the workspaces currently loaded on the server,
+  not from what was loaded when the job ran. If an owner workspace becomes
+  unhealthy (fails to reload, Git source unreachable, etc.), its secret-marked
+  values are **not** masked in already-created jobs until that workspace loads
+  successfully again.
+
 ### Offline CLI
 
 `stroem validate` warns on qualified type references (they are validated at job
@@ -148,6 +166,18 @@ Connection references are narrower: a foreign connection is only reachable when 
 ## Before / after example
 
 This mirrors the incident that motivated this feature: `ai_traffic_model`'s `daily` task needed to call `jobs.recalc-agg-sessions` and use the `jobs` workspace's `clickhouse-prod` connection, without either being configured locally.
+
+The `jobs` workspace side is unchanged between "before" and "after" except for one flag:
+
+```yaml
+# jobs workspace
+connections:
+  clickhouse-prod:
+    type: clickhouse
+    shared: true                      # required for any other workspace to name this connection
+    host: ch.internal
+    password: "{{ secret.ch_password }}"
+```
 
 **Before** (fails — no `jobs` library, no local `clickhouse-prod` connection):
 
@@ -196,7 +226,7 @@ tasks:
           company_nums: "{{ run.output.companies }}"
 ```
 
-- Job creation succeeds — there is no local `clickhouse-prod` lookup, so no error.
+- Job creation succeeds: `"clickhouse-prod"` is a caller-supplied value on a cross-workspace action's input, so it is looked up in the caller (`ai_traffic_model`) first, misses (no such local connection), and falls back to the owner (`jobs`) — where it exists **and** is marked `shared: true`, so the fallback is allowed.
 - The `recalc` step is stamped with the owner workspace (`jobs`) and its pinned revision.
 - The worker fetches the `jobs` tarball for that step, so files like `agg_sessions_4.sql` are present, and `clickhouse-prod` resolves using `jobs`' own secrets.
 
@@ -205,6 +235,8 @@ tasks:
 An unresolvable action reference — either the named workspace doesn't exist, or the workspace exists but has no action by that name (for example a typo like `jobs.recalc-agg-session`, missing the trailing `s`) — returns `400 Bad Request` with a precise message, never a `500`. The same fix applies to a missing/misnamed local connection reference.
 
 This does **not** cover the owner workspace being transiently unavailable (for example, a Git-backed workspace that failed to load on its last poll) — that's a server/load-health condition, not a caller mistake, and still surfaces as `500`.
+
+A step guarded by a `when` condition is not pre-checked at job creation at all — literal connection references included — since the condition may make the step never run. A bad reference on a `when`-guarded step surfaces as a step failure only if and when that step is actually reached.
 
 ## Not yet supported
 

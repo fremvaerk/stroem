@@ -1485,3 +1485,15 @@ Feature: a connection-typed input (task- or action-level) may name another works
 - [x] Literal flow-step connection values pre-checked at job creation (`job_creator::precheck_literal_connection_inputs`); templated ones fail the step at claim (422, `error_message` set)
 - [x] `classify_execute_error` matches the full error context chain (`{:#}`), not just the outermost wrapper, so `is not shared` / `unknown workspace` map to 400 while `is not available` (configured-but-unloaded workspace) stays 500
 - [x] E2E test: cross-workspace shared connection scenario (`tests/e2e.sh`)
+
+### Follow-ups
+- [ ] Redaction material (secret-marked connection values) is computed from currently-loaded workspace configs, not persisted with the job — if an owner workspace becomes unhealthy or rotates a secret, already-created jobs are not (or are incorrectly) redacted until the owner reloads
+- [ ] Connection/action resolution errors are classified by substring matching on the error chain (`classify_execute_error`) rather than a typed error enum — brittle if wording changes; a `ConnectionResolutionError` (or similar) type would let the classification be exhaustive-matched instead
+- [ ] `WorkspaceManager::has_workspace` ignores source-construction failures (`load_errors`), unlike the new `configured_names()` — a workspace whose source failed to construct (e.g. bad `GitSource::new()`) reads as nonexistent for action-reference detection instead of unavailable
+- [ ] `Debug` for `ConnectionDef` / `WorkspaceConfig` is not redacted — a stray `{:?}` log line can leak secret-marked connection values or workspace secrets (existing gap, sharpened by cross-workspace connections widening who can trigger resolution of a given connection)
+- [ ] YAML deserialisation errors on a bad `shared:` value (or any connection field) report `serde_yaml`'s file/line/column, not the connection name — a path-aware deserializer would let the error name the connection directly
+- [ ] Task-detail dropdown canonicalisation (`canonical_type_ref` over every loaded workspace) is recomputed on every request; memoise per workspace-config-generation if this shows up in profiling
+- [ ] `WorkspaceSet::load` is called once per flow step inside `handle_task_steps`'s loop (`job_creator.rs`) — hoist it out of the loop to snapshot once per job creation instead of once per step
+- [ ] `handle_task_steps` swallows some connection/action resolution errors rather than propagating them to the caller as a 400 — needs an audit pass to confirm every failure mode surfaces the same way `create_job_for_task_inner`'s does
+- [ ] CLI `SingleWorkspace`'s workspace-name sentinel (used to detect a dotted/qualified reference so `stroem run`/`validate` can print the "requires a server" message) is a magic string rather than a typed variant — worth a small refactor
+- [ ] No CLI-level (`crates/stroem-cli`) tests directly exercise `cmd_validate`/`cmd_run` against a workspace containing a qualified cross-workspace reference — current coverage is at the `stroem-common`/`stroem-server` layer only

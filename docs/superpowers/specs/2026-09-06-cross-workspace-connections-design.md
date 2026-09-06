@@ -153,8 +153,10 @@ value today would now be consumed as the flag; a **non-boolean** `shared`
 would fail deserialisation, and the loader's existing behaviour skips the
 **whole file** with a warning (`workspace_loader.rs`). Neither the repo's
 YAML nor the user's playground workspace contains a `shared:` key
-(checked 2026-09-06). Accepted; the deserialiser emits an error that names the
-connection, and the release note calls it out.
+(checked 2026-09-06). Accepted; `serde_yaml` reports the file, line and
+column of the bad value — naming the offending connection specifically would
+need a path-aware deserializer (follow-up, see TODO.md), so the operator
+locates it from the file/line instead — and the release note calls it out.
 
 Semantics:
 
@@ -292,8 +294,9 @@ Two different moments, two different surfaces:
   inputs, any flow-step `input:` value that is a plain string with no `{{`
   is resolved eagerly with the same lookup — templated values cannot be checked
   before render). Errors here return from `execute_task`.
-  `web/api/tasks.rs::is_user_error` already maps *"resolve connection"* and
-  *"does not exist"* to 400; add *"is not shared"* and *"unknown workspace"*.
+  `web/api/tasks.rs::classify_execute_error` already maps *"resolve
+  connection"* and *"does not exist"* to 400; add *"is not shared"* and
+  *"unknown workspace"*.
   `Unavailable` stays 500, matching actions.
 - **Claim time** (worker-executed steps whose values were templated): a
   resolution error cannot reach the HTTP caller — the job already exists. The
@@ -349,7 +352,13 @@ string, so `jobs.clickhouse-prod` replays unchanged.
 
 Discovery note: because the endpoint requires `View` on the task and only lists
 `shared` foreign connections, the dropdown cannot expose a non-shared
-connection's *name* from another workspace.
+connection's *name* from another workspace. However, a distinct side channel
+exists: attempting to *use* a guessed name still distinguishes "no such
+connection" from "exists but is not shared" (§3.4's error text), so a caller
+with execute access can confirm the existence (not the values) of an unshared
+foreign connection by trial. Accepted trade-off — the error message is more
+useful for legitimate debugging than the confirmation is valuable to an
+attacker who already has execute access to some workspace on the server.
 
 ## 7. Redaction
 
@@ -399,10 +408,10 @@ the action's owner. One tarball per step, as before.
   check into a reusable fn.
 
 **stroem-server**
-- `job_creator.rs` — `WorkspaceSet` + `collect_workspace_set`; two call sites.
+- `job_creator.rs` — `WorkspaceSet` + `WorkspaceSet::load`; two call sites.
 - `web/worker_api/rendering.rs`, `web/worker_api/jobs.rs` — claim-time set on
   `RenderContext`.
-- `web/api/tasks.rs` — dropdown; `is_user_error` additions.
+- `web/api/tasks.rs` — dropdown; `classify_execute_error` additions.
 - `web/api/jobs.rs` — redaction union.
 
 **stroem-cli**
@@ -434,9 +443,9 @@ the action's owner. One tarball per step, as before.
 
 **stroem-server integration tests** (`tests/`, testcontainers Postgres, two
 folder workspaces `caller` + `owner` + a third `infra` for the two-hop case):
-- Job creation with `owner.shared-conn` ⇒ 201, `job.input` holds the values.
+- Job creation with `owner.shared-conn` ⇒ 200, `job.input` holds the values.
 - Same with `owner.private-conn` ⇒ 400 "not shared".
-- `infra.ch-eu` declaring `type: owner.clickhouse` ⇒ 201 (two-hop).
+- `infra.ch-eu` declaring `type: owner.clickhouse` ⇒ 200 (two-hop).
 - Caller-local `type: clickhouse` + `owner.shared-conn` ⇒ 400 mismatch.
 - Claim path: local action, flow-step `input: {ch: "owner.shared-conn"}` ⇒
   claimed step input contains the values; `ClaimResponse.workspace == caller`.
@@ -461,7 +470,8 @@ folder workspaces `caller` + `owner` + a third `infra` for the two-hop case):
   defaults applied before the values reach the step.
 - Pre-existing config with `type: foo.bar` on both a local connection and an
   input, no such type or workspace ⇒ still resolves (opaque local name).
-- `ConnectionDef` YAML with `shared: "yes"` ⇒ load error names the connection.
+- `ConnectionDef` YAML with `shared: "yes"` ⇒ load error from `serde_yaml`
+  (file/line/column; does not name the connection — see §3.4).
 - Regression: existing cross-workspace action tests untouched and green.
 
 **stroem-cli**: `stroem validate` on a workspace using `owner.type` prints the
@@ -479,8 +489,14 @@ and the log contains the owner's host value.
   fit in the existing JSONB inputs.
 - Existing YAML is unaffected unless a connection had a value key named
   `shared` (now consumed as the flag; release note).
-- Existing cross-workspace *action* behaviour is byte-for-byte unchanged for
-  bare-name owner connections.
+- **Migration requirement**: caller-supplied bare owner-connection names on a
+  cross-workspace action's step input now require `shared: true` on the
+  owner side — the bypass §3.4 describes is closed. A deployment relying on
+  the old ungated bare-name lookup (e.g. the documented
+  `clickhouse: "clickhouse-prod"` example) must add `shared: true` to that
+  connection before upgrading, or the step starts failing with
+  `"exists but is not shared"`. Owner-action `default:` values are
+  unaffected — the owner reading its own config stays ungated, unchanged.
 
 ## 12. Open questions (answered during brainstorming, recorded here)
 
