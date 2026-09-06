@@ -1,6 +1,6 @@
 # Cross-Workspace Connections — Design
 
-**Status:** Draft (awaiting review)
+**Status:** Implemented (2026-09-06)
 **Date:** 2026-09-06
 **Builds on:** `2026-07-29-cross-workspace-references-design.md` (cross-workspace actions)
 
@@ -247,35 +247,34 @@ behaviour.
 ### 4.2 Server: pre-collecting configs
 
 `WorkspaceManager::get_config` is async and returns `Arc<WorkspaceConfig>`;
-the resolver is sync and runs inside CPU-bound render paths. The server builds a
-`WorkspaceSet` — `HashMap<String, Arc<WorkspaceConfig>>` + local name — before
-calling the resolver:
-
-- Collect every workspace prefix that appears in (a) the task's input types and
-  default values, (b) the action's input types and defaults, (c) the submitted
-  input string values, (d) any connection `type:` in already-collected configs
-  (one extra hop: a shared connection in `infra` may declare `type: jobs.x`).
-  Two hops are sufficient because a connection's type is a leaf; loop until the
-  set stops growing, bounded by the number of loaded workspaces.
-- `get_config` each; a name that is not a loaded workspace is simply absent from
-  the set and the resolver reports it as unknown.
+the resolver is sync and runs inside CPU-bound render paths. Rather than
+scanning task/action schemas and input values for the workspace prefixes that
+might be referenced, the server takes the simpler route: `WorkspaceSet::load`
+snapshots **every healthy workspace's config** via
+`WorkspaceManager::get_all_configs()` — one `RwLock` read per workspace, no
+I/O, no prefix scan — plus the full set of configured workspace names via
+`WorkspaceManager::names()` (healthy or not, for `Unknown` vs. `Unavailable`
+classification). The resolver then does a plain map lookup per reference
+against this one pre-loaded snapshot; a name absent from `configs` but present
+in `known` is a configured-but-unloaded workspace (`Unavailable`, 500), and a
+name absent from both is unconfigured (`Unknown`, 400).
 
 `WorkspaceSet` carries two things: `known: HashSet<String>` from
 `WorkspaceManager::names()` (every configured workspace, healthy or not) and
-`configs: HashMap<String, Arc<WorkspaceConfig>>` from `get_config` (healthy
-only). `WorkspaceLookup::get` returns an enum
+`configs: HashMap<String, Arc<WorkspaceConfig>>` from `get_all_configs()`
+(healthy only). `WorkspaceLookup::get` returns an enum
 `Found(&cfg) | Unknown | Unavailable` so the resolver can report an unknown
 prefix as an author error (400) and a known-but-unloaded workspace as a server
-condition (500), matching the action rule. A helper
-`job_creator::collect_workspace_set(workspaces, local_name, local_cfg, &[&json])`
-is the single place this scan lives.
+condition (500), matching the action rule. `WorkspaceSet::load` (server) is
+the single place this snapshot is built; each call site (job creation, claim
+time) constructs its own `WorkspaceSet` for the current local workspace.
 
 ### 4.3 Call sites
 
 | Site | File | Change |
 |------|------|--------|
-| Task input at job creation | `job_creator.rs` ~L172 | build `WorkspaceSet` from task schema + effective input; pass it |
-| Action input at job creation | `job_creator.rs` ~L492 | same, from action schema + rendered input |
+| Task input at job creation | `job_creator.rs` ~L174 | `WorkspaceSet::load` the full snapshot; pass it |
+| Action input at job creation | `job_creator.rs` ~L507 | same, one snapshot per call |
 | Action input at claim time | `web/worker_api/rendering.rs::prepare_step_action_input` ~L188 | `RenderContext` gains `workspace_set: &WorkspaceSet` (built in `worker_api/jobs.rs::claim_job` next to the existing owner-config fetch); local = `action_ws` for cross-workspace steps, caller otherwise |
 | CLI `stroem run` | `stroem-cli/src/local/run.rs` L52, L359 | `SingleWorkspace`; any dotted name that is not a literal local key ⇒ error *"cross-workspace connection references require a server; run this task via `stroem-api trigger`"* |
 

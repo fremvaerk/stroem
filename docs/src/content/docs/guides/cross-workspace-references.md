@@ -47,11 +47,103 @@ This means the caller passes only plain input values; it does not need any of th
 
 The owner workspace's revision is pinned when the job is created (the same discipline as `job.revision`), so a mid-run change to the owner workspace's config cannot shift the action under an in-flight job. The worker fetches the owner workspace's tarball at that pinned revision for the step — a cross-workspace step downloads exactly one workspace tarball (its owner), never two.
 
+## Connections
+
+A connection-typed input may name another workspace's connection directly,
+and a type may be another workspace's type. Both use the same `workspace.name`
+addressing and are independent of each other:
+
+```yaml
+# ai_traffic_model — no ClickHouse type, connection, or secret defined here
+tasks:
+  daily:
+    input:
+      clickhouse:
+        type: jobs.clickhouse          # the TYPE lives in workspace `jobs`
+        default: jobs.clickhouse-prod  # the CONNECTION lives in `jobs` too
+    flow:
+      run:
+        action: score-all              # a LOCAL action
+        input:
+          clickhouse: "{{ input.clickhouse }}"
+```
+
+### `shared: true`
+
+A connection can be referenced from another workspace **only** if its owner
+marks it shared:
+
+```yaml
+# jobs workspace
+connections:
+  clickhouse-prod:
+    type: clickhouse
+    shared: true
+    host: ch.internal
+    password: "{{ secret.ch_password }}"
+```
+
+Unshared connections are private to their workspace. A reference to one from
+elsewhere fails at job creation with `400 Bad Request` and a message ending in
+`is not shared`. Inside its own workspace the flag is ignored.
+
+### How types match
+
+Every type reference is normalised to `(workspace, type)`. A bare name means
+the workspace the YAML is written in, so `type: clickhouse` in `ai_traffic_model`
+is a *different* type from `type: clickhouse` in `jobs`, even if both exist.
+A connection satisfies an input only when both resolve to the same pair.
+Consequences:
+
+| Input declares          | Connection value       | Connection's own `type:` | Result |
+|--------------------------|------------------------|--------------------------|--------|
+| `jobs.clickhouse`       | `jobs.clickhouse-prod` | `clickhouse` (in `jobs`) | OK if shared |
+| `jobs.clickhouse`       | `infra.ch-eu`          | `jobs.clickhouse`        | OK if shared — type and connection in different workspaces |
+| `clickhouse` (local)    | `jobs.clickhouse-prod` | `clickhouse` (in `jobs`) | Rejected: `caller.clickhouse ≠ jobs.clickhouse` |
+| `jobs.clickhouse`       | `local-ch` (local)     | `jobs.clickhouse`        | OK — a local connection may adopt a foreign type |
+
+Untyped connections (no `type:`) match any input type, as they do locally.
+
+A connection whose `type:` is in another workspace gets that type's property
+defaults applied and its required fields checked when the job is created (the
+owner's load-time validation never saw the type).
+
+### Cross-workspace actions and the `shared` gate
+
+On a step whose action is `owner.action`, connection names the **caller**
+supplies resolve in the caller first and then, if not found, in the owner —
+but only shared ones. Names that come from the owner action's own `default:`
+resolve in the owner without the gate. Before this release the caller could
+name any owner connection bare; now the owner must mark it `shared: true` or
+the step fails with `... exists but is not shared`. Owner-side defaults are
+also never re-rendered against a caller-supplied value — only fields the
+caller actually left out are filled in and rendered — so a caller cannot
+smuggle out the owner's secrets through a value it supplies itself.
+
+### Dropdown
+
+The task form lists every eligible connection: local ones by bare name, then
+shared foreign ones as `workspace.name`.
+
+### Redaction and visibility
+
+Resolved connection values are stored with the job. Job detail redacts every
+workspace's `secrets` values and every connection property whose type marks it
+`secret: true`. Everything else in a shared connection is visible to anyone
+with View permission on a task that uses it, in any workspace — mark
+credentials `secret: true` in the connection type.
+
+### Offline CLI
+
+`stroem validate` warns on qualified type references (they are validated at job
+creation). `stroem run` cannot resolve a qualified connection and fails with
+`cross-workspace connection references require a server`.
+
 ## Open access
 
-Any workspace may reference any other workspace's actions — there is no ACL gate on cross-workspace references in this release. This is an intentional, low-friction choice for deployments where all workspaces are internal and already gated at the task-execution boundary.
+Any workspace may reference any other workspace's actions — there is no ACL gate on cross-workspace action references in this release. This is an intentional, low-friction choice for deployments where all workspaces are internal and already gated at the task-execution boundary.
 
-One consequence worth knowing: a cross-workspace connection reference resolves the owner's secret values and passes the resolved object into the caller's job (subject to the same redaction rules as any connection input). Referencing another workspace's action or connection is effectively a way to read that workspace's effective connection values — not a leak, but a capability every workspace author has today. There's no per-workspace opt-out or `exports:` allowlist yet.
+Connection references are narrower: a foreign connection is only reachable when its owner opts in with `shared: true` (see [Connections](#connections) above). There's no workspace-level `exports:` allowlist — the flag is per-connection and global to the server, not scoped to specific callers.
 
 ## Before / after example
 
@@ -118,8 +210,6 @@ This does **not** cover the owner workspace being transiently unavailable (for e
 
 The following are deliberately out of scope for this release:
 
-- **Qualified connection references outside a cross-workspace action.** An explicit `jobs.clickhouse-prod` reference from an arbitrary field (not the connection input of a `jobs`-owned action) is not resolved. Within a cross-workspace *action*, the action's own connection-typed inputs already resolve correctly by bare name in the owner context — that's what makes the example above work — but a bare `workspace.connection-name` reference used anywhere else is not yet supported.
-- **Qualified connection-type references** (for example, a caller declaring an input `type: jobs.clickhouse`) are not yet supported.
 - **Cross-workspace `type: task` actions.** A `task:` action referencing another workspace's task (`task: jobs.some-task`) is not yet resolved — only flow-step `action:` references are cross-workspace-aware today.
 - **Cross-workspace agent actions.** An `agent` step that is a cross-workspace reference still renders its prompt, system prompt, and MCP/task tools against the *caller's* workspace config, not the owner's — only script/docker/pod action bodies (and their connection-typed inputs) render in the owner context.
 - **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are.

@@ -1461,10 +1461,27 @@ Feature: a flow step's `action:` may be `owner_ws.action`, resolved live against
 - [x] Doc-review fix: `web/api/tasks.rs::is_user_error` didn't match the cross-workspace "workspace has no action" error message, so a typo'd cross-workspace action reference (owner workspace exists, action doesn't) returned 500 instead of 400 — added `"has no action"` to the substring allowlist; regression test `test_execute_task_cross_workspace_unknown_action_returns_400` (RED on 500, GREEN after the fix)
 
 ### Deferred follow-ups
-- [ ] Qualified connection references used outside a cross-workspace action's own input resolution (e.g. an explicit `jobs.clickhouse-prod` from an arbitrary field, not the connection input of a `jobs`-owned action) — `resolve_connection_inputs` still takes a single `&WorkspaceConfig`, not a resolver
-- [ ] Qualified connection-type references (`type: jobs.clickhouse` on a caller-declared input)
+- [x] Qualified connection references used outside a cross-workspace action's own input resolution (e.g. an explicit `jobs.clickhouse-prod` from an arbitrary field, not the connection input of a `jobs`-owned action) — `resolve_connection_inputs` still takes a single `&WorkspaceConfig`, not a resolver — done via `WorkspaceLookup` + `WorkspaceSet`, see "Cross-Workspace Connections" below
+- [x] Qualified connection-type references (`type: jobs.clickhouse` on a caller-declared input) — done, see "Cross-Workspace Connections" below
 - [ ] Cross-workspace `type: task` actions — `task: owner_ws.some_task` is not resolved; `handle_task_steps` (`job_creator.rs:490`) only looks up tasks locally
 - [ ] Cross-workspace `agent` steps render prompt/system_prompt/MCP/task-tools against the CALLER's workspace config, not the owner's (only script/docker/pod action bodies + their connection inputs are owner-aware)
 - [ ] Cross-workspace hook actions — `hooks.rs` has no `parse_qualified_ref` usage; hook action validation (`validate_hook_action_exists`) was deliberately left untouched to match
 - [ ] Wire workspace-config validation (`validate_workflow_config_with_libraries` / the new cross-workspace-resolver variant) into the server's actual load/reload pipeline — pre-existing gap for ANY action reference (not introduced by this feature); today job-creation-time resolution is the only real safety net, giving a precise 400 rather than a validation-time error
 - [ ] Confirm `./tests/e2e.sh` section 17 (cross-workspace action) actually passes in CI — it was written and is believed correct by construction but was never observed to run to completion locally
+
+## Cross-Workspace Connections (2026-09-06)
+
+Feature: a connection-typed input (task- or action-level) may name another workspace's connection (`ws.conn`) or type (`type: ws.type`), independently addressable and matched by canonical `(workspace, type)` pair. Per-connection `shared: true` gates cross-workspace use (default `false`); unshared foreign references are 400 at job creation / a failed step at claim. Task-detail dropdown lists shared foreign connections as `workspace.name`. Job-detail redaction now masks every loaded workspace's `secrets` plus connection properties marked `secret: true`.
+
+- Spec: `docs/superpowers/specs/2026-09-06-cross-workspace-connections-design.md`
+- Docs: `docs/src/content/docs/guides/cross-workspace-references.md` ("Connections" section), `docs/src/content/docs/guides/connections.md`, `CLAUDE.md` "Cross-Workspace References" and "Connections" subsections
+
+### Done
+- [x] Cross-workspace connections: qualified connection/type references (`ws.conn`, `type: ws.type`), per-connection `shared: true` gate, dropdown, cross-workspace redaction (2026-09-06)
+- [x] `WorkspaceLookup` trait (stroem-common) + `WorkspaceSet` (server, snapshots all healthy configs via `get_all_configs()`, no prefix scan) + `SingleWorkspace` (CLI) implementations
+- [x] Canonical `(workspace, type)` matching (`template::canonical_type_ref`) so same-named types in different workspaces never collide
+- [x] Provenance-aware two-pass resolution for cross-workspace actions (`prepare_action_input_cross`): caller-supplied names resolve caller-then-owner-if-shared; owner's own defaults resolve ungated
+- [x] `merge_action_defaults` renders only default-filled fields, never re-rendering caller-supplied values against the owner's secrets — closes a cross-workspace secret-exfiltration path via Tera string-literal tricks
+- [x] Literal flow-step connection values pre-checked at job creation (`job_creator::precheck_literal_connection_inputs`); templated ones fail the step at claim (422, `error_message` set)
+- [x] `classify_execute_error` matches the full error context chain (`{:#}`), not just the outermost wrapper, so `is not shared` / `unknown workspace` map to 400 while `is not available` (configured-but-unloaded workspace) stays 500
+- [x] E2E test: cross-workspace shared connection scenario (`tests/e2e.sh`)

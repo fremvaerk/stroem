@@ -56,6 +56,21 @@ connections:
 
 Connection values support Tera templates (e.g., `{{ 'ref+...' | vals }}` for secret resolution). Default values from the connection type are applied automatically for missing fields — in this example, `staging_db.port` will default to `5432`.
 
+### Sharing a connection across workspaces
+
+By default a connection is only usable within its own workspace. Set `shared: true` to allow other workspaces to reference it by qualified name (`workspace.connection-name`):
+
+```yaml
+connections:
+  clickhouse-prod:
+    type: clickhouse
+    shared: true
+    host: ch.internal
+    password: "{{ secret.ch_password }}"
+```
+
+A reference to an unshared connection from another workspace is rejected with `400 Bad Request`. See [Cross-Workspace References](/guides/cross-workspace-references/#connections) for the full rules, including how connection types are matched across workspaces.
+
 ### Untyped Connections
 
 Connections without a `type` field are also valid. Untyped connections skip type validation entirely and can be used for any connection-type input field:
@@ -106,6 +121,10 @@ In the web UI, connection-type inputs render as a searchable dropdown listing al
 
 When a connection type comes from a library, use the full namespaced name: `type: common.postgres` (where `common` is the library name).
 
+### Cross-workspace
+
+A connection-type input's `type:` and the connection name it resolves may each independently belong to another workspace (`type: jobs.clickhouse`, `default: jobs.clickhouse-prod`) — the type and the connection don't need to live in the same workspace. A foreign connection resolves only if its owner marked it `shared: true`. See [Cross-Workspace References → Connections](/guides/cross-workspace-references/#connections) for the addressing rules, the `shared` gate, and redaction.
+
 ## Resolution Flow
 
 **Task-level** (at job creation):
@@ -138,3 +157,4 @@ At YAML parse time (`stroem validate`):
 - Unknown fields produce warnings
 - Empty string values produce errors
 - Task input fields with non-primitive types must reference a known connection type
+- A dotted (qualified) type reference, such as `type: jobs.clickhouse`, is not resolved offline — `stroem validate` emits a warning and defers the check to job creation, where the server can see every workspace
