@@ -1,0 +1,24 @@
+# Cross-workspace CONNECTION reference: the `test` workspace owns the `demo`
+# type and the `demo-shared` connection. This workspace defines neither.
+actions:
+  echo-conn:
+    type: script
+    runner: local
+    input:
+      conn:
+        type: test.demo
+    script: |
+      echo "HOST={{ input.conn.host }}"
+
+tasks:
+  xref-conn:
+    mode: distributed
+    input:
+      conn:
+        type: test.demo
+        default: test.demo-shared
+    flow:
+      run:
+        action: echo-conn
+        input:
+          conn: "{{ input.conn }}"

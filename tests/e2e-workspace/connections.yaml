@@ -1,0 +1,19 @@
+connection_types:
+  demo:
+    host:
+      type: string
+      required: true
+    token:
+      type: string
+      secret: true
+
+connections:
+  demo-shared:
+    type: demo
+    shared: true
+    host: SHARED_CONN_OK
+    token: e2e-demo-secret-token-value
+  demo-private:
+    type: demo
+    host: PRIVATE_HOST
+    token: e2e-private-token

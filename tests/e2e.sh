@@ -608,6 +608,66 @@ else
     fail "xref logs missing CROSS_WS_OK - cross-workspace action did not use owner workspace's files"
 fi
 
+# --- 18. Cross-workspace connection reference (shared flag) ---
+# xref-conn (in "default") declares `type: test.demo` and defaults to
+# `test.demo-shared`; neither the type nor the connection exists in "default".
+info "Triggering xref-conn task (cross-workspace shared connection)..."
+EXEC_RESP_XCONN=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/xref-conn/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+XCONN_JOB_ID=$(echo "$EXEC_RESP_XCONN" | jq -r '.job_id')
+if [ -z "$XCONN_JOB_ID" ] || [ "$XCONN_JOB_ID" = "null" ]; then
+    fail "xref-conn execute failed: $EXEC_RESP_XCONN"
+fi
+pass "xref-conn job created: $XCONN_JOB_ID"
+
+XCONN_POLLED=0
+XCONN_STATUS="pending"
+while [ "$XCONN_STATUS" != "completed" ] && [ "$XCONN_STATUS" != "failed" ]; do
+    sleep 2
+    XCONN_POLLED=$((XCONN_POLLED + 2))
+    if [ "$XCONN_POLLED" -ge "$MAX_POLL" ]; then
+        acurl "$BASE_URL/api/jobs/$XCONN_JOB_ID" | jq .
+        fail "xref-conn job did not reach terminal state within ${MAX_POLL}s"
+    fi
+    XCONN_DETAIL=$(acurl "$BASE_URL/api/jobs/$XCONN_JOB_ID")
+    XCONN_STATUS=$(echo "$XCONN_DETAIL" | jq -r '.status')
+    printf "."
+done
+echo ""
+if [ "$XCONN_STATUS" != "completed" ]; then
+    echo "$XCONN_DETAIL" | jq .
+    fail "xref-conn job failed"
+fi
+pass "xref-conn job completed (${XCONN_POLLED}s)"
+
+XCONN_LOGS=$(acurl "$BASE_URL/api/jobs/$XCONN_JOB_ID/logs" | jq -r '.logs')
+if echo "$XCONN_LOGS" | grep -q "HOST=SHARED_CONN_OK"; then
+    pass "xref-conn resolved test.demo-shared in the owner workspace"
+else
+    echo "$XCONN_LOGS"
+    fail "xref-conn logs missing HOST=SHARED_CONN_OK"
+fi
+
+if echo "$XCONN_DETAIL" | grep -q "e2e-demo-secret-token-value"; then
+    echo "$XCONN_DETAIL" | jq .
+    fail "job detail leaked the owner's secret-marked connection token"
+else
+    pass "job detail redacts the owner's secret-marked token"
+fi
+
+info "Triggering xref-conn with an UNSHARED foreign connection (expect 400)..."
+# plain curl: `acurl` passes -f, which suppresses output on a 4xx.
+XCONN_PRIV_CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -X POST \
+    "$BASE_URL/api/workspaces/default/tasks/xref-conn/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {"conn": "test.demo-private"}}')
+if [ "$XCONN_PRIV_CODE" = "400" ]; then
+    pass "unshared foreign connection rejected with 400"
+else
+    fail "expected 400 for unshared foreign connection, got $XCONN_PRIV_CODE"
+fi
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"
