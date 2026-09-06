@@ -406,13 +406,19 @@ fn create_job_for_task_inner<'a>(
             );
         }
 
-        // If all steps ended up terminal (e.g. all skipped by when conditions),
-        // mark the job as completed now rather than waiting for the recovery sweep.
+        // If all steps ended up terminal (e.g. all skipped by when conditions,
+        // or a step failed during server-side dispatch), settle the job now
+        // rather than waiting for the recovery sweep.
         if needs_post_creation_loop {
             let all_terminal = JobStepRepo::all_steps_terminal(pool, job_id).await?;
             if all_terminal {
-                JobRepo::mark_completed(pool, job_id, None).await?;
-                tracing::info!(job_id = %job_id, "All steps terminal at creation — job marked completed");
+                if JobStepRepo::any_step_failed(pool, job_id).await? {
+                    JobRepo::mark_failed(pool, job_id).await?;
+                    tracing::info!(job_id = %job_id, "All steps terminal at creation with a failure — job marked failed");
+                } else {
+                    JobRepo::mark_completed(pool, job_id, None).await?;
+                    tracing::info!(job_id = %job_id, "All steps terminal at creation — job marked completed");
+                }
             }
         }
 

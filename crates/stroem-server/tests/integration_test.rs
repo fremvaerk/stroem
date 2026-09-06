@@ -2108,6 +2108,12 @@ async fn test_task_step_bad_connection_fails_step_not_swallowed() -> Result<()> 
         "{:?}",
         run.error_message
     );
+
+    // The job itself must settle as `failed`, not `completed` — the
+    // post-creation "all steps terminal" settle logic must distinguish a
+    // terminal-because-failed step from a terminal-because-skipped one.
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed", "job: {job:?}");
     Ok(())
 }
 
