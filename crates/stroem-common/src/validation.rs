@@ -1,6 +1,7 @@
 use crate::dag;
-use crate::models::workflow::{ActionDef, WorkspaceConfig};
+use crate::models::workflow::{ActionDef, ConnectionTypeDef, WorkspaceConfig};
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 
 /// Maximum allowed `FlowStep.timeout` (24h, in seconds).
 ///
@@ -619,6 +620,49 @@ fn validate_workflow_config_inner(
     Ok(warnings)
 }
 
+/// Check one connection's values against its type: required properties present
+/// (unless the type supplies a default), unknown fields (warning), empty
+/// strings (error). Shared by load-time validation and by the resolver for
+/// connections whose type lives in another workspace.
+pub fn check_connection_values(
+    conn_name: &str,
+    values: &HashMap<String, serde_json::Value>,
+    type_name: &str,
+    type_def: &ConnectionTypeDef,
+) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    for (prop_name, prop_def) in &type_def.properties {
+        if prop_def.required && prop_def.default.is_none() && !values.contains_key(prop_name) {
+            bail!(
+                "Connection '{}' is missing required field '{}' (type '{}')",
+                conn_name,
+                prop_name,
+                type_name
+            );
+        }
+    }
+    for key in values.keys() {
+        if !type_def.properties.contains_key(key) {
+            warnings.push(format!(
+                "Connection '{}' has field '{}' not defined in type '{}'",
+                conn_name, key, type_name
+            ));
+        }
+    }
+    for (key, value) in values {
+        if let Some(s) = value.as_str() {
+            if s.is_empty() {
+                bail!(
+                    "Connection '{}' field '{}' has an empty value",
+                    conn_name,
+                    key
+                );
+            }
+        }
+    }
+    Ok(warnings)
+}
+
 /// Validates connection types and connections.
 ///
 /// - Property types must be `string`, `integer`, `number`, or `boolean`.
@@ -665,40 +709,21 @@ fn validate_connections(config: &WorkspaceConfig) -> Result<Vec<String>> {
     for (conn_name, conn) in &config.connections {
         if let Some(ref type_name) = conn.connection_type {
             if let Some(type_def) = config.connection_types.get(type_name) {
-                // Check required fields without defaults are present
-                for (prop_name, prop_def) in &type_def.properties {
-                    if prop_def.required
-                        && prop_def.default.is_none()
-                        && !conn.values.contains_key(prop_name)
-                    {
-                        bail!(
-                            "Connection '{}' is missing required field '{}' (type '{}')",
-                            conn_name,
-                            prop_name,
-                            type_name
-                        );
-                    }
-                }
-
-                // Warn about unknown fields
-                for key in conn.values.keys() {
-                    if !type_def.properties.contains_key(key) {
-                        warnings.push(format!(
-                            "Connection '{}' has field '{}' not defined in type '{}'",
-                            conn_name, key, type_name
-                        ));
-                    }
-                }
-            } else {
-                bail!(
-                    "Connection '{}' references non-existent connection type '{}'",
+                warnings.extend(check_connection_values(
                     conn_name,
-                    type_name
-                );
+                    &conn.values,
+                    type_name,
+                    type_def,
+                )?);
+                continue;
             }
+            bail!(
+                "Connection '{}' references non-existent connection type '{}'",
+                conn_name,
+                type_name
+            );
         }
-
-        // Check for empty string values
+        // Untyped: still reject empty strings.
         for (key, value) in &conn.values {
             if let Some(s) = value.as_str() {
                 if s.is_empty() {
@@ -1919,6 +1944,37 @@ mod tests {
     use super::*;
     use crate::models::workflow::{AgentToolRef, McpServerDef, TaskDef, TriggerDef};
     use std::collections::HashMap;
+
+    #[test]
+    fn test_check_connection_values_required_unknown_empty() {
+        use crate::models::workflow::{ConnectionPropertyDef, ConnectionTypeDef};
+        let type_def = ConnectionTypeDef {
+            properties: HashMap::from([(
+                "host".to_string(),
+                ConnectionPropertyDef {
+                    property_type: "string".into(),
+                    required: true,
+                    default: None,
+                    secret: false,
+                },
+            )]),
+        };
+        // missing required
+        let err = check_connection_values("c", &HashMap::new(), "t", &type_def).unwrap_err();
+        assert!(err.to_string().contains("missing required field 'host'"));
+        // unknown field → warning, not error
+        let vals = HashMap::from([
+            ("host".to_string(), serde_json::json!("h")),
+            ("extra".to_string(), serde_json::json!(1)),
+        ]);
+        let warnings = check_connection_values("c", &vals, "t", &type_def).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'extra'"));
+        // empty string → error
+        let vals = HashMap::from([("host".to_string(), serde_json::json!(""))]);
+        let err = check_connection_values("c", &vals, "t", &type_def).unwrap_err();
+        assert!(err.to_string().contains("empty value"));
+    }
 
     #[test]
     fn test_validate_valid_workflow() {

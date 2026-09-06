@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use tera::Tera;
 
-use crate::models::workflow::{InputFieldDef, WorkspaceConfig};
+use crate::models::workflow::{ConnectionDef, InputFieldDef, WorkspaceConfig};
 
 /// Tera filter that resolves `ref+` secret references via the vals CLI.
 ///
@@ -93,6 +93,235 @@ pub fn parse_qualified_ref(name: &str) -> (Option<&str>, &str) {
         Some((ws, item)) if !ws.is_empty() && !item.is_empty() => (Some(ws), item),
         _ => (None, name),
     }
+}
+
+/// Outcome of asking a [`WorkspaceLookup`] for a workspace by name.
+pub enum Lookup<'a> {
+    Found(&'a WorkspaceConfig),
+    /// No workspace of that name is configured — an author error.
+    Unknown,
+    /// Configured, but not loaded / unhealthy right now — a server condition.
+    Unavailable,
+}
+
+/// Access to workspace configs by name. The server implements this over its
+/// in-memory `WorkspaceManager` snapshot; the CLI over the single local config.
+pub trait WorkspaceLookup {
+    /// The workspace the caller's YAML lives in.
+    fn local_name(&self) -> &str;
+    fn get(&self, name: &str) -> Lookup<'_>;
+    /// `true` when no server is present, so a qualified reference can never be
+    /// satisfied. Changes the error wording only.
+    fn offline(&self) -> bool {
+        false
+    }
+}
+
+/// A [`WorkspaceLookup`] over exactly one config (CLI, unit tests).
+pub struct SingleWorkspace<'a> {
+    pub name: &'a str,
+    pub config: &'a WorkspaceConfig,
+}
+
+impl WorkspaceLookup for SingleWorkspace<'_> {
+    fn local_name(&self) -> &str {
+        self.name
+    }
+    fn get(&self, name: &str) -> Lookup<'_> {
+        if name == self.name {
+            Lookup::Found(self.config)
+        } else {
+            Lookup::Unknown
+        }
+    }
+    fn offline(&self) -> bool {
+        true
+    }
+}
+
+/// A connection-type reference normalised to the workspace that defines it.
+/// Two references match only if both fields are equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalType {
+    pub workspace: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for CanonicalType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.workspace, self.name)
+    }
+}
+
+fn found_config<'a>(
+    lookup: &'a dyn WorkspaceLookup,
+    ws: &str,
+    what: &str,
+) -> Result<&'a WorkspaceConfig> {
+    match lookup.get(ws) {
+        Lookup::Found(c) => Ok(c),
+        Lookup::Unknown => bail!("{}: unknown workspace '{}'", what, ws),
+        Lookup::Unavailable => bail!("{}: workspace '{}' is not available", what, ws),
+    }
+}
+
+/// Canonicalise a connection-type reference written in `defining_ws`.
+///
+/// Precedence: a literal key in `defining_ws` (covers library-flattened
+/// `lib.type`), then `ws.type` split on the first dot against a known
+/// workspace, then — if the prefix is not a configured workspace — an opaque
+/// local name (keeps pre-existing `type: foo.bar` string-compare configs
+/// working). A bare name is always `(defining_ws, name)`.
+pub fn canonical_type_ref(
+    type_ref: &str,
+    defining_ws: &str,
+    lookup: &dyn WorkspaceLookup,
+) -> Result<CanonicalType> {
+    let local = |name: &str| CanonicalType {
+        workspace: defining_ws.to_string(),
+        name: name.to_string(),
+    };
+    let defining_cfg = found_config(
+        lookup,
+        defining_ws,
+        &format!("connection type '{}'", type_ref),
+    )?;
+    if defining_cfg.connection_types.contains_key(type_ref) {
+        return Ok(local(type_ref));
+    }
+    match parse_qualified_ref(type_ref) {
+        (Some(ws), item) => match lookup.get(ws) {
+            Lookup::Found(cfg) => {
+                if cfg.connection_types.contains_key(item) {
+                    Ok(CanonicalType {
+                        workspace: ws.to_string(),
+                        name: item.to_string(),
+                    })
+                } else {
+                    bail!(
+                        "connection type '{}': workspace '{}' has no connection type '{}'",
+                        type_ref,
+                        ws,
+                        item
+                    )
+                }
+            }
+            Lookup::Unknown => Ok(local(type_ref)),
+            Lookup::Unavailable => bail!(
+                "connection type '{}': workspace '{}' is not available",
+                type_ref,
+                ws
+            ),
+        },
+        (None, _) => Ok(local(type_ref)),
+    }
+}
+
+/// Where a connection-typed input is resolved.
+pub struct ResolveScope<'a> {
+    pub lookup: &'a dyn WorkspaceLookup,
+    /// Workspace whose YAML declares the input schema (types canonicalise here).
+    pub schema_ws: &'a str,
+    /// Workspace in which a bare connection name is looked up first.
+    pub value_ws: &'a str,
+    /// Second workspace tried for a bare name on a miss — only `shared`
+    /// connections qualify. Used for caller-supplied values on a
+    /// cross-workspace action step.
+    pub fallback_ws: Option<&'a str>,
+}
+
+/// A connection located by [`resolve_connection_ref`].
+pub struct ResolvedConnection<'a> {
+    pub workspace: String,
+    pub name: String,
+    pub def: &'a ConnectionDef,
+}
+
+/// Locate a connection by bare or qualified name, enforcing the `shared` gate
+/// for any reference that crosses a workspace boundary.
+pub fn resolve_connection_ref<'a>(
+    conn_ref: &str,
+    scope: &ResolveScope<'a>,
+) -> Result<ResolvedConnection<'a>> {
+    let lookup = scope.lookup;
+    let value_cfg = found_config(
+        lookup,
+        scope.value_ws,
+        &format!("connection '{}'", conn_ref),
+    )?;
+
+    // 1. Literal local key (bare name, or a connection literally named "a.b").
+    if let Some(def) = value_cfg.connections.get(conn_ref) {
+        return Ok(ResolvedConnection {
+            workspace: scope.value_ws.to_string(),
+            name: conn_ref.to_string(),
+            def,
+        });
+    }
+
+    // 2. Qualified `ws.name`.
+    if let (Some(ws), item) = parse_qualified_ref(conn_ref) {
+        return match lookup.get(ws) {
+            Lookup::Found(cfg) => match cfg.connections.get(item) {
+                Some(def) if ws == scope.value_ws || def.shared => Ok(ResolvedConnection {
+                    workspace: ws.to_string(),
+                    name: item.to_string(),
+                    def,
+                }),
+                Some(_) => bail!(
+                    "connection '{}' exists in workspace '{}' but is not shared (set `shared: true` on it in workspace '{}')",
+                    conn_ref,
+                    ws,
+                    ws
+                ),
+                None => bail!(
+                    "connection '{}' does not exist: workspace '{}' has no connection '{}'",
+                    conn_ref,
+                    ws,
+                    item
+                ),
+            },
+            Lookup::Unknown if lookup.offline() => bail!(
+                "connection '{}': cross-workspace connection references require a server (run this task through `stroem-api trigger`)",
+                conn_ref
+            ),
+            Lookup::Unknown => bail!("connection '{}': unknown workspace '{}'", conn_ref, ws),
+            Lookup::Unavailable => bail!(
+                "connection '{}': workspace '{}' is not available",
+                conn_ref,
+                ws
+            ),
+        };
+    }
+
+    // 3. Bare name missed locally: try the fallback workspace, gated by `shared`.
+    if let Some(fb) = scope.fallback_ws.filter(|fb| *fb != scope.value_ws) {
+        if let Lookup::Found(cfg) = lookup.get(fb) {
+            match cfg.connections.get(conn_ref) {
+                Some(def) if def.shared => {
+                    return Ok(ResolvedConnection {
+                        workspace: fb.to_string(),
+                        name: conn_ref.to_string(),
+                        def,
+                    })
+                }
+                Some(_) => bail!(
+                    "connection '{}' not found in workspace '{}'; '{}.{}' exists but is not shared",
+                    conn_ref,
+                    scope.value_ws,
+                    fb,
+                    conn_ref
+                ),
+                None => {}
+            }
+        }
+    }
+
+    bail!(
+        "connection '{}' does not exist in workspace '{}'",
+        conn_ref,
+        scope.value_ws
+    )
 }
 
 /// Evaluate a `when` condition template against a JSON context.
@@ -312,16 +541,41 @@ pub const PRIMITIVE_TYPES: &[&str] = &[
     "string", "text", "integer", "number", "boolean", "date", "datetime",
 ];
 
-/// Resolve connection inputs: replace connection name strings with the full connection object.
-///
-/// For each field in `input_schema` where `field_type` is not a primitive type,
-/// it's treated as a connection type reference. The corresponding value in `input`
-/// (a string naming a connection) is looked up in `workspace_config.connections`
-/// and replaced with the connection's values object.
+/// Resolve connection inputs: replace connection name strings with the full
+/// connection object. See [`resolve_connection_inputs_scoped`]; this wrapper
+/// resolves everything in `lookup.local_name()`.
 pub fn resolve_connection_inputs(
     input: &serde_json::Value,
     input_schema: &HashMap<String, InputFieldDef>,
-    workspace_config: &WorkspaceConfig,
+    lookup: &dyn WorkspaceLookup,
+) -> Result<serde_json::Value> {
+    let local = lookup.local_name();
+    resolve_connection_inputs_scoped(
+        input,
+        input_schema,
+        &ResolveScope {
+            lookup,
+            schema_ws: local,
+            value_ws: local,
+            fallback_ws: None,
+        },
+    )
+}
+
+/// Resolve connection inputs within an explicit [`ResolveScope`].
+///
+/// For each field in `input_schema` whose `field_type` is not a primitive, the
+/// value must be a connection name (string) or an already-resolved object
+/// (passed through). The name is located by [`resolve_connection_ref`], its
+/// declared type is canonicalised in the connection's own workspace and must
+/// equal the field's canonical type (untyped connections match anything —
+/// existing rule). A connection whose type lives in a different workspace than
+/// the connection itself gets that type's property defaults applied and its
+/// values checked here, because the owner's load-time pass never saw the type.
+pub fn resolve_connection_inputs_scoped(
+    input: &serde_json::Value,
+    input_schema: &HashMap<String, InputFieldDef>,
+    scope: &ResolveScope,
 ) -> Result<serde_json::Value> {
     let empty = serde_json::Map::new();
     let input_map = input.as_object().unwrap_or(&empty);
@@ -331,17 +585,13 @@ pub fn resolve_connection_inputs(
         if PRIMITIVE_TYPES.contains(&field_def.field_type.as_str()) {
             continue;
         }
-
-        // This field references a connection type
         let value = match result.get(field_name) {
             Some(v) => v.clone(),
-            None => continue, // Field not provided — skip (merge_defaults may have already handled it)
+            None => continue,
         };
-
         let conn_name = match value.as_str() {
             Some(s) => s,
             None => {
-                // Already an object (e.g. passed inline) — skip resolution
                 if value.is_object() {
                     continue;
                 }
@@ -353,32 +603,53 @@ pub fn resolve_connection_inputs(
             }
         };
 
-        let conn = workspace_config
-            .connections
-            .get(conn_name)
-            .with_context(|| {
-                format!(
-                    "Input field '{}' references connection '{}' which does not exist",
-                    field_name, conn_name
-                )
-            })?;
+        let field_ct = canonical_type_ref(&field_def.field_type, scope.schema_ws, scope.lookup)
+            .with_context(|| format!("Input field '{}'", field_name))?;
+        let resolved = resolve_connection_ref(conn_name, scope).with_context(|| {
+            format!(
+                "Input field '{}' references connection '{}'",
+                field_name, conn_name
+            )
+        })?;
 
-        // Validate connection type matches the declared input type
-        if let Some(ref conn_type) = conn.connection_type {
-            if conn_type != &field_def.field_type {
-                bail!(
-                    "Input field '{}' expects type '{}' but connection '{}' is type '{}'",
-                    field_name,
-                    field_def.field_type,
-                    conn_name,
-                    conn_type
-                );
+        let values = match resolved.def.connection_type {
+            None => resolved.def.values.clone(),
+            Some(ref declared) => {
+                let conn_ct = canonical_type_ref(declared, &resolved.workspace, scope.lookup)
+                    .with_context(|| format!("connection '{}'", conn_name))?;
+                if conn_ct != field_ct {
+                    bail!(
+                        "Input field '{}' expects type '{}' but connection '{}' is type '{}'",
+                        field_name,
+                        field_ct,
+                        conn_name,
+                        conn_ct
+                    );
+                }
+                if conn_ct.workspace != resolved.workspace {
+                    // Foreign-typed connection: defaults + checks not done at load.
+                    let type_cfg =
+                        found_config(scope.lookup, &conn_ct.workspace, "connection type")?;
+                    let type_def = type_cfg
+                        .connection_types
+                        .get(&conn_ct.name)
+                        .with_context(|| format!("connection type '{}' vanished", conn_ct))?;
+                    let with_defaults = resolved.def.values_with_type_defaults(type_def);
+                    crate::validation::check_connection_values(
+                        &format!("{}.{}", resolved.workspace, resolved.name),
+                        &with_defaults,
+                        &conn_ct.to_string(),
+                        type_def,
+                    )?;
+                    with_defaults
+                } else {
+                    resolved.def.values.clone()
+                }
             }
-        }
+        };
 
-        // Replace the string with the connection's values object
         let values_json =
-            serde_json::to_value(&conn.values).context("Failed to serialize connection values")?;
+            serde_json::to_value(&values).context("Failed to serialize connection values")?;
         result.insert(field_name.clone(), values_json);
     }
 
@@ -502,21 +773,70 @@ pub fn merge_action_defaults(
     render_value_deep(&merged, context).context("Failed to render templates in action defaults")
 }
 
-/// Prepare action input: merge defaults, resolve connection references.
-///
-/// Combines `merge_action_defaults` and `resolve_connection_inputs` into a single
-/// operation. This is the canonical way to prepare action-level input before
-/// rendering the action's cmd/script templates.
+/// Prepare action input: merge defaults, resolve connection references, all
+/// within `lookup.local_name()` (a local step: caller == owner).
 pub fn prepare_action_input(
     rendered_input: &serde_json::Value,
     action_input_schema: &HashMap<String, InputFieldDef>,
-    workspace_config: &WorkspaceConfig,
+    lookup: &dyn WorkspaceLookup,
 ) -> Result<serde_json::Value> {
-    let secrets_ctx = serde_json::json!({ "secret": &workspace_config.secrets });
-    let merged = merge_action_defaults(rendered_input, action_input_schema, &secrets_ctx)
+    let local = lookup.local_name();
+    prepare_action_input_cross(rendered_input, action_input_schema, lookup, local, local)
+}
+
+/// Prepare action input for a step whose action is owned by `owner_ws` while
+/// the flow step (and `rendered_input`) belong to `caller_ws`.
+///
+/// Provenance-aware two-pass:
+/// 1. Fields present in `rendered_input` were supplied by the caller: resolve
+///    them with bare names in the caller first, falling back to the owner only
+///    for `shared` connections.
+/// 2. Merge the owner's action defaults (rendered with the owner's secrets).
+/// 3. Fields filled by defaults are the owner reading its own config: resolve
+///    ungated in the owner. Fields resolved in pass 1 are objects by now and
+///    pass through.
+///
+/// When `caller_ws == owner_ws` the passes collapse to the local behaviour.
+pub fn prepare_action_input_cross(
+    rendered_input: &serde_json::Value,
+    action_input_schema: &HashMap<String, InputFieldDef>,
+    lookup: &dyn WorkspaceLookup,
+    caller_ws: &str,
+    owner_ws: &str,
+) -> Result<serde_json::Value> {
+    let owner_cfg = found_config(lookup, owner_ws, "action owner")?;
+
+    let caller_resolved = resolve_connection_inputs_scoped(
+        rendered_input,
+        action_input_schema,
+        &ResolveScope {
+            lookup,
+            schema_ws: owner_ws,
+            value_ws: caller_ws,
+            fallback_ws: if caller_ws == owner_ws {
+                None
+            } else {
+                Some(owner_ws)
+            },
+        },
+    )
+    .context("Failed to resolve action connection inputs")?;
+
+    let secrets_ctx = serde_json::json!({ "secret": &owner_cfg.secrets });
+    let merged = merge_action_defaults(&caller_resolved, action_input_schema, &secrets_ctx)
         .context("Failed to merge action input defaults")?;
-    resolve_connection_inputs(&merged, action_input_schema, workspace_config)
-        .context("Failed to resolve action connection inputs")
+
+    resolve_connection_inputs_scoped(
+        &merged,
+        action_input_schema,
+        &ResolveScope {
+            lookup,
+            schema_ws: owner_ws,
+            value_ws: owner_ws,
+            fallback_ws: None,
+        },
+    )
+    .context("Failed to resolve action connection inputs")
 }
 
 #[cfg(test)]
@@ -1285,6 +1605,445 @@ mod tests {
         ws
     }
 
+    /// Test lookup over several named workspaces. `unavailable` names are
+    /// configured-but-unloaded (Lookup::Unavailable); everything else unknown.
+    struct MultiWs {
+        local: String,
+        configs: HashMap<String, WorkspaceConfig>,
+        unavailable: Vec<String>,
+    }
+    impl WorkspaceLookup for MultiWs {
+        fn local_name(&self) -> &str {
+            &self.local
+        }
+        fn get(&self, name: &str) -> Lookup<'_> {
+            if let Some(c) = self.configs.get(name) {
+                Lookup::Found(c)
+            } else if self.unavailable.iter().any(|u| u == name) {
+                Lookup::Unavailable
+            } else {
+                Lookup::Unknown
+            }
+        }
+    }
+
+    fn conn(type_name: Option<&str>, shared: bool, host: &str) -> ConnectionDef {
+        ConnectionDef {
+            connection_type: type_name.map(|s| s.to_string()),
+            shared,
+            values: HashMap::from([("host".to_string(), json!(host))]),
+        }
+    }
+
+    fn empty_type() -> ConnectionTypeDef {
+        ConnectionTypeDef {
+            properties: HashMap::new(),
+        }
+    }
+
+    /// caller: no types/connections. jobs: type `clickhouse`, connections
+    /// `clickhouse-prod` (shared) and `private-ch` (not shared).
+    /// infra: connection `ch-eu` with `type: jobs.clickhouse`, shared.
+    fn three_workspaces() -> MultiWs {
+        let caller = WorkspaceConfig::default();
+        let mut jobs = WorkspaceConfig::default();
+        jobs.connection_types
+            .insert("clickhouse".to_string(), empty_type());
+        jobs.connections.insert(
+            "clickhouse-prod".to_string(),
+            conn(Some("clickhouse"), true, "ch.jobs.internal"),
+        );
+        jobs.connections.insert(
+            "private-ch".to_string(),
+            conn(Some("clickhouse"), false, "ch.private.internal"),
+        );
+        let mut infra = WorkspaceConfig::default();
+        infra.connections.insert(
+            "ch-eu".to_string(),
+            conn(Some("jobs.clickhouse"), true, "ch.eu.internal"),
+        );
+        MultiWs {
+            local: "caller".to_string(),
+            configs: HashMap::from([
+                ("caller".to_string(), caller),
+                ("jobs".to_string(), jobs),
+                ("infra".to_string(), infra),
+            ]),
+            unavailable: vec!["broken".to_string()],
+        }
+    }
+
+    fn schema_of(field_type: &str) -> HashMap<String, InputFieldDef> {
+        HashMap::from([("ch".to_string(), field(field_type, false, None))])
+    }
+
+    // ── canonical_type_ref ──────────────────────────────────────────────
+
+    #[test]
+    fn test_canonical_bare_type_is_local() {
+        let ws = three_workspaces();
+        let ct = canonical_type_ref("clickhouse", "jobs", &ws).unwrap();
+        assert_eq!(
+            ct,
+            CanonicalType {
+                workspace: "jobs".into(),
+                name: "clickhouse".into()
+            }
+        );
+        assert_eq!(ct.to_string(), "jobs.clickhouse");
+    }
+
+    #[test]
+    fn test_canonical_dotted_type_resolves_to_owner() {
+        let ws = three_workspaces();
+        let ct = canonical_type_ref("jobs.clickhouse", "caller", &ws).unwrap();
+        assert_eq!(ct.workspace, "jobs");
+        assert_eq!(ct.name, "clickhouse");
+    }
+
+    #[test]
+    fn test_canonical_literal_local_key_wins_over_split() {
+        // Library-flattened type `common.pg` is a literal local key.
+        let mut ws = three_workspaces();
+        ws.configs
+            .get_mut("caller")
+            .unwrap()
+            .connection_types
+            .insert("common.pg".to_string(), empty_type());
+        let ct = canonical_type_ref("common.pg", "caller", &ws).unwrap();
+        assert_eq!(
+            ct,
+            CanonicalType {
+                workspace: "caller".into(),
+                name: "common.pg".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_canonical_unknown_prefix_is_opaque_local() {
+        let ws = three_workspaces();
+        let ct = canonical_type_ref("nope.thing", "caller", &ws).unwrap();
+        assert_eq!(
+            ct,
+            CanonicalType {
+                workspace: "caller".into(),
+                name: "nope.thing".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_canonical_known_ws_missing_type_is_error() {
+        let ws = three_workspaces();
+        let err = canonical_type_ref("jobs.mysql", "caller", &ws).unwrap_err();
+        assert!(
+            err.to_string().contains("has no connection type 'mysql'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_canonical_unavailable_ws_is_error() {
+        let ws = three_workspaces();
+        let err = canonical_type_ref("broken.x", "caller", &ws).unwrap_err();
+        assert!(err.to_string().contains("not available"), "{err}");
+    }
+
+    // ── resolve_connection_inputs (qualified refs) ─────────────────────
+
+    #[test]
+    fn test_resolve_qualified_shared_connection_from_owner() {
+        let ws = three_workspaces();
+        let out = resolve_connection_inputs(
+            &json!({"ch": "jobs.clickhouse-prod"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["host"], "ch.jobs.internal");
+    }
+
+    #[test]
+    fn test_resolve_qualified_unshared_connection_is_rejected() {
+        let ws = three_workspaces();
+        let err = resolve_connection_inputs(
+            &json!({"ch": "jobs.private-ch"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+    }
+
+    #[test]
+    fn test_resolve_two_hop_connection_declaring_foreign_type() {
+        // infra.ch-eu declares `type: jobs.clickhouse` → canonical (jobs, clickhouse)
+        let ws = three_workspaces();
+        let out = resolve_connection_inputs(
+            &json!({"ch": "infra.ch-eu"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["host"], "ch.eu.internal");
+    }
+
+    #[test]
+    fn test_resolve_local_bare_type_rejects_foreign_connection() {
+        // caller declares its OWN `clickhouse` type → (caller, clickhouse) ≠ (jobs, clickhouse)
+        let mut ws = three_workspaces();
+        ws.configs
+            .get_mut("caller")
+            .unwrap()
+            .connection_types
+            .insert("clickhouse".to_string(), empty_type());
+        let err = resolve_connection_inputs(
+            &json!({"ch": "jobs.clickhouse-prod"}),
+            &schema_of("clickhouse"),
+            &ws,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("expects type 'caller.clickhouse'"), "{msg}");
+        assert!(msg.contains("is type 'jobs.clickhouse'"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_unknown_workspace_is_user_error() {
+        let ws = three_workspaces();
+        let err =
+            resolve_connection_inputs(&json!({"ch": "nope.x"}), &schema_of("jobs.clickhouse"), &ws)
+                .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("unknown workspace 'nope'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_unavailable_workspace_is_distinct_error() {
+        let ws = three_workspaces();
+        let err = resolve_connection_inputs(
+            &json!({"ch": "broken.x"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not available"), "{msg}");
+        assert!(!msg.contains("unknown workspace"), "{msg}");
+    }
+
+    #[test]
+    fn test_resolve_local_connection_declaring_foreign_type_matches() {
+        // caller's own `local-ch` says `type: jobs.clickhouse` → satisfies `type: jobs.clickhouse`
+        let mut ws = three_workspaces();
+        ws.configs.get_mut("caller").unwrap().connections.insert(
+            "local-ch".to_string(),
+            conn(Some("jobs.clickhouse"), false, "ch.local"),
+        );
+        let out = resolve_connection_inputs(
+            &json!({"ch": "local-ch"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["host"], "ch.local");
+    }
+
+    #[test]
+    fn test_resolve_untyped_shared_connection_matches_any_type() {
+        let mut ws = three_workspaces();
+        ws.configs
+            .get_mut("jobs")
+            .unwrap()
+            .connections
+            .insert("loose".to_string(), conn(None, true, "loose.host"));
+        let out = resolve_connection_inputs(
+            &json!({"ch": "jobs.loose"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["host"], "loose.host");
+    }
+
+    #[test]
+    fn test_resolve_foreign_typed_connection_gets_type_defaults_and_is_checked() {
+        let mut ws = three_workspaces();
+        // jobs.clickhouse gains a defaulted `port` and a required `host`.
+        let type_def = ConnectionTypeDef {
+            properties: HashMap::from([
+                (
+                    "port".to_string(),
+                    crate::models::workflow::ConnectionPropertyDef {
+                        property_type: "integer".into(),
+                        required: false,
+                        default: Some(json!(8443)),
+                        secret: false,
+                    },
+                ),
+                (
+                    "host".to_string(),
+                    crate::models::workflow::ConnectionPropertyDef {
+                        property_type: "string".into(),
+                        required: true,
+                        default: None,
+                        secret: false,
+                    },
+                ),
+            ]),
+        };
+        ws.configs
+            .get_mut("jobs")
+            .unwrap()
+            .connection_types
+            .insert("clickhouse".to_string(), type_def);
+        // Two-hop infra.ch-eu: gets port default applied at resolution.
+        let out = resolve_connection_inputs(
+            &json!({"ch": "infra.ch-eu"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["port"], 8443);
+        // A foreign-typed connection missing a required field is rejected.
+        ws.configs.get_mut("infra").unwrap().connections.insert(
+            "bad".to_string(),
+            ConnectionDef {
+                connection_type: Some("jobs.clickhouse".into()),
+                shared: true,
+                values: HashMap::new(),
+            },
+        );
+        let err = resolve_connection_inputs(
+            &json!({"ch": "infra.bad"}),
+            &schema_of("jobs.clickhouse"),
+            &ws,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("missing required field 'host'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_opaque_dotted_type_string_compare_compat() {
+        // Pre-existing configs: input and connection both say `type: foo.bar`,
+        // no such type and no workspace `foo`. Must keep working.
+        let mut ws = three_workspaces();
+        ws.configs.get_mut("caller").unwrap().connections.insert(
+            "legacy".to_string(),
+            conn(Some("foo.bar"), false, "legacy.host"),
+        );
+        let out = resolve_connection_inputs(&json!({"ch": "legacy"}), &schema_of("foo.bar"), &ws)
+            .unwrap();
+        assert_eq!(out["ch"]["host"], "legacy.host");
+    }
+
+    #[test]
+    fn test_single_workspace_rejects_qualified_refs_with_server_hint() {
+        let ws = make_ws_with_connection();
+        let single = SingleWorkspace {
+            name: "local",
+            config: &ws,
+        };
+        let err = resolve_connection_inputs(
+            &json!({"db": "other.prod_db"}),
+            &{
+                let mut s = HashMap::new();
+                s.insert("db".to_string(), field("postgres", false, None));
+                s
+            },
+            &single,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("require a server"), "{err:#}");
+    }
+
+    // ── prepare_action_input_cross (provenance-aware two-pass) ─────────
+
+    #[test]
+    fn test_cross_caller_supplied_bare_name_prefers_caller_then_shared_owner() {
+        let mut ws = three_workspaces();
+        // Owner action schema (written in jobs): ch: type clickhouse, default private-ch
+        let mut schema = HashMap::new();
+        schema.insert(
+            "ch".to_string(),
+            field("clickhouse", false, Some(json!("private-ch"))),
+        );
+        // (1) caller supplies shared owner name bare → falls back to owner, ok
+        let out = prepare_action_input_cross(
+            &json!({"ch": "clickhouse-prod"}),
+            &schema,
+            &ws,
+            "caller",
+            "jobs",
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["host"], "ch.jobs.internal");
+        // (2) caller supplies UNSHARED owner name bare → rejected
+        let err = prepare_action_input_cross(
+            &json!({"ch": "private-ch"}),
+            &schema,
+            &ws,
+            "caller",
+            "jobs",
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not found in workspace 'caller'"), "{msg}");
+        assert!(
+            msg.contains("'jobs.private-ch' exists but is not shared"),
+            "{msg}"
+        );
+        // (3) caller-local bare name wins over an owner name of the same spelling
+        ws.configs.get_mut("caller").unwrap().connections.insert(
+            "clickhouse-prod".to_string(),
+            conn(Some("jobs.clickhouse"), false, "ch.caller.local"),
+        );
+        let out = prepare_action_input_cross(
+            &json!({"ch": "clickhouse-prod"}),
+            &schema,
+            &ws,
+            "caller",
+            "jobs",
+        )
+        .unwrap();
+        assert_eq!(out["ch"]["host"], "ch.caller.local");
+    }
+
+    #[test]
+    fn test_cross_owner_default_resolves_ungated_in_owner() {
+        let ws = three_workspaces();
+        let mut schema = HashMap::new();
+        schema.insert(
+            "ch".to_string(),
+            field("clickhouse", false, Some(json!("private-ch"))),
+        );
+        // Caller supplies nothing → owner's default `private-ch` (unshared) resolves.
+        let out = prepare_action_input_cross(&json!({}), &schema, &ws, "caller", "jobs").unwrap();
+        assert_eq!(out["ch"]["host"], "ch.private.internal");
+    }
+
+    #[test]
+    fn test_prepare_action_input_local_unchanged() {
+        let ws = make_ws_with_connection();
+        let single = SingleWorkspace {
+            name: "local",
+            config: &ws,
+        };
+        let mut schema = HashMap::new();
+        schema.insert(
+            "db".to_string(),
+            field("postgres", false, Some(json!("prod_db"))),
+        );
+        let out = prepare_action_input(&json!({}), &schema, &single).unwrap();
+        assert_eq!(out["db"]["host"], "db.example.com");
+    }
+
     #[test]
     fn test_resolve_connection_inputs_valid() {
         let ws = make_ws_with_connection();
@@ -1293,7 +2052,15 @@ mod tests {
         schema.insert("db".to_string(), field("postgres", false, None));
         schema.insert("env".to_string(), field("string", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         // db should be resolved to the connection's values
         assert_eq!(result["db"]["host"], "db.example.com");
         assert_eq!(result["db"]["port"], 5432);
@@ -1309,9 +2076,16 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("db".to_string(), field("postgres", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws);
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        );
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("nonexistent"));
         assert!(err.contains("does not exist"));
     }
@@ -1330,11 +2104,18 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("cache".to_string(), field("redis", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws);
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        );
         assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("expects type 'redis'"));
-        assert!(err.contains("type 'postgres'"));
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("expects type") && err.contains("redis"));
+        assert!(err.contains("is type") && err.contains("postgres"));
     }
 
     #[test]
@@ -1345,7 +2126,15 @@ mod tests {
         schema.insert("name".to_string(), field("string", false, None));
         schema.insert("count".to_string(), field("integer", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["name"], "alice");
         assert_eq!(result["count"], 5);
     }
@@ -1357,7 +2146,15 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("query".to_string(), field("text", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["query"], "SELECT *\nFROM users\nWHERE active = true");
     }
 
@@ -1369,7 +2166,15 @@ mod tests {
         schema.insert("db".to_string(), field("postgres", false, None));
 
         // Missing field should be skipped (not an error)
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert!(result.get("db").is_none());
     }
 
@@ -1381,7 +2186,15 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("db".to_string(), field("postgres", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["db"]["host"], "inline.example.com");
         assert_eq!(result["db"]["port"], 5433);
     }
@@ -1502,7 +2315,14 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("db".to_string(), field("postgres", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws);
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("expects a connection name"));
@@ -1518,7 +2338,15 @@ mod tests {
         schema.insert("retries".to_string(), field("integer", false, None));
         schema.insert("debug".to_string(), field("boolean", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert!(result["db"].is_object());
         assert_eq!(result["db"]["host"], "db.example.com");
         assert_eq!(result["env"], "production");
@@ -1534,7 +2362,15 @@ mod tests {
         schema.insert("start".to_string(), field("date", false, None));
         schema.insert("ts".to_string(), field("datetime", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["start"], "2024-01-01");
         assert_eq!(result["ts"], "2024-01-01T00:00:00Z");
     }
@@ -1546,7 +2382,15 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("ratio".to_string(), field("number", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["ratio"], 0.75);
     }
 
@@ -1557,7 +2401,15 @@ mod tests {
         let input = json!({"extra_field": "some-value", "count": 99});
         let schema = HashMap::new();
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["extra_field"], "some-value");
         assert_eq!(result["count"], 99);
     }
@@ -1569,7 +2421,15 @@ mod tests {
         schema.insert("db".to_string(), field("postgres", false, None));
 
         // null input is treated as empty object — missing field is silently skipped
-        let result = resolve_connection_inputs(&json!(null), &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &json!(null),
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert!(result.get("db").is_none());
         assert_eq!(result, json!({}));
     }
@@ -1581,7 +2441,14 @@ mod tests {
         let mut schema = HashMap::new();
         schema.insert("db".to_string(), field("postgres", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws);
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("expects a connection name"));
@@ -1620,7 +2487,15 @@ mod tests {
         schema.insert("primary".to_string(), field("postgres", false, None));
         schema.insert("replica".to_string(), field("postgres", false, None));
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["primary"]["host"], "primary.example.com");
         assert_eq!(result["replica"]["host"], "replica.example.com");
     }
@@ -1631,7 +2506,15 @@ mod tests {
         let input = json!({"key": "value", "count": 5});
         let schema = HashMap::new();
 
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["key"], "value");
         assert_eq!(result["count"], 5);
     }
@@ -1663,7 +2546,15 @@ mod tests {
         schema.insert("api".to_string(), field("custom", false, None));
 
         // Untyped connection: no type mismatch check, just resolve
-        let result = resolve_connection_inputs(&input, &schema, &ws).unwrap();
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
         assert_eq!(result["api"]["url"], "https://api.example.com");
     }
 
@@ -1866,7 +2757,15 @@ mod tests {
 
         // User provides query but not db — default "ch-prod" should be filled and resolved
         let input = json!({"query": "SELECT 1"});
-        let result = prepare_action_input(&input, &schema, &ws).unwrap();
+        let result = prepare_action_input(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
 
         assert_eq!(result["query"], "SELECT 1");
         assert_eq!(result["db"]["host"], "ch.example.com");
@@ -1895,7 +2794,15 @@ mod tests {
 
         // User explicitly provides the connection name
         let input = json!({"api": "my-conn"});
-        let result = prepare_action_input(&input, &schema, &ws).unwrap();
+        let result = prepare_action_input(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
 
         assert_eq!(result["api"]["url"], "https://example.com");
     }
@@ -1913,7 +2820,15 @@ mod tests {
         );
 
         let input = json!({});
-        let result = prepare_action_input(&input, &schema, &ws).unwrap();
+        let result = prepare_action_input(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        )
+        .unwrap();
 
         assert_eq!(result["token"], "secret-key-123");
     }
