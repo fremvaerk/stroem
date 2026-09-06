@@ -29,7 +29,7 @@ impl<'a> WorkspaceSet<'a> {
         local_override: Option<&'a WorkspaceConfig>,
     ) -> WorkspaceSet<'a> {
         let configs = workspaces.get_all_configs().await;
-        let known = workspaces.names().into_iter().map(str::to_owned).collect();
+        let known = workspaces.configured_names();
         Self::from_parts(local_name, local_override, configs, known)
     }
 
@@ -113,9 +113,15 @@ pub fn collect_redaction_values(set: &WorkspaceSet) -> Vec<String> {
             let Some(type_def) = type_cfg.connection_types.get(&ct.name) else {
                 continue;
             };
+            // Use the values as resolved (own values + the type's property
+            // defaults filled in), not `conn.values` alone: a `secret: true`
+            // property whose value comes only from the foreign type's
+            // `default:` is still materialised into the persisted job input
+            // by `values_with_type_defaults` and must be masked too.
+            let effective = conn.values_with_type_defaults(type_def);
             for (prop, def) in &type_def.properties {
                 if def.secret {
-                    if let Some(v) = conn.values.get(prop) {
+                    if let Some(v) = effective.get(prop) {
                         collect_strings(v, &mut out);
                     }
                 }
@@ -198,6 +204,22 @@ mod tests {
         assert!(matches!(set.get("C"), Lookup::Unknown));
     }
 
+    #[tokio::test]
+    async fn load_classifies_source_construction_failure_as_unavailable_not_unknown() {
+        // A workspace whose SOURCE failed to construct (e.g. a bad
+        // `GitSource::new()`) has no `entries` row at all — only a
+        // `load_errors` entry. `WorkspaceManager::names()` alone would miss
+        // it entirely, making `WorkspaceSet::load` misclassify it as
+        // `Unknown` (400, "author mistake") when it is really a configured
+        // workspace that is transiently unavailable (500).
+        let mut mgr = WorkspaceManager::from_configs(vec![("A".to_string(), ws("a"), None)]);
+        mgr.insert_load_error_for_test("broken", "failed to construct git source");
+
+        let set = WorkspaceSet::load(&mgr, "A", None).await;
+        assert!(matches!(set.get("broken"), Lookup::Unavailable));
+        assert!(matches!(set.get("nonexistent"), Lookup::Unknown));
+    }
+
     #[test]
     fn redaction_values_union_secrets_and_secret_marked_connection_props() {
         let mut a = ws("secret-a-value");
@@ -267,5 +289,44 @@ mod tests {
             );
         }
         assert!(!vals.contains(&"public-host".to_string()));
+    }
+
+    #[test]
+    fn redaction_values_include_secret_from_foreign_type_default() {
+        let mut a = ws("secret-a-value");
+        let mut b = ws("secret-b-value");
+        // B defines type `db` with a secret `token` that has a type-level
+        // default. Connection `mirror` in A does NOT set `token` at all —
+        // the resolver materialises the default into the persisted job
+        // input via `values_with_type_defaults`, so it must be redacted too.
+        b.connection_types.insert(
+            "db".to_string(),
+            ConnectionTypeDef {
+                properties: HashMap::from([(
+                    "token".to_string(),
+                    ConnectionPropertyDef {
+                        property_type: "string".into(),
+                        required: false,
+                        default: Some(json!("default-token-secret-value")),
+                        secret: true,
+                    },
+                )]),
+            },
+        );
+        a.connections.insert(
+            "mirror".to_string(),
+            ConnectionDef {
+                connection_type: Some("B.db".into()),
+                shared: false,
+                values: HashMap::new(),
+            },
+        );
+        let set =
+            WorkspaceSet::from_parts("A", Some(&a), vec![("B".to_string(), Arc::new(b))], vec![]);
+        let vals = collect_redaction_values(&set);
+        assert!(
+            vals.contains(&"default-token-secret-value".to_string()),
+            "missing default-token-secret-value: {vals:?}"
+        );
     }
 }
