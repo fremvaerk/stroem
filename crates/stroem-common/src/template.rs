@@ -1272,6 +1272,7 @@ mod tests {
             "prod_db".to_string(),
             ConnectionDef {
                 connection_type: Some("postgres".to_string()),
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("db.example.com"));
@@ -1593,6 +1594,7 @@ mod tests {
             "primary_db".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("primary.example.com"));
@@ -1604,6 +1606,7 @@ mod tests {
             "replica_db".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("replica.example.com"));
@@ -1646,6 +1649,7 @@ mod tests {
             "my_api".to_string(),
             ConnectionDef {
                 connection_type: None, // untyped
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("url".to_string(), json!("https://api.example.com"));
@@ -1841,6 +1845,7 @@ mod tests {
             "ch-prod".to_string(),
             crate::models::workflow::ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("ch.example.com"));
@@ -1876,6 +1881,7 @@ mod tests {
             "my-conn".to_string(),
             crate::models::workflow::ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("url".to_string(), json!("https://example.com"));

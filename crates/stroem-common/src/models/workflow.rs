@@ -26,13 +26,39 @@ pub struct ConnectionTypeDef {
 
 /// Connection definition — a named, typed object storing external system config.
 ///
-/// Flat syntax: `type` is the connection type reference, all other fields are values.
+/// Flat syntax: `type` is the connection type reference, `shared` opts the
+/// connection into cross-workspace use, all other fields are values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionDef {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub connection_type: Option<String>,
+    /// When `true`, other workspaces may reference this connection as
+    /// `<workspace>.<name>`. Bare-name use inside the owning workspace ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
     #[serde(flatten)]
     pub values: HashMap<String, serde_json::Value>,
+}
+
+impl ConnectionDef {
+    /// The connection's values with the type's property defaults filled in for
+    /// any property the connection does not set. Used at load time for local
+    /// types and at resolution time for connections whose type lives in another
+    /// workspace (which the load-time pass never sees).
+    pub fn values_with_type_defaults(
+        &self,
+        type_def: &ConnectionTypeDef,
+    ) -> HashMap<String, serde_json::Value> {
+        let mut out = self.values.clone();
+        for (prop_name, prop_def) in &type_def.properties {
+            if !out.contains_key(prop_name) {
+                if let Some(ref default_value) = prop_def.default {
+                    out.insert(prop_name.clone(), default_value.clone());
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Normalize a user-supplied field-type string to its canonical form.
@@ -1010,13 +1036,7 @@ impl WorkspaceConfig {
         for (conn_name, conn) in &mut self.connections {
             if let Some(ref type_name) = conn.connection_type {
                 if let Some(type_def) = types.get(type_name) {
-                    for (prop_name, prop_def) in &type_def.properties {
-                        if !conn.values.contains_key(prop_name) {
-                            if let Some(ref default_value) = prop_def.default {
-                                conn.values.insert(prop_name.clone(), default_value.clone());
-                            }
-                        }
-                    }
+                    conn.values = conn.values_with_type_defaults(type_def);
                 } else {
                     tracing::warn!(
                         "Connection '{}' references unknown type '{}'",
@@ -2422,6 +2442,7 @@ connections:
             "prod_db".to_string(),
             ConnectionDef {
                 connection_type: Some("postgres".to_string()),
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("db.example.com"));
@@ -2463,6 +2484,7 @@ connections:
             "prod_db".to_string(),
             ConnectionDef {
                 connection_type: Some("postgres".to_string()),
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("port".to_string(), json!(5433));
@@ -2484,6 +2506,7 @@ connections:
             "api".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("token".to_string(), json!("{{ 'resolved-token' }}"));
@@ -2509,6 +2532,7 @@ connections:
             "ch-prod".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("{{ secret.clickhouse.host }}"));
@@ -2537,6 +2561,7 @@ connections:
             "custom".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("url".to_string(), json!("https://example.com"));
@@ -2567,6 +2592,7 @@ connections:
             "bad".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("host".to_string(), json!("{{ missing.var }}"));
@@ -2590,6 +2616,7 @@ connections:
             "conn_a".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("token".to_string(), json!("{{ secret.token_a }}"));
@@ -2601,6 +2628,7 @@ connections:
             "conn_b".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("token".to_string(), json!("{{ secret.token_b }}"));
@@ -2625,6 +2653,7 @@ connections:
             "orphan".to_string(),
             ConnectionDef {
                 connection_type: Some("nonexistent_type".to_string()),
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("url".to_string(), json!("https://example.com"));
@@ -2652,6 +2681,7 @@ connections:
             "my_conn".to_string(),
             ConnectionDef {
                 connection_type: Some("empty_type".to_string()),
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("url".to_string(), json!("https://example.com"));
@@ -2676,6 +2706,7 @@ connections:
             "api".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert(
@@ -2703,6 +2734,7 @@ connections:
             "cfg".to_string(),
             ConnectionDef {
                 connection_type: None,
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("port".to_string(), json!(5432));
@@ -2749,6 +2781,7 @@ connections:
             "prod_db".to_string(),
             ConnectionDef {
                 connection_type: Some("postgres".to_string()),
+                shared: false,
                 values: {
                     let mut v = HashMap::new();
                     v.insert("port".to_string(), json!(5433));
@@ -4458,5 +4491,93 @@ tasks:
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let task = config.tasks.get("simple").unwrap();
         assert!(task.retry.is_none());
+    }
+
+    #[test]
+    fn test_connection_def_shared_defaults_false_and_is_not_a_value() {
+        let yaml = r#"
+type: pg
+host: db.example.com
+"#;
+        let conn: ConnectionDef = serde_yaml::from_str(yaml).unwrap();
+        assert!(!conn.shared);
+        assert_eq!(conn.values.get("host").unwrap(), "db.example.com");
+        assert!(!conn.values.contains_key("shared"));
+    }
+
+    #[test]
+    fn test_connection_def_shared_true_is_consumed_as_flag() {
+        let yaml = r#"
+type: pg
+shared: true
+host: db.example.com
+"#;
+        let conn: ConnectionDef = serde_yaml::from_str(yaml).unwrap();
+        assert!(conn.shared);
+        assert!(!conn.values.contains_key("shared"));
+    }
+
+    #[test]
+    fn test_connection_def_shared_non_bool_is_an_error() {
+        let yaml = r#"
+type: pg
+shared: "yes"
+host: db.example.com
+"#;
+        let err = serde_yaml::from_str::<ConnectionDef>(yaml).unwrap_err();
+        // serde_yaml reports the type mismatch with a line/column, not the field
+        // name; the loader prefixes the file path. That is enough to locate it.
+        assert!(err.to_string().contains("expected a boolean"), "{err}");
+    }
+
+    #[test]
+    fn test_connection_def_serialize_omits_shared_when_false() {
+        let conn = ConnectionDef {
+            connection_type: Some("pg".into()),
+            shared: false,
+            values: HashMap::from([("host".to_string(), serde_json::json!("h"))]),
+        };
+        let v = serde_json::to_value(&conn).unwrap();
+        assert!(v.get("shared").is_none());
+        let shared = ConnectionDef {
+            shared: true,
+            ..conn
+        };
+        let v = serde_json::to_value(&shared).unwrap();
+        assert_eq!(v["shared"], true);
+    }
+
+    #[test]
+    fn test_values_with_type_defaults_fills_missing_only() {
+        let type_def = ConnectionTypeDef {
+            properties: HashMap::from([
+                (
+                    "port".to_string(),
+                    ConnectionPropertyDef {
+                        property_type: "integer".into(),
+                        required: false,
+                        default: Some(serde_json::json!(5432)),
+                        secret: false,
+                    },
+                ),
+                (
+                    "host".to_string(),
+                    ConnectionPropertyDef {
+                        property_type: "string".into(),
+                        required: true,
+                        default: Some(serde_json::json!("ignored")),
+                        secret: false,
+                    },
+                ),
+            ]),
+        };
+        let conn = ConnectionDef {
+            connection_type: Some("pg".into()),
+            shared: false,
+            values: HashMap::from([("host".to_string(), serde_json::json!("real"))]),
+        };
+        let v = conn.values_with_type_defaults(&type_def);
+        assert_eq!(v["host"], "real");
+        assert_eq!(v["port"], 5432);
     }
 }

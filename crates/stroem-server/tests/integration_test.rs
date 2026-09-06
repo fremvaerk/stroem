@@ -1875,6 +1875,7 @@ async fn setup_with_library_dotted_action() -> Result<(
         "prod".to_string(),
         ConnectionDef {
             connection_type: Some("pg".to_string()),
+            shared: false,
             values: HashMap::from([("host".to_string(), json!("db.local.internal"))]),
         },
     );
@@ -3155,6 +3156,7 @@ async fn test_task_detail_connections() -> Result<()> {
         "prod_db".to_string(),
         ConnectionDef {
             connection_type: Some("postgres".to_string()),
+            shared: false,
             values: HashMap::from([
                 ("host".to_string(), json!("prod.example.com")),
                 ("port".to_string(), json!(5432)),
@@ -3165,6 +3167,7 @@ async fn test_task_detail_connections() -> Result<()> {
         "staging_db".to_string(),
         ConnectionDef {
             connection_type: Some("postgres".to_string()),
+            shared: false,
             values: HashMap::from([
                 ("host".to_string(), json!("staging.example.com")),
                 ("port".to_string(), json!(5432)),
@@ -3175,6 +3178,7 @@ async fn test_task_detail_connections() -> Result<()> {
         "redis_cache".to_string(),
         ConnectionDef {
             connection_type: Some("redis".to_string()),
+            shared: false,
             values: HashMap::from([("host".to_string(), json!("redis.example.com"))]),
         },
     );
@@ -3183,6 +3187,7 @@ async fn test_task_detail_connections() -> Result<()> {
         "misc_config".to_string(),
         ConnectionDef {
             connection_type: None,
+            shared: false,
             values: HashMap::from([("url".to_string(), json!("https://misc.example.com"))]),
         },
     );
@@ -14735,6 +14740,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         "clickhouse-prod".to_string(),
         ConnectionDef {
             connection_type: Some("clickhouse".to_string()),
+            shared: false,
             values: HashMap::from([
                 ("host".to_string(), json!("ch.example.com")),
                 ("port".to_string(), json!(9000)),

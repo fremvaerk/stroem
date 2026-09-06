@@ -57,6 +57,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
         "production-db".to_string(),
         ConnectionDef {
             connection_type: Some("postgres".to_string()),
+            shared: false,
             values: HashMap::from([
                 ("host".to_string(), json!("prod.example.com")),
                 ("port".to_string(), json!(5432)),

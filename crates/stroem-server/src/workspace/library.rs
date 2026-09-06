@@ -759,6 +759,7 @@ mod tests {
             "my-db".to_string(),
             ConnectionDef {
                 connection_type: Some("postgres".to_string()),
+                shared: false,
                 values: HashMap::new(),
             },
         );

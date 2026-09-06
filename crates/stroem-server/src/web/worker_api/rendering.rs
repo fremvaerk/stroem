@@ -1355,6 +1355,7 @@ mod tests {
             "prod".to_string(),
             ConnectionDef {
                 connection_type: Some("pg".to_string()),
+                shared: false,
                 values: HashMap::from([("host".to_string(), json!("db.owner.internal"))]),
             },
         );
@@ -1455,6 +1456,7 @@ mod tests {
             "prod".to_string(),
             ConnectionDef {
                 connection_type: Some("pg".to_string()),
+                shared: false,
                 values: HashMap::from([("host".to_string(), json!("db.local.internal"))]),
             },
         );
