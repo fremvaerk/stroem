@@ -5377,6 +5377,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
+ "yaml_serde",
 ]
 
 [[package]]

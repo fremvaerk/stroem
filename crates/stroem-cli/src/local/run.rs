@@ -49,7 +49,11 @@ pub async fn cmd_run(task_name: &str, path: &str, input: Option<&str>) -> Result
     let ctx_for_defaults = json!({ "secret": &config.secrets });
     let merged_input = merge_defaults(&user_input, &task.input, &ctx_for_defaults)
         .context("Failed to merge input defaults")?;
-    let resolved_input = resolve_connection_inputs(&merged_input, &task.input, &config)
+    let lookup = stroem_common::template::SingleWorkspace {
+        name: "local",
+        config: &config,
+    };
+    let resolved_input = resolve_connection_inputs(&merged_input, &task.input, &lookup)
         .context("Failed to resolve connection inputs")?;
 
     eprintln!("Task: {} ({} steps)\n", task_name, task.flow.len());
@@ -356,7 +360,11 @@ async fn execute_step(
         .with_context(|| format!("Step '{}': failed to render input", step_name))?;
 
     // Prepare action input (merge action defaults + resolve connections)
-    let action_input = prepare_action_input(&rendered_input, &action.input, config)
+    let lookup = stroem_common::template::SingleWorkspace {
+        name: "local",
+        config,
+    };
+    let action_input = prepare_action_input(&rendered_input, &action.input, &lookup)
         .with_context(|| format!("Step '{}': failed to prepare action input", step_name))?;
 
     // Build context for script/env rendering: full step context + rendered input
@@ -1499,5 +1507,44 @@ tasks:
         );
         assert_eq!(summary.failed, 3, "all three iterations should fail");
         assert_eq!(summary.skipped, 0);
+    }
+
+    #[test]
+    fn local_run_rejects_qualified_connection_with_server_hint() {
+        let yaml = r#"
+connection_types:
+  pg:
+    host: { type: string }
+tasks:
+  t:
+    input:
+      db: { type: pg, default: other.prod }
+    flow:
+      s:
+        action: a
+actions:
+  a:
+    type: script
+    script: echo hi
+"#;
+        let config: stroem_common::models::workflow::WorkspaceConfig =
+            serde_yaml::from_str(yaml).unwrap();
+        let task = &config.tasks["t"];
+        let merged = stroem_common::template::merge_defaults(
+            &serde_json::json!({}),
+            &task.input,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let err = stroem_common::template::resolve_connection_inputs(
+            &merged,
+            &task.input,
+            &stroem_common::template::SingleWorkspace {
+                name: "local",
+                config: &config,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("require a server"), "{err:#}");
     }
 }
