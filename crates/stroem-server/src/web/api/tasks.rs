@@ -544,34 +544,51 @@ pub async fn execute_task(
 /// Classify a `create_job_for_task` failure as a 400 (author mistake) or a 500
 /// (server/infra condition).
 ///
-/// Matches on the FULL context chain (`{:#}`), not just the outermost
-/// wrapper: `create_job_for_task` wraps the author-facing phrase (e.g. "is
-/// not shared") several `.context()` layers deep (e.g. "step '...': failed
-/// to resolve connection inputs" -> "Input field '...' references
-/// connection '...'" -> the actual cause), and `anyhow::Error`'s plain
-/// `Display` only renders the outermost layer.
+/// Two tiers of phrase matching, because trusting every layer of the context
+/// chain equally is unsafe once wrapped infra errors (sqlx, I/O, ...) are in
+/// the mix:
+///
+/// - **Precise phrases** (`is not shared`, `unknown workspace`, `has no
+///   connection`) are specific enough to `stroem_common::template`'s
+///   cross-workspace error text that they are safe to match anywhere in the
+///   FULL context chain (`{:#}`) — `create_job_for_task` wraps the
+///   author-facing phrase several `.context()` layers deep (e.g. "step
+///   '...': failed to resolve connection inputs" -> "Input field '...'
+///   references connection '...'" -> the actual cause).
+/// - **Legacy broad phrases** (`not found`, `does not exist`, `resolve
+///   connection`, `has no action`, `required`, `invalid`, `validation`) are
+///   common enough that an inner infra-layer message could contain one by
+///   coincidence (e.g. a Postgres error's own "relation ... does not
+///   exist"), so they are matched on the OUTERMOST message only
+///   (`e.to_string()`, which only renders the top context layer this
+///   function's caller controls).
 ///
 /// A configured-but-unavailable workspace (`"is not available"`, from
 /// `Lookup::Unavailable` in `stroem_common::template`) is a transient server
-/// condition, not an author mistake, and always stays a 500 even though its
-/// message also contains substrings like "workspace" that could otherwise
-/// look user-facing.
+/// condition, not an author mistake, and always stays a 500 (checked first,
+/// anywhere in the chain) even though its message also contains substrings
+/// like "workspace" that could otherwise look user-facing.
 fn classify_execute_error(e: anyhow::Error) -> AppError {
-    let msg = format!("{:#}", e);
-    // A configured-but-unloaded workspace is a server condition, never a 400.
-    let is_infra = msg.contains("is not available");
-    let is_user_error = !is_infra
-        && (msg.contains("not found")
-            || msg.contains("does not exist") // connection/action missing
-            || msg.contains("resolve connection") // resolve_connection_inputs context
-            || msg.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
-            || msg.contains("is not shared") // cross-workspace connection gate
-            || msg.contains("unknown workspace") // qualified ref to a workspace that is not configured
-            || msg.contains("required")
-            || msg.contains("invalid")
-            || msg.contains("validation"));
-    if is_user_error {
-        AppError::BadRequest(msg)
+    let chain = format!("{:#}", e);
+    if chain.contains("is not available") {
+        return AppError::Internal(e);
+    }
+    let precise_user_error = chain.contains("is not shared") // cross-workspace connection gate
+        || chain.contains("unknown workspace") // qualified ref to a workspace that is not configured
+        || chain.contains("has no connection"); // cross-workspace: owner workspace exists, connection doesn't
+    if precise_user_error {
+        return AppError::BadRequest(chain);
+    }
+    let outer = e.to_string();
+    let legacy_user_error = outer.contains("not found")
+        || outer.contains("does not exist") // connection/action missing
+        || outer.contains("resolve connection") // resolve_connection_inputs context
+        || outer.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
+        || outer.contains("required")
+        || outer.contains("invalid")
+        || outer.contains("validation");
+    if legacy_user_error {
+        AppError::BadRequest(chain)
     } else {
         AppError::Internal(e)
     }
@@ -606,5 +623,36 @@ mod classify_execute_error_tests {
             matches!(err, AppError::Internal(_)),
             "expected Internal, got {err:?}"
         );
+    }
+
+    #[test]
+    fn legacy_phrase_buried_in_an_infra_layer_is_internal() {
+        // A Postgres-style inner error happens to contain "does not exist",
+        // but only at an inner layer, not the outermost context this
+        // function's caller actually attaches. Must not be misread as an
+        // author mistake.
+        let e =
+            anyhow::anyhow!("relation \"job_step\" does not exist").context("Failed to create job");
+
+        let err = classify_execute_error(e);
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn precise_phrase_buried_deep_in_chain_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
+        )
+        .context("Input field 'conn' references connection 'owner.private'")
+        .context("Failed to resolve connection inputs");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 }
