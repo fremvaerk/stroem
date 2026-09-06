@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, ConnectionDef, ConnectionTypeDef, FlowStep, HookDef, InputFieldDef, TaskDef,
-    TriggerDef, WorkspaceConfig,
+    ActionDef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep, HookDef,
+    InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -1421,6 +1421,264 @@ async fn setup_two_workspaces() -> Result<(
     let router = build_router(state, CancellationToken::new());
 
     Ok((router, pool, temp_dir, container))
+}
+
+/// Three workspaces for cross-workspace CONNECTION tests.
+///
+/// owner:  type `clickhouse` {host, token(secret)}, connections `shared-conn`
+///         (shared, token "owner-token-secret-value"), `private-conn` (unshared),
+///         action `remote` with input conn: type clickhouse, default private-conn.
+/// infra:  connection `ch-eu` with `type: owner.clickhouse`, shared.
+/// caller: task `use-shared`   input conn: {type: owner.clickhouse, default: owner.shared-conn}
+///                              step run: local `echo-conn` action, input conn: "{{ input.conn }}"
+///         task `use-private`  same but default owner.private-conn
+///         task `use-infra`    same but default infra.ch-eu
+///         task `bad-type`     input conn: {type: clickhouse} (caller-local type) default owner.shared-conn
+///         task `via-action`   step run: action owner.remote, input conn: "private-conn" (bare, caller-supplied)
+///         task `literal-bad`  step run: local echo-conn, input conn: "owner.private-conn" (literal)
+///         task `templated`    input pick: string; step run: local echo-conn, input conn: "{{ input.pick }}"
+///         caller has a local type `clickhouse` (for bad-type) and NO connections.
+async fn setup_shared_connections() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let ch_type = || ConnectionTypeDef {
+        properties: HashMap::from([
+            (
+                "host".to_string(),
+                ConnectionPropertyDef {
+                    property_type: "string".into(),
+                    required: true,
+                    default: None,
+                    secret: false,
+                },
+            ),
+            (
+                "token".to_string(),
+                ConnectionPropertyDef {
+                    property_type: "string".into(),
+                    required: false,
+                    default: None,
+                    secret: true,
+                },
+            ),
+        ]),
+    };
+    let conn = |shared: bool, host: &str, token: &str, ty: &str| ConnectionDef {
+        connection_type: Some(ty.to_string()),
+        shared,
+        values: HashMap::from([
+            ("host".to_string(), json!(host)),
+            ("token".to_string(), json!(token)),
+        ]),
+    };
+    let field = |ty: &str, default: Option<&str>| -> InputFieldDef {
+        let mut f: InputFieldDef = serde_yaml::from_str(&format!("type: {ty}")).unwrap();
+        f.default = default.map(|d| json!(d));
+        f
+    };
+    let flow_step = |action: &str, conn_value: &str| FlowStep {
+        action: action.to_string(),
+        name: None,
+        description: None,
+        depends_on: vec![],
+        input: HashMap::from([("conn".to_string(), json!(conn_value))]),
+        continue_on_failure: false,
+        timeout: None,
+        when: None,
+        for_each: None,
+        sequential: false,
+        retry: None,
+        inline_action: None,
+    };
+    let task = |input: HashMap<String, InputFieldDef>, step: FlowStep| TaskDef {
+        name: None,
+        description: None,
+        mode: "distributed".to_string(),
+        folder: None,
+        input,
+        flow: HashMap::from([("run".to_string(), step)]),
+        timeout: None,
+        retry: None,
+        on_success: vec![],
+        on_error: vec![],
+        on_suspended: vec![],
+        on_cancel: vec![],
+    };
+
+    // owner
+    let mut owner = WorkspaceConfig::default();
+    owner
+        .connection_types
+        .insert("clickhouse".into(), ch_type());
+    owner.connections.insert(
+        "shared-conn".into(),
+        conn(
+            true,
+            "shared.host",
+            "owner-token-secret-value",
+            "clickhouse",
+        ),
+    );
+    owner.connections.insert(
+        "private-conn".into(),
+        conn(false, "private.host", "private-token-secret", "clickhouse"),
+    );
+    let mut remote = trivial_script_action("echo $CONN");
+    remote
+        .input
+        .insert("conn".into(), field("clickhouse", Some("private-conn")));
+    owner.actions.insert("remote".into(), remote);
+
+    // infra
+    let mut infra = WorkspaceConfig::default();
+    infra.connections.insert(
+        "ch-eu".into(),
+        conn(true, "eu.host", "eu-token-secret-value", "owner.clickhouse"),
+    );
+
+    // caller
+    let mut caller = WorkspaceConfig::default();
+    caller
+        .connection_types
+        .insert("clickhouse".into(), ch_type());
+    let mut echo_conn = trivial_script_action("echo $CONN");
+    echo_conn
+        .input
+        .insert("conn".into(), field("owner.clickhouse", None));
+    caller.actions.insert("echo-conn".into(), echo_conn);
+    let conn_input =
+        |ty: &str, default: &str| HashMap::from([("conn".to_string(), field(ty, Some(default)))]);
+    caller.tasks.insert(
+        "use-shared".into(),
+        task(
+            conn_input("owner.clickhouse", "owner.shared-conn"),
+            flow_step("echo-conn", "{{ input.conn }}"),
+        ),
+    );
+    caller.tasks.insert(
+        "use-private".into(),
+        task(
+            conn_input("owner.clickhouse", "owner.private-conn"),
+            flow_step("echo-conn", "{{ input.conn }}"),
+        ),
+    );
+    caller.tasks.insert(
+        "use-infra".into(),
+        task(
+            conn_input("owner.clickhouse", "infra.ch-eu"),
+            flow_step("echo-conn", "{{ input.conn }}"),
+        ),
+    );
+    caller.tasks.insert(
+        "bad-type".into(),
+        task(
+            conn_input("clickhouse", "owner.shared-conn"),
+            flow_step("echo-conn", "{{ input.conn }}"),
+        ),
+    );
+    caller.tasks.insert(
+        "via-action".into(),
+        task(HashMap::new(), flow_step("owner.remote", "private-conn")),
+    );
+    caller.tasks.insert(
+        "literal-bad".into(),
+        task(HashMap::new(), flow_step("echo-conn", "owner.private-conn")),
+    );
+    caller.tasks.insert(
+        "templated".into(),
+        task(
+            HashMap::from([(
+                "pick".to_string(),
+                field("string", Some("owner.private-conn")),
+            )]),
+            flow_step("echo-conn", "{{ input.pick }}"),
+        ),
+    );
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([
+            (
+                "caller".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "owner".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "infra".to_string(),
+                WorkspaceSourceDef::Folder {
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+        ]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+    let mgr = WorkspaceManager::from_configs(vec![
+        ("caller".to_string(), caller, None),
+        ("owner".to_string(), owner, Some("rev-owner-1".to_string())),
+        ("infra".to_string(), infra, None),
+    ]);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let router = build_router(state, CancellationToken::new());
+    Ok((router, pool, temp_dir, container))
+}
+
+#[tokio::test]
+async fn test_task_detail_lists_shared_foreign_connections_only() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_shared_connections().await?;
+    let response = router
+        .oneshot(api_request(
+            "GET",
+            "/api/workspaces/caller/tasks/use-shared",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    let list = body["connections"]["owner.clickhouse"]
+        .as_array()
+        .expect("dropdown keyed by the type as written");
+    let names: Vec<&str> = list.iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(names, vec!["infra.ch-eu", "owner.shared-conn"], "{names:?}");
+    Ok(())
 }
 
 /// Build a minimal workspace with a task ("needs-conn") whose input declares a

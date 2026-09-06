@@ -276,7 +276,13 @@ pub async fn get_task(
         .map(|(trig_name, trigger)| TriggerInfo::from_def(trig_name, trigger, 5))
         .collect();
 
-    // Build connections map: for each non-primitive input type, collect matching connection names
+    // Build connections map keyed by each input's `type:` AS WRITTEN (the UI
+    // looks the list up by the field's own type string). Candidates are every
+    // connection in any loaded workspace whose canonical type equals the
+    // input's canonical type; foreign ones only when `shared`.
+    let ws_set =
+        crate::workspace_set::WorkspaceSet::load(&state.workspaces, &ws, Some(workspace.as_ref()))
+            .await;
     let mut connections: HashMap<String, Vec<String>> = HashMap::new();
     let connection_types_needed: BTreeSet<&str> = task
         .input
@@ -285,16 +291,40 @@ pub async fn get_task(
         .filter(|t| !PRIMITIVE_TYPES.contains(t))
         .collect();
 
-    for conn_type in connection_types_needed {
-        let mut names: Vec<String> = workspace
-            .connections
-            .iter()
-            .filter(|(_, conn)| conn.connection_type.as_deref() == Some(conn_type))
-            .map(|(conn_name, _)| conn_name.clone())
-            .collect();
-        if !names.is_empty() {
-            names.sort();
-            connections.insert(conn_type.to_string(), names);
+    for type_as_written in connection_types_needed {
+        let Ok(field_ct) =
+            stroem_common::template::canonical_type_ref(type_as_written, &ws, &ws_set)
+        else {
+            continue; // unresolvable type: no dropdown, job creation reports the error
+        };
+        let mut local: Vec<String> = Vec::new();
+        let mut foreign: Vec<String> = Vec::new();
+        for (ws_name, cfg) in ws_set.iter_configs() {
+            let is_local = ws_name == ws;
+            for (conn_name, conn) in &cfg.connections {
+                let Some(ref declared) = conn.connection_type else {
+                    continue;
+                };
+                let Ok(conn_ct) =
+                    stroem_common::template::canonical_type_ref(declared, ws_name, &ws_set)
+                else {
+                    continue;
+                };
+                if conn_ct != field_ct {
+                    continue;
+                }
+                if is_local {
+                    local.push(conn_name.clone());
+                } else if conn.shared {
+                    foreign.push(format!("{}.{}", ws_name, conn_name));
+                }
+            }
+        }
+        local.sort();
+        foreign.sort();
+        local.extend(foreign);
+        if !local.is_empty() {
+            connections.insert(type_as_written.to_string(), local);
         }
     }
 
