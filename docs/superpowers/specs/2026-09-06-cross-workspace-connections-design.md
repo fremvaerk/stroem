@@ -255,14 +255,20 @@ might be referenced, the server takes the simpler route: `WorkspaceSet::load`
 snapshots **every healthy workspace's config** via
 `WorkspaceManager::get_all_configs()` — one `RwLock` read per workspace, no
 I/O, no prefix scan — plus the full set of configured workspace names via
-`WorkspaceManager::names()` (healthy or not, for `Unknown` vs. `Unavailable`
-classification). The resolver then does a plain map lookup per reference
-against this one pre-loaded snapshot; a name absent from `configs` but present
-in `known` is a configured-but-unloaded workspace (`Unavailable`, 500), and a
-name absent from both is unconfigured (`Unknown`, 400).
+`WorkspaceManager::configured_names()` (healthy or not, for `Unknown` vs.
+`Unavailable` classification — this is the union of `entries` and
+`load_errors`, so a workspace whose *source construction* failed, e.g.
+`GitSource::new()`, is still counted as known rather than reading as
+unconfigured; plain `names()` would miss it). The resolver then does a plain
+map lookup per reference against this one pre-loaded snapshot; a name absent
+from `configs` but present in `known` is a configured-but-unloaded workspace
+(`Unavailable`, 500), and a name absent from both is unconfigured (`Unknown`,
+400).
 
 `WorkspaceSet` carries two things: `known: HashSet<String>` from
-`WorkspaceManager::names()` (every configured workspace, healthy or not) and
+`WorkspaceManager::configured_names()` (every workspace the server was
+configured with, whether or not it loaded successfully — entries plus
+source-construction failures) and
 `configs: HashMap<String, Arc<WorkspaceConfig>>` from `get_all_configs()`
 (healthy only). `WorkspaceLookup::get` returns an enum
 `Found(&cfg) | Unknown | Unavailable` so the resolver can report an unknown
@@ -293,7 +299,13 @@ Two different moments, two different surfaces:
   **literal pre-check**: for every flow step whose action has connection-typed
   inputs, any flow-step `input:` value that is a plain string with no `{{`
   is resolved eagerly with the same lookup — templated values cannot be checked
-  before render). Errors here return from `execute_task`.
+  before render). A flow step with a `when` condition is **excluded** from the
+  literal pre-check even when its `input:` value is a plain string: the
+  condition may evaluate false (or the step may cascade-skip), so a bad
+  literal is not an author mistake worth rejecting the whole job creation
+  for — it is only checked once the step is actually promoted/dispatched
+  (`precheck_literal_connection_inputs` returns early on `flow_step.when.is_some()`).
+  Errors here return from `execute_task`.
   `web/api/tasks.rs::classify_execute_error` already maps *"resolve
   connection"* and *"does not exist"* to 400; add *"is not shared"* and
   *"unknown workspace"*.
