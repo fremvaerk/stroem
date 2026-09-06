@@ -556,10 +556,11 @@ pub async fn execute_task(
 ///   '...': failed to resolve connection inputs" -> "Input field '...'
 ///   references connection '...'" -> the actual cause).
 /// - **Legacy broad phrases** (`not found`, `does not exist`, `resolve
-///   connection`, `has no action`, `required`, `invalid`, `validation`) are
-///   common enough that an inner infra-layer message could contain one by
-///   coincidence (e.g. a Postgres error's own "relation ... does not
-///   exist"), so they are matched on the OUTERMOST message only
+///   connection`, `has no action`, `required`, `invalid`, `validation`,
+///   `merge input defaults`) are common enough that an inner infra-layer
+///   message could contain one by coincidence (e.g. a Postgres error's own
+///   "relation ... does not exist"), so they are matched on the OUTERMOST
+///   message only
 ///   (`e.to_string()`, which only renders the top context layer this
 ///   function's caller controls).
 ///
@@ -586,7 +587,8 @@ fn classify_execute_error(e: anyhow::Error) -> AppError {
         || outer.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
         || outer.contains("required")
         || outer.contains("invalid")
-        || outer.contains("validation");
+        || outer.contains("validation")
+        || outer.contains("merge input defaults"); // task-input default template render failure
     if legacy_user_error {
         AppError::BadRequest(chain)
     } else {
@@ -639,6 +641,22 @@ mod classify_execute_error_tests {
             matches!(err, AppError::Internal(_)),
             "expected Internal, got {err:?}"
         );
+    }
+
+    #[test]
+    fn bad_default_template_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "Failed to render default template for input field 'x': Variable `secret.nope` not found"
+        )
+        .context("Failed to merge input defaults");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("Failed to merge input defaults"), "{msg}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     #[test]
