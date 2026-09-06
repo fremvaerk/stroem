@@ -121,7 +121,12 @@ Same rule as actions (`job_creator.rs`, cross-workspace-references §4.2):
    `(caller, common.clickhouse)`.
 2. On a local miss, split on the **first** `.` into `(workspace, item)`. If
    `workspace` is a loaded workspace, look `item` up there.
-3. Unqualified names are always local. Fully backward-compatible.
+3. If the prefix is **not a known workspace**, the dotted string is treated as
+   an **opaque local name** (canonical `(local, "a.b")`). Today the server never
+   runs offline validation at load and the resolver only string-compares type
+   names, so a local connection and input that both say `type: foo.bar` with no
+   such type defined currently work; this rule keeps them working.
+4. Unqualified names are always local. Fully backward-compatible.
 
 Connections are **never** library-imported (libraries ignore `connections:`),
 so for connection names step 1 is only for consistency and never matches a
@@ -143,8 +148,13 @@ pub struct ConnectionDef {
 ```
 
 `shared` is a reserved key, so it must be pulled out of the flattened `values`
-map exactly like `type` already is. A connection with a value literally named
-`shared` today would silently change meaning — acceptable; document it.
+map exactly like `type` already is. Compatibility: a `shared: true|false`
+value today would now be consumed as the flag; a **non-boolean** `shared`
+would fail deserialisation, and the loader's existing behaviour skips the
+**whole file** with a warning (`workspace_loader.rs`). Neither the repo's
+YAML nor the user's playground workspace contains a `shared:` key
+(checked 2026-09-06). Accepted; the deserialiser emits an error that names the
+connection, and the release note calls it out.
 
 Semantics:
 
@@ -152,9 +162,22 @@ Semantics:
 - Referenced by **qualified name from another workspace**: must be `shared`,
   else resolution fails with a distinct error
   *"connection 'jobs.private-ch' exists but is not shared"*.
-- **Cross-workspace actions** resolving their own connection-typed inputs by
-  bare name in the owner context (existing behaviour) are the owner reading its
-  own config: **ungated**, unchanged.
+- **Cross-workspace actions**: provenance decides the gate.
+  - A connection name that comes from the **owner's own action `default:`**
+    is the owner reading its own config: **ungated**, unchanged.
+  - A connection name **supplied by the caller** (the flow-step `input:` map, or
+    a job-input field merged in by `merge_missing_action_fields`) is the
+    caller's reference. A bare name resolves in the **caller** first; on a miss
+    it falls back to the **owner only if `shared`**. A qualified name follows
+    the normal rule. This closes the bypass where a caller could write
+    `clickhouse: "private-conn"` on an `owner.action` step and read the owner's
+    unshared connection by bare name.
+  - **Behaviour change vs v0.15.23**: the documented example
+    `clickhouse: "clickhouse-prod"` on a `jobs.recalc-agg-sessions` step keeps
+    working **only after** `jobs` marks `clickhouse-prod` as `shared: true`.
+    Until then it fails with *"connection 'clickhouse-prod' not found in
+    'ai_traffic_model'; 'jobs.clickhouse-prod' exists but is not shared"*.
+    This is the point of the flag; release-note it.
 - Untyped connections (no `type:`) skip the type check today and satisfy any
   connection-typed input. That rule is kept unchanged for foreign references:
   an untyped `shared: true` connection matches any input type. The owner opted
@@ -178,8 +201,9 @@ pub trait WorkspaceLookup {
     /// The workspace the caller's YAML lives in.
     fn local(&self) -> &WorkspaceConfig;
     fn local_name(&self) -> &str;
-    /// Any other loaded workspace, or None if unknown / not loaded.
-    fn get(&self, name: &str) -> Option<&WorkspaceConfig>;
+    /// Any other workspace: Found(cfg) | Unknown (not configured) |
+    /// Unavailable (configured but not loaded / unhealthy).
+    fn get(&self, name: &str) -> Lookup<'_>;
 }
 ```
 
@@ -201,7 +225,24 @@ Inside the resolver, for each non-primitive input field:
 4. Canonicalise the connection's declared type **in the connection's own
    workspace** and compare pairs. Mismatch ⇒ existing type-mismatch error,
    messages now print canonical `ws.type` on both sides.
-5. Replace the string with `conn.values`.
+5. If the connection's canonical type lives in a **different workspace than
+   the connection** (i.e. its `type:` is dotted), the owner's load-time pass
+   never saw the type: apply the type's **property defaults** here (same logic
+   as `WorkspaceConfig::apply_connection_defaults`, factored into a shared fn)
+   and run the same **presence/unknown-field/empty-string checks** that
+   `validate_connections` performs at load (factored out; there is no JSON
+   value-type check today and none is added). Local-typed connections were
+   already defaulted and validated at load and are not touched.
+6. Replace the string with the (defaulted) `conn.values`.
+
+**Provenance-aware two-pass** (implements §3.4 for cross-workspace actions):
+`prepare_action_input` becomes: (a) resolve the connection-typed fields that
+are **present in the caller-rendered input** with `local = caller` and the
+fallback-to-owner-if-shared rule; (b) `merge_action_defaults` with the
+**owner's** secrets context (unchanged); (c) resolve the fields that were
+**filled by defaults** with `local = owner`, ungated. For local steps caller
+and owner are the same workspace and the two passes collapse to today's
+behaviour.
 
 ### 4.2 Server: pre-collecting configs
 
@@ -219,7 +260,13 @@ calling the resolver:
 - `get_config` each; a name that is not a loaded workspace is simply absent from
   the set and the resolver reports it as unknown.
 
-`WorkspaceSet` implements `WorkspaceLookup`. A helper
+`WorkspaceSet` carries two things: `known: HashSet<String>` from
+`WorkspaceManager::names()` (every configured workspace, healthy or not) and
+`configs: HashMap<String, Arc<WorkspaceConfig>>` from `get_config` (healthy
+only). `WorkspaceLookup::get` returns an enum
+`Found(&cfg) | Unknown | Unavailable` so the resolver can report an unknown
+prefix as an author error (400) and a known-but-unloaded workspace as a server
+condition (500), matching the action rule. A helper
 `job_creator::collect_workspace_set(workspaces, local_name, local_cfg, &[&json])`
 is the single place this scan lives.
 
@@ -239,10 +286,23 @@ flow-step `input:` map resolves globally. Both work with one lookup.
 
 ### 4.4 Error classification
 
-`web/api/tasks.rs::is_user_error` already maps *"resolve connection"* and
-*"does not exist"* to 400. Add *"is not shared"* and *"unknown workspace"* so
-every author mistake is a 400, never a 500. An owner workspace that is loaded
-but currently unhealthy (config unavailable) stays a 500, matching actions.
+Two different moments, two different surfaces:
+
+- **Job creation** (task inputs; `type: task` server-side steps; plus a new
+  **literal pre-check**: for every flow step whose action has connection-typed
+  inputs, any flow-step `input:` value that is a plain string with no `{{`
+  is resolved eagerly with the same lookup — templated values cannot be checked
+  before render). Errors here return from `execute_task`.
+  `web/api/tasks.rs::is_user_error` already maps *"resolve connection"* and
+  *"does not exist"* to 400; add *"is not shared"* and *"unknown workspace"*.
+  `Unavailable` stays 500, matching actions.
+- **Claim time** (worker-executed steps whose values were templated): a
+  resolution error cannot reach the HTTP caller — the job already exists. The
+  existing path applies: `claim_job` calls `fail_claimed_step` with the error
+  text, the step fails, and the message is visible in job detail. No new
+  mechanism; the spec's tests assert the step/job status, not an HTTP code.
+
+`execute_task` returns 200 (`Json`), not 201; tests assert 200.
 
 ## 5. Validation
 
@@ -280,6 +340,9 @@ field's own type). New logic:
    it is `shared`).
 3. Emit local matches by bare name, foreign matches as `ws.name`. Sort local
    first, then foreign alphabetically.
+4. Untyped connections are not listed — same as today for local untyped
+   connections (the filter is on declared type). They remain usable by typing
+   the name. Documented.
 
 The UI (`ui/src/pages/task-detail` form) already renders a `<select>` from this
 map and submits the chosen string. No change. Re-run prefill stores the raw
@@ -292,21 +355,33 @@ connection's *name* from another workspace.
 ## 7. Redaction
 
 `web/api/jobs.rs::get_job` currently does
-`collect_secret_values(&caller_ws.secrets)`. Change to union the secrets of:
+`collect_secret_values(&caller_ws.secrets)`. Owner provenance is **not
+recoverable** from persisted data: a flow-step `input: {ch: "owner.x"}` on a
+local action is resolved at claim time, the resolved object overwrites
+`job_step.input`, and `action_workspace` stays NULL. Rather than reconstruct
+provenance, redact against **every loaded workspace**
+(`WorkspaceManager::get_all_configs()`, in-memory `Arc` clones):
 
-- the job's own workspace,
-- every distinct `job_step.action_workspace` for the job (already stored, one
-  query the handler performs anyway to list steps),
-- every workspace prefix found in string values of `job.raw_input` and the task's
-  input defaults (a `jobs.clickhouse-prod` submission ⇒ include `jobs`), plus the
-  one-hop expansion from §4.2 for connections whose type is foreign.
+- all `secrets` values of every workspace (today: caller only), and
+- the values of every connection property whose **type marks it
+  `secret: true`** (`ConnectionPropertyDef.secret` exists today and is not
+  consulted by redaction; this covers literal credentials and `vals` that never
+  passed through `secrets`). Type lookup uses §3.3 so dotted-typed connections
+  are covered.
 
-Both `job.input` and each step's `input` are then redacted against the union.
-This also closes the pre-existing exposure for cross-workspace actions. Cost:
-a few extra `Arc` clones per job-detail request.
+Existing `>3 chars` filter kept. Trade-off: a short common value in workspace
+X's secrets could mask an innocent string in workspace Y's job — the same
+coincidence risk that exists within a workspace today, extended across them.
+Under-redaction is a credential leak; over-redaction is a `••••••` in an
+unrelated log. Chosen accordingly.
 
-`raw_input` redaction limitation (values not present in any workspace's
-`secrets` are never masked) is unchanged and remains documented.
+Unchanged, documented limitations: values rotated out of config are no longer
+in the redaction set, so historical jobs can reveal a previous value
+(pre-existing for local connections); user-typed values never in any config
+are never masked. `shared: true` therefore exposes a connection's
+**non-secret-marked** fields to anyone with `View` on a consuming task in any
+workspace. Documentation for the flag says so and recommends `secret: true` on
+credential properties.
 
 ## 8. Worker
 
@@ -372,6 +447,22 @@ folder workspaces `caller` + `owner` + a third `infra` for the two-hop case):
   `private-conn`, lists local first.
 - Job detail: owner's secret value appearing in `job.input` / step input is
   masked to `••••••`.
+- Cross-workspace action, caller supplies bare `private-conn` (owner,
+  unshared) via flow-step input ⇒ step fails "not shared"; same name with
+  `shared: true` ⇒ resolves; a caller-local bare name wins over an owner name.
+- Job detail: owner secret reaching a step input via a flow-step `input:` on a
+  LOCAL action (no `action_workspace`) is masked; a third-workspace connection
+  referenced from an action default is masked; a literal credential in a
+  property marked `secret: true` (never in `secrets`) is masked.
+- Creation-time literal pre-check: flow-step `input: {ch: "owner.private"}` ⇒
+  400 before any step exists; templated value ⇒ job created, step fails at
+  claim with the error in `error_message`.
+- Unknown prefix ⇒ 400; configured-but-unhealthy owner ⇒ 500.
+- Dotted-typed connection in `infra` gets `owner.clickhouse`'s property
+  defaults applied before the values reach the step.
+- Pre-existing config with `type: foo.bar` on both a local connection and an
+  input, no such type or workspace ⇒ still resolves (opaque local name).
+- `ConnectionDef` YAML with `shared: "yes"` ⇒ load error names the connection.
 - Regression: existing cross-workspace action tests untouched and green.
 
 **stroem-cli**: `stroem validate` on a workspace using `owner.type` prints the
