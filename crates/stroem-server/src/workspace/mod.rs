@@ -7,7 +7,7 @@ pub use library::{merge_library_into_workspace, LibraryResolver, ResolvedLibrary
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -340,6 +340,14 @@ impl WorkspaceManager {
         }
     }
 
+    /// Test-only: register a source-construction failure for `name` with no
+    /// corresponding `entries` row — mirrors what `new()` does when e.g.
+    /// `GitSource::new()` itself fails, before any placeholder entry exists.
+    #[cfg(test)]
+    pub fn insert_load_error_for_test(&mut self, name: &str, error: &str) {
+        self.load_errors.insert(name.to_string(), error.to_string());
+    }
+
     /// Get the workspace config for a given name.
     /// Returns None for workspaces with a load error (empty placeholder config).
     pub async fn get_config(&self, name: &str) -> Option<Arc<WorkspaceConfig>> {
@@ -373,12 +381,33 @@ impl WorkspaceManager {
 
     /// List all workspace names (including errored workspaces with placeholder entries).
     /// Note: source construction failures (e.g. `GitSource::new()`) are not included here
-    /// as they have no entry — use `list_workspace_info()` for the complete list.
+    /// as they have no entry — use `list_workspace_info()` or `configured_names()` for
+    /// the complete list.
     pub fn names(&self) -> Vec<&str> {
         self.entries.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Every workspace name the server was CONFIGURED with, whether or not it
+    /// loaded successfully — the union of `entries` (placeholder-or-healthy)
+    /// and `load_errors` (source construction failed before an entry could
+    /// even be created, e.g. `GitSource::new()`).
+    ///
+    /// Callers that need to distinguish "not configured at all" (unknown,
+    /// 400) from "configured but currently unavailable" (unavailable, 500)
+    /// should use this instead of `names()`.
+    pub fn configured_names(&self) -> Vec<String> {
+        let mut names: HashSet<String> = self.entries.keys().cloned().collect();
+        names.extend(self.load_errors.keys().cloned());
+        names.into_iter().collect()
+    }
+
     /// Check whether a workspace with the given name exists (regardless of health status).
+    // TODO: like `names()`, this ignores `load_errors` — a workspace whose
+    // *source construction* failed (e.g. `GitSource::new()`) has no `entries`
+    // row and so reads as nonexistent here, not merely unavailable. Same gap
+    // as `names()`; `configured_names()` closes it for `WorkspaceSet::load`
+    // but this method is used for action-reference detection and is left
+    // unchanged for now.
     pub fn has_workspace(&self, name: &str) -> bool {
         self.entries.contains_key(name)
     }
