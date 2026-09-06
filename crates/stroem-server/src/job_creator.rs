@@ -1352,6 +1352,14 @@ fn precheck_literal_connection_inputs(
     caller_ws: &str,
     owner_ws: Option<&str>,
 ) -> Result<()> {
+    if flow_step.when.is_some() {
+        // A `when`-guarded step may never run at all (condition false, or the
+        // step cascade-skipped). Pre-checking its literal connection inputs
+        // at job creation would reject jobs that are perfectly fine to
+        // create — keep today's behaviour: a bad literal fails the step at
+        // claim time, only if the step is actually reached.
+        return Ok(());
+    }
     let owner_ws = owner_ws.unwrap_or(caller_ws);
     let mut literal_schema = HashMap::new();
     let mut literal_values = serde_json::Map::new();
@@ -1855,5 +1863,55 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn precheck_skips_when_guarded_step_with_bad_literal() {
+        use crate::workspace_set::WorkspaceSet;
+        use std::sync::Arc;
+        use stroem_common::models::workflow::{
+            ActionDef, ConnectionDef, ConnectionTypeDef, FlowStep, InputFieldDef, WorkspaceConfig,
+        };
+
+        let mut owner = WorkspaceConfig::default();
+        owner.connection_types.insert(
+            "ch".to_string(),
+            ConnectionTypeDef {
+                properties: Default::default(),
+            },
+        );
+        owner.connections.insert(
+            "private".to_string(),
+            ConnectionDef {
+                connection_type: Some("ch".into()),
+                shared: false,
+                values: Default::default(),
+            },
+        );
+        let caller = WorkspaceConfig::default();
+        let set = WorkspaceSet::from_parts(
+            "caller",
+            Some(&caller),
+            vec![("owner".to_string(), Arc::new(owner))],
+            vec![],
+        );
+
+        let mut action: ActionDef = serde_yaml::from_str("type: script\nscript: echo").unwrap();
+        action.input.insert(
+            "conn".to_string(),
+            InputFieldDef {
+                field_type: "owner.ch".to_string(),
+                ..serde_yaml::from_str("type: string").unwrap()
+            },
+        );
+
+        // Same literal, unshared reference as the rejected case above, but
+        // this step is `when`-guarded: the pre-check must not run at all, so
+        // job creation is not blocked by a step that may never execute.
+        let mut step: FlowStep =
+            serde_yaml::from_str("action: a\ninput:\n  conn: \"owner.private\"").unwrap();
+        step.when = Some("input.flag".to_string());
+
+        precheck_literal_connection_inputs("s", &step, &action, &set, "caller", None).unwrap();
     }
 }
