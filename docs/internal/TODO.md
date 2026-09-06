@@ -1483,7 +1483,7 @@ Feature: a connection-typed input (task- or action-level) may name another works
 - [x] Provenance-aware two-pass resolution for cross-workspace actions (`prepare_action_input_cross`): caller-supplied names resolve caller-then-owner-if-shared; owner's own defaults resolve ungated
 - [x] `merge_action_defaults` renders only default-filled fields, never re-rendering caller-supplied values against the owner's secrets — closes a cross-workspace secret-exfiltration path via Tera string-literal tricks
 - [x] Literal flow-step connection values pre-checked at job creation (`job_creator::precheck_literal_connection_inputs`); templated ones fail the step at claim (422, `error_message` set)
-- [x] `classify_execute_error` matches the full error context chain (`{:#}`), not just the outermost wrapper, so `is not shared` / `unknown workspace` map to 400 while `is not available` (configured-but-unloaded workspace) stays 500
+- [x] `classify_execute_error` is two-tier: precise phrases (`is not shared`, `unknown workspace`, `has no connection`) are matched anywhere in the full error context chain (`{:#}`); legacy broad phrases (`not found`, `does not exist`, `resolve connection`, `has no action`, `required`, `invalid`, `validation`) are matched on the outermost message only, so an inner infra-layer error can't be misread as a user mistake; `is not available` (configured-but-unloaded workspace) is checked first, anywhere in the chain, and always stays 500
 - [x] E2E test: cross-workspace shared connection scenario (`tests/e2e.sh`)
 
 ### Follow-ups
