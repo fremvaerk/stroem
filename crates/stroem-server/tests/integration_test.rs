@@ -1456,6 +1456,8 @@ async fn setup_two_workspaces() -> Result<(
 ///         task `via-action`   step run: action owner.remote, input conn: "private-conn" (bare, caller-supplied)
 ///         task `literal-bad`  step run: local echo-conn, input conn: "owner.private-conn" (literal)
 ///         task `templated`    input pick: string; step run: local echo-conn, input conn: "{{ input.pick }}"
+///         action `child-task` type:task -> use-shared, input conn: type owner.clickhouse (no default)
+///         task `task-step-bad` step run (when: "true"): action child-task, input conn: "owner.private-conn"
 ///         caller has a local type `clickhouse` (for bad-type) and NO connections.
 async fn setup_shared_connections() -> Result<(
     Router,
@@ -1651,6 +1653,85 @@ async fn setup_shared_connections() -> Result<(
             )]),
             flow_step("echo-conn", "{{ input.pick }}"),
         ),
+    );
+
+    // `child-task`: type:task action delegating to `use-shared`, with a
+    // connection-typed input so `handle_task_steps` exercises
+    // `prepare_action_input` for a task-action step (Item 2 regression:
+    // resolution failures there must fail the step, not swallow the error).
+    caller.actions.insert(
+        "child-task".into(),
+        ActionDef {
+            action_type: "task".to_string(),
+            name: None,
+            description: None,
+            task: Some("use-shared".to_string()),
+            cmd: None,
+            script: None,
+            source: None,
+            runner: None,
+            language: None,
+            dependencies: vec![],
+            interpreter: None,
+            args: vec![],
+            tags: vec![],
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            workdir: None,
+            resources: None,
+            input: HashMap::from([("conn".to_string(), field("owner.clickhouse", None))]),
+            output: None,
+            manifest: None,
+            provider: None,
+            model: None,
+            system_prompt: None,
+            prompt: None,
+            temperature: None,
+            max_tokens: None,
+            tools: vec![],
+            max_turns: None,
+            interactive: false,
+            message: None,
+            retry: None,
+        },
+    );
+    caller.tasks.insert(
+        "task-step-bad".into(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow: HashMap::from([(
+                "run".to_string(),
+                FlowStep {
+                    action: "child-task".to_string(),
+                    name: None,
+                    description: None,
+                    depends_on: vec![],
+                    input: HashMap::from([("conn".to_string(), json!("owner.private-conn"))]),
+                    continue_on_failure: false,
+                    timeout: None,
+                    // Root step with a `when` — excluded from the creation-time
+                    // literal pre-check (§4.4), so this only surfaces at
+                    // `handle_task_steps` / claim-time resolution.
+                    when: Some("true".to_string()),
+                    for_each: None,
+                    sequential: false,
+                    retry: None,
+                    inline_action: None,
+                },
+            )]),
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
     );
 
     let config = ServerConfig {
@@ -1981,6 +2062,52 @@ async fn test_templated_shared_foreign_connection_resolves_at_claim() -> Result<
     let claim = body_json(response).await;
     assert_eq!(claim["workspace"].as_str().unwrap(), "caller");
     assert_eq!(claim["input"]["conn"]["host"], "shared.host");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_step_bad_connection_fails_step_not_swallowed() -> Result<()> {
+    // Item 2 regression: `handle_task_steps` (the server-side dispatch loop
+    // for type:task flow steps) used to `tracing::warn!` a
+    // `prepare_action_input` failure and fall through with the UNRESOLVED
+    // input, silently proceeding to create the child job instead of failing
+    // the step. `task-step-bad`'s `run` step is a type:task action
+    // (`child-task`) with a literal reference to the unshared
+    // `owner.private-conn`; the root `when: "true"` excludes it from the
+    // creation-time literal pre-check (see `precheck_literal_connection_inputs`
+    // — a `when`-guarded step is never pre-checked, only checked once
+    // actually promoted/dispatched), so the resolution failure can only
+    // surface from `handle_task_steps` itself.
+    let (router, pool, _tmp, _container) = setup_shared_connections().await?;
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/caller/tasks/task-step-bad/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // The `when` condition promotes the root step synchronously inside job
+    // creation (`create_job_for_task_inner`'s post-creation cascade loop),
+    // and `handle_task_steps` runs right after — by the time the execute
+    // response comes back, the step has already been marked failed.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "steps: {steps:?}");
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("is not shared"),
+        "{:?}",
+        run.error_message
+    );
     Ok(())
 }
 

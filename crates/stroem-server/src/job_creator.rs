@@ -508,8 +508,13 @@ pub async fn handle_task_steps(
                 match prepare_action_input(&rendered_input, &action.input, &ws_set) {
                     Ok(prepared) => prepared,
                     Err(e) => {
-                        tracing::warn!("Failed to prepare action input: {:#}", e);
-                        rendered_input
+                        let err = format!(
+                            "Failed to prepare action input for task step '{}': {:#}",
+                            step.step_name, e
+                        );
+                        JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
+                        tracing::error!("{}", err);
+                        continue;
                     }
                 }
             } else {
