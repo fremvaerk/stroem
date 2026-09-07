@@ -733,6 +733,25 @@ pub async fn expand_for_each_steps(
                 .unwrap_or(false)
         });
         if !deps_met {
+            // `skip_unreachable_steps` deliberately ignores for_each placeholders,
+            // so this is the ONLY place a placeholder behind a failed/cancelled
+            // dependency can be retired. Without it the placeholder stays
+            // `pending` forever and the job never settles (Codex review
+            // 2026-09-07; the 2026-09-02 fix covered only skipped deps).
+            let blocked_by_failure = !flow_step.continue_on_failure
+                && flow_step.depends_on.iter().any(|dep| {
+                    status_map.get(dep).is_some_and(|s| {
+                        s == StepStatus::Failed.as_ref() || s == StepStatus::Cancelled.as_ref()
+                    })
+                });
+            if blocked_by_failure {
+                JobStepRepo::mark_skipped(pool, job_id, &step.step_name).await?;
+                expanded.push(step.step_name.clone());
+                tracing::info!(
+                    "for_each step '{}' skipped: dependency failed/cancelled",
+                    step.step_name
+                );
+            }
             continue;
         }
 

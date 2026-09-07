@@ -1602,3 +1602,99 @@ async fn test_for_each_placeholder_skip_cascades_to_downstream_step() -> Result<
 
     Ok(())
 }
+
+// ─── Regression: for_each placeholder directly downstream of a FAILED step ────
+
+/// Codex review finding (2026-09-07): `skip_unreachable_steps` ignores
+/// `for_each` placeholders and `expand_for_each_steps` just `continue`s when a
+/// dependency is failed/cancelled, so a placeholder whose dependency FAILED
+/// (not skipped) stays `pending` forever and the job never settles. The
+/// 2026-09-02 fix only covered a *skipped* dependency.
+#[tokio::test]
+async fn test_failed_dep_skips_for_each_placeholder_directly_downstream() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let expr = "{{ a.output.items | json_encode() }}";
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step_for_each(vec!["a"], expr));
+    flow.insert("c".to_string(), flow_step(vec!["b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_for_each(job_id, "b", "pending", expr),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["b"], "skipped",
+        "for_each placeholder behind a FAILED dependency must be skipped"
+    );
+    assert_eq!(
+        statuses["c"], "skipped",
+        "downstream of the skipped placeholder"
+    );
+    let job = JobRepo::get(&pool, job_id).await?.expect("job exists");
+    assert_eq!(job.status, "failed", "job must settle, not stay running");
+    Ok(())
+}
+
+/// With `continue_on_failure: true` the placeholder must still be considered
+/// for expansion after a failed dependency (unchanged behaviour) — here the
+/// template reads `a.output` which is null for a failed step, so expansion
+/// fails the placeholder rather than skipping it, and the job settles.
+#[tokio::test]
+async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeholder() -> Result<()>
+{
+    let (pool, _container) = setup_db().await?;
+
+    let expr = "{{ a.output.items | json_encode() }}";
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        FlowStep {
+            continue_on_failure: true,
+            ..flow_step_for_each(vec!["a"], expr)
+        },
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_for_each(job_id, "b", "pending", expr),
+        ],
+    )
+    .await?;
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
+    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_ne!(
+        statuses["b"], "skipped",
+        "continue_on_failure placeholder must not be cascade-skipped"
+    );
+    assert_ne!(
+        statuses["b"], "pending",
+        "placeholder must be resolved, not left pending"
+    );
+    let job = JobRepo::get(&pool, job_id).await?.expect("job exists");
+    assert_ne!(job.status, "running", "job must settle");
+    Ok(())
+}
