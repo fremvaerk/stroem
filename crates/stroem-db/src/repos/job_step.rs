@@ -316,7 +316,9 @@ impl JobStepRepo {
                   AND $1::jsonb @> to_jsonb(required_ability)
                   AND required_tags::jsonb <@ $2::jsonb
                   AND (NOT $3::boolean OR $2::jsonb <@ required_tags::jsonb)
-                  AND action_type NOT IN ('task', 'agent', 'approval', 'event_source')
+                  -- Server-dispatched kinds only. `agent` is worker-side since
+                  -- a8aa1c6 and must NOT be listed (ed67c76 regressed this).
+                  AND action_type NOT IN ('task', 'approval', 'event_source')
                   AND (retry_at IS NULL OR retry_at <= NOW())
                 ORDER BY random()
                 FOR UPDATE SKIP LOCKED
@@ -964,7 +966,7 @@ impl JobStepRepo {
               -- `event_source` here would cause the sweep to fail
               -- server-dispatched consumer steps that no worker was ever
               -- supposed to claim.
-              AND js.action_type NOT IN ('task', 'agent', 'approval', 'event_source')
+              AND js.action_type NOT IN ('task', 'approval', 'event_source')
               AND js.ready_at < NOW() - make_interval(secs => $1::double precision)
               AND NOT EXISTS (
                   SELECT 1 FROM worker w

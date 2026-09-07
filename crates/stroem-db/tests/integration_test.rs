@@ -4937,3 +4937,143 @@ async fn test_sweep_treats_exclusive_worker_as_unmatched_for_untagged_steps() ->
 
     Ok(())
 }
+
+// ─── Regression: agent steps must be claimable by agent-capable workers ───────
+
+fn agent_step(job_id: Uuid, name: &str) -> NewJobStep {
+    NewJobStep {
+        job_id,
+        step_name: name.to_string(),
+        action_name: "summarise".to_string(),
+        action_type: "agent".to_string(),
+        action_image: None,
+        action_spec: None,
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "agent".to_string(),
+        required_tags: vec![],
+        runner: "none".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }
+}
+
+/// Agent dispatch moved worker-side in a8aa1c6 (2026-03-23); the retry commit
+/// ed67c76 (2026-04-08) re-added `'agent'` to the claim query's `NOT IN` list,
+/// making agent steps unclaimable by anyone. A worker advertising the `agent`
+/// capability must be able to claim an `action_type = 'agent'` step.
+#[tokio::test]
+async fn test_claim_agent_step_claimable_by_agent_capable_worker() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "agent-test",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[agent_step(job_id, "think")]).await?;
+
+    // A script-only worker must NOT get it (capability mismatch, unchanged).
+    let script_worker = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        script_worker,
+        "script-w",
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    let claimed =
+        JobStepRepo::claim_ready_step(&pool, &["script".to_string()], &[], false, script_worker)
+            .await?;
+    assert!(
+        claimed.is_none(),
+        "script-only worker must not claim an agent step"
+    );
+
+    // An agent-capable worker MUST get it.
+    let agent_worker = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        agent_worker,
+        "agent-w",
+        &["agent".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    let claimed =
+        JobStepRepo::claim_ready_step(&pool, &["agent".to_string()], &[], false, agent_worker)
+            .await?
+            .expect("agent-capable worker must claim the agent step");
+    assert_eq!(claimed.step_name, "think");
+    assert_eq!(claimed.status, "running");
+    assert_eq!(claimed.worker_id, Some(agent_worker));
+    Ok(())
+}
+
+/// The unmatched-step sweep must mirror the claim exclusion set: a ready agent
+/// step with no agent-capable worker online is "unmatched" and must be reported
+/// so recovery can fail it instead of leaving it ready forever.
+#[tokio::test]
+async fn test_unmatched_sweep_reports_agent_step_without_agent_worker() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "agent-test",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[agent_step(job_id, "think")]).await?;
+    // Only a script worker is active.
+    WorkerRepo::register(
+        &pool,
+        Uuid::new_v4(),
+        "script-w",
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    // Age the ready_at past the timeout.
+    sqlx::query("UPDATE job_step SET ready_at = NOW() - interval '10 minutes' WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+    let unmatched = JobStepRepo::get_unmatched_ready_steps(&pool, 60.0).await?;
+    assert!(
+        unmatched
+            .iter()
+            .any(|s| s.job_id == job_id && s.step_name == "think"),
+        "agent step with no agent worker must be reported as unmatched: {unmatched:?}"
+    );
+    Ok(())
+}
