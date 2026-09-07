@@ -4,6 +4,12 @@ Ships on top of Plan A (creation-settlement unification). Additive migration
 (`045_job_step_carried_over.sql`), new endpoint, new UI action — no config changes
 required.
 
+**Ships together with Plan A.** These notes cover only what Plan B adds. The Re-run
+workspace-hook change, the `cancelled` settlement change and the two stuck-job fixes
+(jobs that settle at creation, and a `type: task` child that settles at creation without
+propagating to its parent) are documented in `release-notes-draft-plan-a.md`; merge both
+drafts into the combined release notes so none of them is lost.
+
 ## User-visible changes
 
 - **New: Restart from a step.** A terminal job's step detail panel (and a `for_each`
@@ -19,6 +25,19 @@ required.
     snapshot at claim time, not what the source job saw; artifacts are not carried over;
     a carried cross-workspace step keeps the current action definition but the old
     output; child jobs of a carried `type: task` step are not re-linked to the new job.
+- **Re-run and Restart are now offered only on top-level jobs.** Both actions always create
+  a brand-new job with no parent, so offering them on a `type: task` child job, an agent
+  tool call, an uploaded-state job or a hook job produced a detached job tree that nothing
+  propagated back to the original parent — and restarting a hook job relabelled it
+  `restart`, a source type the server treats as top-level, re-enabling the workspace-hook
+  fanout the `hook` source type exists to suppress. The buttons are now hidden on those
+  jobs and both APIs reject them with `400`. This closes a pre-existing hole in Re-run as
+  well as the new one Restart would have added.
+- **Restart rejects input that no longer satisfies the task schema.** Restart replays the
+  source job's `raw_input` with no form in front of it. If the task has since gained a
+  required input field with no default, the restart is now rejected with `400` naming the
+  missing field, instead of creating a job with a hole in its input. Use Re-run, which
+  gives you the form, to supply the new value.
 - **`hook.failed_steps[].carried_over`.** In an `on_error` hook, each failed-step entry
   now has a `carried_over` boolean so a notification can tell a fresh failure apart from
   one carried forward, unactioned, by a restart. `false` for every job that isn't a

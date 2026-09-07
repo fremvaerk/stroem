@@ -378,6 +378,34 @@ fn create_job_for_task_inner<'a>(
         let merged_input = merge_defaults(&effective_input, &task.input, &secrets_ctx)
             .context("Failed to merge input defaults")?;
 
+        // Restart replays the source job's `raw_input` with no form in front of
+        // it, so a schema that gained a required field without a default since
+        // the source ran would otherwise create a job with incomplete input.
+        // `merge_defaults` deliberately skips required-field validation (webhook
+        // and trigger inputs do not match the task schema), so restart checks it
+        // here. The message must contain "required": `classify_execute_error`
+        // keys off that word in the OUTERMOST message to return 400, not 500.
+        if matches!(mode, CreationMode::Restart { .. }) {
+            let present = merged_input.as_object();
+            let mut missing: Vec<&str> = task
+                .input
+                .iter()
+                .filter(|(name, field)| {
+                    field.required
+                        && field.default.is_none()
+                        && !present.map(|m| m.contains_key(*name)).unwrap_or(false)
+                })
+                .map(|(name, _)| name.as_str())
+                .collect();
+            missing.sort_unstable();
+            if !missing.is_empty() {
+                bail!(
+                    "Restart input is missing required field(s) with no default: {}",
+                    missing.join(", ")
+                );
+            }
+        }
+
         // Resolve connection inputs (replace connection names with full objects).
         // Qualified names (`ws.conn`) resolve against other workspaces, gated by `shared`.
         let ws_set = WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;

@@ -273,18 +273,25 @@ mod tests {
             ("b".into(), fs(&[], false)),
             ("c".into(), fs(&[], false)),
             ("d".into(), fs(&[], false)),
+            ("e".into(), fs(&[], false)),
             ("x".into(), fs(&[], false)),
         ]);
         let src = [
             row("a", "pending", None),
             row("b", "ready", None),
             row("c", "claimed", None),
-            row("d", "suspended", None),
+            row("d", "running", None),
+            row("e", "suspended", None),
             row("x", "failed", None),
         ];
         let p = compute_restart_set(&flow, &src, "x").unwrap();
+        // Exact membership, so an empty `carried` can never satisfy the loop
+        // below vacuously and a status dropped from the non-terminal set shows
+        // up as a missing name rather than as silence.
+        assert_eq!(names(&p.carried), vec!["a", "b", "c", "d", "e"]);
         for s in &p.carried {
             assert_eq!(s.status, "cancelled", "{}", s.step_name);
+            assert_eq!(s.output, None, "{}", s.step_name);
             assert_eq!(
                 s.error_message.as_deref(),
                 Some("carried over from cancelled source job")

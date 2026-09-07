@@ -268,6 +268,9 @@ pub struct JobDetailResponse {
     pub source_id: Option<String>,
     pub source_job_id: Option<Uuid>,
     pub restart_from_step: Option<String>,
+    /// Parent job of a `type: task` / agent-tool child. `None` for top-level
+    /// runs; the UI uses it (with `source_type`) to hide Re-run and Restart.
+    pub parent_job_id: Option<Uuid>,
     pub revision: Option<String>,
     pub worker_id: Option<Uuid>,
     pub created_at: String,
@@ -448,6 +451,7 @@ pub async fn get_job(
         source_id: job.source_id,
         source_job_id: job.source_job_id,
         restart_from_step: job.restart_from_step,
+        parent_job_id: job.parent_job_id,
         revision: job.revision,
         worker_id: job.worker_id,
         created_at: job.created_at.to_rfc3339(),
@@ -655,6 +659,22 @@ pub struct RestartJobRequest {
     pub dry_run: bool,
 }
 
+/// Source types whose jobs are *derived* runs rather than a user's own top-level
+/// run. Restart and Re-run both refuse them: `create_restart_job` and
+/// `execute_task` always create a parentless job, so restarting a `type: task`
+/// child (or an agent tool call, or a manually uploaded state job) would produce
+/// a detached job tree that nothing propagates back to the original parent, and
+/// restarting a `hook` job would relabel it `restart` — a source type
+/// [`crate::hooks::is_top_level_source`] treats as top-level, re-enabling the
+/// very workspace-hook fanout that `hook` exists to suppress.
+const DERIVED_SOURCE_TYPES: &[&str] = &["hook", "task", "agent_tool", "upload"];
+
+/// True when `job` is a user's own top-level run and may therefore be restarted
+/// or re-run. See [`DERIVED_SOURCE_TYPES`].
+pub(crate) fn is_top_level_job(job: &stroem_db::JobRow) -> bool {
+    job.parent_job_id.is_none() && !DERIVED_SOURCE_TYPES.contains(&job.source_type.as_str())
+}
+
 /// POST /api/jobs/:id/restart — Restart From Step (spec 2026-09-07 §6.1).
 ///
 /// Creates a new job for the source job's task in which the steps at and below
@@ -709,7 +729,12 @@ pub async fn restart_job(
             | Ok(stroem_common::models::job::JobStatus::Skipped)
     );
     if !terminal {
-        return Err(AppError::Conflict("Job is still running".into()));
+        return Err(AppError::Conflict("Job is not in a terminal state".into()));
+    }
+    if !is_top_level_job(&source) {
+        return Err(AppError::BadRequest(
+            "Only top-level jobs can be restarted".into(),
+        ));
     }
     if source.raw_input.is_none() {
         return Err(AppError::BadRequest(
@@ -1265,6 +1290,7 @@ mod tests {
             source_id: None,
             source_job_id: None,
             restart_from_step: None,
+            parent_job_id: None,
             revision: None,
             worker_id: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -1310,6 +1336,7 @@ mod tests {
             source_id: None,
             source_job_id: Some(Uuid::nil()),
             restart_from_step: None,
+            parent_job_id: None,
             revision: None,
             worker_id: None,
             created_at: "".to_string(),

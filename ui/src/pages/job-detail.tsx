@@ -17,6 +17,7 @@ import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
+import { isTopLevelJob } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
 
@@ -34,8 +35,11 @@ export function JobDetailPage() {
   const [graphOpen, setGraphOpen] = useState(true);
   const [cancelling, setCancelling] = useState(false);
   // Task-level execute permission, used to gate the restart affordances.
-  // Undefined `can_execute` means ACL is off — treat as allowed.
-  const [canExecute, setCanExecute] = useState(true);
+  // `null` means "not resolved yet" — the restart controls stay hidden until a
+  // `getTask` call actually comes back, so a View-only user never sees a button
+  // that the server will only reject. A failed fetch leaves it `null` too.
+  // Undefined `can_execute` on a successful fetch means ACL is off ⇒ allowed.
+  const [canExecute, setCanExecute] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -76,12 +80,15 @@ export function JobDetailPage() {
   useEffect(() => {
     if (!job) return;
     let cancelled = false;
+    // Back to unknown whenever the task changes, so a stale `true` from the
+    // previous task can never authorise controls for the new one.
+    setCanExecute(null);
     getTask(job.workspace, job.task_name)
       .then((data) => {
         if (!cancelled) setCanExecute(data.can_execute !== false);
       })
       .catch(() => {
-        /* non-fatal */
+        /* non-fatal: permission stays unknown and the controls stay hidden */
       });
     return () => {
       cancelled = true;
@@ -230,6 +237,10 @@ export function JobDetailPage() {
     );
   }
 
+  // Re-run and Restart both create a parentless job, so neither is offered on a
+  // child, hook, agent-tool or upload job — the server rejects both with 400.
+  const topLevel = isTopLevelJob(job);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -297,14 +308,16 @@ export function JobDetailPage() {
               {cancelling ? "Cancelling..." : "Cancel Job"}
             </Button>
           )}
-          <Button variant="outline" asChild>
-            <Link
-              to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
-              state={{ sourceJobId: job.job_id, rawInput: job.raw_input }}
-            >
-              Re-run
-            </Link>
-          </Button>
+          {topLevel && (
+            <Button variant="outline" asChild>
+              <Link
+                to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
+                state={{ sourceJobId: job.job_id, rawInput: job.raw_input }}
+              >
+                Re-run
+              </Link>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -509,7 +522,7 @@ export function JobDetailPage() {
                 stepStats={stepStatsMap}
                 now={tickNow}
                 jobStatus={job.status}
-                canRestart={canExecute}
+                canRestart={canExecute === true && topLevel}
                 sourceJobId={job.source_job_id}
                 taskName={job.task_name}
               />

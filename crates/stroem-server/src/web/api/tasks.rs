@@ -489,6 +489,15 @@ pub async fn execute_task(
                 "Source job belongs to a different workspace".into(),
             ));
         }
+        // Same top-level-only rule as Restart: a re-run always creates a
+        // parentless job, so re-running a `type: task` child or a hook job
+        // detaches it from its parent and (for `hook`) escapes the hook
+        // recursion guard by relabelling the source type `rerun`.
+        if !crate::web::api::jobs::is_top_level_job(&source_job) {
+            return Err(AppError::BadRequest(
+                "Only top-level jobs can be re-run".into(),
+            ));
+        }
         if source_job.raw_input.is_none() {
             return Err(AppError::BadRequest(
                 "Source job predates Re-run prefill (no raw_input)".into(),

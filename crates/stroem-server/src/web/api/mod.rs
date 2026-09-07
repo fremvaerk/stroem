@@ -480,16 +480,17 @@ mod classify_execute_error_tests {
     }
 
     #[test]
-    fn precise_phrase_buried_deep_in_chain_is_bad_request() {
-        let e = anyhow::anyhow!(
-            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
-        )
-        .context("Input field 'conn' references connection 'owner.private'")
-        .context("Failed to resolve connection inputs");
+    fn restart_missing_required_input_is_bad_request() {
+        // `create_job_for_task_inner` bails with this exact phrasing when a
+        // restart replays input that no longer satisfies the task schema. The
+        // word "required" must sit in the OUTERMOST message — that is what this
+        // function keys off to answer 400 instead of 500.
+        let e =
+            anyhow::anyhow!("Restart input is missing required field(s) with no default: extra");
 
         let err = classify_execute_error(e);
         match err {
-            AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
+            AppError::BadRequest(msg) => assert!(msg.contains("extra"), "{msg}"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
     }

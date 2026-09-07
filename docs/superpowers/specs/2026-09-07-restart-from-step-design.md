@@ -16,6 +16,29 @@ lineage — "feature A"; this document is the deferred "feature B")
   since some other endpoints treat "workspace unavailable" as a 500.
 - `carried_failed_tolerated` is returned by the dry-run response as designed but is not
   yet surfaced in the confirm dialog UI (tracked in `docs/internal/TODO.md`).
+- **Top-level jobs only** (added after final review, not in the original design). Restart
+  rejects a source job with a `parent_job_id`, or a `source_type` of `hook` / `task` /
+  `agent_tool` / `upload`, with `400 "Only top-level jobs can be restarted"`. The creator
+  always produces a parentless job, so restarting a `type: task` child would leave the
+  original parent's step waiting on a job tree nothing propagates back from; and
+  restarting a `hook` job would relabel it `restart`, a source type
+  `hooks::is_top_level_source` treats as top-level, re-enabling exactly the workspace-hook
+  fanout the `hook` source type exists to suppress. The identical rule was applied to
+  Re-run (`400 "Only top-level jobs can be re-run"`), which had the same pre-existing gap.
+  Shared helper `web/api/jobs.rs::is_top_level_job`, mirrored in the UI as
+  `ui/src/lib/job-status.ts::isTopLevelJob`.
+- **Required-input validation on restart** (added after final review; §4.4 promised the
+  400 but `merge_defaults` does not validate required fields). `create_job_for_task_inner`
+  now checks, for `CreationMode::Restart` only, that every `task.input` field marked
+  `required: true` with no `default` is present in the merged input, and bails with
+  `"Restart input is missing required field(s) with no default: {names}"` — a message whose
+  outermost text contains "required", which is what `classify_execute_error` keys off to
+  answer 400. Normal, re-run, webhook and trigger creation are unchanged: they keep the
+  deliberate no-validation behaviour, since their input shapes do not match the schema.
+  Only explicitly `required` fields count; a field with neither `required: true` nor a
+  default stays optional, matching how the execute form treats it.
+- The 409 message is `"Job is not in a terminal state"`, not §6.1's `"Job is still
+  running"` — the same branch also covers `pending` and an unparseable status.
 
 ## 1. Problem
 

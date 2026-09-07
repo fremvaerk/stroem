@@ -5,7 +5,7 @@ description: Re-run a job from scratch with the same input, or restart it from a
 
 Two ways to recover from a failed (or otherwise finished) job without retyping input: **Re-run**, which starts a brand-new job from the beginning, and **Restart from a step**, which reruns only the steps affected by a chosen step and carries the rest forward unchanged.
 
-Both are available from the job detail page once a job reaches a terminal state (`completed`, `failed`, `skipped`, or `cancelled`).
+Both are available from the job detail page once a job reaches a terminal state (`completed`, `failed`, or `cancelled`), and only on **top-level** jobs — a job you started yourself, or one a trigger, webhook, schedule or retry started. A child job of a `type: task` step, an agent tool call, or a hook job cannot be re-run or restarted: both actions create a brand-new job with no parent, so the original parent would never learn about it. Restart or re-run the top-level job instead. The buttons are hidden on those jobs, and the API rejects them with `400`.
 
 ## Re-run
 
@@ -17,7 +17,7 @@ Use Re-run when you want to change input, or when the failure is unrelated to wh
 
 ## Restart from a step
 
-**Restart from a step** creates a new job that reruns only a chosen step and everything downstream of it, while every other step is copied forward from the source job exactly as it ended. It uses the same input as the source job (no form) and the current workspace revision.
+**Restart from a step** creates a new job that reruns only a chosen step and everything downstream of it, while every other step is copied forward from the source job exactly as it ended. It uses the same input as the source job (no form) and the current workspace revision. If the task's input schema has gained a **required** field with no default since the source job ran, the replayed input no longer satisfies it and the restart is rejected with `400` — use Re-run instead, which gives you the form.
 
 ### Where to find it
 
@@ -30,6 +30,8 @@ Clicking it opens a confirmation dialog built from a dry-run preview (`POST /api
 > Restart **{task}** from **{step}**?
 > Reruns *N* step(s): *step-a, step-b, ...*. *M* step(s) are carried over unchanged.
 
+The preview is computed when you open the dialog and the create request recomputes it, so a workspace reload in between can change what actually runs. The `restart_steps` in the create response is the authoritative list.
+
 If any carried-over step ended failed and the current flow does not tolerate it (no `continue_on_failure`), the dialog adds a warning that the new job will still end failed, and suggests restarting from an earlier step to rerun those failures too.
 
 ### What gets rerun vs. carried over
@@ -40,7 +42,7 @@ Given the step you chose:
 - Every step that transitively depends on any of those roots is also rerun.
 - Everything else is **carried over**: its new row is stamped with the source job's ending status, output, and error message verbatim, without actually running again. A carried step that was still in progress when the source job was cancelled comes over as `cancelled`.
 - Steps that existed in the source job but have since been removed from the flow are dropped, same as Re-run.
-- A step that appears removed and re-added upstream of a step you're keeping pulls that downstream step back into the rerun set — you can't strand a carried step behind a step that no longer has a matching prior run.
+- Automatic inclusion is keyed on step **names**: a step counts as "added" only if its name has no matching row in the source job. A step that was removed and later re-added under the same name still matches, so it is carried over, not rerun — restart from it explicitly if its definition changed. When a genuinely new name sits upstream of a step you were keeping, that downstream step is pulled back into the rerun set, so you can't strand a carried step behind a step that has no matching prior run.
 
 Carried-over steps show a muted **carried over** badge in the step timeline. Their detail panel doesn't fetch logs for the new job — it links back to the source job's logs instead, since nothing executed here.
 
