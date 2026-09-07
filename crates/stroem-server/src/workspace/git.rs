@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use stroem_common::models::workflow::WorkspaceConfig;
 
 use super::WorkspaceSource;
@@ -122,14 +123,29 @@ impl GitSource {
                 "ssh_key" => {
                     let key_path = auth.key_path.clone();
                     let key_content = auth.key.clone();
-                    callbacks.credentials(move |_url, username_from_url, _allowed_types| {
-                        let username = username_from_url.unwrap_or("git");
-                        if let Some(ref content) = key_content {
-                            git2::Cred::ssh_key_from_memory(username, None, content, None)
-                        } else if let Some(ref path) = key_path {
-                            git2::Cred::ssh_key(username, None, Path::new(path), None)
-                        } else {
-                            git2::Cred::ssh_key_from_agent(username)
+                    let attempt = Arc::new(AtomicUsize::new(0));
+                    callbacks.credentials(move |url, username_from_url, allowed_types| {
+                        match credential_decision(
+                            attempt.load(Ordering::SeqCst),
+                            allowed_types,
+                            "SSH key",
+                            url,
+                        ) {
+                            Ok(CredentialDecision::Username) => {
+                                git2::Cred::username(username_from_url.unwrap_or("git"))
+                            }
+                            Ok(CredentialDecision::Grant) => {
+                                attempt.fetch_add(1, Ordering::SeqCst);
+                                let username = username_from_url.unwrap_or("git");
+                                if let Some(ref content) = key_content {
+                                    git2::Cred::ssh_key_from_memory(username, None, content, None)
+                                } else if let Some(ref path) = key_path {
+                                    git2::Cred::ssh_key(username, None, Path::new(path), None)
+                                } else {
+                                    git2::Cred::ssh_key_from_agent(username)
+                                }
+                            }
+                            Err(msg) => Err(git2::Error::from_str(&msg)),
                         }
                     });
                 }
@@ -139,8 +155,21 @@ impl GitSource {
                         .username
                         .clone()
                         .unwrap_or_else(|| "x-access-token".to_string());
-                    callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
-                        git2::Cred::userpass_plaintext(&username, &token)
+                    let attempt = Arc::new(AtomicUsize::new(0));
+                    callbacks.credentials(move |url, _username_from_url, allowed_types| {
+                        match credential_decision(
+                            attempt.load(Ordering::SeqCst),
+                            allowed_types,
+                            "Token",
+                            url,
+                        ) {
+                            Ok(CredentialDecision::Username) => git2::Cred::username(&username),
+                            Ok(CredentialDecision::Grant) => {
+                                attempt.fetch_add(1, Ordering::SeqCst);
+                                git2::Cred::userpass_plaintext(&username, &token)
+                            }
+                            Err(msg) => Err(git2::Error::from_str(&msg)),
+                        }
                     });
                 }
                 _ => {}
@@ -148,6 +177,53 @@ impl GitSource {
         }
 
         callbacks
+    }
+}
+
+/// Outcome of [`credential_decision`]: either hand over a real credential, or
+/// (for SSH URLs with no embedded username) first answer libgit2's
+/// username-only probe.
+#[derive(Debug, PartialEq, Eq)]
+enum CredentialDecision {
+    /// libgit2 is only asking which username to use (typical first round-trip
+    /// for `ssh://` URLs without one embedded) — reply with a plain username
+    /// credential. This does not count as a real credential attempt.
+    Username,
+    /// Hand over the real credential (SSH key or token).
+    Grant,
+}
+
+/// Pure decision function for the libgit2 credentials callback: given how
+/// many real credential attempts have already been made for this URL and
+/// what libgit2 is asking for this round, decide whether to grant the
+/// credential, answer a username-only probe, or refuse.
+///
+/// libgit2 re-invokes the credentials callback on every authentication
+/// failure, re-running the full SSH/HTTPS handshake each time — if the
+/// remote rejects our key/token, retrying the *same* credential can take
+/// well over a minute before libgit2 gives up. The FIRST time libgit2 asks
+/// for a real credential (`attempt == 0`) we hand it over; a second request
+/// with the same `attempt` counter means the remote already rejected it, so
+/// we fail immediately instead of letting libgit2 retry.
+fn credential_decision(
+    attempt: usize,
+    allowed_types: git2::CredentialType,
+    auth_kind: &str,
+    url: &str,
+) -> Result<CredentialDecision, String> {
+    let wants_real_credential = allowed_types.contains(git2::CredentialType::SSH_KEY)
+        || allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT);
+
+    if !wants_real_credential && allowed_types.contains(git2::CredentialType::USERNAME) {
+        return Ok(CredentialDecision::Username);
+    }
+
+    if attempt == 0 {
+        Ok(CredentialDecision::Grant)
+    } else {
+        Err(format!(
+            "{auth_kind} credential rejected by remote for {url} — check that the deploy key / token is authorized for this repository"
+        ))
     }
 }
 
@@ -820,5 +896,118 @@ mod tests {
             GitSource::new("test-ws", "https://example.com/repo.git", "main", None, 300).unwrap();
 
         assert_eq!(source.poll_interval_secs(), 300);
+    }
+
+    // ─── credential_decision (fail-fast on rejected credentials) ──────────
+
+    #[test]
+    fn test_credential_decision_first_ssh_attempt_grants() {
+        let result = credential_decision(
+            0,
+            git2::CredentialType::SSH_KEY,
+            "SSH key",
+            "git@github.com:example/repo.git",
+        );
+        assert!(
+            matches!(result, Ok(CredentialDecision::Grant)),
+            "expected Grant on first attempt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_credential_decision_username_only_request_grants_username_without_consuming_attempt() {
+        // libgit2 asks for USERNAME alone (no SSH_KEY/USER_PASS_PLAINTEXT bit)
+        // before it knows what username to use on ssh:// URLs with none
+        // embedded. This must not be treated as a real credential attempt.
+        let result = credential_decision(
+            0,
+            git2::CredentialType::USERNAME,
+            "SSH key",
+            "ssh://github.com/example/repo.git",
+        );
+        assert!(
+            matches!(result, Ok(CredentialDecision::Username)),
+            "expected Username, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_credential_decision_second_ssh_attempt_is_rejected() {
+        let result = credential_decision(
+            1,
+            git2::CredentialType::SSH_KEY,
+            "SSH key",
+            "git@github.com:example/repo.git",
+        );
+        let err = result.expect_err("second attempt must be rejected");
+        assert!(
+            err.contains("rejected by remote"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("git@github.com:example/repo.git"),
+            "error should name the URL so operators can tell which repo is misconfigured: {err}"
+        );
+        assert!(
+            err.contains("SSH key"),
+            "error should name the auth type: {err}"
+        );
+    }
+
+    #[test]
+    fn test_credential_decision_first_token_attempt_grants() {
+        let result = credential_decision(
+            0,
+            git2::CredentialType::USER_PASS_PLAINTEXT,
+            "Token",
+            "https://github.com/example/repo.git",
+        );
+        assert!(
+            matches!(result, Ok(CredentialDecision::Grant)),
+            "expected Grant on first attempt, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_credential_decision_second_token_attempt_is_rejected() {
+        let result = credential_decision(
+            1,
+            git2::CredentialType::USER_PASS_PLAINTEXT,
+            "Token",
+            "https://github.com/example/repo.git",
+        );
+        let err = result.expect_err("second attempt must be rejected");
+        assert!(
+            err.contains("rejected by remote"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("https://github.com/example/repo.git"),
+            "error should name the URL: {err}"
+        );
+        assert!(
+            err.contains("Token"),
+            "error should name the auth type: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_local_bare_repo_clone_has_no_auth_callback_installed() {
+        // Regression guard: local file:// clones (used throughout this test
+        // module) pass `auth: None`, so `build_remote_callbacks` must not
+        // install a `credentials` callback at all — confirming the fail-fast
+        // logic above is scoped to configured ssh_key/token auth and never
+        // interferes with unauthenticated sources.
+        let (_bare_dir, url) = create_bare_repo(&[(
+            "test.yaml",
+            "actions:\n  a:\n    type: script\n    script: echo hi\n",
+        )]);
+
+        let clone_dir = TempDir::new().unwrap();
+        let source = GitSource::with_clone_dir(&url, "main", None, clone_dir.path().join("repo"));
+
+        // Would fail if a credentials callback were installed and invoked
+        // unexpectedly for a no-auth local clone.
+        source.load().await.unwrap();
     }
 }
