@@ -168,6 +168,16 @@ struct TestApp {
     workspace: WorkspaceConfig,
     /// A second manager over the same in-memory config; `AppState::new` takes
     /// the router's copy by value and `WorkspaceManager` is not `Clone`.
+    ///
+    /// **Warning — two managers.** A `TestApp` holds this one AND the router's,
+    /// both `from_config` over identical configs. Calling
+    /// `create_restart_job(&app.mgr, …)` directly resolves cross-workspace
+    /// actions and `type: task` children against THIS manager, while anything
+    /// driven through the router (`/execute`, worker claims, `/approve`) uses
+    /// the router's. Nothing reloads either one, so the two stay equivalent —
+    /// but suspect this split first if a `type: task` or cross-workspace
+    /// restart test behaves oddly, and note that
+    /// `build_test_app_with_pool` gives the second app a fully separate pair.
     mgr: WorkspaceManager,
     /// Kept alive for the lifetime of the app. `None` for a second app built
     /// over another app's pool (`build_test_app_with_pool`) — that app owns it.
