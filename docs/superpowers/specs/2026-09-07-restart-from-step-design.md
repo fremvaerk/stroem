@@ -1,9 +1,21 @@
 # Restart From Step — Design
 
-**Status:** Revised after Codex review (rev 2, 2026-09-07) — pending user approval
+**Status:** Implemented (2026-09-08)
 **Date:** 2026-09-07
 **Builds on:** `docs/internal/2026-04-28-rerun-prefill-design.md` (Re-run prefill & job
 lineage — "feature A"; this document is the deferred "feature B")
+
+**Implementation notes (deviations from this design):**
+- The migration shipped as `045_job_step_carried_over.sql`, not `044_...` — `044` was
+  taken by an unrelated index migration (`044_claim_index_agent.sql`) landed in parallel.
+- `source_id` on a restart job is `NULL` when auth is not configured, mirroring
+  `execute_task`'s existing rule rather than always recording `"api"`.
+- An unloaded workspace or a task removed from it since the source job ran returns `400`
+  (`"Workspace '{ws}' is not loaded"` / `"Task '{t}' no longer exists..."`), not a
+  404/500 — matches this endpoint's other precondition checks (§6.1) but is worth noting
+  since some other endpoints treat "workspace unavailable" as a 500.
+- `carried_failed_tolerated` is returned by the dry-run response as designed but is not
+  yet surfaced in the confirm dialog UI (tracked in `docs/internal/TODO.md`).
 
 ## 1. Problem
 

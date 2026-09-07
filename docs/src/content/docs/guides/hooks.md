@@ -247,7 +247,7 @@ tasks:
 ### Rules
 
 - `on_success`, `on_error`, and `on_cancel` are evaluated independently. A task can override one while inheriting the others.
-- Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, `mcp` — MCP tool invocations, `retry` — server-initiated retries, `rerun` — a user clicking **Re-run** on a past job, or `restart` — reserved for restart-from-step). Child jobs from `type: task` actions do not trigger workspace hooks.
+- Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, `mcp` — MCP tool invocations, `retry` — server-initiated retries, `rerun` — a user clicking **Re-run** on a past job, or `restart` — a user clicking **Restart from a step**; see [Re-running and Restarting Jobs](/stroem/guides/rerun-and-restart)). Child jobs from `type: task` actions do not trigger workspace hooks.
 - If multiple YAML files define workspace-level hooks, they are merged (extended, not replaced).
 - The same `hook.*` template context and `secret.*` variables are available as in task-level hooks.
 

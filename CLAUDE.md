@@ -369,8 +369,8 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 ### Job Lineage (retry / rerun / restart)
 - **`retry_of_job_id`** — server-initiated retry of a failed job. Same logical run, attempt N+1.
 - **`source_job_id`** + **`source_type = 'rerun'`** — user clicked **Re-run** in the UI. New job uses `source.raw_input` to prefill the form; UI sends `••••••` for fields the user didn't touch and the server replaces it with the source value before merging defaults / resolving connections (see `crates/stroem-common/src/template.rs::resolve_rerun_sentinels`).
-- **`source_job_id`** + **`source_type = 'restart'`** + **`restart_from_step`** — *reserved* for the Restart-from-failed-step feature.
-- `rerun` (and `restart`, reserved) are top-level source types for workspace-level hook fallback — see § Hooks.
+- **`source_job_id`** + **`source_type = 'restart'`** + **`restart_from_step`** — Restart From Step (spec `docs/superpowers/specs/2026-09-07-restart-from-step-design.md`). `restart::compute_restart_set` → `RestartPlan`; `job_creator::create_restart_job` uses `CreationMode::Restart` to seed carried rows (`job_step.carried_over = true`, `JobStepRepo::seed_steps_tx`) inside the creation transaction; the normal post-commit cascade + `settle_if_all_terminal` close the job when the restart set is empty/skipped. Input = source `raw_input` replayed (never the resolved `input`); revision = current. Restart jobs are top-level for hooks and EXCLUDED from duration stats; carried failures are flagged in `hook.failed_steps[].carried_over`. Endpoint `POST /api/jobs/{id}/restart` (`dry_run` for the UI preview). Known limits: state snapshots = latest at claim time; artifacts not carried.
+- `rerun` and `restart` are top-level source types for workspace-level hook fallback — see § Hooks.
 - **`raw_input`** — verbatim user submission stored on every job, before `merge_defaults` and `resolve_connection_inputs`. Returned by `GET /api/jobs/{id}` with workspace-defined secret values redacted to `••••••`. NULL for jobs created before migration `032_job_raw_input_and_lineage.sql`. **Redaction limitation:** the existing `redact_response` only matches values listed in `workspace.secrets`; user-typed secret values not present in the workspace config are stored and returned as plain text (same exposure as the existing `job.input` column — pre-existing limitation, not introduced by Re-run prefill).
 
 ### Health Check
@@ -435,7 +435,8 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - `ui/src/lib/api.ts` — token management. `ui/src/hooks/use-job-logs.ts` — WebSocket logs.
 
 ### Release Pipeline
-- 5 platforms (linux-amd64/arm64, darwin-amd64/arm64, windows-amd64), 3 binaries = 15 assets
-- Cross-compilation for linux-arm64 uses `cross`; others use native runners
-- Multi-arch Docker images (amd64 + arm64) for server, worker, runner
-- Release Dockerfiles COPY pre-built binaries using `TARGETARCH` arg
+- Current state of `.github/workflows/release.yml` (arm64/darwin/windows jobs are commented out, not yet re-enabled): one `build-binaries` job builds all four binaries (`stroem-server`, `stroem-worker`, `stroem`, `stroem-api`) for linux-amd64 only and uploads four `*-x86_64-unknown-linux-gnu.tar.gz` tarballs as GitHub release assets.
+- Three single-platform (`linux/amd64` only — multi-arch is not currently built) Docker images published to `ghcr.io/{owner}/stroem-{server,worker,runner}`, tagged `{version}`/`{major.minor}`/`{major}` via `docker/metadata-action`.
+- Helm chart (`helm/stroem`) version/appVersion stamped from the tag and pushed to `oci://ghcr.io/{owner}/charts`.
+- Final `release` job collects all binary artifacts and creates the GitHub Release with auto-generated notes.
+- Release Dockerfiles (`docker/Dockerfile.server.release`, `docker/Dockerfile.worker.release`, `Dockerfile.runner`) COPY the pre-built linux-amd64 binary in.

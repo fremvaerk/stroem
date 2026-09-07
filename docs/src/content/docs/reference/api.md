@@ -353,6 +353,75 @@ Cancels a pending or running job. Running steps are actively killed (processes t
 stroem cancel <job_id>
 ```
 
+## Restart Job From a Step
+
+```
+POST /api/jobs/{id}/restart
+```
+
+Creates a new job for the same task and input, rerunning only the given step and its
+dependents; every other step is carried over from the source job unchanged (see
+[Re-running and Restarting Jobs](/stroem/guides/rerun-and-restart)). Requires Run
+permission on the task. The source job must be terminal and must have `raw_input`
+recorded (jobs predating Re-run prefill are rejected).
+
+| Parameter | Description |
+|-----------|-------------|
+| `id` | Source job ID (UUID) |
+
+**Request body:**
+
+```json
+{
+  "from_step": "publish",
+  "dry_run": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from_step` | string | Step name to restart from. Must be a step in the task's *current* flow, and not a `for_each` instance name (e.g. `step[0]`). |
+| `dry_run` | bool | When `true`, returns the plan without creating a job. |
+
+**Response — `dry_run: true` (200):**
+
+```json
+{
+  "restart_steps": ["publish", "recalc", "agg-sessions"],
+  "carried_over": ["dates", "recalc-sessions", "ai-sources"],
+  "carried_failed": [],
+  "carried_failed_tolerated": []
+}
+```
+
+**Response — `dry_run: false` (201):**
+
+```json
+{
+  "job_id": "a1b2c3d4-...",
+  "restart_steps": ["publish", "recalc", "agg-sessions"],
+  "carried_over": ["dates", "recalc-sessions", "ai-sources"],
+  "carried_failed": []
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `restart_steps` | Steps that will run (or ran) again under the current flow. |
+| `carried_over` | Steps copied forward from the source job without re-executing. |
+| `carried_failed` | Carried-over steps that ended `failed` and are **not** tolerated by the current flow's `continue_on_failure` — the new job will end `failed`. |
+| `carried_failed_tolerated` | Carried-over steps that ended `failed` but are tolerated (`continue_on_failure: true` on the current flow step). Dry-run only. |
+
+**Error responses:**
+
+| Status | Description |
+|--------|-------------|
+| `400` | Source job has no `raw_input`, `from_step` is not in the current flow, `from_step` is a loop instance, or the workspace/task no longer exists |
+| `401` | Auth is configured and no user was authenticated |
+| `403` | Authenticated user has View but not Run permission on the task |
+| `404` | Job not found, or ACL denies access |
+| `409` | Source job is not terminal |
+
 ## Get Job Logs
 
 ```
