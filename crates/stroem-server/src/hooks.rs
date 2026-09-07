@@ -91,6 +91,9 @@ pub(crate) const MAX_HOOK_CHAIN_DEPTH: usize = 3;
 
 /// Count the `hook` links in a job's ancestry.
 ///
+/// Called only once a job is known to have hooks to fire, so a job with none
+/// configured — the overwhelming majority — costs no queries at all.
+///
 /// Walks up to 20 hops: a `hook`-sourced job continues from the job named by
 /// the UUID prefix of its `source_id` (`{job_id}` or `{job_id}/{hook}`) and
 /// adds one to the count; any other job continues from its `parent_job_id`.
@@ -160,25 +163,6 @@ pub async fn fire_hooks(
         return;
     }
 
-    // Chain guard: bound indirect hook cycles that the recursion guard misses.
-    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
-        tracing::warn!(
-            job_id = %job.job_id,
-            "hook chain depth limit ({}) reached — not firing hooks",
-            MAX_HOOK_CHAIN_DEPTH
-        );
-        state
-            .append_server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
-                     not firing hooks for this job"
-                ),
-            )
-            .await;
-        return;
-    }
-
     // Select task-level and workspace-level hooks for this event type
     let (task_hooks, ws_hooks) = match job.status.parse::<JobStatus>().ok() {
         Some(JobStatus::Completed) => (&task.on_success, &workspace_config.on_success),
@@ -198,6 +182,25 @@ pub async fn fire_hooks(
     };
 
     if hooks.is_empty() {
+        return;
+    }
+
+    // Chain guard: bound indirect hook cycles that the recursion guard misses.
+    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+        tracing::warn!(
+            job_id = %job.job_id,
+            "hook chain depth limit ({}) reached — not firing hooks",
+            MAX_HOOK_CHAIN_DEPTH
+        );
+        state
+            .append_server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+                     not firing hooks for this job"
+                ),
+            )
+            .await;
         return;
     }
 
@@ -298,6 +301,20 @@ pub async fn fire_suspended_hooks(
         return;
     }
 
+    // Select task-level then workspace-level on_suspended hooks
+    let is_top_level = is_top_level_source(&job.source_type);
+    let hooks: &[HookDef] = if !task.on_suspended.is_empty() {
+        &task.on_suspended
+    } else if is_top_level && !workspace_config.on_suspended.is_empty() {
+        &workspace_config.on_suspended
+    } else {
+        return;
+    };
+
+    if hooks.is_empty() {
+        return;
+    }
+
     // Chain guard: bound indirect hook cycles that the recursion guard misses.
     if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
         tracing::warn!(
@@ -314,20 +331,6 @@ pub async fn fire_suspended_hooks(
                 ),
             )
             .await;
-        return;
-    }
-
-    // Select task-level then workspace-level on_suspended hooks
-    let is_top_level = is_top_level_source(&job.source_type);
-    let hooks: &[HookDef] = if !task.on_suspended.is_empty() {
-        &task.on_suspended
-    } else if is_top_level && !workspace_config.on_suspended.is_empty() {
-        &workspace_config.on_suspended
-    } else {
-        return;
-    };
-
-    if hooks.is_empty() {
         return;
     }
 
