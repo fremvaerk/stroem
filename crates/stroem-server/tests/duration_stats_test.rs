@@ -203,13 +203,25 @@ async fn insert_completed_job(
     task: &str,
     duration_secs: i64,
 ) -> Result<Uuid> {
+    insert_completed_job_with_source(pool, workspace, task, duration_secs, "api").await
+}
+
+/// Like [`insert_completed_job`] but with an explicit `source_type` — used to
+/// seed `restart` jobs that must be excluded from duration statistics.
+async fn insert_completed_job_with_source(
+    pool: &PgPool,
+    workspace: &str,
+    task: &str,
+    duration_secs: i64,
+    source_type: &str,
+) -> Result<Uuid> {
     let job_id = JobRepo::create(
         pool,
         workspace,
         task,
         "distributed",
         None,
-        "api",
+        source_type,
         None,
         None,
         None,
@@ -226,6 +238,30 @@ async fn insert_completed_job(
     .execute(pool)
     .await?;
     Ok(job_id)
+}
+
+/// Helper: insert a completed `job_step` row directly via SQL, for per-step
+/// duration stats tests.
+async fn insert_completed_step(
+    pool: &PgPool,
+    job_id: Uuid,
+    step_name: &str,
+    duration_secs: i64,
+) -> Result<()> {
+    let completed_at = Utc::now();
+    let started_at = completed_at - Duration::seconds(duration_secs);
+    sqlx::query(
+        "INSERT INTO job_step \
+           (job_id, step_name, action_name, status, action_type, required_tags, started_at, completed_at) \
+         VALUES ($1, $2, 'noop', 'completed', 'script', '[]'::jsonb, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(step_name)
+    .bind(started_at)
+    .bind(completed_at)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -360,6 +396,45 @@ async fn test_stats_limit_negative_clamped() -> Result<()> {
     // clamp(-5, 1, 500) == 1
     assert_eq!(body["window"], json!(1));
     assert_eq!(body["task"]["sample_size"], json!(1));
+
+    Ok(())
+}
+
+/// Restart jobs (spec §6.4) must be excluded from duration statistics — both
+/// the whole-job aggregate and the per-step aggregate. A single fast restart
+/// run must not shrink `min_ms` or skew percentiles for real runs.
+#[tokio::test]
+async fn test_stats_excludes_restart_jobs() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job1 = insert_completed_job(&pool, "default", "my-task", 10).await?;
+    let job2 = insert_completed_job(&pool, "default", "my-task", 20).await?;
+    let restart_job =
+        insert_completed_job_with_source(&pool, "default", "my-task", 1, "restart").await?;
+
+    // Give the restart job's step a tiny 1s duration so it would dominate
+    // every per-step percentile if it leaked into the aggregate.
+    insert_completed_step(&pool, job1, "run", 10).await?;
+    insert_completed_step(&pool, job2, "run", 20).await?;
+    insert_completed_step(&pool, restart_job, "run", 1).await?;
+
+    let response = router
+        .oneshot(api_get("/api/workspaces/default/tasks/my-task/stats"))
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+
+    assert_eq!(body["task"]["sample_size"], json!(2));
+    assert_eq!(body["task"]["min_ms"], json!(10_000.0));
+
+    let steps = body["steps"].as_array().expect("steps array");
+    let run_step = steps
+        .iter()
+        .find(|s| s["step_name"] == json!("run"))
+        .expect("run step stats present");
+    assert_eq!(run_step["sample_size"], json!(2));
+    assert_eq!(run_step["min_ms"], json!(10_000.0));
 
     Ok(())
 }

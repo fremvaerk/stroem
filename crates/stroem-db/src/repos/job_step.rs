@@ -1260,7 +1260,9 @@ impl JobStepRepo {
 
     /// Per-step duration percentiles aggregated over the last `job_limit`
     /// completed runs of a task. Ordered by the step's average start-time within
-    /// the job (best-effort flow order). Excludes `for_each` instance rows.
+    /// the job (best-effort flow order). Excludes `for_each` instance rows and
+    /// jobs with `source_type = 'restart'` (spec §6.4) — see
+    /// [`super::job::JobRepo::get_task_duration_stats`] for why.
     pub async fn get_step_duration_stats_for_task(
         pool: &PgPool,
         workspace: &str,
@@ -1276,6 +1278,7 @@ impl JobStepRepo {
             "WITH recent_jobs AS ( \
                SELECT job_id, started_at AS job_started_at FROM job \
                WHERE workspace = $1 AND task_name = $2 AND status = 'completed' \
+                 AND source_type <> 'restart' \
                  AND started_at IS NOT NULL \
                ORDER BY completed_at DESC, job_id \
                LIMIT $3 \

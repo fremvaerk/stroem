@@ -1091,8 +1091,11 @@ impl JobRepo {
     /// Aggregate duration statistics over the last `limit` *completed* runs of a task.
     ///
     /// Only includes jobs with `status = 'completed'` and non-NULL `started_at` /
-    /// `completed_at`. Returns zero-sample row (all fields `None`) when no runs
-    /// match — never returns `Err` for "no data".
+    /// `completed_at`. Excludes `source_type = 'restart'` jobs (spec §6.4) —
+    /// restart jobs re-run only a suffix of the flow, so their duration is not
+    /// comparable to a full run and would skew percentiles. Returns zero-sample
+    /// row (all fields `None`) when no runs match — never returns `Err` for
+    /// "no data".
     pub async fn get_task_duration_stats(
         pool: &PgPool,
         workspace: &str,
@@ -1116,6 +1119,7 @@ impl JobRepo {
                FROM job \
                WHERE workspace = $1 AND task_name = $2 \
                  AND status = 'completed' \
+                 AND source_type <> 'restart' \
                  AND started_at IS NOT NULL AND completed_at IS NOT NULL \
                  AND completed_at >= started_at \
                ORDER BY completed_at DESC, job_id \
@@ -1150,6 +1154,7 @@ impl JobRepo {
              FROM job \
              WHERE workspace = $1 AND task_name = $2 \
                AND status = 'completed' \
+               AND source_type <> 'restart' \
                AND started_at IS NOT NULL AND completed_at IS NOT NULL \
                AND completed_at >= started_at \
              ORDER BY completed_at DESC, job_id \
