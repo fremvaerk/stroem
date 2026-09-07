@@ -171,6 +171,8 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Smart polling via `peek_revision()`: FolderSource hashes metadata (30s), GitSource uses ls-remote (60s default)
 - API routes workspace-scoped: `/api/workspaces/{ws}/tasks/{name}/execute`
 - Worker: `WorkspaceCache` with immutable revision-based dirs, `WorkspaceGuard` (RAII ref-counted), ETag caching
+- **Concurrent startup load**: `WorkspaceManager::new` loads all workspaces concurrently — one `tokio::spawn`ed task per workspace (via `JoinSet`, not `join_all`: `GitSource::load`'s `block_in_place` occupies a whole worker thread, so only separate spawned tasks actually parallelize it), bounded by `MAX_CONCURRENT_WORKSPACE_LOADS` (8). Logs `Loaded {n} workspace(s) in {elapsed}` after all joins. A panicked load task is caught and recorded as a load error for that workspace, not a crash.
+- **Git credential fail-fast**: `GitSource::build_remote_callbacks`'s libgit2 credentials callback grants the configured SSH key/token only on the first request per URL (via the pure `credential_decision()` function in `git.rs`); a second request means the remote rejected it, so it errors immediately ("`<auth type> credential rejected by remote for <url>`") instead of letting libgit2 retry the same credential for over a minute. A username-only probe (`ssh://` URLs with no embedded user) is answered without consuming an attempt.
 
 ### Libraries (Actions, Tasks, Connection Types)
 - Import shared actions, tasks, and connection types from Git repos or local folders

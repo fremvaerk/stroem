@@ -12,10 +12,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use stroem_common::models::workflow::WorkspaceConfig;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{GitAuthConfig, LibraryDef, WorkspaceSourceDef};
+
+/// Upper bound on how many workspace sources `WorkspaceManager::new` loads at
+/// once. Git sources block a whole worker thread each (see the comment in
+/// `new()`), so this also caps how many worker threads a large workspace
+/// fleet can occupy at startup.
+const MAX_CONCURRENT_WORKSPACE_LOADS: usize = 8;
 
 /// Trait for workspace sources (folder, git, etc.)
 #[async_trait]
@@ -195,6 +202,13 @@ impl WorkspaceManager {
             HashMap::new()
         };
 
+        let total_configured = defs.len();
+        let start = Instant::now();
+
+        // Construct every source up front. Construction failures (e.g. a
+        // malformed git config) go straight into `load_errors`, same as
+        // before — they never reach the concurrent load step below.
+        let mut sources: Vec<(String, Arc<dyn WorkspaceSource>)> = Vec::with_capacity(defs.len());
         for (name, def) in defs {
             let source: Arc<dyn WorkspaceSource> = match def {
                 WorkspaceSourceDef::Folder { ref path } => {
@@ -217,8 +231,68 @@ impl WorkspaceManager {
                     }
                 }
             };
+            sources.push((name, source));
+        }
 
-            match source.load().await {
+        // Load every workspace concurrently. `tokio::spawn` (via `JoinSet`)
+        // is required here rather than `join_all` over the loading futures:
+        // `GitSource::load` wraps its blocking libgit2 clone/fetch in
+        // `tokio::task::block_in_place`, which hands the *current* worker
+        // thread over to blocking work for the duration of the call — it
+        // does not yield that thread back to the runtime for other tasks to
+        // use. Polling several such futures on one task (as `join_all`
+        // would) still runs them one at a time; only separate spawned tasks,
+        // each occupying its own worker thread, actually run the blocking
+        // git operations in parallel. Without this, a single slow or
+        // misbehaving remote would still stall every other workspace's
+        // startup, exactly as it did before this change.
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_WORKSPACE_LOADS));
+        let mut join_set = JoinSet::new();
+        let mut task_names: HashMap<tokio::task::Id, String> =
+            HashMap::with_capacity(sources.len());
+        for (name, source) in sources {
+            let semaphore = semaphore.clone();
+            let abort_handle = join_set.spawn(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore is never closed");
+                let result = source.load().await;
+                (source, result)
+            });
+            task_names.insert(abort_handle.id(), name);
+        }
+
+        type LoadedWorkspace = (
+            String,
+            Arc<dyn WorkspaceSource>,
+            Result<(WorkspaceConfig, Vec<String>)>,
+        );
+        let mut loaded: Vec<LoadedWorkspace> = Vec::with_capacity(task_names.len());
+        while let Some(joined) = join_set.join_next_with_id().await {
+            match joined {
+                Ok((id, (source, result))) => {
+                    let name = task_names
+                        .remove(&id)
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    loaded.push((name, source, result));
+                }
+                Err(join_err) => {
+                    // A panicked load task must not take the server down.
+                    // The source itself is gone (it was moved into the
+                    // unwound task), so this workspace gets no `entries`
+                    // row — same shape as a source-construction failure.
+                    let name = task_names
+                        .remove(&join_err.id())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    tracing::error!("Workspace '{}' load task panicked: {}", name, join_err);
+                    load_errors.insert(name, format!("workspace load task panicked: {join_err}"));
+                }
+            }
+        }
+
+        for (name, source, result) in loaded {
+            match result {
                 Ok((mut config, warnings)) => {
                     // Merge library items into workspace config
                     for lib in resolved_libraries.values() {
@@ -266,6 +340,12 @@ impl WorkspaceManager {
                 }
             }
         }
+
+        tracing::info!(
+            "Loaded {} workspace(s) in {:?}",
+            total_configured,
+            start.elapsed()
+        );
 
         Self {
             entries,
@@ -2329,5 +2409,115 @@ tasks:
             }
             other => panic!("expected Cooldown (in-flight), got {other:?}"),
         }
+    }
+
+    // ─── concurrent startup loading ────────────────────────────────────
+
+    /// Minimal copy of `git::tests::create_bare_repo` (private to that
+    /// module) — creates a bare git repo with an initial commit on `main`
+    /// containing the given files, returning (TempDir, file:// URL).
+    fn create_bare_repo_for_test(files: &[(&str, &str)]) -> (TempDir, String) {
+        let bare_dir = TempDir::new().unwrap();
+        let bare_repo = git2::Repository::init_bare(bare_dir.path()).unwrap();
+
+        let mut tb = bare_repo.treebuilder(None).unwrap();
+        for &(name, content) in files {
+            let oid = bare_repo.blob(content.as_bytes()).unwrap();
+            tb.insert(name, oid, 0o100644).unwrap();
+        }
+        let tree_oid = tb.write().unwrap();
+        let tree = bare_repo.find_tree(tree_oid).unwrap();
+
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let commit_oid = bare_repo
+            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        bare_repo
+            .reference("HEAD", commit_oid, true, "set HEAD")
+            .ok();
+        bare_repo.set_head("refs/heads/main").unwrap();
+
+        let url = format!("file://{}", bare_dir.path().display());
+        (bare_dir, url)
+    }
+
+    /// `WorkspaceManager::new` must load workspaces concurrently: two git
+    /// sources (backed by local bare repos, exercising the real
+    /// `block_in_place` clone path) plus a folder source pointing at a
+    /// non-existent path all load correctly, and none blocks the others.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_new_loads_git_and_folder_workspaces_concurrently() {
+        let (_bare1, url1) = create_bare_repo_for_test(&[(
+            "deploy.yaml",
+            "actions:\n  a:\n    type: script\n    script: echo hi\n",
+        )]);
+        let (_bare2, url2) = create_bare_repo_for_test(&[(
+            "deploy.yaml",
+            "actions:\n  b:\n    type: script\n    script: echo hi\n",
+        )]);
+
+        // Unique names so the on-disk clone dir (temp_dir/stroem/git/{name})
+        // doesn't collide with other tests or runs.
+        let git_one = format!("git-one-{}", uuid::Uuid::new_v4());
+        let git_two = format!("git-two-{}", uuid::Uuid::new_v4());
+
+        let mut defs = HashMap::new();
+        defs.insert(
+            git_one.clone(),
+            WorkspaceSourceDef::Git {
+                url: url1,
+                git_ref: "main".to_string(),
+                poll_interval_secs: 60,
+                auth: None,
+            },
+        );
+        defs.insert(
+            git_two.clone(),
+            WorkspaceSourceDef::Git {
+                url: url2,
+                git_ref: "main".to_string(),
+                poll_interval_secs: 60,
+                auth: None,
+            },
+        );
+        defs.insert(
+            "missing-folder".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: "/nonexistent/path/for/concurrent/test".to_string(),
+            },
+        );
+
+        let mgr = WorkspaceManager::new(defs, HashMap::new(), HashMap::new()).await;
+
+        // All three configured, whether healthy or not.
+        let mut configured = mgr.configured_names();
+        configured.sort();
+        let mut expected = vec![
+            git_one.clone(),
+            git_two.clone(),
+            "missing-folder".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(configured, expected);
+
+        // Both git workspaces loaded successfully.
+        assert!(
+            mgr.get_config(&git_one).await.is_some(),
+            "git-one should have loaded"
+        );
+        assert!(
+            mgr.get_config(&git_two).await.is_some(),
+            "git-two should have loaded"
+        );
+
+        // The folder workspace has a load_error.
+        assert!(mgr.get_config("missing-folder").await.is_none());
+        let infos = mgr.list_workspace_info().await;
+        let missing = infos
+            .iter()
+            .find(|i| i.name == "missing-folder")
+            .expect("missing-folder should appear in workspace info");
+        assert!(missing.error.is_some());
     }
 }
