@@ -10,15 +10,29 @@ use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use uuid::Uuid;
 
-/// Increment the `stroem_jobs_completed_total` counter for a job that has
-/// reached terminal state. Uses a DB-level CAS guard (`metrics_recorded_at`)
-/// to ensure the counter fires exactly once per job, regardless of how many
-/// code paths converge on terminal detection (orchestrate_after_step,
-/// propagate_to_parent, handle_job_terminal, cancel_job cascade).
+/// Exactly-once claim that a job's terminal side effects — hooks, sync-waiter
+/// notification, log archive upload, parent-step propagation, task-level
+/// retry-job creation, and the completion metric — have started running.
+///
+/// Terminal state is observed concurrently from multiple independent code
+/// paths (`orchestrate_after_step`, `propagate_to_parent`, `handle_job_terminal`,
+/// the `cancel_job` cascade), potentially on different server replicas under
+/// HA with no shared lock. Every one of those paths MUST call this function
+/// immediately after detecting a job is terminal and run propagation, retry,
+/// hook, notify, and archive logic ONLY when it returns `true` — otherwise the
+/// same job's terminal side effects (most importantly hook jobs) can fire more
+/// than once.
+///
+/// Implemented as a DB-level CAS on `metrics_recorded_at`: whichever caller
+/// wins the `UPDATE ... WHERE metrics_recorded_at IS NULL RETURNING job_id`
+/// race increments the `stroem_jobs_completed_total` counter and returns
+/// `true` — the metric emission piggybacks on the same claim rather than
+/// being a separate concern. Every other caller observes the column already
+/// set, returns `false`, and must skip all terminal side effects for this job.
 ///
 /// The UPDATE is best-effort: if it fails (e.g. pool exhausted), we log a
-/// warning and skip incrementing rather than double-counting.
-async fn record_job_completed(pool: &sqlx::PgPool, job: &stroem_db::JobRow) {
+/// warning and return `false` rather than risk double-processing.
+async fn claim_terminal_handling(pool: &sqlx::PgPool, job: &stroem_db::JobRow) -> bool {
     match sqlx::query_scalar::<_, uuid::Uuid>(
         "UPDATE job SET metrics_recorded_at = NOW() \
          WHERE job_id = $1 AND metrics_recorded_at IS NULL \
@@ -29,27 +43,30 @@ async fn record_job_completed(pool: &sqlx::PgPool, job: &stroem_db::JobRow) {
     .await
     {
         Ok(Some(_)) => {
-            // We won the CAS race — increment the counter exactly once.
+            // We won the CAS race — increment the counter and claim terminal handling.
             metrics::counter!(
                 crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
                 "status" => job.status.clone(),
             )
             .increment(1);
+            true
         }
         Ok(None) => {
-            // Another code path already recorded this job — skip to avoid
-            // double-counting.
+            // Another code path already claimed terminal handling for this job —
+            // skip to avoid double-firing hooks, double-counting, etc.
             tracing::debug!(
                 job_id = %job.job_id,
-                "record_job_completed: metrics_recorded_at already set, skipping"
+                "claim_terminal_handling: metrics_recorded_at already set, terminal handling already claimed elsewhere"
             );
+            false
         }
         Err(e) => {
             tracing::warn!(
                 job_id = %job.job_id,
                 error = %e,
-                "record_job_completed: CAS update failed, counter not incremented"
+                "claim_terminal_handling: CAS update failed, treating as not claimed"
             );
+            false
         }
     }
 }
@@ -267,11 +284,16 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 | Some(JobStatus::Cancelled)
                 | Some(JobStatus::Skipped)
         ) {
-            // Emit the counter at terminal-state detection. The CAS guard inside
-            // record_job_completed ensures it fires exactly once per job even when
-            // multiple code paths (orchestrate_after_step, propagate_to_parent,
-            // handle_job_terminal, cancel_job cascade) race to this point.
-            record_job_completed(&state.pool, &job_after).await;
+            // Exactly-once claim: only the winner propagates to the parent,
+            // creates a retry job, and runs terminal actions (hooks, notify,
+            // archive) for this job. See `claim_terminal_handling` doc comment.
+            if !claim_terminal_handling(&state.pool, &job_after).await {
+                tracing::debug!(
+                    job_id = %job_after.job_id,
+                    "orchestrate_after_step: terminal handling already claimed, skipping"
+                );
+                return Ok(());
+            }
 
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
@@ -587,25 +609,31 @@ async fn propagate_to_parent(
                         | Some(JobStatus::Cancelled)
                         | Some(JobStatus::Skipped)
                 ) {
-                    // Emit the counter via CAS guard — exactly-once even when
-                    // cancel_job cascade and this path both observe terminal state.
-                    record_job_completed(&state.pool, &parent_after).await;
+                    // Exactly-once claim: only the winner propagates further up
+                    // the chain and runs terminal actions for the parent job.
+                    if claim_terminal_handling(&state.pool, &parent_after).await {
+                        // Propagate up the chain if parent is also a child
+                        if let (Some(grandparent_id), Some(ref grandparent_step)) =
+                            (parent_after.parent_job_id, &parent_after.parent_step_name)
+                        {
+                            Box::pin(propagate_to_parent(
+                                state,
+                                &parent_after,
+                                grandparent_id,
+                                grandparent_step,
+                            ))
+                            .await?;
+                        }
 
-                    // Propagate up the chain if parent is also a child
-                    if let (Some(grandparent_id), Some(ref grandparent_step)) =
-                        (parent_after.parent_job_id, &parent_after.parent_step_name)
-                    {
-                        Box::pin(propagate_to_parent(
-                            state,
-                            &parent_after,
-                            grandparent_id,
-                            grandparent_step,
-                        ))
-                        .await?;
+                        // Fire hooks, notify waiters, upload to S3
+                        run_terminal_job_actions(state, &parent_after, &parent_ws, &parent_task)
+                            .await;
+                    } else {
+                        tracing::debug!(
+                            job_id = %parent_after.job_id,
+                            "propagate_to_parent: terminal handling already claimed, skipping"
+                        );
                     }
-
-                    // Fire hooks, notify waiters, upload to S3
-                    run_terminal_job_actions(state, &parent_after, &parent_ws, &parent_task).await;
                 }
             }
         }
@@ -686,13 +714,21 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         _ => return Ok(()),
     };
 
-    // Emit the counter via CAS guard — exactly-once even when cancel_job cascade
-    // and propagate_to_parent both converge on the same terminal job.
-    record_job_completed(&state.pool, &job).await;
-
     // Remove from the in-memory cancelled set to prevent unbounded growth.
-    // Safe to call unconditionally — no-op if not present.
+    // Safe to call unconditionally — no-op if not present. Independent of the
+    // terminal-handling claim below (idempotent either way).
     crate::cancellation::clear_cancelled(state, job_id);
+
+    // Exactly-once claim: only the winner propagates to the parent and runs
+    // terminal actions (hooks, notify, archive) for this job. See
+    // `claim_terminal_handling` doc comment.
+    if !claim_terminal_handling(&state.pool, &job).await {
+        tracing::debug!(
+            job_id = %job_id,
+            "handle_job_terminal: terminal handling already claimed, skipping"
+        );
+        return Ok(());
+    }
 
     // Propagate to parent
     if let (Some(parent_job_id), Some(ref parent_step)) = (job.parent_job_id, &job.parent_step_name)

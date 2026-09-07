@@ -705,9 +705,19 @@ impl JobRepo {
         Ok(jobs)
     }
 
-    /// Child jobs that are terminal while the parent step that spawned them is
-    /// still `running` — i.e. children that settled synchronously at creation
-    /// and never went through terminal handling / parent propagation.
+    /// `type: task` child jobs that are terminal while the parent step that
+    /// spawned them is still `running` — i.e. children that settled
+    /// synchronously inside `create_job_for_task_inner` (all steps skipped,
+    /// or a server-dispatched root step failed) and never went through
+    /// terminal handling / parent propagation, because the creator has no
+    /// `AppState` to run it with.
+    ///
+    /// Scoped to `source_type = 'task'` deliberately: `agent_tool` children
+    /// are a different mechanism (`propagate_to_parent`'s dedicated
+    /// `agent_tool` branch) that intentionally leaves the parent agent step
+    /// `running` across multiple tool calls — such a child would otherwise
+    /// match this predicate permanently and be re-finalized (re-firing its
+    /// hooks) on every unrelated sibling-step completion.
     pub async fn get_settled_children_with_running_parent_step(
         pool: &PgPool,
         parent_job_id: Uuid,
@@ -715,6 +725,7 @@ impl JobRepo {
         let rows = sqlx::query_as::<_, JobRow>(&format!(
             "SELECT {} FROM job j \
              WHERE j.parent_job_id = $1 \
+               AND j.source_type = 'task' \
                AND j.status IN ('completed', 'failed', 'cancelled', 'skipped') \
                AND EXISTS ( \
                    SELECT 1 FROM job_step s \
@@ -725,7 +736,7 @@ impl JobRepo {
         .bind(parent_job_id)
         .fetch_all(pool)
         .await
-        .context("get_settled_children_with_running_parent_step")?;
+        .context("Failed to get settled children with running parent step")?;
         Ok(rows)
     }
 

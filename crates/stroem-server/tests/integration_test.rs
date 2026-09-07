@@ -19582,6 +19582,64 @@ async fn setup_with_workspace(
     Ok((router, pool, temp_dir, container))
 }
 
+/// Like `setup_with_workspace`, but returns the `AppState` directly instead of
+/// consuming it into a `Router` — for tests that call `job_creator` /
+/// `job_recovery` functions directly rather than going through HTTP.
+async fn setup_state_with_workspace(
+    workspace: WorkspaceConfig,
+) -> Result<(
+    AppState,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+
+    Ok((state, pool, temp_dir, container))
+}
+
 // ─── Test: approval step reaches suspended after its dependency completes ─────
 
 #[tokio::test]
@@ -23599,6 +23657,220 @@ async fn test_child_settled_at_creation_propagates_to_parent() -> Result<()> {
     assert_eq!(
         JobRepo::get(&pool, job_id).await?.unwrap().status,
         "completed"
+    );
+    Ok(())
+}
+
+/// `reconcile_settled_children` must be safe to call repeatedly for the same
+/// parent: once the settled child has been finalized (its hooks fired, the
+/// parent step marked completed), calling it again must be a no-op, not a
+/// second round of hook firing (Critical 2 in the Task 4 review).
+#[tokio::test]
+async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-child".to_string(),
+        TaskDef {
+            flow: child_flow,
+            // Task-level on_success hook — fires once when the child settles.
+            on_success: vec![HookDef {
+                action: "greet".to_string(),
+                input: HashMap::new(),
+            }],
+            ..base_task.clone()
+        },
+    );
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-instant".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-child".to_string()),
+            ..greet_action
+        },
+    );
+    let mut flow = HashMap::new();
+    flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-instant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("parent".to_string(), TaskDef { flow, ..base_task });
+
+    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        "default",
+        "parent",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    stroem_server::job_recovery::finalize_created_job(&state, created).await;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    assert_eq!(
+        steps[0].status, "completed",
+        "parent step must reflect the settled child after the first finalize: {steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    // Call reconcile_settled_children twice more, directly, simulating extra
+    // orchestration passes converging on the same already-settled child.
+    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "child's on_success hook must fire exactly once across repeated reconcile calls: {jobs:?}"
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    assert_eq!(
+        steps[0].status, "completed",
+        "parent step must remain completed after repeated reconcile calls: {steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    Ok(())
+}
+
+/// A hook job must never trigger a further hook, even when its action is
+/// `type: task` and the target task itself declares `on_success`, and even
+/// when that target task settles synchronously at creation (which now drives
+/// it through `finalize_created_job` -> `handle_job_terminal` ->
+/// `fire_hooks`). `fire_hooks`'s recursion guard checks `source_type ==
+/// "hook"` before it even looks at task-level vs. workspace-level hooks, so
+/// this must hold regardless of what hooks the target task defines
+/// (Important 5 in the Task 4 review).
+#[tokio::test]
+async fn test_hook_of_hook_does_not_recurse() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+
+    // Target task for the workspace's on_success hook: settles synchronously
+    // at creation (its only step is skipped), and declares its own
+    // on_success hook — which must NOT fire, because the job that reaches
+    // terminal state here has source_type == "hook".
+    let mut target_flow = HashMap::new();
+    target_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-hook-target".to_string(),
+        TaskDef {
+            flow: target_flow,
+            on_success: vec![HookDef {
+                action: "greet".to_string(),
+                input: HashMap::new(),
+            }],
+            ..base_task.clone()
+        },
+    );
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-instant-hook-target".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-hook-target".to_string()),
+            ..greet_action
+        },
+    );
+
+    // Root task: settles synchronously at creation (all steps skipped), so
+    // the root job completes without needing a worker and fires the
+    // workspace-level on_success hook via `finalize_created_job`.
+    let mut root_flow = HashMap::new();
+    root_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "root".to_string(),
+        TaskDef {
+            flow: root_flow,
+            ..base_task
+        },
+    );
+    workspace.on_success.push(HookDef {
+        action: "run-instant-hook-target".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/root/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "exactly one hook job — the target task's own on_success must not fire (no hook-of-hook): {jobs:?}"
     );
     Ok(())
 }

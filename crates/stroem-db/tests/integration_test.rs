@@ -5173,3 +5173,89 @@ async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
     assert!(by["queued"].completed_at.is_some());
     Ok(())
 }
+
+/// `get_settled_children_with_running_parent_step` must be scoped to
+/// `source_type = 'task'` children only. `agent_tool` children are a
+/// different mechanism (`propagate_to_parent`'s dedicated agent_tool branch)
+/// that intentionally leaves the parent step `running` across multiple tool
+/// calls — such a child would otherwise match this predicate permanently.
+#[tokio::test]
+async fn test_get_settled_children_with_running_parent_step_excludes_agent_tool() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // The parent step that "spawned" both children is still running.
+    JobStepRepo::create_steps(&pool, &[plain_step(parent_id, "step-a", "running")]).await?;
+
+    // An agent_tool child settled (completed) while the parent agent step is
+    // running — this must NOT be treated as a synchronously-settled type:task
+    // child; the agent_tool branch owns its own re-claim/hooks lifecycle.
+    let agent_tool_child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "agent_tool",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("step-a"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, agent_tool_child_id, None).await?;
+
+    let settled = JobRepo::get_settled_children_with_running_parent_step(&pool, parent_id).await?;
+    assert!(
+        settled.is_empty(),
+        "agent_tool child must not match the settled-child predicate: {settled:?}"
+    );
+
+    // A type:task child settled (completed) while the parent step is
+    // running — this IS the synchronous-settle-at-creation case the
+    // predicate exists to find.
+    let task_child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("step-a"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, task_child_id, None).await?;
+
+    let settled = JobRepo::get_settled_children_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "exactly the task-sourced child should be returned: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, task_child_id);
+
+    Ok(())
+}
