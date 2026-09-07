@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over";
 
 /// Job step row from database
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
@@ -56,6 +56,10 @@ pub struct JobStepRow {
     /// Pinned revision of `action_workspace` at job-creation time. `None`
     /// when `action_workspace` is `None`.
     pub action_revision: Option<String>,
+    /// `true` when this row's terminal status/output was copied from a
+    /// source job via [`JobStepRepo::seed_steps_tx`] rather than executed
+    /// in this job. See [`Seed`] and spec 2026-09-07 §5.
+    pub carried_over: bool,
 }
 
 /// New job step for creation
@@ -160,6 +164,16 @@ pub struct StepDurationStatsRow {
     pub p95_ms: Option<f64>,
     pub min_ms: Option<f64>,
     pub max_ms: Option<f64>,
+}
+
+/// One carried-over row for a restart job (spec §4.2).
+#[derive(Debug, Clone)]
+pub struct Seed {
+    pub step_name: String,
+    /// Terminal status to write: completed | failed | skipped | cancelled.
+    pub status: String,
+    pub output: Option<JsonValue>,
+    pub error_message: Option<String>,
 }
 
 /// Repository for job step operations
@@ -274,6 +288,48 @@ impl JobStepRepo {
         q.execute(executor)
             .await
             .context("Failed to create job steps")?;
+        Ok(())
+    }
+
+    /// Overwrite freshly created rows with carried-over terminal state, inside
+    /// the creation transaction. Clears every "live" column the creator may
+    /// have set (ready_at on root rows) and any execution residue.
+    ///
+    /// Takes `&mut PgConnection` (not a generic `Copy` executor) because it
+    /// issues one UPDATE per seed within a single transaction — pass `&mut tx`
+    /// at the call site (deref coercion from `Transaction<'_, Postgres>`).
+    pub async fn seed_steps_tx(
+        tx: &mut sqlx::PgConnection,
+        job_id: Uuid,
+        seeds: &[Seed],
+    ) -> Result<()> {
+        for seed in seeds {
+            let result = sqlx::query(
+                r#"
+                UPDATE job_step
+                SET status = $3, output = $4, error_message = $5,
+                    completed_at = NOW(), carried_over = TRUE,
+                    ready_at = NULL, retry_at = NULL, started_at = NULL, worker_id = NULL,
+                    agent_state = NULL, suspended_at = NULL
+                WHERE job_id = $1 AND step_name = $2
+                "#,
+            )
+            .bind(job_id)
+            .bind(&seed.step_name)
+            .bind(&seed.status)
+            .bind(&seed.output)
+            .bind(&seed.error_message)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("seed step '{}'", seed.step_name))?;
+            if result.rows_affected() != 1 {
+                bail!(
+                    "seed step '{}' matched {} rows (expected 1)",
+                    seed.step_name,
+                    result.rows_affected()
+                );
+            }
+        }
         Ok(())
     }
 

@@ -112,6 +112,7 @@ export interface JobStep {
   retry_at: string | null;
   approval_message: string | null;
   approval_fields: Record<string, unknown> | null;
+  carried_over: boolean;
 }
 
 export interface JobDetail {

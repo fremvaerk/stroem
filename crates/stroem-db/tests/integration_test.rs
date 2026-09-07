@@ -1,10 +1,11 @@
 use anyhow::Result;
 use chrono::{Duration, Utc};
+use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{
-    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, TaskStateRepo,
+    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, Seed, TaskStateRepo,
     UserAuthLinkRepo, UserRepo, WorkerRepo, WorkspaceStateRepo,
 };
 use testcontainers::runners::AsyncRunner;
@@ -5582,5 +5583,111 @@ async fn test_get_settled_descendants_excludes_jobs_with_live_steps() -> Result<
     );
     assert_eq!(settled[0].job_id, child_id);
 
+    Ok(())
+}
+
+// ─── Plan B / Task 1: seeding carried-over rows ──────────────────────────────
+
+#[tokio::test]
+async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            plain_step(job_id, "a", "ready"),
+            plain_step(job_id, "b", "pending"),
+        ],
+    )
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    JobStepRepo::seed_steps_tx(
+        &mut tx,
+        job_id,
+        &[
+            Seed {
+                step_name: "a".into(),
+                status: "completed".into(),
+                output: Some(json!({"k": 1})),
+                error_message: None,
+            },
+            Seed {
+                step_name: "b".into(),
+                status: "failed".into(),
+                output: None,
+                error_message: Some("old boom".into()),
+            },
+        ],
+    )
+    .await?;
+    tx.commit().await?;
+
+    let by: std::collections::HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(by["a"].status, "completed");
+    assert_eq!(by["a"].output.as_ref().unwrap()["k"], 1);
+    assert!(by["a"].carried_over);
+    assert!(
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT ready_at FROM job_step WHERE job_id=$1 AND step_name='a'"
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await?
+        .is_none(),
+        "ready_at cleared on a seeded root row"
+    );
+    assert!(by["a"].completed_at.is_some());
+    assert_eq!(by["b"].status, "failed");
+    assert_eq!(by["b"].error_message.as_deref(), Some("old boom"));
+    assert!(by["b"].carried_over);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_seed_steps_tx_unknown_step_aborts() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(job_id, "a", "ready")]).await?;
+    let mut tx = pool.begin().await?;
+    let err = JobStepRepo::seed_steps_tx(
+        &mut tx,
+        job_id,
+        &[Seed {
+            step_name: "ghost".into(),
+            status: "completed".into(),
+            output: None,
+            error_message: None,
+        }],
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("ghost"), "{err:#}");
     Ok(())
 }

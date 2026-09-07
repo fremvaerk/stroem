@@ -36,6 +36,7 @@ function mkStep(partial: Partial<JobStep> & { step_name: string }): JobStep {
     retry_at: null,
     approval_message: null,
     approval_fields: null,
+    carried_over: false,
   };
 }
 

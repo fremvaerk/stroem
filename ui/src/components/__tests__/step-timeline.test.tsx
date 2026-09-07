@@ -35,6 +35,7 @@ function makeStep(overrides: Partial<JobStep> = {}): JobStep {
     retry_at: null,
     approval_message: null,
     approval_fields: null,
+    carried_over: false,
     ...overrides,
   };
 }

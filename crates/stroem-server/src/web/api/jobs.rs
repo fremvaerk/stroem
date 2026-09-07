@@ -333,6 +333,7 @@ pub async fn get_job(
                 "max_retries": step.max_retries,
                 "retry_history": step.retry_history,
                 "retry_at": step.retry_at,
+                "carried_over": step.carried_over,
             });
             // For approval and agent steps, always surface approval-specific fields so
             // the UI can show the message and input schema after the step leaves the
