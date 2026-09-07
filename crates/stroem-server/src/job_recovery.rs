@@ -124,10 +124,9 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                         state
                             .append_server_log(
                                 job_id,
-                                &format!(
-                                    "[retry] Step '{}' attempt {}/{} failed, retrying in {}s",
+                                &step_retry_message(
                                     step_name,
-                                    step_row.retry_attempt + 1,
+                                    step_row.retry_attempt,
                                     max,
                                     delay_secs,
                                 ),
@@ -140,10 +139,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                     state
                         .append_server_log(
                             job_id,
-                            &format!(
-                                "[retry] Step '{}' retries exhausted ({}/{})",
-                                step_name, step_row.retry_attempt, max,
-                            ),
+                            &step_retries_exhausted_message(step_name, step_row.retry_attempt, max),
                         )
                         .await;
                 }
@@ -811,6 +807,53 @@ fn extract_first_failure(steps: &[JobStepRow]) -> String {
     "unknown error".to_string()
 }
 
+/// Server-log line for a failed step execution that will be retried.
+///
+/// `retry_attempt` is 0 for the initial execution and `max_retries` counts
+/// retries only (`RetryConfig.max_attempts`), so both sides of the slash are
+/// converted to execution counts: `retry_attempt + 1` of `max_retries + 1`.
+/// This matches the UI step timeline (`attempt N/M`).
+fn step_retry_message(
+    step_name: &str,
+    retry_attempt: i32,
+    max_retries: i32,
+    delay_secs: u64,
+) -> String {
+    format!(
+        "[retry] Step '{}' attempt {}/{} failed, retrying in {}s",
+        step_name,
+        retry_attempt + 1,
+        max_retries + 1,
+        delay_secs,
+    )
+}
+
+/// Server-log line for the final failed execution of a step (no retries left).
+fn step_retries_exhausted_message(step_name: &str, retry_attempt: i32, max_retries: i32) -> String {
+    format!(
+        "[retry] Step '{}' retries exhausted ({}/{})",
+        step_name,
+        retry_attempt + 1,
+        max_retries + 1,
+    )
+}
+
+/// Server-log line for a task-level retry that creates a new job.
+fn task_retry_message(
+    retry_attempt: i32,
+    max_retries: i32,
+    retry_job_id: Uuid,
+    delay_secs: u64,
+) -> String {
+    format!(
+        "[retry] Task attempt {}/{} failed, retrying as job {} (in {}s)",
+        retry_attempt + 1,
+        max_retries + 1,
+        retry_job_id,
+        delay_secs,
+    )
+}
+
 /// Compute the retry delay in seconds for a step based on its retry config.
 fn compute_retry_delay(step: &JobStepRow) -> u64 {
     let base_secs = step.retry_backoff_secs.unwrap_or(30) as u64;
@@ -925,13 +968,7 @@ async fn try_retry_job(
     state
         .append_server_log(
             failed_job.job_id,
-            &format!(
-                "[retry] Task retry {}/{}: new job {} (in {}s)",
-                failed_job.retry_attempt + 1,
-                max,
-                retry_job_id,
-                delay_secs,
-            ),
+            &task_retry_message(failed_job.retry_attempt, max, retry_job_id, delay_secs),
         )
         .await;
 
@@ -961,6 +998,38 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+
+    // `max_retries` stores RetryConfig.max_attempts, which counts retries and
+    // excludes the initial execution: max 2 ⇒ 3 executions. Every message
+    // counts EXECUTIONS on both sides of the slash, matching the UI timeline's
+    // `attempt {retry_attempt + 1}/{max_retries + 1}`.
+    #[test]
+    fn retry_messages_count_executions_consistently() {
+        // First execution (retry_attempt 0) failed, 2 retries allowed ⇒ 1 of 3.
+        assert_eq!(
+            step_retry_message("run", 0, 2, 900),
+            "[retry] Step 'run' attempt 1/3 failed, retrying in 900s"
+        );
+        // Second execution (retry_attempt 1) failed ⇒ 2 of 3.
+        assert_eq!(
+            step_retry_message("run", 1, 2, 1800),
+            "[retry] Step 'run' attempt 2/3 failed, retrying in 1800s"
+        );
+        // Third execution (retry_attempt 2) failed and no retries remain ⇒ 3 of 3.
+        assert_eq!(
+            step_retries_exhausted_message("run", 2, 2),
+            "[retry] Step 'run' retries exhausted (3/3)"
+        );
+        // Task-level retry follows the same convention.
+        let job_id = Uuid::nil();
+        assert_eq!(
+            task_retry_message(0, 2, job_id, 60),
+            format!(
+                "[retry] Task attempt 1/3 failed, retrying as job {} (in 60s)",
+                job_id
+            )
+        );
+    }
 
     fn make_step(status: &str, error_message: Option<&str>) -> JobStepRow {
         JobStepRow {

@@ -265,7 +265,8 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - **Action retry**: `ActionDef.retry: Option<RetryConfig>` — default retry for all steps using this action, overridden by step-level.
 - **Task retry**: `TaskDef.retry: Option<RetryConfig>` — retries the entire task as a new job on failure. Creates new job with `source_type = "retry"`, linked via `retry_of_job_id`/`retry_job_id`.
 - **Resolution**: step.retry > action.retry (most specific wins). Task retry is independent.
-- **RetryConfig**: `max_attempts` (1-10), `delay` (HumanDuration, max 1h), `backoff` (fixed/exponential), `jitter` (bool).
+- **RetryConfig**: `max_attempts` (1-10) counts RETRIES, excluding the initial run — `max_attempts: 2` ⇒ up to 3 executions (stored as `job_step.max_retries` / `job.max_retries`; retry loop runs while `retry_attempt < max_retries`). `delay` (HumanDuration, max 1h), `backoff` (fixed/exponential), `jitter` (bool).
+- **Attempt counters in messages**: the UI timeline and the `_server` log lines (`job_recovery.rs::{step_retry_message, step_retries_exhausted_message, task_retry_message}`) both count EXECUTIONS on both sides of the slash: `attempt {retry_attempt + 1}/{max_retries + 1}`. Keep them in sync (unit test `retry_messages_count_executions_consistently`).
 - **BackoffStrategy**: `Fixed` (constant delay) or `Exponential` (base * 2^attempt, capped at 2^6).
 - **Server-side**: retry check in `orchestrate_after_step()` before failure cascade. `claim_ready_step` respects `retry_at`.
 - **Hooks**: `on_error`/`on_cancel` hooks fire only after all retries exhausted (step and task). `source_type = "retry"` is top-level for hook fallback.
