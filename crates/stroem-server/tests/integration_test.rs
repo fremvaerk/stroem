@@ -23305,3 +23305,164 @@ async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> 
     assert!(job.completed_at.is_some());
     Ok(())
 }
+
+// ─── Plan A / Task 3: creation-time settlement uses the shared routine ───────
+
+/// A root `type: task` step that fails at dispatch but is `continue_on_failure`
+/// must leave the job `completed` (the orchestrator rule), not `failed` (the
+/// old creation-time rule).
+#[tokio::test]
+async fn test_creation_settle_honours_continue_on_failure() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-missing".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("nonexistent-task".to_string()),
+            ..greet_action
+        },
+    );
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "dispatch".to_string(),
+        FlowStep {
+            action: "run-missing".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: true,
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("tolerant-root".to_string(), TaskDef { flow, ..base_task });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/tolerant-root/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps[0].status, "failed", "{steps:?}");
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "tolerated failure must complete the job: {job:?}"
+    );
+    assert!(job.completed_at.is_some());
+    Ok(())
+}
+
+/// `create_job_for_task_detailed` reports whether the job settled at creation.
+#[tokio::test]
+async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    // Root step with `when: "false"` → skipped at creation → job terminal at creation.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "all-skipped".to_string(),
+        TaskDef {
+            flow,
+            ..base_task.clone()
+        },
+    );
+    // Plain root step → not terminal at creation.
+    let mut flow2 = HashMap::new();
+    flow2.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "live".to_string(),
+        TaskDef {
+            flow: flow2,
+            ..base_task
+        },
+    );
+
+    let (pool, _container) = {
+        let container = Postgres::default().start().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let pool = create_pool(&format!(
+            "postgres://postgres:postgres@localhost:{}/postgres",
+            port
+        ))
+        .await?;
+        run_migrations(&pool).await?;
+        (pool, container)
+    };
+    let mgr = WorkspaceManager::from_config("default", workspace.clone());
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &mgr,
+        &pool,
+        &workspace,
+        "default",
+        "all-skipped",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    assert!(created.terminal_at_creation);
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &mgr,
+        &pool,
+        &workspace,
+        "default",
+        "live",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    assert!(!created.terminal_at_creation);
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "pending"
+    );
+    Ok(())
+}

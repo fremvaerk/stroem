@@ -19,6 +19,17 @@ use crate::workspace_set::WorkspaceSet;
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
 const MAX_TASK_DEPTH: u32 = 10;
 
+/// Result of job creation. `terminal_at_creation` is true when every step was
+/// already terminal once creation-time promotion/expansion/dispatch finished
+/// (e.g. all root steps skipped by `when`, or a server-dispatched root step
+/// failed) — the caller must then run `job_recovery::finalize_created_job`
+/// so hooks/metrics/log-archive fire exactly as for an orchestrator-settled job.
+#[derive(Debug, Clone, Copy)]
+pub struct CreatedJob {
+    pub job_id: Uuid,
+    pub terminal_at_creation: bool,
+}
+
 /// Create a job and its steps for a task in a workspace.
 ///
 /// Shared by the API handler (`execute_task`) and the scheduler.
@@ -44,6 +55,42 @@ pub async fn create_job_for_task(
     agents_config: Option<&AgentsConfig>,
     defaults: JobDefaults,
 ) -> Result<Uuid> {
+    create_job_for_task_detailed(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        revision,
+        source_job_id,
+        agents_config,
+        defaults,
+    )
+    .await
+    .map(|c| c.job_id)
+}
+
+/// Like [`create_job_for_task`] but also reports `terminal_at_creation`.
+/// HTTP/MCP/scheduler entry points use this and call
+/// `job_recovery::finalize_created_job` afterwards.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_job_for_task_detailed(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    source_job_id: Option<Uuid>,
+    agents_config: Option<&AgentsConfig>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
         pool,
@@ -99,6 +146,7 @@ pub async fn create_child_job_for_task(
         defaults,
     )
     .await
+    .map(|c| c.job_id)
 }
 
 /// Create a job with parent tracking (for type: task sub-jobs).
@@ -118,7 +166,7 @@ fn create_job_for_task_inner<'a>(
     source_job_id: Option<Uuid>,
     _agents_config: Option<&'a AgentsConfig>,
     defaults: JobDefaults,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CreatedJob>> + Send + 'a>> {
     Box::pin(async move {
         // Look up task
         let task = workspace_config.tasks.get(task_name).with_context(|| {
@@ -349,24 +397,19 @@ fn create_job_for_task_inner<'a>(
 
         tracing::info!("Created job {} with {} steps", job_id, new_steps.len());
 
-        // Evaluate root steps with `when` conditions or `for_each` expressions
-        let needs_post_creation_loop = task
-            .flow
-            .values()
-            .any(|fs| (fs.depends_on.is_empty() && fs.when.is_some()) || fs.for_each.is_some());
-        if needs_post_creation_loop {
-            // Fetch job_row once — it doesn't change, but the step snapshot
-            // must be refreshed each iteration as steps are promoted/skipped.
+        // ── Post-commit initialisation ────────────────────────────────────
+        // The job row is committed; anything that fails from here on must be
+        // made visible on the job instead of surfacing as a 500 with a
+        // committed `pending` job left behind (spec §6.2 / P8).
+        let init: Result<()> = async {
+            // Promote/skip/expand root steps. Runs unconditionally: cheap when
+            // nothing is promotable, and required for Plan B's seeded jobs.
             let job_row = JobRepo::get(pool, job_id).await?.context("Job not found")?;
-
-            // Safety bound: generous limit to accommodate for_each expansion cascades.
             let max_iterations = task.flow.len() * 2 + 10;
             for _iteration in 0..max_iterations {
                 let steps_snapshot = JobStepRepo::get_steps_for_job(pool, job_id).await?;
                 let render_ctx =
                     build_step_render_context(&job_row, &steps_snapshot, workspace_config);
-
-                // Promote/skip loop: root conditions may cascade
                 let changed =
                     JobStepRepo::promote_ready_steps(pool, job_id, &task.flow, Some(&render_ctx))
                         .await?;
@@ -377,7 +420,6 @@ fn create_job_for_task_inner<'a>(
                 if changed.is_empty() && skipped.is_empty() && expanded.is_empty() {
                     break;
                 }
-
                 if _iteration + 1 == max_iterations {
                     tracing::warn!(
                         job_id = %job_id,
@@ -386,48 +428,46 @@ fn create_job_for_task_inner<'a>(
                     );
                 }
             }
-        }
 
-        // Handle any initially-ready type: task steps
-        handle_task_steps(
-            workspaces,
-            pool,
-            workspace_config,
-            workspace_name,
-            job_id,
-            task,
-            defaults,
-        )
-        .await?;
+            handle_task_steps(workspaces, pool, workspace_config, workspace_name, job_id, task, defaults)
+                .await?;
 
-        // Handle any initially-ready type: approval steps
-        if let Err(e) =
-            handle_approval_steps(pool, workspace_config, workspace_name, job_id, task).await
-        {
-            tracing::error!(
-                job_id = %job_id,
-                "Failed to handle initial approval steps: {:#}",
-                e
-            );
-        }
-
-        // If all steps ended up terminal (e.g. all skipped by when conditions,
-        // or a step failed during server-side dispatch), settle the job now
-        // rather than waiting for the recovery sweep.
-        if needs_post_creation_loop {
-            let all_terminal = JobStepRepo::all_steps_terminal(pool, job_id).await?;
-            if all_terminal {
-                if JobStepRepo::any_step_failed(pool, job_id).await? {
-                    JobRepo::mark_failed(pool, job_id).await?;
-                    tracing::info!(job_id = %job_id, "All steps terminal at creation with a failure — job marked failed");
-                } else {
-                    JobRepo::mark_completed(pool, job_id, None).await?;
-                    tracing::info!(job_id = %job_id, "All steps terminal at creation — job marked completed");
-                }
+            if let Err(e) =
+                handle_approval_steps(pool, workspace_config, workspace_name, job_id, task).await
+            {
+                tracing::error!(job_id = %job_id, "Failed to handle initial approval steps: {:#}", e);
             }
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = init {
+            let msg = format!("[creation] initialisation failed: {:#}", e);
+            tracing::error!(job_id = %job_id, "{}", msg);
+            JobStepRepo::fail_non_terminal_steps(pool, job_id, &msg)
+                .await
+                .context("fail steps after initialisation error")?;
+            JobRepo::mark_failed(pool, job_id)
+                .await
+                .context("mark job failed after initialisation error")?;
+            return Ok(CreatedJob {
+                job_id,
+                terminal_at_creation: true,
+            });
         }
 
-        Ok(job_id)
+        // Shared settlement — identical rules to the orchestrator path.
+        let settled = crate::orchestrator::settle_if_all_terminal(pool, job_id, task)
+            .await
+            .context("settle job at creation")?;
+        if let Some(ref status) = settled {
+            tracing::info!(job_id = %job_id, ?status, "All steps terminal at creation — job settled");
+        }
+
+        Ok(CreatedJob {
+            job_id,
+            terminal_at_creation: settled.is_some(),
+        })
     })
 }
 
@@ -644,7 +684,8 @@ async fn handle_task_steps_pass(
         )
         .await
         {
-            Ok(child_job_id) => {
+            Ok(created) => {
+                let child_job_id = created.job_id;
                 tracing::info!(
                     "Created child job {} for task step '{}' -> task '{}'",
                     child_job_id,
