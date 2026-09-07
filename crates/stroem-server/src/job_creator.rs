@@ -168,6 +168,12 @@ pub async fn create_restart_job(
     revision: Option<&str>,
     defaults: JobDefaults,
 ) -> Result<CreatedJob> {
+    debug_assert!(
+        plan.restart_steps.iter().any(|s| s == from_step),
+        "restart plan for '{}' does not contain it: {:?} — plan was built for a different step",
+        from_step,
+        plan.restart_steps
+    );
     let raw = source.raw_input.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "Source job {} predates Re-run prefill (no raw_input)",
