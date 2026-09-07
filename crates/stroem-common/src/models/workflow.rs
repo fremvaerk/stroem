@@ -680,8 +680,8 @@ pub enum ConcurrencyPolicy {
 /// Retry configuration for failed steps (step/action level) or failed jobs (task level).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts (not counting the initial attempt).
-    /// E.g. `max_attempts: 3` means up to 4 total executions.
+    /// Maximum total executions, including the initial run. `max_attempts: 3`
+    /// means at most 3 executions (2 retries).
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Delay before the first retry. For exponential backoff, this is the base delay.

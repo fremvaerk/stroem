@@ -32,6 +32,8 @@ tasks:
           backoff: fixed
 ```
 
+`max_attempts` counts executions including the first; `max_attempts: 1` disables retry for that step.
+
 **Behavior:**
 - Attempt 1: Step runs and fails
 - Wait 30s

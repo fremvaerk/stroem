@@ -287,9 +287,13 @@ fn create_job_for_task_inner<'a>(
                 loop_index: None,
                 loop_total: None,
                 loop_item: None,
+                // `max_attempts` counts total executions; the DB column counts
+                // retries only, so it's stored as `max_attempts - 1`. Validation
+                // guarantees `max_attempts >= 1`, so this subtraction never
+                // underflows.
                 max_retries: retry
                     .as_ref()
-                    .map(|r| i32::try_from(r.max_attempts).expect("max_attempts fits i32")),
+                    .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
                 retry_backoff_secs: retry
                     .as_ref()
                     .map(|r| i32::try_from(r.delay.as_secs()).expect("retry delay fits i32")),

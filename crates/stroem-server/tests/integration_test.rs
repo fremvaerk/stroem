@@ -21438,6 +21438,49 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
     Ok(())
 }
 
+/// Regression: `max_attempts` counts total executions, while the DB column
+/// `job_step.max_retries` keeps counting retries only. A step created with
+/// `max_attempts: 3` (3 total executions) must store `max_retries == Some(2)`.
+#[tokio::test]
+async fn test_step_retry_max_retries_column_is_max_attempts_minus_one() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 3,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (_router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(
+        step.max_retries,
+        Some(2),
+        "max_attempts: 3 must store max_retries = 2 (retries only)"
+    );
+
+    Ok(())
+}
+
 /// Test 2: exhausting all retries causes the step and the job to be marked failed.
 #[tokio::test]
 async fn test_step_retry_exhausted_fails_job() -> Result<()> {
@@ -21445,7 +21488,7 @@ async fn test_step_retry_exhausted_fails_job() -> Result<()> {
     use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
 
     let retry_cfg = RetryConfig {
-        max_attempts: 1, // only 1 retry allowed
+        max_attempts: 2, // 2 total executions = 1 retry allowed
         delay: HumanDuration(0),
         backoff: BackoffStrategy::Fixed,
         jitter: false,
@@ -21751,7 +21794,7 @@ async fn test_step_retry_with_continue_on_failure() -> Result<()> {
             for_each: None,
             sequential: false,
             retry: Some(RetryConfig {
-                max_attempts: 1,
+                max_attempts: 2, // 2 total executions = 1 retry allowed
                 delay: HumanDuration(0),
                 backoff: BackoffStrategy::Fixed,
                 jitter: false,

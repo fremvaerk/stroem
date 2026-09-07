@@ -209,4 +209,32 @@ describe("StepTimeline", () => {
     const amberSpan = container.querySelector(".text-amber-700");
     expect(amberSpan).not.toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // Retry badge (pre-retry) — shows configured total executions
+  // -------------------------------------------------------------------------
+  it("shows 'attempts: N' (max_retries + 1) before any retry has happened", () => {
+    // max_retries = 2 means max_attempts: 3 was configured (2 retries, 3 total executions).
+    const step = makeStep({ max_retries: 2, retry_attempt: 0 });
+
+    renderTimeline([step]);
+
+    expect(screen.getByText("attempts: 3")).toBeInTheDocument();
+  });
+
+  it("does not show the attempts badge when max_retries is 0", () => {
+    const step = makeStep({ max_retries: 0, retry_attempt: 0 });
+
+    renderTimeline([step]);
+
+    expect(screen.queryByText(/attempts:/)).not.toBeInTheDocument();
+  });
+
+  it("does not show the attempts badge when max_retries is null", () => {
+    const step = makeStep({ max_retries: null, retry_attempt: 0 });
+
+    renderTimeline([step]);
+
+    expect(screen.queryByText(/attempts:/)).not.toBeInTheDocument();
+  });
 });

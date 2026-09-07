@@ -138,7 +138,7 @@ function StepRow({
             )}
             {step.max_retries != null && step.max_retries > 0 && step.retry_attempt === 0 && (
               <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                retry: {step.max_retries}
+                attempts: {step.max_retries + 1}
               </span>
             )}
             {isRetryPending && (

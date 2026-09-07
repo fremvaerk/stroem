@@ -1977,8 +1977,34 @@ fn validate_retry_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::workflow::{AgentToolRef, McpServerDef, TaskDef, TriggerDef};
+    use crate::duration::HumanDuration;
+    use crate::models::workflow::{
+        AgentToolRef, BackoffStrategy, McpServerDef, RetryConfig, TaskDef, TriggerDef,
+    };
     use std::collections::HashMap;
+
+    fn retry_config(max_attempts: u32) -> RetryConfig {
+        RetryConfig {
+            max_attempts,
+            delay: HumanDuration(30),
+            backoff: BackoffStrategy::Fixed,
+            jitter: false,
+        }
+    }
+
+    /// `max_attempts` counts total executions. `1` (no retry) is the minimum
+    /// allowed; `0` is rejected since it would mean "never run".
+    #[test]
+    fn test_validate_retry_config_max_attempts_boundaries() {
+        assert!(validate_retry_config(&retry_config(1), "Test").is_ok());
+        assert!(validate_retry_config(&retry_config(10), "Test").is_ok());
+
+        let err = validate_retry_config(&retry_config(0), "Test").unwrap_err();
+        assert!(err.to_string().contains("out of range"), "got: {err}");
+
+        let err = validate_retry_config(&retry_config(11), "Test").unwrap_err();
+        assert!(err.to_string().contains("out of range"), "got: {err}");
+    }
 
     #[test]
     fn test_check_connection_values_required_unknown_empty() {
