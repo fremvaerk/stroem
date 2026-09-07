@@ -80,12 +80,18 @@ async fn handle_task_steps(
     defaults: JobDefaults,
 ) -> Result<()> {
     let mgr = WorkspaceManager::from_config(workspace_name, workspace_config.clone());
+    let job = JobRepo::get(pool, job_id).await?.expect("job exists");
+    let task = workspace_config
+        .tasks
+        .get(&job.task_name)
+        .expect("task exists in workspace");
     stroem_server::job_creator::handle_task_steps(
         &mgr,
         pool,
         workspace_config,
         workspace_name,
         job_id,
+        task,
         defaults,
     )
     .await
@@ -23164,5 +23170,138 @@ async fn test_sub_task_inherits_defaults() -> Result<()> {
         "child job should also inherit default_job_timeout"
     );
 
+    Ok(())
+}
+
+// ─── Regression: task-step dispatch failure must cascade (prod job 201012e5) ──
+
+/// A `type: task` step is dispatched server-side by `handle_task_steps`. When
+/// child-job creation fails there (e.g. the referenced task/action does not
+/// exist), the step is marked `failed` — but the orchestrator must then run
+/// for that failure exactly as it does when a worker reports one, so that
+/// dependents are cascade-skipped and the job closes as `failed`. Previously
+/// nothing re-orchestrated, leaving dependents `pending` and the job stuck in
+/// `running` forever.
+#[tokio::test]
+async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+
+    // type:task action whose target task does not exist → child creation fails.
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-missing".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("nonexistent-task".to_string()),
+            ..greet_action
+        },
+    );
+
+    // first (script) → dispatch (task, fails at dispatch) → after (script)
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "first".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    flow.insert(
+        "dispatch".to_string(),
+        FlowStep {
+            action: "run-missing".to_string(),
+            depends_on: vec!["first".to_string()],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    flow.insert(
+        "after".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec!["dispatch".to_string()],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "dispatch-fail-pipeline".to_string(),
+        TaskDef { flow, ..base_task },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/dispatch-fail-pipeline/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // Worker claims and completes `first` → orchestration promotes `dispatch`
+    // → server-side dispatch fails it.
+    let worker_id = register_test_worker(&pool).await;
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(body_json(response).await["step_name"], "first");
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/first/complete", job_id),
+            json!({"output": {"greeting": "hi"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let steps: HashMap<String, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(steps["first"].status, "completed");
+    assert_eq!(
+        steps["dispatch"].status, "failed",
+        "{:?}",
+        steps["dispatch"]
+    );
+    assert!(
+        steps["dispatch"]
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("Failed to create child job"),
+        "{:?}",
+        steps["dispatch"].error_message
+    );
+    assert_eq!(
+        steps["after"].status, "skipped",
+        "dependent of a dispatch-failed task step must be cascade-skipped"
+    );
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "job must close as failed, not stay running"
+    );
+    assert!(job.completed_at.is_some());
     Ok(())
 }

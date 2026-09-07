@@ -395,6 +395,7 @@ fn create_job_for_task_inner<'a>(
             workspace_config,
             workspace_name,
             job_id,
+            task,
             defaults,
         )
         .await?;
@@ -441,10 +442,62 @@ pub async fn handle_task_steps(
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
     job_id: Uuid,
+    task: &stroem_common::models::workflow::TaskDef,
     defaults: JobDefaults,
 ) -> Result<()> {
+    // A dispatch failure re-runs the orchestrator, which may promote further
+    // `type: task` steps (e.g. `continue_on_failure` dependents) that this
+    // pass's snapshot never saw — so loop until a pass fails nothing. Bounded
+    // by the flow size: every failing pass retires at least one step.
+    for _ in 0..(task.flow.len() + 1) {
+        let failed_any = handle_task_steps_pass(
+            workspaces,
+            pool,
+            workspace_config,
+            workspace_name,
+            job_id,
+            task,
+            defaults,
+        )
+        .await?;
+        if !failed_any {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Mark a server-dispatched step failed and immediately re-orchestrate so its
+/// dependents are cascade-skipped / the job closes. Every failure branch in
+/// `handle_task_steps_pass` must go through here.
+async fn fail_task_step(
+    pool: &PgPool,
+    job_id: Uuid,
+    step_name: &str,
+    err: &str,
+    task: &stroem_common::models::workflow::TaskDef,
+    workspace_config: &WorkspaceConfig,
+) -> Result<()> {
+    tracing::error!("{}", err);
+    JobStepRepo::mark_failed(pool, job_id, step_name, err).await?;
+    orchestrate_after_server_step_failure(pool, job_id, step_name, task, workspace_config).await;
+    Ok(())
+}
+
+/// One dispatch pass over the currently-ready `type: task` steps.
+/// Returns `true` if any step was marked failed during this pass.
+async fn handle_task_steps_pass(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    job_id: Uuid,
+    task: &stroem_common::models::workflow::TaskDef,
+    defaults: JobDefaults,
+) -> Result<bool> {
     let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
     let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
+    let mut failed_any = false;
 
     for step in &steps {
         if step.status != StepStatus::Ready.as_ref() || step.action_type != "task" {
@@ -467,8 +520,8 @@ pub async fn handle_task_steps(
                 "Maximum task nesting depth ({}) exceeded for task '{}'",
                 MAX_TASK_DEPTH, task_ref
             );
-            JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-            tracing::error!("{}", err);
+            fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config).await?;
+            failed_any = true;
             continue;
         }
 
@@ -499,9 +552,26 @@ pub async fn handle_task_steps(
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    render_input_map(&map, &context_value).with_context(|| {
-                        format!("Failed to render input for task step '{}'", step.step_name)
-                    })?
+                    match render_input_map(&map, &context_value) {
+                        Ok(rendered) => rendered,
+                        Err(e) => {
+                            let err = format!(
+                                "Failed to render input for task step '{}': {:#}",
+                                step.step_name, e
+                            );
+                            fail_task_step(
+                                pool,
+                                job_id,
+                                &step.step_name,
+                                &err,
+                                task,
+                                workspace_config,
+                            )
+                            .await?;
+                            failed_any = true;
+                            continue;
+                        }
+                    }
                 }
             } else {
                 serde_json::json!({})
@@ -522,8 +592,9 @@ pub async fn handle_task_steps(
                             "Failed to prepare action input for task step '{}': {:#}",
                             step.step_name, e
                         );
-                        JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                        tracing::error!("{}", err);
+                        fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config)
+                            .await?;
+                        failed_any = true;
                         continue;
                     }
                 }
@@ -586,13 +657,13 @@ pub async fn handle_task_steps(
                     "Failed to create child job for task '{}': {:#}",
                     task_ref, e
                 );
-                JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                tracing::error!("{}", err);
+                fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config).await?;
+                failed_any = true;
             }
         }
     }
 
-    Ok(())
+    Ok(failed_any)
 }
 
 /// Maximum number of for_each instances (runtime limit)
@@ -1080,7 +1151,7 @@ pub async fn handle_approval_steps(
                             );
                             tracing::error!("{}", err);
                             JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                            orchestrate_after_approval_failure(
+                            orchestrate_after_server_step_failure(
                                 pool,
                                 job_id,
                                 &step.step_name,
@@ -1118,7 +1189,7 @@ pub async fn handle_approval_steps(
                     );
                     tracing::error!("{}", err);
                     JobStepRepo::mark_failed(pool, job_id, &step.step_name, &err).await?;
-                    orchestrate_after_approval_failure(
+                    orchestrate_after_server_step_failure(
                         pool,
                         job_id,
                         &step.step_name,
@@ -1314,9 +1385,12 @@ pub fn build_step_render_context(
     serde_json::Value::Object(ctx)
 }
 
-/// Run orchestrator after an approval step fails (e.g. message render error).
-/// Cascade-skips downstream steps and marks the job as failed if needed.
-async fn orchestrate_after_approval_failure(
+/// Run the orchestrator after a server-dispatched step (approval, task) is
+/// marked failed outside the worker `complete_step` path. Cascade-skips
+/// downstream steps and closes the job as failed if everything is terminal.
+/// Without this, dependents stay `pending` and the job sits in `running`
+/// forever (prod job 201012e5, 2026-09-07).
+async fn orchestrate_after_server_step_failure(
     pool: &PgPool,
     job_id: Uuid,
     step_name: &str,
@@ -1333,7 +1407,7 @@ async fn orchestrate_after_approval_failure(
     .await
     {
         tracing::error!(
-            "Failed to orchestrate after approval step '{}' failure in job {}: {:#}",
+            "Failed to orchestrate after server-side step '{}' failure in job {}: {:#}",
             step_name,
             job_id,
             e

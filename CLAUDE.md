@@ -347,6 +347,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Server-side dispatch. `create_job_for_task_inner()` uses `Box::pin` for recursive async.
 - `compute_depth()` max 10 levels. Child propagation via `propagate_to_parent()`.
 - Self-referencing task actions rejected by validation.
+- **Dispatch failures re-orchestrate**: `handle_task_steps` runs in passes; every failure branch (depth exceeded, input render/prepare error, child-job creation error) goes through `fail_task_step` → `mark_failed` + `orchestrate_after_server_step_failure` (shared with approval steps), and the pass loop repeats while failures keep promoting further task steps. A server-side `mark_failed` that does NOT re-run the orchestrator leaves dependents `pending` and the job stuck `running` (prod 2026-09-07). Regression test: `test_task_step_dispatch_failure_cascades_and_fails_job`.
 
 ### Config Loading
 - `config` crate loads YAML + env var overrides. Prefix: `STROEM__`, separator: `__`

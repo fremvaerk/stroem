@@ -178,6 +178,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
         &workspace,
         &job.workspace,
         job_id,
+        &task,
         crate::config::JobDefaults::from(state.config.as_ref()),
     )
     .await
@@ -505,6 +506,7 @@ async fn propagate_to_parent(
                 &parent_ws,
                 &parent_job.workspace,
                 parent_job_id,
+                &parent_task,
                 crate::config::JobDefaults::from(state.config.as_ref()),
             )
             .await?;
