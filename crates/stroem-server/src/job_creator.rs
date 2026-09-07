@@ -37,6 +37,25 @@ pub struct CreatedJob {
     pub terminal_at_creation: bool,
 }
 
+/// How a job comes into being. Replaces the positional `source_job_id`, which
+/// used to mean both "resolve Re-run sentinels against this job" and "persist
+/// this lineage pointer".
+pub enum CreationMode<'a> {
+    /// Plain creation: API, scheduler, webhook, `type: task` child, hook.
+    Normal,
+    /// User clicked Re-run: `••••••` sentinels in `input` are replaced from the
+    /// source's `raw_input`; `source_job_id` is persisted.
+    Rerun { source_job_id: Uuid },
+    /// Restart From Step (spec 2026-09-07): `input` is the source's `raw_input`
+    /// replayed through the normal pipeline; carried rows are seeded in the
+    /// creation transaction; lineage + `restart_from_step` are persisted.
+    Restart {
+        source: &'a JobRow,
+        from_step: &'a str,
+        plan: &'a crate::restart::RestartPlan,
+    },
+}
+
 /// Create a job and its steps for a task in a workspace.
 ///
 /// Shared by the API handler (`execute_task`) and the scheduler.
@@ -116,8 +135,63 @@ pub async fn create_job_for_task_detailed(
         None,
         None,
         revision,
-        source_job_id,
+        match source_job_id {
+            Some(id) => CreationMode::Rerun { source_job_id: id },
+            None => CreationMode::Normal,
+        },
         agents_config,
+        defaults,
+    )
+    .await
+}
+
+/// Restart From Step. `plan` comes from [`crate::restart::compute_restart_set`]
+/// (also used by the dry-run endpoint). Input is the source's `raw_input`
+/// replayed through `merge_defaults` + `resolve_connection_inputs` (spec §4.4),
+/// so a restart re-resolves connections and secrets against today's workspace
+/// rather than reusing the source's frozen `input`. Legacy sources without
+/// `raw_input` are rejected exactly like Re-run.
+///
+/// Reports `terminal_at_creation` like every other creation entry point — the
+/// caller must run `job_recovery::finalize_created_job` when it is true (a
+/// restart whose whole restart set cascades to skipped settles immediately).
+#[allow(clippy::too_many_arguments)]
+pub async fn create_restart_job(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    source: &JobRow,
+    plan: &crate::restart::RestartPlan,
+    from_step: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
+    let raw = source.raw_input.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Source job {} predates Re-run prefill (no raw_input)",
+            source.job_id
+        )
+    })?;
+    create_job_for_task_inner(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        &source.task_name,
+        raw,
+        "restart",
+        source_id,
+        None,
+        None,
+        revision,
+        CreationMode::Restart {
+            source,
+            from_step,
+            plan,
+        },
+        None,
         defaults,
     )
     .await
@@ -195,7 +269,7 @@ pub async fn create_child_job_for_task_detailed(
         Some(parent_job_id),
         Some(parent_step_name),
         revision,
-        None, // child paths never set source_job_id
+        CreationMode::Normal, // child paths never carry re-run/restart lineage
         None,
         defaults,
     )
@@ -216,7 +290,7 @@ fn create_job_for_task_inner<'a>(
     parent_job_id: Option<Uuid>,
     parent_step_name: Option<&'a str>,
     revision: Option<&'a str>,
-    source_job_id: Option<Uuid>,
+    mode: CreationMode<'a>,
     _agents_config: Option<&'a AgentsConfig>,
     defaults: JobDefaults,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CreatedJob>> + Send + 'a>> {
@@ -229,38 +303,62 @@ fn create_job_for_task_inner<'a>(
             )
         })?;
 
-        // Re-run flow: if the caller named a source job, resolve any "reuse from source"
-        // sentinels in the incoming input by looking up the source's raw_input. Done
-        // BEFORE merge_defaults so a sentinel that the source did not override falls
-        // through to the schema default (supports secret rotation).
+        // Lineage resolution.
+        //
+        // Re-run flow: resolve any "reuse from source" sentinels in the incoming
+        // input by looking up the source's raw_input. Done BEFORE merge_defaults
+        // so a sentinel that the source did not override falls through to the
+        // schema default (supports secret rotation).
+        //
+        // Restart flow: `create_restart_job` already passed the source's
+        // `raw_input` as `input`, so there is nothing to resolve — only the
+        // lineage pointers to persist.
         let mut effective_input = input;
-        if let Some(src_id) = source_job_id {
-            let source_job = stroem_db::JobRepo::get(pool, src_id)
-                .await
-                .context("fetch source job for re-run")?
-                .ok_or_else(|| anyhow::anyhow!("Source job {} not found", src_id))?;
-            if source_job.workspace != workspace_name {
-                bail!(
-                    "Source job {} belongs to workspace '{}', cannot Re-run into '{}'",
-                    src_id,
-                    source_job.workspace,
-                    workspace_name
-                );
+        let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
+            CreationMode::Normal => (None, None),
+            CreationMode::Rerun { source_job_id } => {
+                let src_id = *source_job_id;
+                let source_job = stroem_db::JobRepo::get(pool, src_id)
+                    .await
+                    .context("fetch source job for re-run")?
+                    .ok_or_else(|| anyhow::anyhow!("Source job {} not found", src_id))?;
+                if source_job.workspace != workspace_name {
+                    bail!(
+                        "Source job {} belongs to workspace '{}', cannot Re-run into '{}'",
+                        src_id,
+                        source_job.workspace,
+                        workspace_name
+                    );
+                }
+                let source_raw = match source_job.raw_input {
+                    Some(v) => v,
+                    None => bail!(
+                        "Source job {} predates Re-run prefill (no raw_input)",
+                        src_id
+                    ),
+                };
+                effective_input = stroem_common::template::resolve_rerun_sentinels(
+                    &effective_input,
+                    &source_raw,
+                    &task.input,
+                )
+                .context("resolve re-run sentinels")?;
+                (Some(src_id), None)
             }
-            let source_raw = match source_job.raw_input {
-                Some(v) => v,
-                None => bail!(
-                    "Source job {} predates Re-run prefill (no raw_input)",
-                    src_id
-                ),
-            };
-            effective_input = stroem_common::template::resolve_rerun_sentinels(
-                &effective_input,
-                &source_raw,
-                &task.input,
-            )
-            .context("resolve re-run sentinels")?;
-        }
+            CreationMode::Restart {
+                source, from_step, ..
+            } => {
+                if source.workspace != workspace_name {
+                    bail!(
+                        "Source job {} belongs to workspace '{}', cannot restart into '{}'",
+                        source.job_id,
+                        source.workspace,
+                        workspace_name
+                    );
+                }
+                (Some(source.job_id), Some(*from_step))
+            }
+        };
 
         // Capture the user's submission verbatim before defaults/connections are merged.
         let raw_input_to_persist = Some(effective_input.clone());
@@ -430,8 +528,8 @@ fn create_job_for_task_inner<'a>(
                 .or(defaults.job_timeout_secs),
             revision,
             raw_input_to_persist,
-            source_job_id,
-            None, // restart_from_step (feature B)
+            lineage_source_job_id,
+            restart_from_step,
         )
         .await
         .context("Failed to create job")?;
@@ -439,6 +537,16 @@ fn create_job_for_task_inner<'a>(
         JobStepRepo::create_steps_tx(&mut *tx, &new_steps)
             .await
             .context("Failed to create job steps")?;
+
+        // Restart: overwrite the freshly created rows outside the restart set
+        // with the source job's terminal state, inside the SAME transaction —
+        // a job must never be visible with carried rows still `ready`, or a
+        // worker could claim a step that is meant to be skipped entirely.
+        if let CreationMode::Restart { plan, .. } = &mode {
+            JobStepRepo::seed_steps_tx(&mut tx, job_id, &plan.carried)
+                .await
+                .context("seed carried-over steps")?;
+        }
 
         tx.commit().await.context("Failed to commit job creation")?;
 
@@ -754,8 +862,8 @@ async fn handle_task_steps_pass(
             Some(job_id),
             Some(&step.step_name),
             job.revision.as_deref(),
-            None, // source_job_id: child task jobs never inherit re-run source
-            None, // agents_config not available; orchestrator will dispatch
+            CreationMode::Normal, // child task jobs never inherit re-run/restart lineage
+            None,                 // agents_config not available; orchestrator will dispatch
             defaults,
         )
         .await
