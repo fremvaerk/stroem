@@ -1,4 +1,4 @@
-use crate::job_creator::create_job_for_task;
+use crate::job_creator::create_job_for_task_detailed;
 use crate::state::{AliveGuard, AppState};
 use crate::workspace::WorkspaceManager;
 use chrono::{DateTime, Utc};
@@ -410,7 +410,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
         }
     };
 
-    match create_job_for_task(
+    match create_job_for_task_detailed(
         workspaces,
         &app_state.pool,
         &config,
@@ -426,7 +426,8 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
     )
     .await
     {
-        Ok(job_id) => {
+        Ok(created) => {
+            let job_id = created.job_id;
             tracing::info!("Trigger '{}' created job {}", source_id, job_id);
             // Fire on_suspended hooks for any root-level approval steps that were
             // suspended during job creation (FIX 2).
@@ -438,6 +439,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                 job_id,
             )
             .await;
+            crate::job_recovery::finalize_created_job(app_state, created).await;
         }
         Err(e) => {
             tracing::error!("Trigger '{}' failed to create job: {:#}", source_id, e);

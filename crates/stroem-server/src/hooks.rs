@@ -154,8 +154,7 @@ pub async fn fire_hooks(
         let source_id = job.job_id.to_string();
 
         if let Err(e) = fire_single_hook(
-            &state.workspaces,
-            &state.pool,
+            state,
             workspace_config,
             &job.workspace,
             hook,
@@ -252,8 +251,7 @@ pub async fn fire_suspended_hooks(
     let defaults = crate::config::JobDefaults::from(state.config.as_ref());
     for (i, hook) in hooks.iter().enumerate() {
         if let Err(e) = fire_single_hook(
-            &state.workspaces,
-            &state.pool,
+            state,
             workspace_config,
             &job.workspace,
             hook,
@@ -386,8 +384,7 @@ async fn build_hook_context(
 
 #[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
-    workspaces: &crate::workspace::WorkspaceManager,
-    pool: &PgPool,
+    state: &AppState,
     workspace_config: &WorkspaceConfig,
     workspace: &str,
     hook: &HookDef,
@@ -396,8 +393,8 @@ async fn fire_single_hook(
     revision: Option<&str>,
     defaults: crate::config::JobDefaults,
 ) -> anyhow::Result<()> {
-    // Note: `state` is not available here — fire_initial_suspended_hooks is called
-    // by the top-level callers of create_job_for_task which do have AppState.
+    let workspaces = &state.workspaces;
+    let pool = &state.pool;
     // Resolve action
     let action = workspace_config
         .actions
@@ -433,7 +430,7 @@ async fn fire_single_hook(
             .as_ref()
             .context("type: task action missing task field")?;
 
-        let job_id = crate::job_creator::create_job_for_task(
+        let created = crate::job_creator::create_job_for_task_detailed(
             workspaces,
             pool,
             workspace_config,
@@ -449,6 +446,7 @@ async fn fire_single_hook(
         )
         .await
         .context("Failed to create hook task job")?;
+        let job_id = created.job_id;
 
         tracing::info!(
             "Fired hook task job {} for action '{}' -> task '{}' (source: {})",
@@ -457,6 +455,8 @@ async fn fire_single_hook(
             task_ref,
             source_id
         );
+
+        crate::job_recovery::finalize_created_job(state, created).await;
 
         return Ok(());
     }

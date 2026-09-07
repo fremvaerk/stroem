@@ -191,6 +191,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             )
             .await;
     }
+    reconcile_settled_children(state, job_id).await;
 
     // Handle any newly-promoted type: approval steps and fire on_suspended hooks
     {
@@ -510,6 +511,7 @@ async fn propagate_to_parent(
                 crate::config::JobDefaults::from(state.config.as_ref()),
             )
             .await?;
+            reconcile_settled_children(state, parent_job_id).await;
 
             // Handle any newly-promoted approval steps in the parent,
             // and fire on_suspended hooks for steps that just became suspended (FIX 3).
@@ -610,6 +612,56 @@ async fn propagate_to_parent(
     }
 
     Ok(())
+}
+
+/// Run the side effects a freshly created job may already owe.
+///
+/// - `terminal_at_creation` → `handle_job_terminal` (hooks, metrics, archive,
+///   parent propagation) — the creator itself has no `AppState`.
+/// - Always → `reconcile_settled_children`: `type: task` root steps dispatched
+///   at creation may have produced a child that settled synchronously.
+///
+/// Best-effort: creation already succeeded, so problems are logged, not returned.
+pub async fn finalize_created_job(state: &AppState, created: crate::job_creator::CreatedJob) {
+    if created.terminal_at_creation {
+        // `handle_job_terminal` can, via hook dispatch, create a `type: task` hook
+        // job that itself settles synchronously and calls back into
+        // `finalize_created_job` — box this leg to avoid an infinitely-sized future.
+        if let Err(e) = Box::pin(handle_job_terminal(state, created.job_id)).await {
+            tracing::error!(job_id = %created.job_id, "terminal handling after creation failed: {:#}", e);
+        }
+    }
+    reconcile_settled_children(state, created.job_id).await;
+}
+
+/// Children of `parent_job_id` that are terminal while their parent step is
+/// still `running` never reached `propagate_to_parent` (they settled inside
+/// `create_job_for_task_inner`, which has no `AppState`). Run terminal handling
+/// for each; it propagates to the parent step and fires the child's hooks. The
+/// "parent step still running" predicate makes this idempotent.
+pub async fn reconcile_settled_children(state: &AppState, parent_job_id: Uuid) {
+    let children =
+        match JobRepo::get_settled_children_with_running_parent_step(&state.pool, parent_job_id)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(job_id = %parent_job_id, "reconcile_settled_children: {:#}", e);
+                return;
+            }
+        };
+    for child in children {
+        tracing::info!(
+            child = %child.job_id, parent = %parent_job_id,
+            "child job settled at creation — running terminal handling"
+        );
+        // `handle_job_terminal` → `propagate_to_parent` → `reconcile_settled_children`
+        // → `handle_job_terminal` forms a call cycle; box this leg to avoid an
+        // infinitely-sized future.
+        if let Err(e) = Box::pin(handle_job_terminal(state, child.job_id)).await {
+            tracing::error!(child = %child.job_id, "terminal handling for settled child failed: {:#}", e);
+        }
+    }
 }
 
 /// Handle a job that has just reached terminal state (completed or failed).
@@ -910,7 +962,7 @@ async fn try_retry_job(
     };
 
     let input = failed_job.input.clone().unwrap_or_default();
-    let retry_job_id = crate::job_creator::create_job_for_task(
+    let created = crate::job_creator::create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         workspace,
@@ -926,6 +978,7 @@ async fn try_retry_job(
     )
     .await
     .context("Failed to create retry job")?;
+    let retry_job_id = created.job_id;
 
     // Set retry tracking fields, link original → retry, and optionally set retry_at
     // in a single transaction so the retry job is never visible in a partial state.
@@ -973,6 +1026,8 @@ async fn try_retry_job(
             &task_retry_message(failed_job.retry_attempt, max, retry_job_id, delay_secs),
         )
         .await;
+
+    finalize_created_job(state, created).await;
 
     Ok(true)
 }

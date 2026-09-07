@@ -705,6 +705,30 @@ impl JobRepo {
         Ok(jobs)
     }
 
+    /// Child jobs that are terminal while the parent step that spawned them is
+    /// still `running` — i.e. children that settled synchronously at creation
+    /// and never went through terminal handling / parent propagation.
+    pub async fn get_settled_children_with_running_parent_step(
+        pool: &PgPool,
+        parent_job_id: Uuid,
+    ) -> Result<Vec<JobRow>> {
+        let rows = sqlx::query_as::<_, JobRow>(&format!(
+            "SELECT {} FROM job j \
+             WHERE j.parent_job_id = $1 \
+               AND j.status IN ('completed', 'failed', 'cancelled', 'skipped') \
+               AND EXISTS ( \
+                   SELECT 1 FROM job_step s \
+                   WHERE s.job_id = $1 AND s.step_name = j.parent_step_name AND s.status = 'running' \
+               )",
+            JOB_COLUMNS
+        ))
+        .bind(parent_job_id)
+        .fetch_all(pool)
+        .await
+        .context("get_settled_children_with_running_parent_step")?;
+        Ok(rows)
+    }
+
     /// Get job counts grouped by status (used for dashboard stats)
     pub async fn get_status_counts(pool: &PgPool) -> Result<HashMap<String, i64>> {
         let rows =

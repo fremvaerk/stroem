@@ -1,6 +1,6 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::config::JobDefaults;
-use crate::job_creator::create_job_for_task;
+use crate::job_creator::create_job_for_task_detailed;
 use crate::state::AppState;
 use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
@@ -514,7 +514,7 @@ pub async fn execute_task(
 
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
-    let job_id = create_job_for_task(
+    let created = create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         &workspace,
@@ -530,10 +530,12 @@ pub async fn execute_task(
     )
     .await
     .map_err(classify_execute_error)?;
+    let job_id = created.job_id;
 
     // 6. Fire on_suspended hooks for any root-level approval steps that were
     //    suspended during job creation (FIX 2).
     crate::job_creator::fire_initial_suspended_hooks(&state, &workspace, &ws, &name, job_id).await;
+    crate::job_recovery::finalize_created_job(&state, created).await;
 
     // 7. Return job_id
     Ok(Json(ExecuteTaskResponse {

@@ -23466,3 +23466,139 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
     );
     Ok(())
 }
+
+// ─── Plan A / Task 4: terminal-at-creation side effects ──────────────────────
+
+/// Root job that settles at creation (all steps skipped) must run terminal
+/// handling: the workspace `on_success` hook job is created.
+#[tokio::test]
+async fn test_all_skipped_job_at_creation_fires_workspace_hook() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("all-skipped".to_string(), TaskDef { flow, ..base_task });
+    workspace.on_success.push(HookDef {
+        action: "greet".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/all-skipped/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "exactly one on_success hook job: {jobs:?}"
+    );
+    assert!(hook_jobs[0]
+        .source_id
+        .as_deref()
+        .unwrap_or("")
+        .starts_with(&job_id.to_string()));
+    Ok(())
+}
+
+/// A `type: task` child that settles synchronously at creation (its only step
+/// is skipped by `when`) must propagate to the parent step; the parent job
+/// must complete instead of staying `running` (P5).
+#[tokio::test]
+async fn test_child_settled_at_creation_propagates_to_parent() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-child".to_string(),
+        TaskDef {
+            flow: child_flow,
+            ..base_task.clone()
+        },
+    );
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-instant".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-child".to_string()),
+            ..greet_action
+        },
+    );
+    let mut flow = HashMap::new();
+    flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-instant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("parent".to_string(), TaskDef { flow, ..base_task });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].status, "completed",
+        "parent step must reflect the settled child: {steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+    Ok(())
+}

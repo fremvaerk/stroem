@@ -1,4 +1,4 @@
-use crate::job_creator::create_job_for_task;
+use crate::job_creator::create_job_for_task_detailed;
 use crate::state::AppState;
 use crate::web::error::AppError;
 use anyhow::Context;
@@ -98,7 +98,7 @@ async fn webhook_handler(
     let timeout_secs = wh.timeout_secs.unwrap_or(DEFAULT_SYNC_TIMEOUT_SECS);
     let revision = state.workspaces.get_revision(&wh.ws_name);
 
-    let job_id = match create_job_for_task(
+    let created = match create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         &config,
@@ -115,12 +115,13 @@ async fn webhook_handler(
     .await
     .context("create webhook job")
     {
-        Ok(id) => id,
+        Ok(c) => c,
         Err(e) => {
             tracing::error!("Webhook '{}' failed to create job: {:#}", name, e);
             return AppError::Internal(e).into_response();
         }
     };
+    let job_id = created.job_id;
 
     tracing::info!(
         "Webhook '{}' created job {} for task '{}'",
@@ -139,6 +140,7 @@ async fn webhook_handler(
         job_id,
     )
     .await;
+    crate::job_recovery::finalize_created_job(&state, created).await;
 
     if is_sync {
         let mut rx = state.job_completion.subscribe(job_id).await;
