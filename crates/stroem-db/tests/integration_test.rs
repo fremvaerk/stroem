@@ -5077,3 +5077,99 @@ async fn test_unmatched_sweep_reports_agent_step_without_agent_worker() -> Resul
     );
     Ok(())
 }
+
+// ─── Plan A / Task 1: settlement helpers ─────────────────────────────────────
+
+fn plain_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
+    NewJobStep {
+        job_id,
+        step_name: name.to_string(),
+        action_name: "noop".to_string(),
+        action_type: "script".to_string(),
+        action_image: None,
+        action_spec: None,
+        input: None,
+        status: status.to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }
+}
+
+#[tokio::test]
+async fn test_job_mark_cancelled_sets_completed_at() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_cancelled(&pool, job_id).await?;
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "cancelled");
+    assert!(
+        job.completed_at.is_some(),
+        "mark_cancelled must stamp completed_at"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            plain_step(job_id, "done", "completed"),
+            plain_step(job_id, "waiting", "pending"),
+            plain_step(job_id, "queued", "ready"),
+        ],
+    )
+    .await?;
+    let n = JobStepRepo::fail_non_terminal_steps(&pool, job_id, "init exploded").await?;
+    assert_eq!(n, 2);
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let by: std::collections::HashMap<_, _> =
+        steps.iter().map(|s| (s.step_name.as_str(), s)).collect();
+    assert_eq!(by["done"].status, "completed", "terminal rows untouched");
+    assert_eq!(by["waiting"].status, "failed");
+    assert_eq!(
+        by["waiting"].error_message.as_deref(),
+        Some("init exploded")
+    );
+    assert_eq!(by["queued"].status, "failed");
+    assert!(by["queued"].completed_at.is_some());
+    Ok(())
+}

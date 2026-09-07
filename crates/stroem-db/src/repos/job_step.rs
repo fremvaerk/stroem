@@ -876,6 +876,27 @@ impl JobStepRepo {
         Ok(result.rows_affected())
     }
 
+    /// Fail every non-terminal step of a job with one error message. Used when
+    /// post-commit job initialisation (promotion / expansion / dispatch) fails:
+    /// the job row already exists, so the failure must be made visible on its
+    /// steps instead of vanishing into a 500. Returns rows affected.
+    pub async fn fail_non_terminal_steps(pool: &PgPool, job_id: Uuid, error: &str) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'failed', error_message = $2, completed_at = NOW()
+            WHERE job_id = $1
+              AND status IN ('pending', 'ready', 'claimed', 'running', 'suspended')
+            "#,
+        )
+        .bind(job_id)
+        .bind(error)
+        .execute(pool)
+        .await
+        .context("Failed to fail non-terminal steps")?;
+        Ok(result.rows_affected())
+    }
+
     /// Get currently running steps for a job (for active cancellation/kill).
     pub async fn get_running_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
         let steps = sqlx::query_as::<_, JobStepRow>(&format!(

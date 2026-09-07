@@ -481,6 +481,22 @@ impl JobRepo {
         Ok(())
     }
 
+    /// Mark job as cancelled (stamps `completed_at`, unlike `update_status`).
+    pub async fn mark_cancelled(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job
+            SET status = 'cancelled', completed_at = NOW()
+            WHERE job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .context("Failed to mark job as cancelled")?;
+        Ok(())
+    }
+
     /// Set the retry_job_id on a job (linking original → retry).
     pub async fn set_retry_job_id(pool: &PgPool, job_id: Uuid, retry_job_id: Uuid) -> Result<()> {
         sqlx::query("UPDATE job SET retry_job_id = $1 WHERE job_id = $2")
