@@ -644,6 +644,158 @@ pub async fn cancel_job(
     }
 }
 
+/// Request body for `POST /api/jobs/{id}/restart`.
+#[derive(Debug, Deserialize)]
+pub struct RestartJobRequest {
+    /// Flow step to restart from. Must be a key of the task's *current* flow
+    /// and must not be a `for_each` instance (`step[0]`).
+    pub from_step: String,
+    /// Preview only: compute and return the plan, create nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// POST /api/jobs/:id/restart — Restart From Step (spec 2026-09-07 §6.1).
+///
+/// Creates a new job for the source job's task in which the steps at and below
+/// `from_step` rerun while everything else is carried over from the source as
+/// it ended. `dry_run` returns the same plan without creating anything, so a
+/// confirm dialog can be authoritative about steps added to the flow since the
+/// source job ran.
+///
+/// Checks run in the spec's order: 401 (auth configured, no user) → 404 (job
+/// missing or ACL `Deny`) → 403 (ACL `View`) → 409 (source not terminal) → 400
+/// (legacy source, workspace/task gone, bad `from_step`).
+#[tracing::instrument(skip(state, auth_user, req))]
+pub async fn restart_job(
+    State(state): State<Arc<AppState>>,
+    auth_user: Option<AuthUser>,
+    Path(id): Path<String>,
+    Json(req): Json<RestartJobRequest>,
+) -> Result<Response, AppError> {
+    let job_id = parse_uuid_param(&id, "job")?;
+
+    // Explicit 401: `check_job_acl` returns `Run` when no user is supplied, so
+    // the missing-token case must be rejected before it (mirrors execute_task).
+    let source_id = match (state.config.auth.is_some(), &auth_user) {
+        (false, _) => None,
+        (true, Some(user)) => Some(user.claims.email.clone()),
+        (true, None) => return Err(AppError::Unauthorized("Authentication required".into())),
+    };
+
+    let source = JobRepo::get(&state.pool, job_id)
+        .await
+        .context("get job")?
+        .ok_or_else(|| AppError::not_found("Job"))?;
+
+    // Restart creates a job, so it needs Run — like execute and cancel.
+    match check_job_acl(&state, &auth_user, &source.workspace, &source.task_name).await? {
+        TaskPermission::Deny => return Err(AppError::not_found("Job")),
+        TaskPermission::View => {
+            return Err(AppError::Forbidden(
+                "Insufficient permissions to restart this job".into(),
+            ))
+        }
+        TaskPermission::Run => {}
+    }
+
+    let terminal = matches!(
+        source
+            .status
+            .parse::<stroem_common::models::job::JobStatus>(),
+        Ok(stroem_common::models::job::JobStatus::Completed)
+            | Ok(stroem_common::models::job::JobStatus::Failed)
+            | Ok(stroem_common::models::job::JobStatus::Cancelled)
+            | Ok(stroem_common::models::job::JobStatus::Skipped)
+    );
+    if !terminal {
+        return Err(AppError::Conflict("Job is still running".into()));
+    }
+    if source.raw_input.is_none() {
+        return Err(AppError::BadRequest(
+            "Source job predates Re-run prefill (no raw_input)".into(),
+        ));
+    }
+
+    let workspace = state
+        .get_workspace(&source.workspace)
+        .await
+        .ok_or_else(|| {
+            AppError::BadRequest(format!("Workspace '{}' is not loaded", source.workspace))
+        })?;
+    let task = workspace.tasks.get(&source.task_name).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "Task '{}' no longer exists in workspace '{}'",
+            source.task_name, source.workspace
+        ))
+    })?;
+
+    let source_steps = JobStepRepo::get_steps_for_job(&state.pool, job_id)
+        .await
+        .context("get source steps")?;
+    let plan = crate::restart::compute_restart_set(&task.flow, &source_steps, &req.from_step)
+        .map_err(|e| {
+            AppError::BadRequest(match e {
+                crate::restart::RestartError::UnknownStep(s) => format!(
+                    "Step '{}' is not in the current flow of task '{}'",
+                    s, source.task_name
+                ),
+                other => other.to_string(),
+            })
+        })?;
+
+    let carried_names: Vec<&str> = plan.carried.iter().map(|s| s.step_name.as_str()).collect();
+    if req.dry_run {
+        return Ok(Json(json!({
+            "restart_steps": plan.restart_steps,
+            "carried_over": carried_names,
+            "carried_failed": plan.carried_failed,
+            "carried_failed_tolerated": plan.carried_failed_tolerated,
+        }))
+        .into_response());
+    }
+
+    let revision = state.workspaces.get_revision(&source.workspace);
+    let created = crate::job_creator::create_restart_job(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        &source.workspace,
+        &source,
+        &plan,
+        &req.from_step,
+        source_id.as_deref(),
+        revision.as_deref(),
+        crate::config::JobDefaults::from(state.config.as_ref()),
+    )
+    .await
+    .map_err(super::classify_execute_error)?;
+
+    // Root approval steps suspended during creation, then terminal handling for
+    // a restart whose set cascade-skipped and settled on the spot.
+    crate::job_creator::fire_initial_suspended_hooks(
+        &state,
+        &workspace,
+        &source.workspace,
+        &source.task_name,
+        created.job_id,
+    )
+    .await;
+    let new_job_id = created.job_id;
+    crate::job_recovery::finalize_created_job(&state, created).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "job_id": new_job_id.to_string(),
+            "restart_steps": plan.restart_steps,
+            "carried_over": carried_names,
+            "carried_failed": plan.carried_failed,
+        })),
+    )
+        .into_response())
+}
+
 /// Request body for the approve/reject endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ApproveStepRequest {

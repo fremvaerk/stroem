@@ -14,8 +14,8 @@ use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep, InputFieldDef,
-    TaskDef, WorkspaceConfig,
+    ActionDef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep, HookDef,
+    InputFieldDef, TaskDef, WorkspaceConfig,
 };
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, JobStepRow, Seed};
 use stroem_server::config::{
@@ -1322,6 +1322,228 @@ async fn seed_failure_rolls_back_the_whole_restart_job() -> Result<()> {
     assert_eq!(
         before, after,
         "a failed seed must roll back the job row it was created with"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 5: POST /api/jobs/{id}/restart — dry run, real run, rejections,
+// redaction of carried output, and terminal-at-creation side effects.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `POST /api/jobs/{job_id}/restart`. The test server has `auth: None`, so no
+/// token is needed and `check_job_acl` short-circuits to `Run`.
+async fn restart_req(
+    app: &TestApp,
+    job_id: Uuid,
+    body: JsonValue,
+) -> Result<(StatusCode, JsonValue)> {
+    api_post(app, &format!("/api/jobs/{}/restart", job_id), body).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_endpoint_dry_run_then_real_run() -> Result<()> {
+    let app = build_test_app("default", line_workspace()).await?;
+    let source_id = run_source_job_failing_at_b(&app).await?;
+
+    let (st, body) =
+        restart_req(&app, source_id, json!({"from_step": "b", "dry_run": true})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["restart_steps"], json!(["b", "c"]));
+    assert_eq!(body["carried_over"], json!(["a"]));
+    assert_eq!(body["carried_failed"], json!([]));
+    assert_eq!(body["carried_failed_tolerated"], json!([]));
+    assert!(
+        body.get("job_id").is_none(),
+        "dry run must not report a job id: {body}"
+    );
+    assert_eq!(
+        JobRepo::list(&app.pool, Some("default"), None, None, None, 100, 0)
+            .await?
+            .len(),
+        1,
+        "dry run creates nothing"
+    );
+
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "b"})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let new_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    assert_eq!(body["restart_steps"], json!(["b", "c"]));
+    assert_eq!(body["carried_over"], json!(["a"]));
+    assert_eq!(body["carried_failed"], json!([]));
+
+    let new = get_job(&app, &new_id.to_string()).await?;
+    assert_eq!(new["source_type"], "restart");
+    assert_eq!(new["restart_from_step"], "b");
+    assert_eq!(new["source_job_id"], source_id.to_string());
+    let steps = new["steps"].as_array().unwrap();
+    let a = steps.iter().find(|s| s["step_name"] == "a").unwrap();
+    assert_eq!(a["carried_over"], true);
+    assert_eq!(a["status"], "completed");
+    let b = steps.iter().find(|s| s["step_name"] == "b").unwrap();
+    assert_eq!(b["carried_over"], false);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_endpoint_rejections() -> Result<()> {
+    let app = build_test_app("default", line_workspace()).await?;
+    let source_id = run_source_job_failing_at_b(&app).await?;
+
+    // A job that is still running cannot be restarted. Created after the source
+    // run so its own `a` never competes for the worker's claim.
+    let (st, body) = execute_task(&app, "default", "line", json!({"input": {"note": "x"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let running: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let (st, body) = restart_req(&app, running, json!({"from_step": "a"})).await?;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+
+    // Unknown step / loop instance / unknown job / malformed body.
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "nope"})).await?;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("not in the current flow"),
+        "{body}"
+    );
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "b[0]"})).await?;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("not an instance"),
+        "{body}"
+    );
+    let (st, body) = restart_req(&app, Uuid::new_v4(), json!({"from_step": "a"})).await?;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    let (st, body) = restart_req(&app, source_id, json!({"nope": 1})).await?;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a body without from_step must not reach the handler: {body}"
+    );
+
+    // Legacy source without raw_input.
+    sqlx::query("UPDATE job SET raw_input = NULL WHERE job_id = $1")
+        .bind(source_id)
+        .execute(&app.pool)
+        .await?;
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "b"})).await?;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("predates"),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_endpoint_redacts_carried_step_output() -> Result<()> {
+    // A carried row's copied output goes through the same secret redaction as
+    // a row the new job actually executed.
+    let mut ws = line_workspace();
+    ws.secrets
+        .insert("token".to_string(), json!("s3cr3t-value"));
+    let app = build_test_app("default", ws).await?;
+
+    let (st, body) =
+        execute_task(&app, "default", "line", json!({"input": {"note": "n1"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let worker = register_worker(&app).await?;
+    complete_next(
+        &app,
+        &worker,
+        source_id,
+        "a",
+        json!({"output": {"val": "A-OUT", "leak": "s3cr3t-value"}}),
+    )
+    .await?;
+    complete_next(
+        &app,
+        &worker,
+        source_id,
+        "b",
+        json!({"exit_code": 1, "error": "b broke"}),
+    )
+    .await?;
+
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "b"})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let new_id = body["job_id"].as_str().unwrap().to_string();
+
+    // The row in the database keeps the real value (it is a verbatim copy)...
+    let by = steps_by_name(&app.pool, new_id.parse()?).await?;
+    assert_eq!(by["a"].output.as_ref().unwrap()["leak"], "s3cr3t-value");
+
+    // ...but the API masks it, exactly as it does for the source job.
+    let new = get_job(&app, &new_id).await?;
+    let a = new["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step_name"] == "a")
+        .unwrap();
+    assert_eq!(a["carried_over"], true);
+    assert_eq!(a["output"]["leak"], "••••••");
+    assert_eq!(a["output"]["val"], "A-OUT");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_endpoint_terminal_at_creation_fires_hooks() -> Result<()> {
+    // A restart whose whole restart set cascade-skips is terminal the moment it
+    // is created. The endpoint must still run terminal handling (hooks, metrics,
+    // log archive) exactly once — that is `finalize_created_job`.
+    let mut ws = line_workspace();
+    ws.actions
+        .insert("notify".to_string(), script_action("true"));
+    ws.on_error = vec![HookDef {
+        action: "notify".to_string(),
+        input: HashMap::new(),
+    }];
+    let app = build_test_app("default", ws).await?;
+
+    // Source: `a` fails, `b`/`c` cascade-skip → job failed.
+    let (st, body) =
+        execute_task(&app, "default", "line", json!({"input": {"note": "n1"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let worker = register_worker(&app).await?;
+    complete_next(
+        &app,
+        &worker,
+        source_id,
+        "a",
+        json!({"exit_code": 1, "error": "a broke"}),
+    )
+    .await?;
+    assert_eq!(
+        get_job(&app, &source_id.to_string()).await?["status"],
+        "failed"
+    );
+
+    // Restart from `c`: `a` carries failed, `b` carries skipped, `c` is the
+    // whole restart set and cascade-skips → failed at creation.
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "c"})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let new_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    assert_eq!(body["carried_failed"], json!(["a"]));
+    assert_eq!(
+        get_job(&app, &new_id.to_string()).await?["status"],
+        "failed"
+    );
+
+    // Hook jobs carry the triggering job's id in `source_id`.
+    let hook_jobs: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'hook' AND source_id = $1")
+            .bind(new_id.to_string())
+            .fetch_all(&app.pool)
+            .await?;
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "a restart that settles at creation must fire its on_error hook exactly once"
     );
     Ok(())
 }

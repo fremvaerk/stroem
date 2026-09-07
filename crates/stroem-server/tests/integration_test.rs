@@ -9409,6 +9409,96 @@ async fn test_refresh_unauthenticated_request_when_auth_enabled() -> Result<()> 
     Ok(())
 }
 
+// ─── ACL: POST /api/jobs/{id}/restart (Restart From Step) ───────────
+
+fn authed_post_json(uri: &str, token: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+/// A terminal source job in `default`/`hello-world` for the restart ACL tests.
+/// The ACL check runs before any state validation, so the job only has to exist.
+async fn seed_restart_source_job(pool: &PgPool) -> Result<Uuid> {
+    JobRepo::create(
+        pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "acl"})),
+        "api",
+        None,
+        None,
+        Some(json!({"name": "acl"})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_restart_view_only_user_gets_403() -> Result<()> {
+    // Restart creates a job, so it needs Run — View is not enough, and the
+    // refusal must be 403 (the task is visible), not 404.
+    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let job_id = seed_restart_source_job(&pool).await?;
+    let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
+
+    let response = router
+        .oneshot(authed_post_json(
+            &format!("/api/jobs/{job_id}/restart"),
+            &token,
+            json!({"from_step": "greet"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 403);
+    let body = body_json(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Insufficient permissions to restart"),
+        "unexpected body: {body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_restart_denied_user_gets_404() -> Result<()> {
+    // A user the ACL denies must not learn that the job exists.
+    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let job_id = seed_restart_source_job(&pool).await?;
+    let token = acl_login(&router, ACL_NOBODY_EMAIL).await?;
+
+    let response = router
+        .oneshot(authed_post_json(
+            &format!("/api/jobs/{job_id}/restart"),
+            &token,
+            json!({"from_step": "greet"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_restart_unauthenticated_when_auth_enabled() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let job_id = seed_restart_source_job(&pool).await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/jobs/{job_id}/restart"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(json!({"from_step": "greet"}).to_string()))
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 401);
+    Ok(())
+}
+
 // ─── Multi-workspace: Task isolation ────────────────────────────────
 
 #[tokio::test]
