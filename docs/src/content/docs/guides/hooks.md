@@ -56,6 +56,7 @@ Each entry in `hook.failed_steps` contains:
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether the step had `continue_on_failure` set |
+| `carried_over` | bool | `true` if this failure was carried forward from the source run by a job restart rather than produced by this job |
 
 ## on_cancel hooks
 

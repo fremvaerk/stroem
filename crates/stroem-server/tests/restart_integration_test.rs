@@ -1547,3 +1547,81 @@ async fn restart_endpoint_terminal_at_creation_fires_hooks() -> Result<()> {
     );
     Ok(())
 }
+
+/// A restart that settles failed at creation carries its failure forward from
+/// the source run rather than producing a fresh one. `hook.failed_steps` must
+/// flag that failure `carried_over: true` so an `on_error` hook can
+/// distinguish "this job just failed" from "an old failure was carried
+/// forward by Restart-from-step" (spec 2026-09-07 §6.3).
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_hook_context_flags_carried_over_failure() -> Result<()> {
+    let mut ws = line_workspace();
+    ws.actions
+        .insert("notify".to_string(), script_action("true"));
+    ws.on_error = vec![HookDef {
+        action: "notify".to_string(),
+        input: HashMap::from([(
+            "failed".to_string(),
+            json!("{{ hook.failed_steps | json_encode() }}"),
+        )]),
+    }];
+    let app = build_test_app("default", ws).await?;
+
+    // Source: `a` fails, `b`/`c` cascade-skip → job failed.
+    let (st, body) =
+        execute_task(&app, "default", "line", json!({"input": {"note": "n1"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    let worker = register_worker(&app).await?;
+    complete_next(
+        &app,
+        &worker,
+        source_id,
+        "a",
+        json!({"exit_code": 1, "error": "a broke"}),
+    )
+    .await?;
+    assert_eq!(
+        get_job(&app, &source_id.to_string()).await?["status"],
+        "failed"
+    );
+
+    // Restart from `c`: `a` carries failed, `b` carries skipped, `c` is the
+    // whole restart set and cascade-skips → failed at creation.
+    let (st, body) = restart_req(&app, source_id, json!({"from_step": "c"})).await?;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let new_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+    assert_eq!(body["carried_failed"], json!(["a"]));
+
+    // Exactly one hook job, fired for the restarted job.
+    let hook_job_ids: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT job_id FROM job WHERE source_type = 'hook' AND source_id = $1")
+            .bind(new_id.to_string())
+            .fetch_all(&app.pool)
+            .await?;
+    assert_eq!(hook_job_ids.len(), 1, "expected exactly one hook job");
+    let hook_job_id = hook_job_ids[0].0;
+
+    let hook_steps = JobStepRepo::get_steps_for_job(&app.pool, hook_job_id).await?;
+    let hook_step = hook_steps
+        .iter()
+        .find(|s| s.step_name == "hook")
+        .expect("hook job must have a 'hook' step");
+    let rendered_failed = hook_step.input.as_ref().unwrap()["failed"]
+        .as_str()
+        .expect("rendered `failed` input must be a JSON-encoded string");
+    let failed_steps: JsonValue = serde_json::from_str(rendered_failed)?;
+    let failed_steps = failed_steps.as_array().unwrap();
+    assert_eq!(
+        failed_steps.len(),
+        1,
+        "only 'a' failed in the source run: {failed_steps:?}"
+    );
+    assert_eq!(failed_steps[0]["step_name"], "a");
+    assert_eq!(
+        failed_steps[0]["carried_over"], true,
+        "step 'a' failed in the SOURCE run, not this restart — hook.failed_steps \
+         must flag it carried_over: {failed_steps:?}"
+    );
+    Ok(())
+}

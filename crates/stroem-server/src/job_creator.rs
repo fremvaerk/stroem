@@ -17,7 +17,11 @@ use crate::workspace::WorkspaceManager;
 use crate::workspace_set::WorkspaceSet;
 
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
-const MAX_TASK_DEPTH: u32 = 10;
+///
+/// `pub(crate)` so `hooks::hook_chain_depth` can size its ancestry-walk hop
+/// budget off the same constant — up to this many plain `type: task` levels
+/// can sit between two `hook` links in a job's ancestry.
+pub(crate) const MAX_TASK_DEPTH: u32 = 10;
 
 /// Result of job creation. `terminal_at_creation` is true when every step was
 /// already terminal once creation-time promotion/expansion/dispatch finished

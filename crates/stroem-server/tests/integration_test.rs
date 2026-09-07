@@ -24483,6 +24483,133 @@ async fn test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once() -> Resul
     Ok(())
 }
 
+/// Discriminating variant of `test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once`:
+/// that test passes even without the exactly-once CAS, because claiming and
+/// starting the child's script step makes it genuinely `running`, so
+/// `cancel_job(child)` takes the `has_running_steps == true` branch and never
+/// calls `handle_job_terminal(child)` itself — only ONE path ever reaches the
+/// parent's terminal handling.
+///
+/// Here the child's script step is left UNCLAIMED (no worker registered at
+/// all). `cancel_job(child)` cancels it via `cancel_pending_steps`, finds no
+/// running steps, and calls `handle_job_terminal(child)` synchronously —
+/// which `propagate_to_parent`s into the parent's terminal handling — WHILE
+/// still inside the `for child in &child_jobs` loop of the outer
+/// `cancel_job(parent)` call. That outer frame *also* calls
+/// `handle_job_terminal(parent)` once the loop returns, because the parent's
+/// own `type: task` step was already cancelled directly by
+/// `cancel_server_managed_steps` before the loop ran (it has `worker_id IS
+/// NULL`, so it never shows up as a "running step" the outer check waits
+/// for). Two independent call paths race for the parent's terminal actions;
+/// only the exactly-once claim in `claim_terminal_handling` keeps the
+/// `on_cancel` hook from firing twice (B2, parked from Plan A review).
+#[tokio::test]
+async fn test_cancel_cascade_discriminates_exactly_once_claim_with_unclaimed_child() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+
+    // Parent: a single `type: task` step spawning `cleanup` (one script step).
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "parent".to_string(),
+        TaskDef {
+            flow: parent_flow,
+            ..base_task
+        },
+    );
+    // Workspace-level on_cancel: fires for the top-level parent job only.
+    workspace.on_cancel.push(HookDef {
+        action: "greet".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let child = JobRepo::get_child_jobs(&pool, parent_id)
+        .await?
+        .into_iter()
+        .next()
+        .expect("child job must exist");
+
+    // No worker registered, no claim — the child's script step stays `ready`.
+    let child_steps = JobStepRepo::get_steps_for_job(&pool, child.job_id).await?;
+    assert_eq!(
+        child_steps.len(),
+        1,
+        "expected the child's single script step: {child_steps:?}"
+    );
+    assert_eq!(
+        child_steps[0].status, "ready",
+        "the child's step must stay unclaimed for this test to discriminate the CAS"
+    );
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/cancel", parent_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        JobRepo::get(&pool, parent_id).await?.unwrap().status,
+        "cancelled"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, child.job_id).await?.unwrap().status,
+        "cancelled",
+        "the cancel must cascade into the child job"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    let parent_hook_jobs: Vec<_> = hook_jobs
+        .iter()
+        .filter(|j| {
+            j.source_id
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(&parent_id.to_string())
+        })
+        .collect();
+    assert_eq!(
+        parent_hook_jobs.len(),
+        1,
+        "the parent's on_cancel hook must fire exactly once, even when two \
+         independent paths race for its terminal handling: {hook_jobs:?}"
+    );
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "no other hook job may fire from the cascade: {hook_jobs:?}"
+    );
+    Ok(())
+}
+
 /// `reconcile_settled_children` must be safe to call repeatedly for the same
 /// parent: once the settled child has been finalized (its hooks fired, the
 /// parent step marked completed), calling it again must be a no-op, not a
