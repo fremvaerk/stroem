@@ -5174,6 +5174,55 @@ async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
     Ok(())
 }
 
+/// Creation-time compensation writes the failed steps and the failed job in
+/// one transaction, so the two can never be half-applied. Rolling the
+/// transaction back must leave both untouched.
+#[tokio::test]
+async fn test_compensation_writes_are_atomic() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(job_id, "s", "ready")]).await?;
+
+    // Both writes inside a rolled-back transaction: neither may survive.
+    let mut tx = pool.begin().await?;
+    JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, "boom").await?;
+    JobRepo::mark_failed_tx(&mut *tx, job_id).await?;
+    tx.rollback().await?;
+
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "pending"
+    );
+    assert_eq!(
+        JobStepRepo::get_steps_for_job(&pool, job_id).await?[0].status,
+        "ready"
+    );
+
+    // Committing applies both together.
+    let mut tx = pool.begin().await?;
+    JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, "boom").await?;
+    JobRepo::mark_failed_tx(&mut *tx, job_id).await?;
+    tx.commit().await?;
+
+    assert_eq!(JobRepo::get(&pool, job_id).await?.unwrap().status, "failed");
+    let step = &JobStepRepo::get_steps_for_job(&pool, job_id).await?[0];
+    assert_eq!(step.status, "failed");
+    assert_eq!(step.error_message.as_deref(), Some("boom"));
+    Ok(())
+}
+
 /// `get_settled_descendants_with_running_parent_step` must be scoped to
 /// `source_type = 'task'` descendants only. `agent_tool` children are
 /// propagated only by normal step completion (`propagate_to_parent`'s
@@ -5338,21 +5387,200 @@ async fn test_get_settled_descendants_walks_grandchildren() -> Result<()> {
     );
     assert_eq!(settled[0].job_id, grandchild_id);
 
-    // Settle C too: both must come back, deepest first, so that handling G
-    // propagates into C before C is handled.
+    // Simulate G's terminal handling: its parent step completes, C settles.
+    // G no longer matches (its parent step is no longer running) and C now
+    // does (P's step is still running and C has no live step of its own).
+    JobStepRepo::mark_completed(&pool, child_id, "c-step", None).await?;
     JobRepo::mark_completed(&pool, child_id, None).await?;
     let settled =
         JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
     assert_eq!(
         settled.len(),
-        2,
-        "both C and G must be returned: {settled:?}"
+        1,
+        "after G propagates into C, only C matches: {settled:?}"
     );
+    assert_eq!(settled[0].job_id, child_id);
+
+    Ok(())
+}
+
+/// Rows must come back deepest-first so that handling a deep descendant
+/// propagates into its own parent before a shallower sibling branch is
+/// handled. Two independent branches under P: a settled direct child, and a
+/// running child whose own grandchild settled.
+#[tokio::test]
+async fn test_get_settled_descendants_orders_deepest_first() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            plain_step(parent_id, "shallow", "running"),
+            plain_step(parent_id, "deep", "running"),
+        ],
+    )
+    .await?;
+
+    // Branch 1: a settled direct child (depth 1).
+    let shallow_child = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "shallow-child",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("shallow"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, shallow_child, None).await?;
+
+    // Branch 2: a running child whose own grandchild settled (depth 2).
+    let mid_child = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "mid-child",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("deep"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(mid_child, "m-step", "running")]).await?;
+    let deep_grandchild = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "deep-grandchild",
+        "distributed",
+        None,
+        "task",
+        Some(&mid_child.to_string()),
+        Some(mid_child),
+        Some("m-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, deep_grandchild, None).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(settled.len(), 2, "both branches must be found: {settled:?}");
     assert_eq!(
-        settled[0].job_id, grandchild_id,
+        settled[0].job_id, deep_grandchild,
         "deepest descendant must come first: {settled:?}"
     );
-    assert_eq!(settled[1].job_id, child_id);
+    assert_eq!(settled[1].job_id, shallow_child);
+
+    Ok(())
+}
+
+/// A terminal descendant whose own worker is still executing a step must NOT
+/// be reconciled: a cancelled child keeps its cancellation signal (and its
+/// final log lines) until the worker acknowledges. Only once every step of
+/// the child is settled may reconciliation consume its terminal handling.
+#[tokio::test]
+async fn test_get_settled_descendants_excludes_jobs_with_live_steps() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(parent_id, "p-step", "running")]).await?;
+
+    // A cancelled type:task child whose own step is still running on a worker.
+    let child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("p-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(child_id, "live", "running")]).await?;
+    JobRepo::mark_cancelled(&pool, child_id).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert!(
+        settled.is_empty(),
+        "a cancelled child with a live step must not be reconciled yet: {settled:?}"
+    );
+
+    // A `claimed` step is equally live — the worker owns it.
+    sqlx::query("UPDATE job_step SET status = 'claimed' WHERE job_id = $1 AND step_name = $2")
+        .bind(child_id)
+        .bind("live")
+        .execute(&pool)
+        .await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert!(
+        settled.is_empty(),
+        "a claimed step is still live: {settled:?}"
+    );
+
+    // Once the worker acknowledges the cancellation, the child is quiescent
+    // and reconciliation may consume its terminal handling.
+    sqlx::query("UPDATE job_step SET status = 'cancelled', completed_at = NOW() WHERE job_id = $1 AND step_name = $2")
+        .bind(child_id)
+        .bind("live")
+        .execute(&pool)
+        .await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "a quiescent cancelled child must be reconciled: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, child_id);
 
     Ok(())
 }

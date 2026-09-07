@@ -471,6 +471,16 @@ impl JobRepo {
 
     /// Mark job as failed
     pub async fn mark_failed(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        Self::mark_failed_tx(pool, job_id).await
+    }
+
+    /// Executor-generic variant of [`mark_failed`]. Use inside a transaction
+    /// together with [`crate::JobStepRepo::fail_non_terminal_steps_tx`] so a
+    /// job and its steps reach `failed` atomically.
+    pub async fn mark_failed_tx<'e, E>(executor: E, job_id: Uuid) -> Result<()>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         sqlx::query(
             r#"
             UPDATE job
@@ -479,7 +489,7 @@ impl JobRepo {
             "#,
         )
         .bind(job_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to mark job as failed")?;
 
@@ -732,6 +742,14 @@ impl JobRepo {
     /// (re-firing its hooks) on every unrelated sibling-step completion. An
     /// agent-tool child that would be born terminal is rejected at creation by
     /// the `agent_task_tool` endpoint instead.
+    ///
+    /// Execution quiescence is also required: a descendant with a `running` or
+    /// `claimed` step of its own is still owned by a worker, so its terminal
+    /// handling must not be consumed yet. A cancelled child in particular must
+    /// keep its cancellation signal (and go on collecting log lines) until the
+    /// worker acknowledges by settling the step — reconciling it early would
+    /// clear the cancelled cache and upload the log archive while the worker
+    /// is still writing.
     pub async fn get_settled_descendants_with_running_parent_step(
         pool: &PgPool,
         root_job_id: Uuid,
@@ -752,6 +770,11 @@ impl JobRepo {
                    WHERE s.job_id = j.parent_job_id \
                      AND s.step_name = j.parent_step_name \
                      AND s.status = 'running' \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM job_step ls \
+                   WHERE ls.job_id = j.job_id \
+                     AND ls.status IN ('running', 'claimed') \
                ) \
              ORDER BY j.depth DESC",
             MAX_TASK_DEPTH, JOB_COLUMNS

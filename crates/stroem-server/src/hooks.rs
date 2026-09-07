@@ -76,6 +76,71 @@ pub(crate) fn is_top_level_source(source_type: &str) -> bool {
     )
 }
 
+/// Maximum number of `hook` links allowed in a job's ancestry before further
+/// hooks stop firing.
+///
+/// The `source_type == "hook"` recursion guard alone does not bound hook
+/// chains: a hook whose action is `type: task` creates a hook job, whose own
+/// `type: task` step creates an ordinary `source_type = "task"` child, and that
+/// child is no longer hook-sourced — so its task-level hooks fire again. Two
+/// tasks referencing each other that way (A's `on_success` runs B, B's flow
+/// runs A) produce an unbounded chain of fresh job ids that no CAS can stop.
+/// Validation rejects only direct self-reference, so the budget is enforced
+/// here at dispatch time.
+pub(crate) const MAX_HOOK_CHAIN_DEPTH: usize = 3;
+
+/// Count the `hook` links in a job's ancestry.
+///
+/// Walks up to 20 hops: a `hook`-sourced job continues from the job named by
+/// the UUID prefix of its `source_id` (`{job_id}` or `{job_id}/{hook}`) and
+/// adds one to the count; any other job continues from its `parent_job_id`.
+/// A top-level, non-hook job costs no queries at all. The hop cap can
+/// under-count very deeply nested chains, which only ever errs towards
+/// allowing a hook, never towards suppressing one.
+async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
+    const MAX_HOPS: usize = 20;
+
+    let mut depth = 0usize;
+    let mut source_type = job.source_type.clone();
+    let mut source_id = job.source_id.clone();
+    let mut parent_job_id = job.parent_job_id;
+
+    for _ in 0..MAX_HOPS {
+        let next = if source_type == SourceType::Hook.as_ref() {
+            depth += 1;
+            source_id
+                .as_deref()
+                .and_then(|s| s.split('/').next())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        } else {
+            parent_job_id
+        };
+
+        let Some(next) = next else { break };
+
+        match JobRepo::get(pool, next).await {
+            Ok(Some(ancestor)) => {
+                source_type = ancestor.source_type;
+                source_id = ancestor.source_id;
+                parent_job_id = ancestor.parent_job_id;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                // Fail open: an ancestry lookup failure must not silently
+                // suppress a legitimate hook.
+                tracing::warn!(
+                    job_id = %job.job_id,
+                    "hook_chain_depth: ancestry lookup failed, treating chain as shallow: {:#}",
+                    e
+                );
+                break;
+            }
+        }
+    }
+
+    depth
+}
+
 /// Fire hooks for a job that has reached a terminal state.
 ///
 /// - Jobs with `source_type = "hook"` never trigger further hooks (recursion guard).
@@ -92,6 +157,25 @@ pub async fn fire_hooks(
 ) {
     // Recursion guard: hook jobs never trigger further hooks
     if job.source_type == SourceType::Hook.as_ref() {
+        return;
+    }
+
+    // Chain guard: bound indirect hook cycles that the recursion guard misses.
+    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+        tracing::warn!(
+            job_id = %job.job_id,
+            "hook chain depth limit ({}) reached — not firing hooks",
+            MAX_HOOK_CHAIN_DEPTH
+        );
+        state
+            .append_server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+                     not firing hooks for this job"
+                ),
+            )
+            .await;
         return;
     }
 
@@ -211,6 +295,25 @@ pub async fn fire_suspended_hooks(
 ) {
     // Recursion guard: hook jobs never trigger further hooks
     if job.source_type == SourceType::Hook.as_ref() {
+        return;
+    }
+
+    // Chain guard: bound indirect hook cycles that the recursion guard misses.
+    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+        tracing::warn!(
+            job_id = %job.job_id,
+            "hook chain depth limit ({}) reached — not firing on_suspended hooks",
+            MAX_HOOK_CHAIN_DEPTH
+        );
+        state
+            .append_server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+                     not firing hooks for this job"
+                ),
+            )
+            .await;
         return;
     }
 

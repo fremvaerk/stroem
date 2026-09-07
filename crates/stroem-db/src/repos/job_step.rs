@@ -881,6 +881,22 @@ impl JobStepRepo {
     /// the job row already exists, so the failure must be made visible on its
     /// steps instead of vanishing into a 500. Returns rows affected.
     pub async fn fail_non_terminal_steps(pool: &PgPool, job_id: Uuid, error: &str) -> Result<u64> {
+        Self::fail_non_terminal_steps_tx(pool, job_id, error).await
+    }
+
+    /// Executor-generic variant of [`fail_non_terminal_steps`]. Use inside a
+    /// transaction together with [`crate::JobRepo::mark_failed_tx`] so the
+    /// job row and its steps reach `failed` in one atomic write — a half-applied
+    /// compensation leaves failed steps under a non-terminal job that no sweep
+    /// will ever revisit.
+    pub async fn fail_non_terminal_steps_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        error: &str,
+    ) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         let result = sqlx::query(
             r#"
             UPDATE job_step
@@ -891,10 +907,33 @@ impl JobStepRepo {
         )
         .bind(job_id)
         .bind(error)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to fail non-terminal steps")?;
         Ok(result.rows_affected())
+    }
+
+    /// Whether any step of this job is still owned by a worker — `running` or
+    /// `claimed`.
+    ///
+    /// A job row can be terminal (most obviously `cancelled`, stamped by
+    /// `JobRepo::cancel` the moment the user asks) while workers are still
+    /// executing its steps. Terminal side effects — closing and archiving the
+    /// log above all — must wait for those workers to drain, so callers gate
+    /// `claim_terminal_handling` on this returning `false`. The last worker
+    /// acknowledgement then finds the job drained and takes the claim.
+    pub async fn has_live_steps(pool: &PgPool, job_id: Uuid) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM job_step \
+                 WHERE job_id = $1 AND status IN ('running', 'claimed') \
+             )",
+        )
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to check for live steps")?;
+        Ok(exists)
     }
 
     /// Get currently running steps for a job (for active cancellation/kill).

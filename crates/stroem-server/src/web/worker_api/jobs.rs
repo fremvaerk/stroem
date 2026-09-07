@@ -1092,27 +1092,39 @@ pub async fn agent_task_tool(
     .await
     .context("create child job for task tool")?;
 
+    // The child's own subtree may contain a descendant that settled
+    // synchronously — a nested `type: task` grandchild whose every root step is
+    // skipped leaves the child `running` with no step that will ever complete.
+    // Walk the CHILD's subtree so such a child settles here and is caught by
+    // the terminal check below, instead of hanging the agent forever.
+    crate::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+
     // A child that is already terminal the moment it is created (every root step
-    // skipped by `when`, or a server-dispatched root step that failed) can never
-    // deliver a tool result: propagation into the agent step happens only when a
-    // step of the child completes, and finalizing it here is not an option either
-    // — the worker has not yet recorded this child id in `agent_state`, so
-    // `propagate_to_parent` would mark the agent step ready or terminal out from
-    // under the still-running worker. Fail loudly instead of returning an id the
-    // agent would wait on forever.
-    if created.terminal_at_creation {
-        let status = JobRepo::get(&state.pool, created.job_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|j| j.status)
-            .unwrap_or_else(|| "unknown".to_string());
+    // skipped by `when`, a server-dispatched root step that failed, or a nested
+    // descendant that settled) can never deliver a tool result: propagation into
+    // the agent step happens only when a step of the child completes, and
+    // finalizing it here is not an option either — the worker has not yet
+    // recorded this child id in `agent_state`, so the registration barrier in
+    // `propagate_to_parent` defers it indefinitely. Fail loudly instead of
+    // returning an id the agent would wait on forever.
+    let child_status = JobRepo::get(&state.pool, created.job_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|j| j.status)
+        .unwrap_or_else(|| "unknown".to_string());
+    if created.terminal_at_creation
+        || matches!(
+            child_status.as_str(),
+            "completed" | "failed" | "cancelled" | "skipped"
+        )
+    {
         return Err(AppError::Internal(anyhow::anyhow!(
             "child job {} for task tool '{}' settled immediately at creation (status {}); \
              the agent step cannot receive a tool result from it",
             created.job_id,
             req.task_name,
-            status
+            child_status
         )));
     }
     let child_job_id = created.job_id;
@@ -1139,14 +1151,17 @@ pub async fn agent_suspend_step(
     Json(req): Json<SuspendStepRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Save agent state
+    let agent_state = into_exposed(req.agent_state);
     stroem_db::JobStepRepo::update_agent_state(
         &state.pool,
         job_id,
         &step_name,
-        into_exposed(req.agent_state),
+        agent_state.clone(),
     )
     .await
     .context("save agent state")?;
+
+    replay_registered_terminal_tool_children(&state, job_id, &step_name, &agent_state).await;
 
     // Atomically set output and transition from running to suspended
     let output = serde_json::json!({ "approval_message": req.message });
@@ -1200,16 +1215,93 @@ pub async fn agent_save_state(
     Path((job_id, step_name)): Path<(Uuid, String)>,
     Json(req): Json<SaveAgentStateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    let agent_state = into_exposed(req.agent_state);
     stroem_db::JobStepRepo::update_agent_state(
         &state.pool,
         job_id,
         &step_name,
-        into_exposed(req.agent_state),
+        agent_state.clone(),
     )
     .await
     .context("save agent state")?;
 
+    replay_registered_terminal_tool_children(&state, job_id, &step_name, &agent_state).await;
+
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// Lift the agent registration barrier for children that already settled.
+///
+/// A task-tool child can reach a terminal state before the worker's
+/// `agent-state` write records its id, in which case its own terminal handling
+/// found no registration and deliberately deferred propagation
+/// (`job_recovery::propagate_to_parent`). Once the ids are persisted, replay
+/// propagation for every pending child that is already terminal so the tool
+/// result reaches the conversation and the step is released for re-claim.
+///
+/// The child's terminal-handling claim was consumed by its own settlement;
+/// `propagate_to_parent` is the piece that was skipped, so it is called
+/// directly rather than through `handle_job_terminal`. Best-effort: failures
+/// are logged and never fail the worker's request.
+async fn replay_registered_terminal_tool_children(
+    state: &Arc<AppState>,
+    job_id: Uuid,
+    step_name: &str,
+    agent_state: &serde_json::Value,
+) {
+    let conv = match serde_json::from_value::<stroem_agent::state::AgentConversationState>(
+        agent_state.clone(),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                job_id = %job_id,
+                step = %step_name,
+                "could not parse saved agent state to replay settled tool children: {:#}",
+                e
+            );
+            return;
+        }
+    };
+
+    for pending in &conv.pending_tool_calls {
+        let child = match JobRepo::get(&state.pool, pending.child_job_id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    child = %pending.child_job_id,
+                    "could not load pending tool-call child job: {:#}",
+                    e
+                );
+                continue;
+            }
+        };
+        if !matches!(
+            child.status.as_str(),
+            "completed" | "failed" | "cancelled" | "skipped"
+        ) {
+            continue;
+        }
+
+        tracing::info!(
+            child = %child.job_id,
+            job_id = %job_id,
+            step = %step_name,
+            "pending tool-call child was already terminal at registration — replaying propagation"
+        );
+        if let Err(e) =
+            crate::job_recovery::propagate_to_parent(state, &child, job_id, step_name).await
+        {
+            tracing::error!(
+                child = %child.job_id,
+                job_id = %job_id,
+                step = %step_name,
+                "failed to replay propagation for settled tool child: {:#}",
+                e
+            );
+        }
+    }
 }
 
 /// Render the `_server` log line used to surface cross-replica NOTIFY

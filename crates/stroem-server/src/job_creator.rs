@@ -24,6 +24,13 @@ const MAX_TASK_DEPTH: u32 = 10;
 /// (e.g. all root steps skipped by `when`, or a server-dispatched root step
 /// failed) — the caller must then run `job_recovery::finalize_created_job`
 /// so hooks/metrics/log-archive fire exactly as for an orchestrator-settled job.
+///
+/// It is also true when post-commit initialisation itself failed: promotion,
+/// `type: task` dispatch, `type: approval` dispatch and settlement all run
+/// inside one coordinated result, and any error there compensates the job to
+/// `failed` (job row and every non-terminal step, in one transaction) rather
+/// than returning a 500 over a committed job. A DB outage during that
+/// compensation still surfaces as an error to the caller.
 #[derive(Debug, Clone, Copy)]
 pub struct CreatedJob {
     pub job_id: Uuid,
@@ -447,7 +454,19 @@ fn create_job_for_task_inner<'a>(
         // The job row is committed; anything that fails from here on must be
         // made visible on the job instead of surfacing as a 500 with a
         // committed `pending` job left behind (spec §6.2 / P8).
-        let init: Result<()> = async {
+        //
+        // Everything a freshly committed job owes before it can be handed back
+        // lives inside this block: root-step promotion/expansion, `type: task`
+        // dispatch, `type: approval` dispatch, and final settlement. Approval
+        // dispatch in particular MUST be covered — a transient failure before
+        // `mark_suspended` leaves an approval step `ready` forever, since
+        // neither workers nor the unmatched-step sweep ever touch approvals.
+        // Settlement is covered for the same reason: an error there would
+        // otherwise return a 500 over a committed, non-terminal job.
+        //
+        // The block's value is the settled status, if the job reached a
+        // terminal state during initialisation.
+        let init: Result<Option<stroem_common::models::job::JobStatus>> = async {
             // Promote/skip/expand root steps. Runs unconditionally: cheap when
             // nothing is promotable, and required for Plan B's seeded jobs.
             let job_row = JobRepo::get(pool, job_id).await?.context("Job not found")?;
@@ -478,37 +497,48 @@ fn create_job_for_task_inner<'a>(
             handle_task_steps(workspaces, pool, workspace_config, workspace_name, job_id, task, defaults)
                 .await?;
 
-            if let Err(e) =
-                handle_approval_steps(pool, workspace_config, workspace_name, job_id, task).await
-            {
-                tracing::error!(job_id = %job_id, "Failed to handle initial approval steps: {:#}", e);
+            handle_approval_steps(pool, workspace_config, workspace_name, job_id, task)
+                .await
+                .context("dispatch initial approval steps")?;
+
+            // Shared settlement — identical rules to the orchestrator path.
+            let settled = crate::orchestrator::settle_if_all_terminal(pool, job_id, task)
+                .await
+                .context("settle job at creation")?;
+            if let Some(ref status) = settled {
+                tracing::info!(job_id = %job_id, ?status, "All steps terminal at creation — job settled");
             }
-            Ok(())
+            Ok(settled)
         }
         .await;
 
-        if let Err(e) = init {
-            let msg = format!("[creation] initialisation failed: {:#}", e);
-            tracing::error!(job_id = %job_id, "{}", msg);
-            JobStepRepo::fail_non_terminal_steps(pool, job_id, &msg)
-                .await
-                .context("fail steps after initialisation error")?;
-            JobRepo::mark_failed(pool, job_id)
-                .await
-                .context("mark job failed after initialisation error")?;
-            return Ok(CreatedJob {
-                job_id,
-                terminal_at_creation: true,
-            });
-        }
-
-        // Shared settlement — identical rules to the orchestrator path.
-        let settled = crate::orchestrator::settle_if_all_terminal(pool, job_id, task)
-            .await
-            .context("settle job at creation")?;
-        if let Some(ref status) = settled {
-            tracing::info!(job_id = %job_id, ?status, "All steps terminal at creation — job settled");
-        }
+        let settled = match init {
+            Ok(settled) => settled,
+            Err(e) => {
+                let msg = format!("[creation] initialisation failed: {:#}", e);
+                tracing::error!(job_id = %job_id, "{}", msg);
+                // One transaction: a half-applied compensation would leave
+                // failed steps under a non-terminal job with no live step to
+                // trigger another sweep.
+                let mut tx = pool
+                    .begin()
+                    .await
+                    .context("begin compensation transaction after initialisation error")?;
+                JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, &msg)
+                    .await
+                    .context("fail steps after initialisation error")?;
+                JobRepo::mark_failed_tx(&mut *tx, job_id)
+                    .await
+                    .context("mark job failed after initialisation error")?;
+                tx.commit()
+                    .await
+                    .context("commit compensation after initialisation error")?;
+                return Ok(CreatedJob {
+                    job_id,
+                    terminal_at_creation: true,
+                });
+            }
+        };
 
         Ok(CreatedJob {
             job_id,
