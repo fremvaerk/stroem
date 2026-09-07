@@ -14,6 +14,12 @@ Patch release, independently releasable. No config or schema changes required.
   `cancelled` (and no untolerated step failed), the job now settles `cancelled`. Previously such
   a job could settle `completed`, hiding the cancellation from the job list and from `on_cancel`
   hooks.
+- **`continue_on_failure` does not tolerate a `cancelled` step.** The new `cancelled` rule runs
+  after the untolerated-failure check and is deliberately not gated by `continue_on_failure`: a
+  flow step marked `continue_on_failure: true` whose `type: task` child job is cancelled now
+  cancels the whole job, where it previously completed. `continue_on_failure` tolerates failures,
+  not cancellations — a cancellation is an operator decision to stop, not a step outcome to work
+  around.
 - **Jobs that settle immediately at creation now fire hooks, archive logs, and count in
   metrics.** A job that has no steps to run (or whose steps are already terminal at creation
   time) used to skip terminal handling entirely — no `on_success`/`on_error`/`on_cancel` hook,
@@ -31,9 +37,14 @@ Patch release, independently releasable. No config or schema changes required.
   Prometheus counter, log archive upload) are now exactly-once across replicas via a single CAS
   claim (`claim_terminal_handling`), rather than the Prometheus counter being the only
   CAS-guarded effect.
-- A child `type: task` job that settles synchronously during its own creation (rather than via
-  normal step completion) is now reconciled against its parent step immediately, instead of
-  potentially leaving the parent stuck `running`.
+- A `type: task` job that settles synchronously during its own creation (rather than via normal
+  step completion) is now reconciled against its parent step immediately, instead of potentially
+  leaving the parent stuck `running`. The reconciliation walks the whole descendant chain (up to
+  the 10-level task nesting cap), so a grandchild that settles at creation also unblocks the
+  intermediate job, not just a direct child.
+- An agent `type: agent` task-tool call whose child job would be terminal the moment it is
+  created is now rejected with an error instead of returning a child id the agent step would
+  wait on forever.
 
 ## Not included
 

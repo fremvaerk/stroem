@@ -5,6 +5,11 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Maximum `type: task` nesting depth, mirroring `job_creator::MAX_TASK_DEPTH`.
+/// Bounds the descendant walk in
+/// [`JobRepo::get_settled_descendants_with_running_parent_step`].
+const MAX_TASK_DEPTH: i32 = 10;
+
 const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step";
 
 /// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
@@ -705,38 +710,56 @@ impl JobRepo {
         Ok(jobs)
     }
 
-    /// `type: task` child jobs that are terminal while the parent step that
-    /// spawned them is still `running` — i.e. children that settled
+    /// `type: task` **descendant** jobs that are terminal while the parent step
+    /// that spawned them is still `running` — i.e. jobs that settled
     /// synchronously inside `create_job_for_task_inner` (all steps skipped,
     /// or a server-dispatched root step failed) and never went through
     /// terminal handling / parent propagation, because the creator has no
     /// `AppState` to run it with.
     ///
-    /// Scoped to `source_type = 'task'` deliberately: `agent_tool` children
-    /// are a different mechanism (`propagate_to_parent`'s dedicated
-    /// `agent_tool` branch) that intentionally leaves the parent agent step
-    /// `running` across multiple tool calls — such a child would otherwise
-    /// match this predicate permanently and be re-finalized (re-firing its
-    /// hooks) on every unrelated sibling-step completion.
-    pub async fn get_settled_children_with_running_parent_step(
+    /// Walks the whole `parent_job_id` chain below `root_job_id`, bounded at
+    /// `MAX_TASK_DEPTH` levels, because a job that settles at creation can sit
+    /// at any depth: with P → C → G, creating C creates G, G settles, and C is
+    /// left `running` — so nothing but a descendant walk from P ever sees G.
+    /// Rows come back **deepest first**, so the caller settles G (which
+    /// propagates into C) before it reaches C itself.
+    ///
+    /// Scoped to `source_type = 'task'` deliberately: `agent_tool` children are
+    /// propagated only by normal step completion (`propagate_to_parent`'s
+    /// dedicated `agent_tool` branch), which intentionally leaves the parent
+    /// agent step `running` across multiple tool calls — such a child would
+    /// otherwise match this predicate permanently and be re-finalized
+    /// (re-firing its hooks) on every unrelated sibling-step completion. An
+    /// agent-tool child that would be born terminal is rejected at creation by
+    /// the `agent_task_tool` endpoint instead.
+    pub async fn get_settled_descendants_with_running_parent_step(
         pool: &PgPool,
-        parent_job_id: Uuid,
+        root_job_id: Uuid,
     ) -> Result<Vec<JobRow>> {
         let rows = sqlx::query_as::<_, JobRow>(&format!(
-            "SELECT {} FROM job j \
-             WHERE j.parent_job_id = $1 \
-               AND j.source_type = 'task' \
+            "WITH RECURSIVE descendants AS ( \
+                 SELECT j.*, 1 AS depth FROM job j WHERE j.parent_job_id = $1 \
+                 UNION ALL \
+                 SELECT c.*, d.depth + 1 FROM job c \
+                 JOIN descendants d ON c.parent_job_id = d.job_id \
+                 WHERE d.depth < {} \
+             ) \
+             SELECT {} FROM descendants j \
+             WHERE j.source_type = 'task' \
                AND j.status IN ('completed', 'failed', 'cancelled', 'skipped') \
                AND EXISTS ( \
                    SELECT 1 FROM job_step s \
-                   WHERE s.job_id = $1 AND s.step_name = j.parent_step_name AND s.status = 'running' \
-               )",
-            JOB_COLUMNS
+                   WHERE s.job_id = j.parent_job_id \
+                     AND s.step_name = j.parent_step_name \
+                     AND s.status = 'running' \
+               ) \
+             ORDER BY j.depth DESC",
+            MAX_TASK_DEPTH, JOB_COLUMNS
         ))
-        .bind(parent_job_id)
+        .bind(root_job_id)
         .fetch_all(pool)
         .await
-        .context("Failed to get settled children with running parent step")?;
+        .context("Failed to get settled descendants with running parent step")?;
         Ok(rows)
     }
 

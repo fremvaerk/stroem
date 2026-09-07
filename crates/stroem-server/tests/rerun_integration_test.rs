@@ -669,11 +669,23 @@ async fn rerun_failure_fires_workspace_on_error_hook() -> Result<()> {
     let rerun = get_job(&app, &rerun_id.to_string()).await?;
     assert_eq!(rerun["status"], "failed");
     let jobs = JobRepo::list(&app.pool, Some("default"), None, None, None, 100, 0).await?;
-    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    // Filter by the rerun's own id: this proves the hook belongs to the RERUN
+    // rather than to the cancelled source job, instead of relying on the
+    // fixture happening to define no `on_cancel`.
+    let hook_jobs: Vec<_> = jobs
+        .iter()
+        .filter(|j| {
+            j.source_type == "hook"
+                && j.source_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with(&rerun_id.to_string())
+        })
+        .collect();
     assert_eq!(
         hook_jobs.len(),
         1,
-        "workspace on_error must fire for a rerun: {jobs:?}"
+        "workspace on_error must fire exactly once for the rerun: {jobs:?}"
     );
     Ok(())
 }

@@ -39,6 +39,12 @@ pub struct CreatedJob {
 /// `source_job_id` — when set, the new job is treated as a Re-run of that job.
 /// Sentinel values in `input` are resolved against the source job's `raw_input`,
 /// and both `raw_input` and `source_job_id` are persisted on the new job row.
+///
+/// **Warning: drops the `terminal_at_creation` flag.** Production callers must
+/// use [`create_job_for_task_detailed`] and then call
+/// `job_recovery::finalize_created_job`, or a job that settles synchronously at
+/// creation never fires its hooks, metric, log archive or parent propagation.
+/// Kept for tests.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(pool, workspaces, workspace_config, agents_config, input))]
 pub async fn create_job_for_task(
@@ -112,8 +118,14 @@ pub async fn create_job_for_task_detailed(
 
 /// Create a child job with parent tracking.
 ///
-/// Used by `agent_task_tool` endpoint and `handle_task_steps` to create
-/// sub-jobs that propagate back to the parent step on completion.
+/// Used by `handle_task_steps` to create sub-jobs that propagate back to the
+/// parent step on completion.
+///
+/// **Warning: drops the `terminal_at_creation` flag.** Production callers must
+/// use [`create_child_job_for_task_detailed`] and then call
+/// `job_recovery::finalize_created_job` — or, for `agent_tool` children, reject
+/// the terminal case outright, since propagation of an agent-tool result
+/// depends on the worker having recorded the child id first. Kept for tests.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_child_job_for_task(
     workspaces: &WorkspaceManager,
@@ -129,6 +141,41 @@ pub async fn create_child_job_for_task(
     revision: Option<&str>,
     defaults: JobDefaults,
 ) -> Result<Uuid> {
+    create_child_job_for_task_detailed(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        parent_job_id,
+        parent_step_name,
+        revision,
+        defaults,
+    )
+    .await
+    .map(|c| c.job_id)
+}
+
+/// Like [`create_child_job_for_task`] but also reports `terminal_at_creation`,
+/// so the caller can finalize (or reject) a child that settled synchronously.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_child_job_for_task_detailed(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    parent_job_id: Uuid,
+    parent_step_name: &str,
+    revision: Option<&str>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
         pool,
@@ -146,7 +193,6 @@ pub async fn create_child_job_for_task(
         defaults,
     )
     .await
-    .map(|c| c.job_id)
 }
 
 /// Create a job with parent tracking (for type: task sub-jobs).

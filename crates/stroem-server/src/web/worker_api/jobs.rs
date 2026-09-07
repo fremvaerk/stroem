@@ -1075,7 +1075,7 @@ pub async fn agent_task_tool(
 
     let source_id = format!("{}/{}", job_id, step_name);
 
-    let child_job_id = crate::job_creator::create_child_job_for_task(
+    let created = crate::job_creator::create_child_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         &workspace,
@@ -1091,6 +1091,31 @@ pub async fn agent_task_tool(
     )
     .await
     .context("create child job for task tool")?;
+
+    // A child that is already terminal the moment it is created (every root step
+    // skipped by `when`, or a server-dispatched root step that failed) can never
+    // deliver a tool result: propagation into the agent step happens only when a
+    // step of the child completes, and finalizing it here is not an option either
+    // — the worker has not yet recorded this child id in `agent_state`, so
+    // `propagate_to_parent` would mark the agent step ready or terminal out from
+    // under the still-running worker. Fail loudly instead of returning an id the
+    // agent would wait on forever.
+    if created.terminal_at_creation {
+        let status = JobRepo::get(&state.pool, created.job_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|j| j.status)
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "child job {} for task tool '{}' settled immediately at creation (status {}); \
+             the agent step cannot receive a tool result from it",
+            created.job_id,
+            req.task_name,
+            status
+        )));
+    }
+    let child_job_id = created.job_id;
 
     tracing::info!(
         job_id = %job_id,

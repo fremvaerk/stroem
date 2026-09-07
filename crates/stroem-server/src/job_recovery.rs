@@ -30,16 +30,20 @@ use uuid::Uuid;
 /// being a separate concern. Every other caller observes the column already
 /// set, returns `false`, and must skip all terminal side effects for this job.
 ///
-/// The UPDATE is best-effort: if it fails (e.g. pool exhausted), we log a
-/// warning and return `false` rather than risk double-processing.
-async fn claim_terminal_handling(pool: &sqlx::PgPool, job: &stroem_db::JobRow) -> bool {
+/// The UPDATE is fail-closed: if it errors (e.g. pool exhausted), we return
+/// `false` rather than risk double-processing — which means this job's hooks,
+/// log archive upload and parent propagation are dropped entirely and no later
+/// path re-observes it. That is deliberate but must never be silent, so the
+/// error is logged at `error!` level AND written to the job's own log view via
+/// `append_server_log`.
+async fn claim_terminal_handling(state: &AppState, job: &stroem_db::JobRow) -> bool {
     match sqlx::query_scalar::<_, uuid::Uuid>(
         "UPDATE job SET metrics_recorded_at = NOW() \
          WHERE job_id = $1 AND metrics_recorded_at IS NULL \
          RETURNING job_id",
     )
     .bind(job.job_id)
-    .fetch_optional(pool)
+    .fetch_optional(&state.pool)
     .await
     {
         Ok(Some(_)) => {
@@ -61,11 +65,20 @@ async fn claim_terminal_handling(pool: &sqlx::PgPool, job: &stroem_db::JobRow) -
             false
         }
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 job_id = %job.job_id,
                 error = %e,
                 "claim_terminal_handling: CAS update failed, treating as not claimed"
             );
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!(
+                        "[orchestration] terminal handling claim failed: {e} — \
+                         hooks/archive/propagation NOT run for this job"
+                    ),
+                )
+                .await;
             false
         }
     }
@@ -287,7 +300,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             // Exactly-once claim: only the winner propagates to the parent,
             // creates a retry job, and runs terminal actions (hooks, notify,
             // archive) for this job. See `claim_terminal_handling` doc comment.
-            if !claim_terminal_handling(&state.pool, &job_after).await {
+            if !claim_terminal_handling(state, &job_after).await {
                 tracing::debug!(
                     job_id = %job_after.job_id,
                     "orchestrate_after_step: terminal handling already claimed, skipping"
@@ -611,7 +624,7 @@ async fn propagate_to_parent(
                 ) {
                     // Exactly-once claim: only the winner propagates further up
                     // the chain and runs terminal actions for the parent job.
-                    if claim_terminal_handling(&state.pool, &parent_after).await {
+                    if claim_terminal_handling(state, &parent_after).await {
                         // Propagate up the chain if parent is also a child
                         if let (Some(grandparent_id), Some(ref grandparent_step)) =
                             (parent_after.parent_job_id, &parent_after.parent_step_name)
@@ -662,32 +675,39 @@ pub async fn finalize_created_job(state: &AppState, created: crate::job_creator:
     reconcile_settled_children(state, created.job_id).await;
 }
 
-/// Children of `parent_job_id` that are terminal while their parent step is
+/// Descendants of `root_job_id` that are terminal while their parent step is
 /// still `running` never reached `propagate_to_parent` (they settled inside
 /// `create_job_for_task_inner`, which has no `AppState`). Run terminal handling
-/// for each; it propagates to the parent step and fires the child's hooks. The
+/// for each; it propagates to the parent step and fires that job's hooks. The
 /// "parent step still running" predicate makes this idempotent.
-pub async fn reconcile_settled_children(state: &AppState, parent_job_id: Uuid) {
+///
+/// The walk covers the WHOLE descendant chain, not just direct children: with
+/// P → C → G, a G that settles at creation leaves C `running` with no step that
+/// will ever complete, so C never orchestrates and only a descendant walk from
+/// P reaches G. Rows arrive deepest-first, so handling G settles C via
+/// `propagate_to_parent`, and the exactly-once claim makes the later visit to C
+/// in the same loop a no-op.
+pub async fn reconcile_settled_children(state: &AppState, root_job_id: Uuid) {
     let children =
-        match JobRepo::get_settled_children_with_running_parent_step(&state.pool, parent_job_id)
+        match JobRepo::get_settled_descendants_with_running_parent_step(&state.pool, root_job_id)
             .await
         {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!(job_id = %parent_job_id, "reconcile_settled_children: {:#}", e);
+                tracing::error!(job_id = %root_job_id, "reconcile_settled_children: {:#}", e);
                 return;
             }
         };
     for child in children {
         tracing::info!(
-            child = %child.job_id, parent = %parent_job_id,
-            "child job settled at creation — running terminal handling"
+            child = %child.job_id, root = %root_job_id,
+            "descendant job settled at creation — running terminal handling"
         );
         // `handle_job_terminal` → `propagate_to_parent` → `reconcile_settled_children`
         // → `handle_job_terminal` forms a call cycle; box this leg to avoid an
         // infinitely-sized future.
         if let Err(e) = Box::pin(handle_job_terminal(state, child.job_id)).await {
-            tracing::error!(child = %child.job_id, "terminal handling for settled child failed: {:#}", e);
+            tracing::error!(child = %child.job_id, "terminal handling for settled descendant failed: {:#}", e);
         }
     }
 }
@@ -722,7 +742,7 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
     // Exactly-once claim: only the winner propagates to the parent and runs
     // terminal actions (hooks, notify, archive) for this job. See
     // `claim_terminal_handling` doc comment.
-    if !claim_terminal_handling(&state.pool, &job).await {
+    if !claim_terminal_handling(state, &job).await {
         tracing::debug!(
             job_id = %job_id,
             "handle_job_terminal: terminal handling already claimed, skipping"

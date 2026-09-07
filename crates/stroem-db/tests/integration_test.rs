@@ -5174,13 +5174,16 @@ async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
     Ok(())
 }
 
-/// `get_settled_children_with_running_parent_step` must be scoped to
-/// `source_type = 'task'` children only. `agent_tool` children are a
-/// different mechanism (`propagate_to_parent`'s dedicated agent_tool branch)
-/// that intentionally leaves the parent step `running` across multiple tool
-/// calls — such a child would otherwise match this predicate permanently.
+/// `get_settled_descendants_with_running_parent_step` must be scoped to
+/// `source_type = 'task'` descendants only. `agent_tool` children are
+/// propagated only by normal step completion (`propagate_to_parent`'s
+/// dedicated `agent_tool` branch), and an agent-tool child that would be born
+/// terminal is rejected outright at creation by `agent_task_tool` — so an
+/// `agent_tool` child is never this predicate's business, and including one
+/// would match permanently (the parent agent step stays `running` across tool
+/// calls) and re-fire its hooks on every unrelated sibling-step completion.
 #[tokio::test]
-async fn test_get_settled_children_with_running_parent_step_excludes_agent_tool() -> Result<()> {
+async fn test_get_settled_descendants_with_running_parent_step_excludes_agent_tool() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let parent_id = JobRepo::create(
@@ -5201,7 +5204,8 @@ async fn test_get_settled_children_with_running_parent_step_excludes_agent_tool(
 
     // An agent_tool child settled (completed) while the parent agent step is
     // running — this must NOT be treated as a synchronously-settled type:task
-    // child; the agent_tool branch owns its own re-claim/hooks lifecycle.
+    // child; agent-tool results reach the agent step only through normal step
+    // completion, and a terminal-at-creation one is rejected at creation.
     let agent_tool_child_id = JobRepo::create_with_parent(
         &pool,
         "default",
@@ -5221,7 +5225,8 @@ async fn test_get_settled_children_with_running_parent_step_excludes_agent_tool(
     .await?;
     JobRepo::mark_completed(&pool, agent_tool_child_id, None).await?;
 
-    let settled = JobRepo::get_settled_children_with_running_parent_step(&pool, parent_id).await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
     assert!(
         settled.is_empty(),
         "agent_tool child must not match the settled-child predicate: {settled:?}"
@@ -5249,13 +5254,105 @@ async fn test_get_settled_children_with_running_parent_step_excludes_agent_tool(
     .await?;
     JobRepo::mark_completed(&pool, task_child_id, None).await?;
 
-    let settled = JobRepo::get_settled_children_with_running_parent_step(&pool, parent_id).await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
     assert_eq!(
         settled.len(),
         1,
         "exactly the task-sourced child should be returned: {settled:?}"
     );
     assert_eq!(settled[0].job_id, task_child_id);
+
+    Ok(())
+}
+
+/// `get_settled_descendants_with_running_parent_step` must walk the WHOLE
+/// descendant chain, not just direct children. P → C → G, where G settled at
+/// creation while C's spawning step is still `running` and C itself is not
+/// terminal: nothing else will ever reach G (no step of C completes, so C's
+/// orchestration never runs), so reconciliation rooted at P must find it.
+#[tokio::test]
+async fn test_get_settled_descendants_walks_grandchildren() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(parent_id, "p-step", "running")]).await?;
+
+    // C: a type:task child of P, still running, with its own running task step.
+    let child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("p-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(child_id, "c-step", "running")]).await?;
+
+    // G: a type:task grandchild that settled at creation under C's running step.
+    let grandchild_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "grandchild-task",
+        "distributed",
+        None,
+        "task",
+        Some(&child_id.to_string()),
+        Some(child_id),
+        Some("c-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, grandchild_id, None).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "the settled grandchild must be found from the root: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, grandchild_id);
+
+    // Settle C too: both must come back, deepest first, so that handling G
+    // propagates into C before C is handled.
+    JobRepo::mark_completed(&pool, child_id, None).await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        2,
+        "both C and G must be returned: {settled:?}"
+    );
+    assert_eq!(
+        settled[0].job_id, grandchild_id,
+        "deepest descendant must come first: {settled:?}"
+    );
+    assert_eq!(settled[1].job_id, child_id);
 
     Ok(())
 }
