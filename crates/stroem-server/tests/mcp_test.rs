@@ -314,6 +314,7 @@ async fn setup_with_mcp() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -372,6 +373,7 @@ async fn setup_mcp_disabled() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -442,6 +444,7 @@ async fn setup_with_auth_and_mcp_cfg(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),

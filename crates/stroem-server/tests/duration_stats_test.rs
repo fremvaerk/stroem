@@ -155,6 +155,7 @@ async fn setup() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),

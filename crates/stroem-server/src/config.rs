@@ -182,7 +182,15 @@ fn default_poll_interval() -> u64 {
 #[serde(tag = "type")]
 pub enum WorkspaceSourceDef {
     #[serde(rename = "folder")]
-    Folder { path: String },
+    Folder {
+        path: String,
+        /// When `false`, the workspace's triggers (cron schedules, webhooks,
+        /// event sources) are loaded but never fired on this server. Tasks
+        /// remain runnable manually. Lets a staging server mirror a
+        /// production repo without duplicating its scheduled work.
+        #[serde(default = "default_true", deserialize_with = "lenient_bool")]
+        triggers: bool,
+    },
     #[serde(rename = "git")]
     Git {
         url: String,
@@ -191,7 +199,51 @@ pub enum WorkspaceSourceDef {
         #[serde(default = "default_poll_interval")]
         poll_interval_secs: u64,
         auth: Option<GitAuthConfig>,
+        /// See `Folder::triggers`.
+        #[serde(default = "default_true", deserialize_with = "lenient_bool")]
+        triggers: bool,
     },
+}
+
+impl WorkspaceSourceDef {
+    /// Whether this server should fire the workspace's triggers.
+    pub fn triggers_enabled(&self) -> bool {
+        match self {
+            Self::Folder { triggers, .. } | Self::Git { triggers, .. } => *triggers,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Accepts `true`/`false` as a real boolean OR as the strings `"true"` /
+/// `"false"` (case-insensitive). Needed for fields inside `#[serde(tag)]`
+/// enums such as `WorkspaceSourceDef`: serde buffers an internally-tagged
+/// enum's content before dispatching, which bypasses the `config` crate's
+/// own string→bool coercion, so `STROEM__WORKSPACES__<name>__TRIGGERS=false`
+/// would otherwise arrive as the string `"false"` and be rejected. Anything
+/// else (`"maybe"`, `1`, `null`) is still an error.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    use serde::de::{Error, Unexpected};
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrStr<'a> {
+        Bool(bool),
+        Str(std::borrow::Cow<'a, str>),
+    }
+    match BoolOrStr::deserialize(d)? {
+        BoolOrStr::Bool(b) => Ok(b),
+        BoolOrStr::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(D::Error::invalid_value(
+                Unexpected::Str(other),
+                &"a boolean (true/false)",
+            )),
+        },
+    }
 }
 
 /// OIDC/internal provider configuration
@@ -641,13 +693,81 @@ worker_token: "secret-token-123"
         assert_eq!(config.log_storage.local_dir, "/var/stroem/logs");
         assert_eq!(config.workspaces.len(), 1);
         match &config.workspaces["default"] {
-            WorkspaceSourceDef::Folder { path } => {
+            WorkspaceSourceDef::Folder { path, .. } => {
                 assert_eq!(path, "/var/stroem/workspace");
             }
             _ => panic!("Expected folder workspace"),
         }
         assert_eq!(config.worker_token, "secret-token-123");
         assert!(config.auth.is_none());
+    }
+
+    #[test]
+    fn test_workspace_triggers_default_true() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+  remote:
+    type: git
+    url: "https://github.com/org/repo.git"
+worker_token: "secret-token-123"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.workspaces["local"].triggers_enabled());
+        assert!(config.workspaces["remote"].triggers_enabled());
+    }
+
+    #[test]
+    fn test_workspace_triggers_false_parses_for_both_source_types() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+    triggers: false
+  remote:
+    type: git
+    url: "https://github.com/org/repo.git"
+    triggers: false
+worker_token: "secret-token-123"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.workspaces["local"].triggers_enabled());
+        assert!(!config.workspaces["remote"].triggers_enabled());
+        match &config.workspaces["local"] {
+            WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "./workspace"),
+            _ => panic!("Expected folder workspace"),
+        }
+    }
+
+    #[test]
+    fn test_workspace_triggers_rejects_non_bool() {
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://localhost/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  local:
+    type: folder
+    path: "./workspace"
+    triggers: "maybe"
+worker_token: "secret-token-123"
+"#;
+        assert!(serde_yaml::from_str::<ServerConfig>(yaml).is_err());
     }
 
     #[test]
@@ -672,7 +792,7 @@ worker_token: "token"
         let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.workspaces.len(), 2);
         match &config.workspaces["default"] {
-            WorkspaceSourceDef::Folder { path } => assert_eq!(path, "./workspace"),
+            WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "./workspace"),
             _ => panic!("Expected folder"),
         }
         match &config.workspaces["data-team"] {
@@ -681,6 +801,7 @@ worker_token: "token"
                 git_ref,
                 poll_interval_secs,
                 auth,
+                ..
             } => {
                 assert_eq!(url, "https://github.com/org/data-workflows.git");
                 assert_eq!(git_ref, "main");
@@ -715,6 +836,7 @@ worker_token: "token"
                 git_ref,
                 poll_interval_secs,
                 auth,
+                ..
             } => {
                 assert_eq!(url, "git@github.com:org/private.git");
                 assert_eq!(git_ref, "main"); // default
@@ -991,6 +1113,7 @@ worker_token: "token"
                 git_ref,
                 poll_interval_secs,
                 auth,
+                ..
             } => {
                 assert_eq!(url, "https://github.com/org/repo.git");
                 assert_eq!(git_ref, "main");
@@ -1133,7 +1256,7 @@ worker_token: "token"
         assert_eq!(config.workspaces.len(), 5);
 
         match &config.workspaces["local-dev"] {
-            WorkspaceSourceDef::Folder { path } => assert_eq!(path, "/opt/workflows"),
+            WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "/opt/workflows"),
             _ => panic!("Expected folder"),
         }
 
@@ -1154,6 +1277,7 @@ worker_token: "token"
                 git_ref,
                 poll_interval_secs,
                 auth,
+                ..
             } => {
                 assert_eq!(url, "git@github.com:org/ml-workflows.git");
                 assert_eq!(git_ref, "production");
@@ -1176,7 +1300,7 @@ worker_token: "token"
         }
 
         match &config.workspaces["scratch"] {
-            WorkspaceSourceDef::Folder { path } => assert_eq!(path, "/tmp/workflows"),
+            WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "/tmp/workflows"),
             _ => panic!("Expected folder"),
         }
     }
@@ -1407,6 +1531,46 @@ worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         // Non-overridden values preserved from YAML
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.log_storage.local_dir, "./logs");
+    }
+
+    #[test]
+    fn test_env_override_workspace_triggers() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let yaml = r#"
+listen: "0.0.0.0:8080"
+db:
+  url: "postgres://placeholder:5432/stroem"
+log_storage:
+  local_dir: "./logs"
+workspaces:
+  default:
+    type: folder
+    path: "./workspace"
+worker_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"#;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, yaml.as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        // SAFETY: test-only, serialized by ENV_MUTEX
+        unsafe {
+            std::env::set_var("STROEM__WORKSPACES__DEFAULT__TRIGGERS", "false");
+        }
+
+        let config = load_config(file.path().to_str().unwrap());
+
+        unsafe {
+            std::env::remove_var("STROEM__WORKSPACES__DEFAULT__TRIGGERS");
+        }
+
+        let config = config.unwrap();
+        assert!(!config.workspaces["default"].triggers_enabled());
+        // The source itself is untouched by the override.
+        match &config.workspaces["default"] {
+            WorkspaceSourceDef::Folder { path, .. } => assert_eq!(path, "./workspace"),
+            _ => panic!("Expected folder workspace"),
+        }
     }
 
     #[test]

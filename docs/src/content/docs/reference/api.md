@@ -13,7 +13,7 @@ Task, job, and log endpoints do not require authentication unless the server is 
 GET /api/workspaces
 ```
 
-Returns all configured workspaces with task and action counts.
+Returns all configured workspaces with task, action, and trigger counts. `triggers_enabled` is `false` when the server config sets `triggers: false` for the workspace (its triggers are listed but never fired by this server).
 
 **Response:**
 
@@ -24,6 +24,8 @@ Returns all configured workspaces with task and action counts.
     "tasks_count": 3,
     "actions_count": 5,
     "triggers_count": 1,
+    "connections_count": 0,
+    "triggers_enabled": true,
     "revision": "abc123"
   }
 ]

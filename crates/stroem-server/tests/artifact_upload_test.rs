@@ -86,6 +86,7 @@ async fn build_test_app_inner(
         workspaces: HashMap::from([(
             "ws1".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),

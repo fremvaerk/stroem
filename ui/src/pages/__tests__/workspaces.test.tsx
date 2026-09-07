@@ -20,6 +20,7 @@ function ws(overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo {
     tasks_count: 3,
     actions_count: 5,
     triggers_count: 0,
+    triggers_enabled: true,
     revision: "abcdef1234567890",
     ...overrides,
   };
@@ -32,6 +33,32 @@ function renderPage() {
     </MemoryRouter>,
   );
 }
+
+describe("WorkspacesPage triggers column", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows the trigger count and no badge when triggers are enabled", async () => {
+    mockList.mockResolvedValue([ws({ triggers_count: 2, triggers_enabled: true })]);
+    renderPage();
+    await screen.findByText("default");
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.queryByText("off")).not.toBeInTheDocument();
+  });
+
+  it("shows an 'off' badge when the server config disables triggers", async () => {
+    mockList.mockResolvedValue([
+      ws({ name: "staging", triggers_count: 4, triggers_enabled: false }),
+    ]);
+    renderPage();
+    await screen.findByText("staging");
+    expect(screen.getByText("4")).toBeInTheDocument();
+    const badge = screen.getByText("off");
+    expect(badge).toBeInTheDocument();
+    expect(badge.getAttribute("title")).toMatch(/triggers: false/);
+  });
+});
 
 describe("WorkspacesPage refresh button", () => {
   beforeEach(() => {

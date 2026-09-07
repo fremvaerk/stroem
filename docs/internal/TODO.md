@@ -1506,3 +1506,22 @@ Feature: a connection-typed input (task- or action-level) may name another works
 - [x] `handle_task_steps` swallows some connection/action resolution errors rather than propagating them to the caller as a 400 — fixed: a `prepare_action_input` failure now marks the step failed (mirroring the depth-exceeded branch) instead of `tracing::warn!`-ing and falling through with the unresolved input; regression test `test_task_step_bad_connection_fails_step_not_swallowed`
 - [ ] CLI `SingleWorkspace`'s workspace-name sentinel (used to detect a dotted/qualified reference so `stroem run`/`validate` can print the "requires a server" message) is a magic string rather than a typed variant — worth a small refactor
 - [ ] No CLI-level (`crates/stroem-cli`) tests directly exercise `cmd_validate`/`cmd_run` against a workspace containing a qualified cross-workspace reference — current coverage is at the `stroem-common`/`stroem-server` layer only
+
+## Per-Server Trigger Suppression (2026-09-07)
+
+Feature: `workspaces.<name>.triggers: false` in the server config loads a workspace (tasks, actions, connections all usable manually) but never fires its cron schedules, webhooks, or event sources on that server. Server-side only — does not travel with the repository; per-trigger `enabled: false` in workspace YAML remains the repo-level switch.
+
+- Docs: `docs/src/content/docs/guides/multi-workspace.md` ("Disabling triggers per server"), `guides/triggers.md` (note), `getting-started/configuration.md`, `reference/api.md`, `CLAUDE.md` "Multi-Workspace"
+
+### Done
+- [x] `WorkspaceSourceDef::{Folder,Git}.triggers: bool` (default `true`), `WorkspaceSourceDef::triggers_enabled()`; env override via `lenient_bool` (tagged-enum serde buffering bypasses the `config` crate's string→bool coercion)
+- [x] `WorkspaceManager::triggers_enabled(name)` + `triggers_disabled` set captured before source construction (covers `load_errors` placeholders); `with_triggers_disabled(name)` builder (pub — used by unit and integration tests, which build managers via `from_config`/`from_entries`)
+- [x] Skip in `scheduler::load_triggers`, `event_source::collect_desired` (running consumers get cancelled by reconcile), `web/hooks::find_webhook_trigger` (404, same as `enabled: false`)
+- [x] `WorkspaceInfo.triggers_enabled` → `GET /api/workspaces`, UI Workspaces page "Triggers" column with `off` badge, `stroem-api workspaces` TRIGGERS column with `(off)`, startup log line
+- [x] Unit tests: config parse/default/reject/env-override, manager flag (healthy, failed-load, construction-failure rows), each consumer skips a disabled workspace and still serves an enabled one, UI badge test
+
+### Follow-ups
+- [ ] Env override of OTHER fields inside `WorkspaceSourceDef` (`poll_interval_secs` as `STROEM__WORKSPACES__<NAME>__POLL_INTERVAL_SECS=120`) hits the same tagged-enum limitation and arrives as a string → deserialize error. Pre-existing, not introduced here. Fix by a lenient u64 deserializer, or by restructuring `workspaces:` entries into a struct with `#[serde(flatten)] source` so plain fields get the `config` crate's coercion.
+- [ ] No runtime toggle: changing `triggers` requires a config edit + restart (the scheduler/event-source hot-reload re-reads workspace YAML, not the server config). An admin API/UI toggle persisted in the DB would be the next step if operators need it live.
+- [ ] Trigger list API/UI (`/api/workspaces/{ws}/triggers`, task-detail trigger cards) does not yet annotate individual triggers as "suppressed on this server" — only the workspace row carries `triggers_enabled`.
+- [ ] E2E (`tests/e2e.sh`) does not cover the flag; unit coverage on each consumer plus the router-level integration test `test_workspace_triggers_disabled_reported_and_webhook_hidden` was judged sufficient for v1.

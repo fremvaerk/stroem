@@ -78,6 +78,7 @@ export function WorkspacesPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Tasks</TableHead>
                   <TableHead>Actions</TableHead>
+                  <TableHead>Triggers</TableHead>
                   <TableHead>Revision</TableHead>
                   <TableHead className="w-24 text-right">
                     <span className="sr-only">Refresh</span>
@@ -129,6 +130,25 @@ export function WorkspacesPage() {
                       <Badge variant="secondary" className="font-mono text-xs">
                         {ws.actions_count}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <Badge
+                          variant="secondary"
+                          className="font-mono text-xs"
+                        >
+                          {ws.triggers_count}
+                        </Badge>
+                        {!ws.triggers_enabled && (
+                          <Badge
+                            variant="outline"
+                            className="text-xs"
+                            title="Triggers are disabled for this workspace in the server config (triggers: false). Schedules, webhooks and event sources will not fire here; tasks can still be run manually."
+                          >
+                            off
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       {ws.revision ? (

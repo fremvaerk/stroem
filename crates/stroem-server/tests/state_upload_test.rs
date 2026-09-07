@@ -148,6 +148,7 @@ async fn build_test_app_inner(
         workspaces: HashMap::from([(
             workspace_name.to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),
@@ -708,6 +709,7 @@ async fn build_test_app_with_auth(
         workspaces: HashMap::from([(
             workspace_name.to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),

@@ -23,8 +23,8 @@ pub async fn cmd_workspaces(client: &Client, server: &str) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:20} {:10} ACTIONS", "NAME", "TASKS");
-    println!("{}", "-".repeat(40));
+    println!("{:20} {:10} {:10} TRIGGERS", "NAME", "TASKS", "ACTIONS");
+    println!("{}", "-".repeat(52));
     for ws in workspaces {
         let name = ws.get("name").and_then(|v| v.as_str()).unwrap_or("-");
         let tasks = ws.get("tasks_count").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -32,7 +32,21 @@ pub async fn cmd_workspaces(client: &Client, server: &str) -> Result<()> {
             .get("actions_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        println!("{:20} {:10} {}", name, tasks, actions);
+        let triggers = ws
+            .get("triggers_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        // Older servers omit `triggers_enabled`; treat absent as enabled.
+        let triggers_enabled = ws
+            .get("triggers_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let triggers_col = if triggers_enabled {
+            triggers.to_string()
+        } else {
+            format!("{} (off)", triggers)
+        };
+        println!("{:20} {:10} {:10} {}", name, tasks, actions, triggers_col);
     }
 
     Ok(())

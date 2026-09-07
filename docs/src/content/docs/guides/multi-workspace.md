@@ -52,6 +52,31 @@ Git workspaces use `poll_interval_secs` (default: 60) to control how often the s
 
 At startup, and on every reload, all configured workspaces are loaded concurrently rather than one at a time, so a single slow or misbehaving source doesn't delay the others. If a git workspace's clone/fetch fails with an error containing "credential rejected by remote", it means the configured deploy key or token is not authorized for that repository — the server fails that attempt immediately instead of letting it retry for over a minute.
 
+## Disabling triggers per server
+
+Set `triggers: false` on a workspace entry to load it without firing any of its triggers on that server. Cron schedules are not scheduled, webhook names are not routed, and event-source consumers are not started (running consumers are cancelled on the next reconcile). Tasks and actions load normally and can still be run manually from the UI, CLI, API, or MCP.
+
+```yaml
+workspaces:
+  analytics:
+    type: git
+    url: https://github.com/org/data-workflows.git
+    ref: main
+    triggers: false   # this server never fires analytics' schedules/webhooks/event sources
+```
+
+Works for both `folder` and `git` sources. The default is `true`. The usual env override applies, with the workspace name as the middle segment (env keys are lower-cased before matching, so the name must otherwise be spelled exactly as in the config; a name containing `-` needs the hyphen in the variable name too):
+
+```bash
+STROEM__WORKSPACES__ANALYTICS__TRIGGERS=false
+```
+
+Typical use: a staging or developer server that loads the same repository as production so its tasks can be exercised by hand, without a second copy of production's scheduled work running against the same external systems.
+
+This is a server-side setting, so it does not travel with the repository. To turn off a single trigger everywhere, use the trigger's own `enabled: false` in the workspace YAML instead (see [Triggers](/guides/triggers/)).
+
+The workspace list (`GET /api/workspaces`, the UI Workspaces page, and `stroem-api workspaces`) reports `triggers_enabled: false` for such workspaces; the triggers themselves remain listed so you can see what would fire elsewhere.
+
 ## API routes
 
 Each workspace is independent — tasks, actions, and scripts are scoped to their workspace. Tasks are accessed via workspace-scoped API routes:

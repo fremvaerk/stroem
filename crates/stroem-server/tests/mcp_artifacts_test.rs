@@ -67,6 +67,7 @@ async fn build_test_app() -> Result<TestApp> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),
@@ -604,6 +605,7 @@ mod acl_deny {
             workspaces: HashMap::from([(
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: tmp.path().to_string_lossy().to_string(),
                 },
             )]),

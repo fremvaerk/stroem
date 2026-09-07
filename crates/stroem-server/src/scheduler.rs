@@ -142,6 +142,11 @@ async fn load_triggers(
     let mut triggers = HashMap::new();
 
     for ws_name in workspaces.names() {
+        // `workspaces.<name>.triggers: false` in the server config: load the
+        // workspace but never schedule anything from it on this server.
+        if !workspaces.triggers_enabled(ws_name) {
+            continue;
+        }
         let config = match workspaces.get_config(ws_name).await {
             Some(c) => c,
             None => continue,
@@ -557,6 +562,39 @@ mod tests {
         let next = compute_next_run(&cron, last_run, now, None);
         assert!(next.is_some());
         assert!(next.unwrap() > now);
+    }
+
+    #[tokio::test]
+    async fn test_load_triggers_skips_workspace_with_triggers_disabled() {
+        use stroem_common::models::workflow::{TriggerDef, WorkspaceConfig};
+
+        let mk = |task: &str| {
+            let mut config = WorkspaceConfig::new();
+            config.triggers.insert(
+                "every-minute".to_string(),
+                TriggerDef::Scheduler {
+                    cron: "* * * * *".to_string(),
+                    task: task.to_string(),
+                    input: HashMap::new(),
+                    enabled: true,
+                    concurrency: Default::default(),
+                    timezone: None,
+                    force_refresh: false,
+                },
+            );
+            config
+        };
+
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("quiet".to_string(), mk("a"), None),
+            ("loud".to_string(), mk("b"), None),
+        ])
+        .with_triggers_disabled("quiet");
+
+        let triggers = load_triggers(&mgr, None).await;
+        assert_eq!(triggers.len(), 1, "only the enabled workspace contributes");
+        assert!(triggers.contains_key("loud/every-minute"));
+        assert!(!triggers.contains_key("quiet/every-minute"));
     }
 
     #[tokio::test]

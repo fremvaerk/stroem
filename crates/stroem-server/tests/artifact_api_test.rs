@@ -75,6 +75,7 @@ async fn build_test_app() -> Result<TestApp> {
         workspaces: HashMap::from([(
             "ws1".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: tmp.path().to_string_lossy().to_string(),
             },
         )]),

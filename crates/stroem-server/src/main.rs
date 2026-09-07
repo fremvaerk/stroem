@@ -110,10 +110,16 @@ async fn main() -> Result<()> {
             tracing::error!("Workspace '{}': failed to load: {}", info.name, error);
         } else {
             tracing::info!(
-                "Workspace '{}': {} actions, {} tasks",
+                "Workspace '{}': {} actions, {} tasks, {} triggers{}",
                 info.name,
                 info.actions_count,
-                info.tasks_count
+                info.tasks_count,
+                info.triggers_count,
+                if info.triggers_enabled {
+                    ""
+                } else {
+                    " (triggers disabled on this server)"
+                }
             );
         }
     }

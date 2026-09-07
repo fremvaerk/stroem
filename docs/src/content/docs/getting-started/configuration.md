@@ -37,6 +37,7 @@ workspaces:
   #   url: https://github.com/org/data-workflows.git
   #   ref: main
   #   poll_interval_secs: 60
+  #   triggers: false   # load it, but never fire its schedules/webhooks/event sources here
 worker_token: "change-in-production"
 # Optional: fleet-wide timeout defaults applied when a task or step does not
 # specify its own `timeout`. Capped at 24h (step) and 7d (job). Omit to leave
@@ -102,6 +103,7 @@ worker_token: "change-in-production"
 | `log_storage.local_dir` | No | Directory for local log files (default: `/tmp/stroem/logs`) |
 | `log_storage.s3` | No | S3 archival config (see [Log Storage](/operations/log-storage/)) |
 | `workspaces` | Yes | Map of workspace definitions (see [Multi-Workspace](/guides/multi-workspace/)) |
+| `workspaces.<name>.triggers` | No | `false` loads the workspace but never fires its triggers on this server (default: `true`; see [Disabling triggers per server](/guides/multi-workspace/#disabling-triggers-per-server)) |
 | `worker_token` | Yes | Shared secret for worker authentication |
 | `recovery` | No | Recovery sweeper settings (see [Recovery](/operations/recovery/)) |
 | `retention` | No | Data retention settings (see [Retention](/operations/retention/)) |

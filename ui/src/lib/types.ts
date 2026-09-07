@@ -3,6 +3,8 @@ export interface WorkspaceInfo {
   tasks_count: number;
   actions_count: number;
   triggers_count: number;
+  /** false when the server config sets `triggers: false` for this workspace */
+  triggers_enabled: boolean;
   revision?: string;
   error?: string;
   warnings?: string[];

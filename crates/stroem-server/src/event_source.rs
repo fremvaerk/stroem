@@ -342,6 +342,12 @@ async fn collect_desired(state: &AppState) -> Vec<DesiredEventSource> {
     let mut desired = Vec::new();
 
     for ws_name in state.workspaces.names() {
+        // `workspaces.<name>.triggers: false` in the server config: treat the
+        // workspace as having no event sources, so reconcile cancels any
+        // consumer jobs that were started before the flag was set.
+        if !state.workspaces.triggers_enabled(ws_name) {
+            continue;
+        }
         let config = match state.workspaces.get_config(ws_name).await {
             Some(c) => c,
             None => continue,
@@ -873,6 +879,45 @@ mod tests {
     /// `reconcile()`. This test starts the manager as a follower, lets it
     /// tick once, and confirms it exits cleanly after cancellation without
     /// any DB errors (reconcile would attempt DB queries against the invalid pool).
+    #[tokio::test]
+    async fn collect_desired_skips_workspace_with_triggers_disabled() {
+        use crate::state::test_app_state_with_workspaces;
+        use crate::workspace::WorkspaceManager;
+        use std::collections::HashMap;
+        use stroem_common::models::workflow::{TriggerDef, WorkspaceConfig};
+
+        let mk = || {
+            let mut config = WorkspaceConfig::new();
+            config.triggers.insert(
+                "queue".to_string(),
+                TriggerDef::EventSource {
+                    task: "consumer".to_string(),
+                    target_task: "handler".to_string(),
+                    enabled: true,
+                    input: HashMap::new(),
+                    env: HashMap::new(),
+                    restart_policy: RestartPolicy::Always,
+                    backoff_secs: 5,
+                    max_in_flight: None,
+                },
+            );
+            config
+        };
+
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("quiet".to_string(), mk(), None),
+            ("loud".to_string(), mk(), None),
+        ])
+        .with_triggers_disabled("quiet");
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = test_app_state_with_workspaces(mgr, temp.path());
+
+        let desired = collect_desired(&state).await;
+        assert_eq!(desired.len(), 1, "only the enabled workspace contributes");
+        assert_eq!(desired[0].workspace, "loud");
+        assert_eq!(desired[0].trigger_name, "queue");
+    }
+
     #[tokio::test]
     async fn follower_skips_reconcile() {
         use crate::config::{

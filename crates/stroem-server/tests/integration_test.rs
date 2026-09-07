@@ -1210,6 +1210,7 @@ async fn setup() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -1411,12 +1412,14 @@ async fn setup_two_workspaces() -> Result<(
             (
                 "A".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
             (
                 "B".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -1752,18 +1755,21 @@ async fn setup_shared_connections() -> Result<(
             (
                 "caller".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
             (
                 "owner".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
             (
                 "infra".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -2368,6 +2374,7 @@ async fn setup_with_task_needing_missing_connection() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -2732,6 +2739,7 @@ async fn setup_with_library_dotted_action() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -3932,6 +3940,7 @@ async fn test_task_detail_connections() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -6156,6 +6165,7 @@ async fn test_on_error_hook_fires_after_render_failure() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             stroem_server::config::WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -6427,6 +6437,7 @@ async fn test_parent_step_updated_after_child_render_failure() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             stroem_server::config::WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -6661,6 +6672,7 @@ async fn setup_with_auth() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -8872,6 +8884,19 @@ async fn setup_multi_workspace() -> Result<(
     TempDir,
     testcontainers::ContainerAsync<Postgres>,
 )> {
+    setup_multi_workspace_with(&[]).await
+}
+
+/// Like `setup_multi_workspace`, but the named workspaces get their triggers
+/// suppressed as if the server config had `workspaces.<name>.triggers: false`.
+async fn setup_multi_workspace_with(
+    triggers_disabled: &[&str],
+) -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
     let container = Postgres::default().start().await?;
     let port = container.get_host_port_ipv4(5432).await?;
     let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
@@ -8894,12 +8919,14 @@ async fn setup_multi_workspace() -> Result<(
             (
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
             (
                 "ops".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -8975,7 +9002,10 @@ async fn setup_multi_workspace() -> Result<(
         },
     );
 
-    let mgr = WorkspaceManager::from_entries(entries);
+    let mut mgr = WorkspaceManager::from_entries(entries);
+    for name in triggers_disabled {
+        mgr = mgr.with_triggers_disabled(name);
+    }
     let log_storage = LogStorage::new(&config.log_storage.local_dir);
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
     let router = build_router(state, CancellationToken::new());
@@ -8984,6 +9014,54 @@ async fn setup_multi_workspace() -> Result<(
 }
 
 // ─── Multi-workspace: List workspaces ───────────────────────────────
+
+/// `workspaces.<name>.triggers: false` end-to-end: the workspace list reports
+/// the flag, the workspace's webhook is not routable, its triggers are still
+/// listed, and manual execution is unaffected.
+#[tokio::test]
+async fn test_workspace_triggers_disabled_reported_and_webhook_hidden() -> Result<()> {
+    let (router, _pool, _tmp, _container) = setup_multi_workspace_with(&["default"]).await?;
+
+    // Flag surfaces on the workspace list; the other workspace is untouched.
+    let response = router.clone().oneshot(api_get("/api/workspaces")).await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    let workspaces = body.as_array().unwrap();
+    let default_ws = workspaces.iter().find(|w| w["name"] == "default").unwrap();
+    let ops_ws = workspaces.iter().find(|w| w["name"] == "ops").unwrap();
+    assert_eq!(default_ws["triggers_enabled"], json!(false));
+    assert_eq!(ops_ws["triggers_enabled"], json!(true));
+    // Triggers remain loaded and counted — only firing is suppressed.
+    assert!(default_ws["triggers_count"].as_u64().unwrap() > 0);
+
+    // The suppressed workspace's webhook behaves like a nonexistent one.
+    let request = Request::builder()
+        .method("POST")
+        .uri("/hooks/github-push?secret=whsec_test123")
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"ref":"refs/heads/main","commits":[]}"#))
+        .unwrap();
+    let response = router.clone().oneshot(request).await?;
+    assert_eq!(
+        response.status(),
+        404,
+        "webhook of a triggers-disabled workspace must not be routable"
+    );
+
+    // Manual execution of the same workspace's tasks still works.
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/hello-world/execute",
+            json!({"input": {"name": "Manual"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let body = body_json(response).await;
+    assert!(body["job_id"].as_str().is_some());
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_list_workspaces() -> Result<()> {
@@ -9127,12 +9205,14 @@ async fn setup_with_auth_and_acl() -> Result<(
             (
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
             (
                 "ops".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: temp_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -9702,6 +9782,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -9725,6 +9806,7 @@ async fn test_workspace_tarball_download() -> Result<()> {
         HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -9875,6 +9957,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -9898,6 +9981,7 @@ async fn test_tarball_mismatched_etag_returns_200() -> Result<()> {
         HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -9966,6 +10050,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -9989,6 +10074,7 @@ async fn test_tarball_bare_etag_matches() -> Result<()> {
         HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -10073,6 +10159,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_path_str.clone(),
             },
         )]),
@@ -10096,6 +10183,7 @@ async fn test_tarball_stale_etag_after_workspace_change() -> Result<()> {
         HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_path_str.clone(),
             },
         )]),
@@ -10215,6 +10303,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -10238,6 +10327,7 @@ async fn test_tarball_etag_header_format() -> Result<()> {
         HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: ws_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -11115,6 +11205,7 @@ async fn test_config_returns_oidc_providers_with_auth() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -11196,6 +11287,7 @@ async fn test_config_returns_has_internal_auth_true() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -11271,6 +11363,7 @@ async fn test_config_returns_has_internal_auth_false_oidc_only() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -13476,6 +13569,7 @@ async fn setup_recovery() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -13733,6 +13827,7 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -15517,6 +15612,7 @@ async fn test_connection_input_passthrough_at_claim() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -15880,6 +15976,7 @@ async fn setup_sync_webhook() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -17075,12 +17172,14 @@ async fn test_multi_workspace_tarball_download() -> Result<()> {
             (
                 "default".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: ws_default_dir.path().to_string_lossy().to_string(),
                 },
             ),
             (
                 "ops".to_string(),
                 WorkspaceSourceDef::Folder {
+                    triggers: true,
                     path: ws_ops_dir.path().to_string_lossy().to_string(),
                 },
             ),
@@ -17326,6 +17425,7 @@ async fn setup_recovery_with_unmatched_timeout(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -19555,6 +19655,7 @@ async fn setup_with_workspace(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -20409,6 +20510,7 @@ async fn setup_event_source() -> Result<(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -20923,6 +21025,7 @@ async fn test_emit_endpoint_disabled_trigger() -> Result<()> {
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),
@@ -21057,6 +21160,7 @@ async fn setup_event_source_with_workspace(
         workspaces: HashMap::from([(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: temp_dir.path().to_string_lossy().to_string(),
             },
         )]),

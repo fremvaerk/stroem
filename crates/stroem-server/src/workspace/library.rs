@@ -1224,6 +1224,7 @@ tasks:
         workspace_defs.insert(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: workspace_dir.path().to_string_lossy().to_string(),
             },
         );
@@ -1375,6 +1376,7 @@ tasks:
         workspace_defs.insert(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
+                triggers: true,
                 path: workspace_dir.path().to_string_lossy().to_string(),
             },
         );

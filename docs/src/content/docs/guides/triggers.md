@@ -5,6 +5,10 @@ description: Cron schedules and webhook endpoints for automated task execution
 
 Triggers define automated task execution. Two types are supported: `scheduler` (cron-based) and `webhook` (HTTP-triggered).
 
+:::note[Disabling all triggers of a workspace on one server]
+Every trigger has its own `enabled` flag (in the workspace YAML, so it applies wherever the repository is loaded). To stop a whole workspace's triggers on a single server (for example a staging server that mirrors production), set `triggers: false` on that workspace in the **server** config instead — see [Multi-Workspace → Disabling triggers per server](/guides/multi-workspace/#disabling-triggers-per-server). Cron, webhook, and event-source triggers are all affected; tasks stay runnable manually.
+:::
+
 ## Cron scheduler
 
 ```yaml

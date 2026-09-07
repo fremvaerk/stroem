@@ -470,6 +470,11 @@ struct WebhookMatch {
 /// Find the first enabled webhook trigger matching the given name.
 async fn find_webhook_trigger(state: &AppState, name: &str) -> Option<WebhookMatch> {
     for ws_name in state.workspaces.names() {
+        // `workspaces.<name>.triggers: false` in the server config: the
+        // workspace's webhooks are invisible here, same as `enabled: false`.
+        if !state.workspaces.triggers_enabled(ws_name) {
+            continue;
+        }
         let config = match state.workspaces.get_config(ws_name).await {
             Some(c) => c,
             None => continue,
@@ -611,6 +616,62 @@ fn build_webhook_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn webhook_config(hook_name: &str) -> stroem_common::models::workflow::WorkspaceConfig {
+        let mut config = stroem_common::models::workflow::WorkspaceConfig::new();
+        config.triggers.insert(
+            "incoming".to_string(),
+            TriggerDef::Webhook {
+                name: hook_name.to_string(),
+                task: "handler".to_string(),
+                secret: None,
+                input: HashMap::new(),
+                enabled: true,
+                mode: None,
+                timeout_secs: None,
+                force_refresh: false,
+            },
+        );
+        config
+    }
+
+    #[tokio::test]
+    async fn test_find_webhook_trigger_skips_workspace_with_triggers_disabled() {
+        use crate::state::test_app_state_with_workspaces;
+        use crate::workspace::WorkspaceManager;
+
+        // Same webhook name in both workspaces: only the enabled one may match.
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("quiet".to_string(), webhook_config("deploy"), None),
+            ("loud".to_string(), webhook_config("deploy"), None),
+        ])
+        .with_triggers_disabled("quiet");
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = test_app_state_with_workspaces(mgr, temp.path());
+
+        let found = find_webhook_trigger(&state, "deploy")
+            .await
+            .expect("enabled workspace's webhook must be found");
+        assert_eq!(found.ws_name, "loud");
+        assert_eq!(found.trigger_key, "incoming");
+    }
+
+    #[tokio::test]
+    async fn test_find_webhook_trigger_none_when_only_disabled_workspace_matches() {
+        use crate::state::test_app_state_with_workspaces;
+        use crate::workspace::WorkspaceManager;
+
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("quiet".to_string(), webhook_config("deploy"), None),
+            ("loud".to_string(), webhook_config("other"), None),
+        ])
+        .with_triggers_disabled("quiet");
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = test_app_state_with_workspaces(mgr, temp.path());
+
+        assert!(find_webhook_trigger(&state, "deploy").await.is_none());
+        assert!(find_webhook_trigger(&state, "other").await.is_some());
+    }
 
     #[test]
     fn test_extract_secret_from_query() {

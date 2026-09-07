@@ -224,6 +224,51 @@ impl AppState {
     }
 }
 
+/// Build an `AppState` around an arbitrary `WorkspaceManager` with a lazy,
+/// never-connected DB pool. For unit tests in other modules that need to
+/// exercise workspace-iterating code paths (scheduler, event sources, webhook
+/// lookup) without a database.
+#[cfg(test)]
+pub(crate) fn test_app_state_with_workspaces(
+    mgr: WorkspaceManager,
+    log_dir: &std::path::Path,
+) -> AppState {
+    use crate::config::{DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig};
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://invalid:5432/db".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test".to_string(),
+        auth: None,
+        recovery: RecoveryConfig {
+            heartbeat_timeout_secs: 120,
+            sweep_interval_secs: 60,
+            unmatched_step_timeout_secs: 30,
+        },
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+    let log_storage = LogStorage::new(log_dir);
+    let pool = PgPool::connect_lazy("postgres://invalid:5432/db").unwrap();
+    AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
