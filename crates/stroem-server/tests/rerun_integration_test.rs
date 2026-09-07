@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::{
     ActionDef, ConnectionDef, FlowStep, InputFieldDef, TaskDef, WorkspaceConfig,
 };
-use stroem_db::{create_pool, run_migrations};
+use stroem_db::{create_pool, run_migrations, JobRepo, WorkerRepo};
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RetentionConfig, ServerConfig, WorkspaceSourceDef,
 };
@@ -568,5 +568,112 @@ async fn rerun_chain_preserves_immediate_source() -> Result<()> {
     );
     assert_eq!(third_resp["source_type"], json!("rerun"));
 
+    Ok(())
+}
+
+fn worker_req(method: &str, uri: &str, body: JsonValue) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer test-token")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// A failed Re-run must fire the WORKSPACE `on_error` hook (rerun was missing
+/// from the top-level source-type list).
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_failure_fires_workspace_on_error_hook() -> Result<()> {
+    let mut workspace = build_rerun_workspace();
+    // Any existing action works as the hook action — the hook job just needs to exist.
+    let hook_action = workspace
+        .actions
+        .keys()
+        .next()
+        .cloned()
+        .expect("workspace has an action");
+    workspace
+        .on_error
+        .push(stroem_common::models::workflow::HookDef {
+            action: hook_action,
+            input: HashMap::new(),
+        });
+    let app = build_test_app("default", workspace).await?;
+    let task = "rerun-task";
+
+    // Source job.
+    let (st, body) =
+        execute_task(&app, "default", task, json!({"input": {"note": "first"}})).await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let source_id = body["job_id"].as_str().unwrap().to_string();
+
+    // Re-run it.
+    let (st, body) = execute_task(
+        &app,
+        "default",
+        task,
+        json!({"input": {"note": "second"}, "source_job_id": source_id}),
+    )
+    .await?;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let rerun_id: Uuid = body["job_id"].as_str().unwrap().parse()?;
+
+    // Cancel the source job's still-ready step so claim (which picks a
+    // random ready step across jobs) can only pick up the rerun's step.
+    let cancel_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/jobs/{source_id}/cancel"))
+        .body(Body::empty())?;
+    let cancel_resp = app.router.clone().oneshot(cancel_req).await?;
+    assert_eq!(cancel_resp.status(), StatusCode::OK, "cancel source job");
+
+    // Worker claims and fails the rerun's step.
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &app.pool,
+        worker_id,
+        "w",
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    let resp = app
+        .router
+        .clone()
+        .oneshot(worker_req(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    let claim: JsonValue = serde_json::from_slice(&resp.into_body().collect().await?.to_bytes())?;
+    let step = claim["step_name"]
+        .as_str()
+        .expect("claimed the rerun step")
+        .to_string();
+    assert_eq!(claim["job_id"].as_str().unwrap(), rerun_id.to_string());
+    let resp = app
+        .router
+        .clone()
+        .oneshot(worker_req(
+            "POST",
+            &format!("/worker/jobs/{rerun_id}/steps/{step}/complete"),
+            json!({"exit_code": 1, "error": "boom"}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let rerun = get_job(&app, &rerun_id.to_string()).await?;
+    assert_eq!(rerun["status"], "failed");
+    let jobs = JobRepo::list(&app.pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "workspace on_error must fire for a rerun: {jobs:?}"
+    );
     Ok(())
 }

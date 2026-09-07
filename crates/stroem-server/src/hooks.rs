@@ -64,6 +64,18 @@ pub struct HookArtifactMeta {
     pub url: String,
 }
 
+/// Source types whose jobs are "top-level" runs: workspace-level hooks
+/// (`on_success` / `on_error` / `on_cancel` / `on_suspended`) fall back to
+/// them when the task defines none. Child (`task`), hook, agent-tool and
+/// event-source consumer jobs are excluded. `rerun` and `restart` are
+/// user-initiated top-level runs just like `user`/`api`.
+pub(crate) fn is_top_level_source(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry" | "rerun" | "restart"
+    )
+}
+
 /// Fire hooks for a job that has reached a terminal state.
 ///
 /// - Jobs with `source_type = "hook"` never trigger further hooks (recursion guard).
@@ -92,10 +104,7 @@ pub async fn fire_hooks(
     };
 
     // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.
-    let is_top_level = matches!(
-        job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
-    );
+    let is_top_level = is_top_level_source(&job.source_type);
     let hooks: &[HookDef] = if !task_hooks.is_empty() {
         task_hooks
     } else if is_top_level {
@@ -206,10 +215,7 @@ pub async fn fire_suspended_hooks(
     }
 
     // Select task-level then workspace-level on_suspended hooks
-    let is_top_level = matches!(
-        job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
-    );
+    let is_top_level = is_top_level_source(&job.source_type);
     let hooks: &[HookDef] = if !task.on_suspended.is_empty() {
         &task.on_suspended
     } else if is_top_level && !workspace_config.on_suspended.is_empty() {
@@ -549,10 +555,7 @@ mod tests {
             _ => return None,
         };
 
-        let is_top_level = matches!(
-            job_source_type,
-            "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
-        );
+        let is_top_level = is_top_level_source(job_source_type);
         let hooks: &[HookDef] = if !task_hooks.is_empty() {
             task_hooks
         } else if is_top_level {
@@ -1063,6 +1066,27 @@ mod tests {
         let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")], vec![]);
 
         let selected = select_hooks_for_job(&ws, "webhook", "failed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-alert");
+    }
+
+    /// Workspace fallback fires for rerun-sourced top-level jobs (a Re-run's
+    /// failure must not be silently dropped just because it isn't `api`/`user`).
+    #[test]
+    fn test_workspace_fallback_fires_for_rerun_sourced_jobs() {
+        let task = make_task_def(vec![], vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "rerun", "failed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-alert");
+    }
+
+    /// Workspace fallback fires for restart-sourced top-level jobs.
+    #[test]
+    fn test_workspace_fallback_fires_for_restart_sourced_jobs() {
+        let task = make_task_def(vec![], vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "restart", "failed", &task).unwrap();
         assert_eq!(selected[0].action, "ws-alert");
     }
 
