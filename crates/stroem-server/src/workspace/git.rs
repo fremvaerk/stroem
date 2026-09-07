@@ -275,6 +275,61 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Network test (ignored by default): a private GitHub repository cloned
+    /// with an SSH key that is NOT authorized for it must fail within seconds,
+    /// not minutes. Before the fail-fast credentials callback, libgit2 kept
+    /// re-presenting the rejected key until the remote dropped the connection
+    /// (~129s observed in production, 2026-09-07).
+    ///
+    /// Run with:
+    ///   STROEM_TEST_SSH_KEY_PATH=/path/to/unauthorized_key \
+    ///   STROEM_TEST_SSH_REPO=git@github.com:org/private-repo.git \
+    ///   cargo test -p stroem-server --lib test_rejected_ssh_key_fails_fast -- --ignored --nocapture
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs network access and an SSH key that the remote rejects"]
+    async fn test_rejected_ssh_key_fails_fast() {
+        let key_path = match std::env::var("STROEM_TEST_SSH_KEY_PATH") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("STROEM_TEST_SSH_KEY_PATH not set — skipping");
+                return;
+            }
+        };
+        let url = std::env::var("STROEM_TEST_SSH_REPO")
+            .unwrap_or_else(|_| "git@github.com:allunite/ai-validation.git".to_string());
+        let clone_dir = TempDir::new().unwrap();
+        let auth = GitAuthConfig {
+            auth_type: "ssh_key".to_string(),
+            key_path: Some(key_path),
+            key: None,
+            token: None,
+            username: None,
+        };
+        let source =
+            GitSource::with_clone_dir(&url, "main", Some(auth), clone_dir.path().join("repo"));
+
+        let started = std::time::Instant::now();
+        let result = source.load().await;
+        let elapsed = started.elapsed();
+        eprintln!(
+            "load() finished in {:?}: {:?}",
+            elapsed,
+            result.as_ref().err().map(|e| format!("{e:#}"))
+        );
+
+        let err = result.expect_err("an unauthorized key must not clone");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rejected by remote"),
+            "expected the fail-fast message, got: {msg}"
+        );
+        assert!(
+            elapsed.as_secs() < 30,
+            "rejection took {:?}; the callback should abort on the first retry",
+            elapsed
+        );
+    }
+
     /// Create a bare git repo with an initial commit on `main` containing the given files.
     /// Returns (TempDir, file:// URL).
     fn create_bare_repo(files: &[(&str, &str)]) -> (TempDir, String) {
