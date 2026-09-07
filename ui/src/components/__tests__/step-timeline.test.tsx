@@ -211,30 +211,31 @@ describe("StepTimeline", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Retry badge (pre-retry) — shows configured total executions
+  // Retry badge — same "attempt N/M" format before and after a retry
   // -------------------------------------------------------------------------
-  it("shows 'attempts: N' (max_retries + 1) before any retry has happened", () => {
+  it("shows 'attempt 1/M' (M = max_retries + 1) on the first execution", () => {
     // max_retries = 2 means max_attempts: 3 was configured (2 retries, 3 total executions).
     const step = makeStep({ max_retries: 2, retry_attempt: 0 });
 
     renderTimeline([step]);
 
-    expect(screen.getByText("attempts: 3")).toBeInTheDocument();
+    expect(screen.getByText("attempt 1/3")).toBeInTheDocument();
+    expect(screen.getByLabelText(/attempt 1 of 3/)).toBeInTheDocument();
   });
 
-  it("does not show the attempts badge when max_retries is 0", () => {
+  it("does not show the attempt badge when max_retries is 0", () => {
     const step = makeStep({ max_retries: 0, retry_attempt: 0 });
 
     renderTimeline([step]);
 
-    expect(screen.queryByText(/attempts:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/attempt \d/)).not.toBeInTheDocument();
   });
 
-  it("does not show the attempts badge when max_retries is null", () => {
+  it("does not show the attempt badge when max_retries is null", () => {
     const step = makeStep({ max_retries: null, retry_attempt: 0 });
 
     renderTimeline([step]);
 
-    expect(screen.queryByText(/attempts:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/attempt \d/)).not.toBeInTheDocument();
   });
 });

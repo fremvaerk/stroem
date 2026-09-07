@@ -75,7 +75,7 @@ function StepRow({
         tabIndex={0}
         aria-label={[
           `${step.step_name}, status: ${step.status}`,
-          step.retry_attempt > 0 && step.max_retries != null
+          step.max_retries != null && step.max_retries > 0
             ? `attempt ${step.retry_attempt + 1} of ${step.max_retries + 1}`
             : null,
           isRetryPending ? "waiting for retry" : null,
@@ -131,14 +131,17 @@ function StepRow({
                 when
               </span>
             )}
-            {step.max_retries != null && step.max_retries > 0 && step.retry_attempt > 0 && (
-              <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400">
+            {step.max_retries != null && step.max_retries > 0 && (
+              // One format for every execution: "attempt 1/3" on the first run,
+              // "attempt 2/3" after a retry. Muted until a retry has happened.
+              <span
+                className={
+                  step.retry_attempt > 0
+                    ? "rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/30 dark:text-violet-400"
+                    : "rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                }
+              >
                 attempt {step.retry_attempt + 1}/{step.max_retries + 1}
-              </span>
-            )}
-            {step.max_retries != null && step.max_retries > 0 && step.retry_attempt === 0 && (
-              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                attempts: {step.max_retries + 1}
               </span>
             )}
             {isRetryPending && (
