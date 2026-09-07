@@ -291,7 +291,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Hybrid recording: counters/histograms inline at event sites via `metrics::counter!` / `metrics::histogram!`; gauges sampled at scrape time in `gather_gauges` (2s timeout per DB query via `tokio::time::timeout`, errors logged + skipped, NOT zeroed — Prometheus treats absence as stale).
 - DB queries inside `gather_gauges` run concurrently via `tokio::join!` so worst-case scrape latency is bounded at 2s, not 6s.
 - RED middleware applied to `/api/*` only. `/worker`, `/hooks`, `/mcp` deliberately excluded (worker traffic would swamp user-facing signal).
-- Job-completion counter lives in `run_terminal_job_actions` (not `handle_job_terminal`) — that's the single funnel called by `orchestrate_after_step`, `propagate_to_parent`, AND `handle_job_terminal`.
+- Job-completion counter is incremented inside `claim_terminal_handling` (`job_recovery.rs`), which is ALSO the exactly-once gate for every terminal side effect (propagation, task-retry creation, hooks, notify, log archive) via a `metrics_recorded_at` CAS. Any new terminal path must call it first and only act when it returns `true`.
 - Global `replica_id` label added at recorder install — keeps multi-replica scrapes from collapsing into one series.
 - Helm: `serviceMonitor.enabled: true` renders `templates/servicemonitor.yaml`; uses `bearerTokenSecret` when `metrics.public: false`.
 - New metrics: add a `pub const` in `metrics.rs`, add the recording site, add an integration test in `crates/stroem-server/tests/metrics_test.rs`, document in `docs/src/content/docs/operations/metrics.md`.
@@ -317,7 +317,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 ### Hooks (on_success / on_error / on_cancel)
 - `HookDef`: `action` + `input` map. Task-level and workspace-level (fallback when task has none).
 - `on_success` fires on completed, `on_error` fires on failed, `on_cancel` fires on cancelled. Each is independent.
-- Workspace-level hooks only fire for top-level jobs (`source_type`: api, user, trigger, webhook, retry)
+- Workspace-level hooks only fire for top-level jobs. Top-level source types (workspace-hook fallback): `hooks::is_top_level_source` — api, user, trigger, webhook, mcp, retry, rerun, restart.
 - Recursion guard: `source_type = "hook"` → no further hooks
 - Hook actions can be `type: task` — creates full child job instead of single-step hook job
 
@@ -349,6 +349,8 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - `compute_depth()` max 10 levels. Child propagation via `propagate_to_parent()`.
 - Self-referencing task actions rejected by validation.
 - **Dispatch failures re-orchestrate**: `handle_task_steps` runs in passes; every failure branch (depth exceeded, input render/prepare error, child-job creation error) goes through `fail_task_step` → `mark_failed` + `orchestrate_after_server_step_failure` (shared with approval steps), and the pass loop repeats while failures keep promoting further task steps. A server-side `mark_failed` that does NOT re-run the orchestrator leaves dependents `pending` and the job stuck `running` (prod 2026-09-07). Regression test: `test_task_step_dispatch_failure_cascades_and_fails_job`.
+- **Settlement is shared**: `orchestrator::settle_if_all_terminal(pool, job_id, task)` is the ONLY place a job's terminal status is decided (orchestrator AND job creation). Rules: any untolerated `failed` → `failed`; else any `cancelled` → `cancelled`; else `completed` with aggregated terminal-step output. `create_job_for_task_detailed` returns `CreatedJob { job_id, terminal_at_creation }`; every HTTP/MCP/scheduler/webhook/hook/event-source/retry entry point calls `job_recovery::finalize_created_job` afterwards (runs `handle_job_terminal` once when terminal at creation + `reconcile_settled_children`). A child job that settles inside creation is picked up by `reconcile_settled_children` (also called after every `handle_task_steps`).
+- Post-commit initialisation errors fail the live steps with `[creation] initialisation failed: …` and mark the job failed (never a 500 over a committed pending job).
 
 ### Config Loading
 - `config` crate loads YAML + env var overrides. Prefix: `STROEM__`, separator: `__`
@@ -364,6 +366,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - **`retry_of_job_id`** — server-initiated retry of a failed job. Same logical run, attempt N+1.
 - **`source_job_id`** + **`source_type = 'rerun'`** — user clicked **Re-run** in the UI. New job uses `source.raw_input` to prefill the form; UI sends `••••••` for fields the user didn't touch and the server replaces it with the source value before merging defaults / resolving connections (see `crates/stroem-common/src/template.rs::resolve_rerun_sentinels`).
 - **`source_job_id`** + **`source_type = 'restart'`** + **`restart_from_step`** — *reserved* for the Restart-from-failed-step feature.
+- `rerun` (and `restart`, reserved) are top-level source types for workspace-level hook fallback — see § Hooks.
 - **`raw_input`** — verbatim user submission stored on every job, before `merge_defaults` and `resolve_connection_inputs`. Returned by `GET /api/jobs/{id}` with workspace-defined secret values redacted to `••••••`. NULL for jobs created before migration `032_job_raw_input_and_lineage.sql`. **Redaction limitation:** the existing `redact_response` only matches values listed in `workspace.secrets`; user-typed secret values not present in the workspace config are stored and returned as plain text (same exposure as the existing `job.input` column — pre-existing limitation, not introduced by Re-run prefill).
 
 ### Health Check
