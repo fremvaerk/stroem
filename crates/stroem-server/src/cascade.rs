@@ -427,9 +427,13 @@ fn phase_placeholders(
         let Some(fs) = task.flow.get(&r.step_name) else {
             continue;
         };
-        // Idempotency guard as today (job_creator.rs:975-978): instances already
-        // exist → leave the placeholder alone. Task 6 turns this into `Adopt`.
+        // R0: instances already exist (a past crash between insert and the
+        // placeholder transition) → adopt the placeholder instead of leaving it
+        // pending forever. Never re-expands.
         if snap.status(&format!("{}[0]", r.step_name)).is_some() {
+            out.push(Change::Adopt {
+                placeholder: r.step_name.clone(),
+            });
             continue;
         }
         if !deps_satisfied(snap, fs) {
@@ -1296,6 +1300,33 @@ mod tests {
         ];
         let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
         assert_eq!(names(&plan), ["expand:p:3"]);
+    }
+
+    #[test]
+    fn pending_placeholder_with_existing_instances_is_adopted() {
+        let t = task(vec![("p", fs(&[]))]);
+        let rows = vec![
+            placeholder("p", "pending", "[1,2]"),
+            instance("p", 0, "completed", Some(json!(1))),
+            instance("p", 1, "completed", Some(json!(2))),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(
+            names(&plan),
+            ["adopt:p", "rollup-ok:p"],
+            "adopted in P3, rolled up in the next pass"
+        );
+    }
+
+    #[test]
+    fn adoption_needs_a_workspace_config_like_expansion() {
+        let t = task(vec![("p", fs(&[]))]);
+        let rows = vec![
+            placeholder("p", "pending", "[1]"),
+            instance("p", 0, "completed", None),
+        ];
+        let plan = run(&t, &job(None), &rows, None).unwrap();
+        assert!(plan.changes.is_empty());
     }
 
     // ── R5/R6: sequential advance and rollup ─────────────────────────

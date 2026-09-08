@@ -2011,3 +2011,32 @@ async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
     );
     Ok(())
 }
+
+// ─── Test: R0 adoption (Task 6) ────────────────────────────────────────────
+
+/// Placeholders stranded by the pre-cascade crash hole (instances inserted, placeholder
+/// still pending) are adopted and roll up normally.
+#[tokio::test]
+async fn test_adopts_partially_expanded_placeholder() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step_for_each(job_id, "x", "pending", "[1,2]"),
+            step_instance(job_id, "x", 0, "completed"),
+            step_instance(job_id, "x", 1, "completed"),
+        ],
+    )
+    .await?;
+    let task = make_task(HashMap::from([("x".to_string(), flow_step(vec![]))]));
+    on_step_completed(&pool, job_id, "x[1]", &task, Some(&WorkspaceConfig::new())).await?;
+    let s = step_statuses(&pool, job_id).await;
+    assert_eq!(s["x"], "completed");
+    assert_eq!(
+        JobStepRepo::get_steps_for_job(&pool, job_id).await?.len(),
+        3,
+        "no re-expansion"
+    );
+    Ok(())
+}
