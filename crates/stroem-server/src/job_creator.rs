@@ -930,7 +930,7 @@ async fn handle_task_steps_pass(
 }
 
 /// Maximum number of for_each instances (runtime limit)
-const MAX_FOR_EACH_ITEMS: usize = 10000;
+pub(crate) const MAX_FOR_EACH_ITEMS: usize = 10000;
 
 /// Expand pending for_each placeholder steps whose dependencies are met.
 ///
@@ -1152,7 +1152,7 @@ pub async fn expand_for_each_steps(
 }
 
 /// Parse the for_each expression and return the items array.
-fn parse_for_each_items(
+pub(crate) fn parse_for_each_items(
     expr: &str,
     render_ctx: &serde_json::Value,
 ) -> Result<Vec<serde_json::Value>> {
@@ -1178,7 +1178,7 @@ fn parse_for_each_items(
 }
 
 /// Render a Tera template and parse the result as a JSON array.
-fn render_for_each_template(
+pub(crate) fn render_for_each_template(
     template: &str,
     render_ctx: &serde_json::Value,
 ) -> Result<Vec<serde_json::Value>> {

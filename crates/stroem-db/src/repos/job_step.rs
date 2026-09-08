@@ -63,7 +63,7 @@ pub struct JobStepRow {
 }
 
 /// New job step for creation
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NewJobStep {
     pub job_id: Uuid,
     pub step_name: String,
