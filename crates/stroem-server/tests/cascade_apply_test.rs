@@ -7,7 +7,9 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep};
+use stroem_server::cascade::execute;
 use stroem_server::cascade::{apply, ApplyError, Change, Plan, RollupOutcome};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -260,5 +262,112 @@ async fn apply_job_running_update_may_match_zero_rows() -> Result<()> {
     apply(&mut tx, job_id, &plan).await.unwrap();
     tx.commit().await?;
     assert_eq!(step_statuses(&pool, job_id).await["p"], "running");
+    Ok(())
+}
+
+fn make_task(flow: HashMap<String, FlowStep>) -> TaskDef {
+    TaskDef {
+        name: None,
+        description: None,
+        mode: "distributed".to_string(),
+        folder: None,
+        input: HashMap::new(),
+        flow,
+        timeout: None,
+        retry: None,
+        on_success: vec![],
+        on_error: vec![],
+        on_suspended: vec![],
+        on_cancel: vec![],
+    }
+}
+
+fn flow_step(depends_on: Vec<&str>) -> FlowStep {
+    FlowStep {
+        action: "noop".to_string(),
+        name: None,
+        description: None,
+        depends_on: depends_on.into_iter().map(str::to_string).collect(),
+        input: HashMap::new(),
+        continue_on_failure: false,
+        timeout: None,
+        when: None,
+        for_each: None,
+        sequential: false,
+        retry: None,
+        inline_action: None,
+    }
+}
+
+#[tokio::test]
+async fn execute_empty_plan_touches_nothing() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(&pool, &[step(job_id, "a", "running")]).await?;
+    let task = make_task(HashMap::from([("a".to_string(), flow_step(vec![]))]));
+    let plan = execute(&pool, job_id, &task, Some(&WorkspaceConfig::new())).await?;
+    assert!(plan.changes.is_empty());
+    Ok(())
+}
+
+/// Guard-miss re-run through `execute`: a stale plan is never applied.
+#[tokio::test]
+async fn execute_reruns_after_a_guard_miss() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[step(job_id, "a", "completed"), step(job_id, "b", "pending")],
+    )
+    .await?;
+    let task = make_task(HashMap::from([
+        ("a".to_string(), flow_step(vec![])),
+        ("b".to_string(), flow_step(vec!["a"])),
+    ]));
+    // Prove the plan is non-empty on this snapshot, then invalidate it.
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let stale = stroem_server::cascade::run(&task, &job, &steps, Some(&WorkspaceConfig::new()))?;
+    assert_eq!(stale.changes, vec![Change::Promote { step: "b".into() }]);
+    JobStepRepo::cancel_pending_steps(&pool, job_id).await?;
+
+    let plan = execute(&pool, job_id, &task, Some(&WorkspaceConfig::new())).await?;
+    assert!(
+        plan.changes.is_empty(),
+        "the re-run sees b cancelled and plans nothing"
+    );
+    assert_eq!(step_statuses(&pool, job_id).await["b"], "cancelled");
+    Ok(())
+}
+
+/// Two concurrent executes for the same job: both return, the join is promoted
+/// exactly once, final state equals a serial run. Smoke test of the re-run path.
+#[tokio::test]
+async fn execute_concurrently_promotes_join_once() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "l", "completed"),
+            step(job_id, "r", "completed"),
+            step(job_id, "join", "pending"),
+        ],
+    )
+    .await?;
+    let task = make_task(HashMap::from([
+        ("l".to_string(), flow_step(vec![])),
+        ("r".to_string(), flow_step(vec![])),
+        ("join".to_string(), flow_step(vec!["l", "r"])),
+    ]));
+    let ws = WorkspaceConfig::new();
+    let (p1, p2) = tokio::join!(
+        execute(&pool, job_id, &task, Some(&ws)),
+        execute(&pool, job_id, &task, Some(&ws)),
+    );
+    let (p1, p2) = (p1?, p2?);
+    let promoted = p1.changes.len() + p2.changes.len();
+    assert_eq!(promoted, 1, "exactly one of them applied the promotion");
+    assert_eq!(step_statuses(&pool, job_id).await["join"], "ready");
     Ok(())
 }

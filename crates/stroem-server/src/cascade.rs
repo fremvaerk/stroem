@@ -1,8 +1,9 @@
 //! Step cascade: the pure fixpoint that moves a job's non-running steps.
 //! See docs/superpowers/specs/2026-09-08-step-cascade-design.md.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
@@ -665,6 +666,70 @@ pub async fn apply(
         }
     }
     Ok(a)
+}
+
+const MAX_ATTEMPTS: usize = 3;
+
+fn is_deadlock(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<sqlx::Error>()
+            .and_then(|s| s.as_database_error())
+            .and_then(|d| d.code())
+            .map(|code| code == "40P01")
+            .unwrap_or(false)
+    })
+}
+
+/// The one entry point both callers use (§4.7): read the job and its steps, run
+/// the pure fixpoint, apply the plan in one transaction. A guard miss (a row moved
+/// between snapshot and apply) or a Postgres deadlock rolls back and re-runs from
+/// a fresh snapshot, at most `MAX_ATTEMPTS` times.
+#[tracing::instrument(skip(pool, task, workspace_config))]
+pub async fn execute(
+    pool: &PgPool,
+    job_id: Uuid,
+    task: &TaskDef,
+    workspace_config: Option<&WorkspaceConfig>,
+) -> Result<Plan> {
+    for attempt in 1..=MAX_ATTEMPTS {
+        let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
+        let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
+        let plan = run(task, &job, &steps, workspace_config)?;
+        if plan.changes.is_empty() {
+            return Ok(plan);
+        }
+
+        let mut tx = pool.begin().await.context("begin cascade apply")?;
+        match apply(&mut tx, job_id, &plan).await {
+            Ok(applied) => {
+                tx.commit().await.context("commit cascade apply")?;
+                tracing::info!(
+                    job_id = %job_id, attempt,
+                    promoted = applied.promoted, skipped = applied.skipped, failed = applied.failed,
+                    expanded = applied.expanded, adopted = applied.adopted, rolled_up = applied.rolled_up,
+                    "Cascade applied"
+                );
+                return Ok(plan);
+            }
+            Err(ApplyError::GuardMiss { step }) => {
+                tx.rollback().await.ok();
+                tracing::warn!(job_id = %job_id, attempt, step = %step, "Cascade guard miss — re-running");
+            }
+            Err(ApplyError::Db(e)) if is_deadlock(&e) => {
+                tx.rollback().await.ok();
+                tracing::warn!(job_id = %job_id, attempt, "Cascade deadlock (40P01) — re-running");
+            }
+            Err(ApplyError::Db(e)) => {
+                tx.rollback().await.ok();
+                return Err(e);
+            }
+        }
+    }
+    bail!(
+        "cascade guard miss {} times for job {}",
+        MAX_ATTEMPTS,
+        job_id
+    )
 }
 
 #[cfg(test)]
