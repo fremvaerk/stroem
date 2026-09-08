@@ -21697,6 +21697,218 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
     Ok(())
 }
 
+/// A step that fails with retry budget is `ready` the instant the failure is
+/// recorded, so an orchestration for ANY other step of the job cannot see it as
+/// failed and skip its dependents.
+#[tokio::test]
+async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 2,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let task = workspace.tasks.get("retry-task").unwrap().clone();
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+
+    // A dependent of step1 that today would be cascade-skipped in the window.
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, action_spec, status) \
+         VALUES ($1, 'dependent', 'noop', 'script', '{}'::jsonb, 'pending')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    // and an unrelated sibling whose completion triggers a cascade
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, action_spec, status) \
+         VALUES ($1, 'sibling', 'noop', 'script', '{}'::jsonb, 'completed')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    let mut task_with_dep = task.clone();
+    task_with_dep.flow.insert(
+        "dependent".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["step1".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    task_with_dep.flow.insert(
+        "sibling".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    // Fail step1 (retry budget remains) and, without waiting, cascade on the sibling.
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "flaky"}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), StatusCode::OK);
+    orchestrator::on_step_completed(&pool, job_id, "sibling", &task_with_dep, None).await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let by = |n: &str| {
+        steps
+            .iter()
+            .find(|s| s.step_name == n)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(by("step1"), "ready", "retried step is ready, never failed");
+    assert_eq!(
+        by("dependent"),
+        "pending",
+        "dependent must not be cascade-skipped"
+    );
+    Ok(())
+}
+
+/// Retry no longer depends on the workspace being loaded (spec §3 change 2):
+/// the step is `ready` with `retry_at` even when orchestration could not find
+/// the workspace, and a later claim proceeds on the stored input/spec.
+#[tokio::test]
+async fn test_step_retry_scheduled_when_workspace_unavailable() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 2,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    // Make the job's workspace unresolvable before the failure is reported.
+    sqlx::query("UPDATE job SET workspace = 'gone' WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "flaky"}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = steps.iter().find(|s| s.step_name == "step1").unwrap();
+    assert_eq!(
+        step.status, "ready",
+        "retry is scheduled regardless of workspace availability"
+    );
+    assert_eq!(step.retry_attempt, 1);
+    assert!(step.retry_at.is_some());
+
+    // The retry is claimable on the stored input/spec once retry_at has passed.
+    sqlx::query("UPDATE job_step SET retry_at = NOW() - INTERVAL '1 second' WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let claim2 = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim2.status(), StatusCode::OK);
+    let body = body_json(claim2).await;
+    assert_eq!(body["job_id"].as_str().unwrap(), job_id.to_string());
+    assert_eq!(body["step_name"].as_str().unwrap(), "step1");
+    Ok(())
+}
+
 /// Regression: `max_attempts` counts total executions, while the DB column
 /// `job_step.max_retries` keeps counting retries only. A step created with
 /// `max_attempts: 3` (3 total executions) must store `max_retries == Some(2)`.
