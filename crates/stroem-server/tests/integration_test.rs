@@ -21697,8 +21697,10 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
     Ok(())
 }
 
-/// Guards against reintroducing a post-hoc failed-then-reset at `complete_step`:
-/// the failure write must leave the step `ready`, so a cascade for any other step
+/// Guards against reintroducing a post-hoc failed-then-reset at `complete_step`
+/// (sequential variant; the concurrent variant is
+/// `test_step_retry_window_closed_under_concurrent_cascade`).
+/// The failure write must leave the step `ready`, so a cascade for any other step
 /// of the job cannot skip its dependents. The test awaits `complete_step` before
 /// running the sibling cascade, so it does not itself race the two; the atomicity
 /// property is proved structurally (one `UPDATE` on the retry branch of
@@ -21797,7 +21799,7 @@ async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
         .await?;
     assert_eq!(claim.status(), StatusCode::OK);
 
-    // Fail step1 (retry budget remains) and, without waiting, cascade on the sibling.
+    // Fail step1 (retry budget remains), then cascade on the sibling.
     let complete = router
         .clone()
         .oneshot(worker_request(
@@ -21823,6 +21825,405 @@ async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
         by("dependent"),
         "pending",
         "dependent must not be cascade-skipped"
+    );
+    Ok(())
+}
+
+/// Install a test-only gate on the retry write.
+///
+/// The trigger blocks any `job_step` UPDATE that increments `retry_attempt` on
+/// advisory lock `(4242, 1)`. The retry branch of `JobStepRepo::fail_or_retry`
+/// is the only statement in the codebase that increments that column, so this
+/// parks a failure transaction *inside* its retry UPDATE and nothing else.
+/// Production code is untouched: the gate exists only in this test database.
+async fn install_retry_gate(pool: &PgPool) -> Result<()> {
+    sqlx::raw_sql(
+        r#"
+        CREATE OR REPLACE FUNCTION test_gate_retry() RETURNS trigger AS $$
+        BEGIN
+          IF NEW.retry_attempt > OLD.retry_attempt THEN
+            PERFORM pg_advisory_xact_lock(4242, 1);
+          END IF;
+          RETURN NEW;
+        END $$ LANGUAGE plpgsql;
+        CREATE TRIGGER test_gate_retry_trg BEFORE UPDATE ON job_step
+        FOR EACH ROW EXECUTE FUNCTION test_gate_retry();
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Block until exactly one backend is waiting on the retry gate, i.e. the
+/// failure transaction has reached (and is parked in) its retry UPDATE while
+/// still holding the step row locked with the pre-failure status committed.
+async fn await_retry_gate_blocked(pool: &PgPool) -> Result<()> {
+    for _ in 0..200 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' \
+             AND classid = 4242 AND objid = 1 AND NOT granted",
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting == 1 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("failure transaction never reached the gated retry UPDATE");
+}
+
+/// A `NewJobStep` with the loop columns spelled out; `make_loop_step` covers the
+/// placeholder and its instances.
+#[allow(clippy::too_many_arguments)]
+fn make_loop_step(
+    job_id: Uuid,
+    name: &str,
+    status: &str,
+    for_each_expr: Option<&str>,
+    loop_source: Option<&str>,
+    loop_index: Option<i32>,
+    loop_total: Option<i32>,
+    loop_item: Option<Value>,
+) -> NewJobStep {
+    NewJobStep {
+        job_id,
+        step_name: name.to_string(),
+        action_name: "noop".to_string(),
+        action_type: "script".to_string(),
+        action_image: None,
+        action_spec: Some(json!({"script": "true"})),
+        input: None,
+        status: status.to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: for_each_expr.map(|s| s.to_string()),
+        loop_source: loop_source.map(|s| s.to_string()),
+        loop_index,
+        loop_total,
+        loop_item,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }
+}
+
+/// The concurrent counterpart of `test_step_retry_window_never_skips_dependents`:
+/// another step's cascade runs *while* the failure transaction sits inside its
+/// retry UPDATE, which is exactly the interleaving the old code lost.
+///
+/// The gate parks the failure transaction mid-UPDATE with `step1` row-locked and
+/// `running` still the committed status, so the cascade — which reads committed
+/// rows and takes no lock on `step1` — cannot see a transient `failed`.
+///
+/// Why the old failed-then-reset code fails this test: its `mark_failed` was a
+/// separate statement that COMMITTED `status = 'failed'` before the (gated)
+/// `reset_for_retry` ran, so the cascade at step (d) read `failed` and skipped
+/// `dependent`. The final assertion would see `skipped`, not `pending`.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_step_retry_window_closed_under_concurrent_cascade() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 2,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+    let task = workspace.tasks.get("retry-task").unwrap().clone();
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, action_spec, status) \
+         VALUES ($1, 'dependent', 'noop', 'script', '{}'::jsonb, 'pending')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO job_step (job_id, step_name, action_name, action_type, action_spec, status) \
+         VALUES ($1, 'sibling', 'noop', 'script', '{}'::jsonb, 'completed')",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    let mut task_with_dep = task.clone();
+    task_with_dep.flow.insert(
+        "dependent".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec!["step1".to_string()],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    task_with_dep.flow.insert(
+        "sibling".to_string(),
+        FlowStep {
+            action: "noop".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), StatusCode::OK);
+
+    install_retry_gate(&pool).await?;
+
+    // (a) hold the gate on a dedicated connection
+    let mut gate = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(4242, 1)")
+        .execute(&mut *gate)
+        .await?;
+
+    // (b) report the failure; it will park inside the retry UPDATE
+    let failing = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            router
+                .oneshot(worker_request(
+                    "POST",
+                    &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+                    json!({"exit_code": 1, "error": "flaky"}),
+                ))
+                .await
+        })
+    };
+
+    // (c) wait until it is genuinely parked mid-transaction
+    await_retry_gate_blocked(&pool).await?;
+
+    // (d) cascade on the sibling while the failure is in flight
+    orchestrator::on_step_completed(&pool, job_id, "sibling", &task_with_dep, None).await?;
+
+    // (e) let the failure transaction finish
+    sqlx::query("SELECT pg_advisory_unlock(4242, 1)")
+        .execute(&mut *gate)
+        .await?;
+    drop(gate);
+    let complete = failing.await??;
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    // (f) the retried step is `ready` and its dependent was never skipped
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let by = |n: &str| {
+        steps
+            .iter()
+            .find(|s| s.step_name == n)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(by("step1"), "ready", "retried step is ready, never failed");
+    assert_eq!(
+        by("dependent"),
+        "pending",
+        "dependent must not be cascade-skipped by a concurrent cascade"
+    );
+    Ok(())
+}
+
+/// The loop-rollup variant of the window: a sibling instance's completion runs
+/// `check_loop_completion` while the failing instance sits inside its retry
+/// UPDATE. Under the old failed-then-reset code the rollup saw every instance
+/// terminal with one `failed`, and marked the placeholder failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, RetryConfig};
+
+    let retry_cfg = RetryConfig {
+        max_attempts: 3,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    };
+    let workspace = retry_workspace(retry_cfg.clone());
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+
+    // Placeholder `x` plus two instances: [0] still running, [1] already done.
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            make_loop_step(
+                job_id,
+                "x",
+                "running",
+                Some("[\"a\", \"b\"]"),
+                None,
+                None,
+                None,
+                None,
+            ),
+            make_loop_step(
+                job_id,
+                "x[0]",
+                "running",
+                None,
+                Some("x"),
+                Some(0),
+                Some(2),
+                Some(json!("a")),
+            ),
+            make_loop_step(
+                job_id,
+                "x[1]",
+                "completed",
+                None,
+                Some("x"),
+                Some(1),
+                Some(2),
+                Some(json!("b")),
+            ),
+        ],
+    )
+    .await?;
+
+    let worker_id = register_test_worker(&pool).await;
+    sqlx::query(
+        "UPDATE job_step SET max_retries = 2, retry_backoff_secs = 0, retry_strategy = 'fixed', \
+         worker_id = $2, started_at = NOW() - INTERVAL '5 seconds' \
+         WHERE job_id = $1 AND step_name = 'x[0]'",
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .execute(&pool)
+    .await?;
+
+    let mut task = workspace.tasks.get("retry-task").unwrap().clone();
+    task.flow.insert(
+        "x".to_string(),
+        FlowStep {
+            action: "flaky".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: Some(json!(["a", "b"])),
+            sequential: false,
+            retry: Some(retry_cfg),
+            inline_action: None,
+        },
+    );
+
+    install_retry_gate(&pool).await?;
+
+    let mut gate = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(4242, 1)")
+        .execute(&mut *gate)
+        .await?;
+
+    let failing = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            router
+                .oneshot(worker_request(
+                    "POST",
+                    &format!("/worker/jobs/{}/steps/x%5B0%5D/complete", job_id),
+                    json!({"exit_code": 1, "error": "flaky"}),
+                ))
+                .await
+        })
+    };
+
+    await_retry_gate_blocked(&pool).await?;
+
+    // The sibling instance's rollup runs while `x[0]`'s failure is in flight.
+    stroem_server::job_creator::check_loop_completion(&pool, job_id, "x[1]", &task).await?;
+
+    sqlx::query("SELECT pg_advisory_unlock(4242, 1)")
+        .execute(&mut *gate)
+        .await?;
+    drop(gate);
+    let complete = failing.await??;
+    assert_eq!(complete.status(), StatusCode::OK);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let by = |n: &str| {
+        steps
+            .iter()
+            .find(|s| s.step_name == n)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(
+        by("x"),
+        "running",
+        "the placeholder must not be rolled up while an instance is being retried"
+    );
+    assert_eq!(
+        by("x[0]"),
+        "ready",
+        "the failing instance is ready to retry"
     );
     Ok(())
 }
