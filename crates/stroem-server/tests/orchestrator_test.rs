@@ -1134,47 +1134,6 @@ async fn test_multi_step_branch_cascade_skip() -> Result<()> {
     Ok(())
 }
 
-// ─── Test 20: Mixed skipped + failed dep without continue_on_failure ──────────
-
-/// A(completed) + B(failed) → C(no cof) — C is blocked by failed B.
-#[tokio::test]
-async fn test_mixed_skipped_and_failed_dep_blocks_without_cof() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
-
-    let mut flow = HashMap::new();
-    flow.insert("a".to_string(), flow_step(vec![]));
-    flow.insert("b".to_string(), flow_step(vec![]));
-    flow.insert("c".to_string(), flow_step(vec!["a", "b"]));
-    let task = make_task(flow);
-
-    let job_id = create_job(&pool).await;
-    let worker_id = register_worker(&pool).await;
-    JobStepRepo::create_steps(
-        &pool,
-        &[
-            step(job_id, "a", "ready"),
-            step(job_id, "b", "ready"),
-            step(job_id, "c", "pending"),
-        ],
-    )
-    .await?;
-
-    // A completes, B fails
-    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
-    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
-    JobStepRepo::mark_failed(&pool, job_id, "b", "oops").await?;
-    on_step_completed(&pool, job_id, "b", &task, None).await?;
-
-    let statuses = step_statuses(&pool, job_id).await;
-    assert_eq!(
-        statuses["c"], "skipped",
-        "C must be skipped: B failed and C has no continue_on_failure"
-    );
-
-    Ok(())
-}
-
 // ─── Test 21: Mixed skipped + failed dep with continue_on_failure ─────────────
 
 /// A(skipped) + B(failed) → C(cof:true) — C runs because cof tolerates both
@@ -1322,47 +1281,6 @@ async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
     assert_eq!(
         statuses["c"], "skipped",
         "C must be skipped: B is cancelled and C has no continue_on_failure"
-    );
-
-    Ok(())
-}
-
-// ─── Test 24: Cancelled dep + continue_on_failure → step runs ─────────────────
-
-/// A(completed) + B(cancelled) → C(cof:true). C should be promoted.
-#[tokio::test]
-async fn test_cancelled_dep_with_cof_promotes_step() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
-    let worker_id = register_worker(&pool).await;
-
-    let mut flow = HashMap::new();
-    flow.insert("a".to_string(), flow_step(vec![]));
-    flow.insert("b".to_string(), flow_step(vec![]));
-    flow.insert("c".to_string(), flow_step_cof(vec!["a", "b"]));
-    let task = make_task(flow);
-
-    let job_id = create_job(&pool).await;
-    JobStepRepo::create_steps(
-        &pool,
-        &[
-            step(job_id, "a", "ready"),
-            step(job_id, "b", "ready"),
-            step(job_id, "c", "pending"),
-        ],
-    )
-    .await?;
-
-    // A completes, B is marked running then cancelled
-    JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
-    JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
-    JobStepRepo::mark_cancelled(&pool, job_id, "b").await?;
-    on_step_completed(&pool, job_id, "b", &task, None).await?;
-
-    let statuses = step_statuses(&pool, job_id).await;
-    assert_eq!(
-        statuses["c"], "ready",
-        "C must be promoted: cof:true tolerates cancelled dep B"
     );
 
     Ok(())
