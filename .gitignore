@@ -20,3 +20,6 @@ worker-config.*.yaml
 
 .envrc
 test_output.txt
+
+# Local Codex CLI config (holds credentials)
+.codex/
