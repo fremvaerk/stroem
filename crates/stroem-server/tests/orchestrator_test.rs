@@ -154,6 +154,28 @@ fn step_when(job_id: Uuid, name: &str, status: &str, when_expr: &str) -> NewJobS
     }
 }
 
+// `step_for_each` is defined later in this file, next to the other
+// for_each regression test helpers — reused here rather than duplicated.
+
+/// Build a `NewJobStep` for a `for_each` loop instance.
+fn step_instance(job_id: Uuid, source: &str, i: i32, status: &str) -> NewJobStep {
+    NewJobStep {
+        loop_source: Some(source.to_string()),
+        loop_index: Some(i),
+        loop_total: Some(3),
+        loop_item: Some(json!(i)),
+        ..step(job_id, &format!("{source}[{i}]"), status)
+    }
+}
+
+/// Build a `FlowStep` with `sequential = true`.
+fn flow_step_seq(depends_on: Vec<&str>) -> FlowStep {
+    FlowStep {
+        sequential: true,
+        ..flow_step(depends_on)
+    }
+}
+
 /// Collect step statuses for a job, keyed by step name.
 async fn step_statuses(pool: &PgPool, job_id: Uuid) -> HashMap<String, String> {
     JobStepRepo::get_steps_for_job(pool, job_id)
@@ -643,7 +665,7 @@ async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
 /// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.go }}"`),
 /// C (pending, depends on B).  When A completes with `{"go": false}`, B is
 /// skipped by its `when` condition.  C's only dep (B) is then skipped, so the
-/// all-deps-skipped rule (R2) cascade-skips C in the same orchestrator call,
+/// all-deps-skipped rule (R1) cascade-skips C in the same orchestrator call,
 /// without needing a separate blocked-dependency pass (R3).
 #[tokio::test]
 async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
@@ -1789,6 +1811,203 @@ async fn test_settle_returns_none_while_a_step_is_live() -> Result<()> {
     assert_eq!(
         JobRepo::get(&pool, job_id).await?.unwrap().status,
         "pending"
+    );
+    Ok(())
+}
+
+// ─── Test: Self-healing rollup (fix 2) ─────────────────────────────────────
+
+/// A running placeholder whose instances are all terminal but which no keyed
+/// call ever rolled up is rolled up by the next cascade on the job.
+#[tokio::test]
+async fn test_self_healing_rollup_on_unrelated_cascade() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step_for_each(job_id, "x", "running", "[1,2]"),
+            step_instance(job_id, "x", 0, "completed"),
+            step_instance(job_id, "x", 1, "completed"),
+            step(job_id, "other", "completed"),
+        ],
+    )
+    .await?;
+    let task = make_task(HashMap::from([
+        ("x".to_string(), flow_step(vec![])),
+        ("other".to_string(), flow_step(vec![])),
+    ]));
+    on_step_completed(&pool, job_id, "other", &task, Some(&WorkspaceConfig::new())).await?;
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(
+        statuses["x"], "completed",
+        "rolled up although no instance just completed"
+    );
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    Ok(())
+}
+
+// ─── Test: Timeout vs rollup and cancelled placeholder (fix 4) ────────────
+
+/// A placeholder failed by recovery (timeout) is never overwritten by a later
+/// instance completion's rollup.
+#[tokio::test]
+async fn test_rollup_never_overwrites_failed_or_cancelled_placeholder() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    for terminal in ["failed", "cancelled"] {
+        let job_id = create_job(&pool).await;
+        JobStepRepo::create_steps(
+            &pool,
+            &[
+                step_for_each(job_id, "x", terminal, "[1]"),
+                step_instance(job_id, "x", 0, "completed"),
+            ],
+        )
+        .await?;
+        let task = make_task(HashMap::from([("x".to_string(), flow_step(vec![]))]));
+        on_step_completed(&pool, job_id, "x[0]", &task, Some(&WorkspaceConfig::new())).await?;
+        assert_eq!(
+            step_statuses(&pool, job_id).await["x"],
+            terminal,
+            "{terminal} placeholder untouched"
+        );
+    }
+    Ok(())
+}
+
+// ─── Test: R5 behavioural change ───────────────────────────────────────────
+
+/// [failed, completed, pending]: the loop stops at the first failure; [2] is
+/// skipped and never promoted (spec §4.3, deliberate change from today).
+#[tokio::test]
+async fn test_sequential_failure_skips_later_pending_instances() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step_for_each(job_id, "x", "running", "[1,2,3]"),
+            step_instance(job_id, "x", 0, "failed"),
+            step_instance(job_id, "x", 1, "completed"),
+            step_instance(job_id, "x", 2, "pending"),
+        ],
+    )
+    .await?;
+    let task = make_task(HashMap::from([("x".to_string(), flow_step_seq(vec![]))]));
+    on_step_completed(&pool, job_id, "x[1]", &task, Some(&WorkspaceConfig::new())).await?;
+    let s = step_statuses(&pool, job_id).await;
+    assert_eq!(s["x[2]"], "skipped");
+    assert_eq!(s["x"], "failed");
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+    Ok(())
+}
+
+// ─── Test: `on_step_completed` vs creation equivalence, and parent/child ──
+
+/// The same DAG cascaded once at creation and once via on_step_completed ends in
+/// the same statuses (both callers go through cascade::execute).
+#[tokio::test]
+async fn test_creation_and_orchestrator_cascades_agree() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let task = make_task(HashMap::from([
+        ("a".to_string(), flow_step(vec![])),
+        ("b".to_string(), flow_step_when(vec!["a"], "false")),
+        ("c".to_string(), flow_step(vec!["b"])),
+        ("d".to_string(), flow_step_cof(vec!["b"])),
+    ]));
+    let expected = |s: &HashMap<String, String>| {
+        assert_eq!(s["b"], "skipped");
+        assert_eq!(s["c"], "skipped", "all deps skipped → cascade-skip");
+        assert_eq!(s["d"], "ready", "cof survives a skipped dep");
+    };
+    // via the orchestrator
+    let j1 = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(j1, "a", "completed"),
+            step_when(j1, "b", "pending", "false"),
+            step(j1, "c", "pending"),
+            step(j1, "d", "pending"),
+        ],
+    )
+    .await?;
+    on_step_completed(&pool, j1, "a", &task, Some(&WorkspaceConfig::new())).await?;
+    expected(&step_statuses(&pool, j1).await);
+    // via execute directly on an identical snapshot (what creation calls)
+    let j2 = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(j2, "a", "completed"),
+            step_when(j2, "b", "pending", "false"),
+            step(j2, "c", "pending"),
+            step(j2, "d", "pending"),
+        ],
+    )
+    .await?;
+    stroem_server::cascade::execute(&pool, j2, &task, Some(&WorkspaceConfig::new())).await?;
+    expected(&step_statuses(&pool, j2).await);
+    Ok(())
+}
+
+/// A child job's cascade and its parent's cascade run concurrently; both complete.
+#[tokio::test]
+async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let parent = create_job(&pool).await;
+    let child = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None, // input
+        "task",
+        None, // source_id
+        Some(parent),
+        Some("spawn"),
+        None, // timeout_secs
+        None, // revision
+        None, // raw_input
+        None, // source_job_id
+        None, // restart_from_step
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(parent, "spawn", "running"),
+            step(parent, "after", "pending"),
+        ],
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[step(child, "c1", "completed"), step(child, "c2", "pending")],
+    )
+    .await?;
+    let ptask = make_task(HashMap::from([
+        ("spawn".to_string(), flow_step(vec![])),
+        ("after".to_string(), flow_step(vec!["spawn"])),
+    ]));
+    let ctask = make_task(HashMap::from([
+        ("c1".to_string(), flow_step(vec![])),
+        ("c2".to_string(), flow_step(vec!["c1"])),
+    ]));
+    let ws = WorkspaceConfig::new();
+    let (a, b) = tokio::join!(
+        on_step_completed(&pool, parent, "spawn", &ptask, Some(&ws)),
+        on_step_completed(&pool, child, "c1", &ctask, Some(&ws)),
+    );
+    a?;
+    b?;
+    assert_eq!(step_statuses(&pool, child).await["c2"], "ready");
+    assert_eq!(
+        step_statuses(&pool, parent).await["after"],
+        "pending",
+        "spawn still running"
     );
     Ok(())
 }

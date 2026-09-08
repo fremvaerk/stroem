@@ -17959,7 +17959,7 @@ fn when_test_workspace_with_flow(
 /// When a task has a root step (no dependencies) with `when: "false"`, the
 /// creation-time cascade must evaluate the condition immediately and mark
 /// the step `skipped`.  Any dependent steps must cascade to `skipped` in the
-/// same cascade (R2/R3).
+/// same cascade (R2/R1).
 #[tokio::test]
 async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<()> {
     let (_router, pool, _tmp, _container) = setup().await?;
