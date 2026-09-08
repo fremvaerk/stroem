@@ -1,6 +1,6 @@
 # Job Settlement — Design
 
-**Status:** Revision 2 (2026-09-08). Codex pass 1 verdict "not ready" (step 3 read as a loop; retry job not finalized in §6.3); both fixed plus the four low findings. Awaiting Codex confirmation.
+**Status:** Revision 3 (2026-09-08). Codex pass 2 verdict "ready with listed changes"; the two listed spots (`plan` arity in §6.3, `job_created` caller in the §6.2 table) fixed here. Binding for the implementation plan.
 **Date:** 2026-09-08
 **Origin:** architecture review 2026-09-07/08, candidate 2 "Job settlement", entered
 through candidate 1 (the step cascade, now on `main`).
@@ -249,7 +249,7 @@ Callers after the switch:
 |---|---|---|
 | `step_settled` | `orchestrate_after_step` | worker `complete_step` (success path), approve; recovery phases where the outcome is not a failure write |
 | `step_failed` | `fail_step` + `orchestrate_after_step` | worker `complete_step` (failure), claim-time render failure, four recovery phases, approval reject |
-| `job_created` | `finalize_created_job` | `web/api/tasks.rs` (execute, including re-run via `source_job_id`), `web/api/jobs.rs` (restart), `web/hooks.rs`, `web/worker_api/event_source.rs`, `mcp/tools.rs`, `scheduler.rs`, `event_source.rs`, `settlement/hooks.rs`, `settlement/retry.rs` |
+| `job_created` | `finalize_created_job` | `web/api/tasks.rs` (execute, including re-run via `source_job_id`), `web/api/jobs.rs` (restart), `web/hooks.rs`, `web/worker_api/event_source.rs`, `mcp/tools.rs`, `scheduler.rs`, `event_source.rs`, `settlement/hooks.rs`, and `advance` itself for the retry job (§6.3 step 4.d.ii) |
 | `agent_child_created` | `reconcile_settled_children` + inline check | `web/worker_api/jobs.rs::agent_task_tool` |
 | `agent_children_registered` | inline loop over `propagate_to_parent` | `agent_save_state`, `agent_suspend_step` |
 | `cancel` | `cancel_job` | `web/api/jobs.rs`, `mcp/tools.rs`, `recovery.rs`, `scheduler.rs`, `event_source.rs` (three) |
@@ -301,7 +301,7 @@ async fn advance(&self, job_id: Uuid) -> Result<()>;
       `STROEM_JOBS_COMPLETED_TOTAL{status}`; not won → `Ok(())`; error → `error!`
       plus `[orchestration] terminal handling claim failed: …` and `Ok(())` (fail-closed,
       as today).
-   d. `terminal::plan(&job, task, retry_budget)` (§6.6) and run it in order:
+   d. `terminal::plan(&job)` (§6.6) and run it in order:
       i.  propagate (§6.5) when `parent_job_id` is set; errors are logged and never abort
           the rest (the claim is consumed).
       ii. retry when the plan says so: `retry::create_retry_job` (§8.1); on success write
