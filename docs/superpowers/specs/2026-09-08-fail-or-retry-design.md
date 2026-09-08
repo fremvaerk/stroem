@@ -1,6 +1,7 @@
 # Atomic Fail-or-Retry — Design
 
-**Status:** Draft, revision 3 (2026-09-08, after second Codex review)
+**Status:** Reviewed, revision 4 (2026-09-08; Codex "ready with listed changes", all
+applied). Awaiting owner sign-off before the implementation plan.
 **Date:** 2026-09-08
 **Origin:** prerequisite of `2026-09-08-step-cascade-design.md` (Q28); first slice of the
 architecture-review candidate "One interface for every step status transition".
@@ -179,10 +180,11 @@ Changed, both by construction:
    with `retry_at` regardless of workspace availability. Consequence to state plainly:
    a worker may claim that retry while the workspace is still unavailable, and the
    claim path then behaves exactly as it does today for any `ready` step of an
-   unavailable workspace (`web/worker_api/jobs.rs:608-652`: the stored `action_spec`
-   is used when the workspace cannot be resolved). This is the same behaviour a
-   freshly-promoted step already has; it is not new to retries. `retry_at` is sampled
-   before the lookup instead of after it; no bound on the difference is claimed.
+   unavailable workspace: it uses the stored input (`web/worker_api/jobs.rs:608-652`)
+   and renders the stored action specification through the normal claim path
+   (`:670-686`). This is the same behaviour a freshly-promoted step already has; it is
+   not new to retries. `retry_at` is sampled before the lookup instead of after it; no
+   bound on the difference is claimed.
 
 Both changes are recorded in CLAUDE.md.
 
@@ -209,8 +211,9 @@ Both changes are recorded in CLAUDE.md.
 - Regression for change 2: a step fails with retries remaining while its workspace is
   unloaded (TestApp with the workspace removed from the manager after job creation);
   the step is `ready` with `retry_at` set; a worker claim after `retry_at` succeeds and
-  the claimed step carries the stored `action_spec`, matching what a claim of any other
-  `ready` step of that workspace returns in the same state.
+  the claimed step carries the stored input and the rendered stored action
+  specification, matching what a claim of any other `ready` step of that workspace
+  returns in the same state.
 
 ## 5. Rollout
 
@@ -233,4 +236,8 @@ observable as `failed`; retry does not depend on the workspace being loaded".
 - 2026-09-08 — Codex second pass, "ready with listed changes": helpers are private →
   `pub(crate)` (§2); `retry_at` clock and sampling point stated (§2); change 2 restated
   precisely with the claim-during-outage consequence and test (§3, §4); approve/reject
-  test description (§2). This revision (rev 3) applies all four.
+  test description (§2). Rev 3 applied all four.
+- 2026-09-08 — Codex third pass (sixth cascade pass): "ready with listed changes",
+  one nit: distinguish the stored-input fallback (`:608-652`) from the rendered stored
+  action specification (`:670-686`). Rev 4 (this document) applies it. Status moved
+  to Reviewed; awaiting owner sign-off.

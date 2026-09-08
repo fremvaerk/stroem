@@ -1,6 +1,7 @@
 # Step Cascade — Design
 
-**Status:** Draft, revision 6 (2026-09-08, after fifth Codex review)
+**Status:** Reviewed, revision 7 (2026-09-08; Codex sixth pass "ready with listed
+changes", all applied). Awaiting owner sign-off before the implementation plan.
 **Date:** 2026-09-08
 **Origin:** architecture review 2026-09-07/08, candidate "Make the step cascade a pure
 module"; first internal seam of the later "Job settlement" module (separate branch, not
@@ -77,16 +78,17 @@ Settled in the design walk on 2026-09-08 (Q1–Q13) and after three Codex review
 8. **Rendering outside the lock; verified, row-locked apply inside** (Q15, Q24, Q29,
    Q30): the snapshot is read and `run` executes with no transaction open; `execute`
    then begins a transaction, takes the job's advisory lock, re-reads the job status and
-   every step row's `(status, digest)` **with `FOR UPDATE` on the step rows**, where
-   `digest` is `md5(coalesce(output::text,'') || '\x1f' || coalesce(error_message,''))`
-   for every row whose `output`/`error_message` a rule or template can read
-   (`completed`, `skipped`, `failed`, `suspended`, `cancelled`) and `NULL` otherwise,
-   and applies only if that vector is identical to the one the plan was computed from.
-   Verification is therefore exact over the values the plan depended on; no version
-   token is involved (Q29 as refined by Q34). Row data and digest always come from one
-   `SELECT`. Any difference, and a Postgres deadlock report (`40P01`), rolls back and
-   re-runs from a fresh snapshot, at most three times. Batched statements assert their
-   row counts.
+   every step row's `(status, output::text, error_message)` **with `FOR UPDATE` on the
+   step rows**, where the two value columns are read as-is (SQL `NULL` preserved) for
+   every row whose `output`/`error_message` a rule or template can read (`completed`,
+   `skipped`, `failed`, `suspended`, `cancelled`) and forced to `NULL` otherwise, and
+   applies only if that vector is identical to the one the plan was computed from.
+   Verification is therefore exact over the values the plan depended on: no hash, no
+   version token, and `NULL` stays distinct from `''` (the renderer distinguishes them,
+   `job_creator.rs:1643-1652`). Row data and the verification columns always come from
+   one `SELECT`. Any difference, and a Postgres deadlock report (`40P01`), rolls back
+   and re-runs from a fresh snapshot, at most three times. Batched statements assert
+   their row counts. (Q29 as refined by Q34.)
 9. **Loop rollup and sequential advance join the cascade** as global rules over the
    snapshot (§4.3 R5/R6) with an explicit failure-precedence policy (Q26);
    `check_loop_completion` is deleted.
@@ -214,16 +216,17 @@ pub enum RollupOutcome {
 }
 
 /// The pre-run state `run` computed from. One entry per step row, in `step_name`
-/// order, plus the job status. `digest` is `md5(output || 0x1f || error_message)`
-/// (NULLs as empty) for rows whose `output`/`error_message` a rule or template can
-/// read — the context statuses (completed, skipped, failed, suspended) plus
-/// `cancelled`, whose `output` R6 copies into a rollup — and `None` otherwise. Row
-/// data and `digest` are read by ONE `SELECT` (`get_steps_with_digest`), never by two
-/// queries, so a plan is never built from one tuple's data and another's digest.
-/// `execute` applies a plan only if the database still holds this vector.
+/// order, plus the job status. `values` is `Some((output::text, error_message))`, each
+/// inner value nullable exactly as in the row, for rows whose `output`/`error_message`
+/// a rule or template can read — the context statuses (completed, skipped, failed,
+/// suspended) plus `cancelled`, whose `output` R6 copies into a rollup — and `None`
+/// otherwise. Row data and `values` come from ONE `SELECT` (`get_steps_for_job`
+/// already returns both columns), so a plan is never built from one tuple's data and
+/// another's values. `execute` applies a plan only if the database still holds this
+/// vector, compared field by field with SQL `NULL` distinct from `''`.
 pub struct Snapshot {
     pub job_status: JobStatus,
-    pub steps: Vec<(String, StepStatus, Option<String> /* digest */)>,
+    pub steps: Vec<(String, StepStatus, Option<(Option<String>, Option<String>)> /* values */)>,
 }
 
 /// What one `run` decided.
@@ -275,7 +278,7 @@ change list and guarded by §4.6, not by `assumed`.
 `status` (all rows, compared directly); `output`, `error_message` (context rows and
 `cancelled` instance rows, whose `output` R6 reads and which cancellation's separate
 sweeps can leave open to a late output-only write, `cancellation.rs:53`,
-`job_creator.rs:1491`; covered by `digest`); `when_condition`, `for_each_expr`, `loop_source`, `loop_index`,
+`job_creator.rs:1491`; compared as values, `NULL`-preserving); `when_condition`, `for_each_expr`, `loop_source`, `loop_index`,
 `loop_total`, `loop_item`, `action_type`, `action_spec`, `timeout_secs`, the retry
 columns (immutable after row creation except the retry columns, which only change with
 a status change under the prerequisite branch); `job.status` (compared directly);
@@ -492,7 +495,7 @@ if the placeholder transition is in the same committed transaction (fix 1).
 attempt = 0
 loop:
   job   = JobRepo::get(pool, job_id)                             -- no transaction
-  rows  = JobStepRepo::get_steps_with_digest(pool, job_id)      -- <STEP_COLUMNS> + digest, one SELECT
+  rows  = JobStepRepo::get_steps_for_job(pool, job_id)          -- <STEP_COLUMNS>, one SELECT
   plan  = run(task, &job, &rows, workspace_config)              -- may render, may run vals
   if plan.changes.is_empty(): return plan
 
@@ -500,8 +503,9 @@ loop:
     SELECT pg_advisory_xact_lock(CASCADE_LOCK_CLASS, hashtext($1))   -- §4.7.1
     current.steps = SELECT step_name, status,
                            CASE WHEN status IN ('completed','skipped','failed','suspended','cancelled')
-                                THEN md5(coalesce(output::text,'') || chr(31) || coalesce(error_message,''))
-                           END AS digest
+                                THEN output::text END      AS output_text,
+                           CASE WHEN status IN ('completed','skipped','failed','suspended','cancelled')
+                                THEN error_message END     AS error_message
                     FROM job_step WHERE job_id = $1
                     ORDER BY step_name
                     FOR UPDATE                                        -- row locks, all steps
@@ -518,18 +522,20 @@ on SQLSTATE 40P01 (deadlock detected) anywhere inside BEGIN..COMMIT:
 continue-or-fail: if attempt == 3: return Err("cascade verification failed 3 times")
 ```
 
-`get_steps_with_digest` selects `<STEP_COLUMNS>` plus the same `digest` expression in
-one statement, so the data `run` reads and the digest `assumed` records come from the
-same tuple. The in-transaction check uses the same expression with `FOR UPDATE`; both
-live in one repo function so the predicate cannot drift. `md5` over the two text
-values is exact for the purpose: two rows with different `output` or `error_message`
-produce different digests except for an MD5 collision, which is not a concern for
-integrity here (the inputs are not adversarial and a collision would only skip one
-re-run).
+`assumed` is built from the same `JobStepRow`s `run` reads: `Snapshot::from_rows`
+applies the readable-status predicate in Rust and keeps `output` (serialised with
+`serde_json::to_string`, which for a `jsonb` value round-tripped through `::text` is
+byte-identical because Postgres renders `jsonb` canonically) and `error_message` as
+`Option`s. The in-transaction check reads the two columns with the same predicate in
+SQL, under `FOR UPDATE`. The predicate (the status list) is one shared const used by
+both, so it cannot drift. Comparison is field by field on `Option` values: a row whose
+`error_message` went from `NULL` to `''` (or back) mismatches, as the renderer treats
+those differently (`job_creator.rs:1643-1652`, no `error` key vs an empty one). No
+hash, so no collision argument is needed.
 
 **Verification contract.** A plan is applied only if the job's status, every step row's
-status, and the digest of every row whose `output`/`error_message` can be read are
-exactly what `run` computed from. Any status change to any row of the job between snapshot and verification —
+status, and the `output`/`error_message` values of every row whose values can be read
+are exactly what `run` computed from. Any status change to any row of the job between snapshot and verification —
 cancellation (`JobRepo::cancel` on the job row, `cancel_pending_steps` on step rows), a
 recovery timeout write, a worker claim or completion, an approval, a retry (which under
 the prerequisite is a `running → ready` status change), another cascade's commit — and
@@ -564,12 +570,24 @@ Multi-statement transactions touching `job` or `job_step`, and their order:
 - task-level retry `try_retry_job` (`job_recovery.rs:1145-1200`): the new job is
   created and its creation-time cascade committed **before** this transaction begins
   (`create_job_for_task_detailed`, `:1145`); the transaction then updates the new job
-  row (`:1165`), the old job row (`:1172`) and, when the delay is positive, every
-  `ready` step of the new job (`:1191`, `UPDATE job_step SET retry_at … WHERE job_id
-  AND status='ready'`, a multi-row statement). Today this is job → steps, the reverse
-  of the cascade. After Decision 24 it is advisory lock(new job) → new job row → old
-  job row → new job's steps. The old job is terminal, so no cascade holds its lock and
-  no second advisory lock is needed. No cycle.
+  row (`:1172`, setting `retry_of_job_id`, which takes a `KEY SHARE` lock on the
+  referenced retry-chain root job row through the FK in `027_step_retry.sql:20`), the
+  old job row (`:1182`) and, when the delay is positive, every `ready` step of the new
+  job (`:1191`, `UPDATE job_step SET retry_at … WHERE job_id AND status='ready'`, a
+  multi-row statement). Today this is job → steps, the reverse of the cascade. After
+  Decision 24 it is advisory lock(new job) → new job row → root job row (`KEY SHARE`)
+  → old job row → new job's steps. Why this does not cycle, stated narrowly: the new
+  job's advisory lock serialises this transaction against the new job's cascades; the
+  transaction never touches an old-job or root-job `job_step` row, so it can never
+  wait behind a cascade's step-row locks on those jobs; a cascade on the old or root
+  job (which is possible — nothing in `orchestrate_after_step` excludes terminal jobs,
+  `job_recovery.rs:146-185` — for instance a late worker report) holds that job's step
+  rows and takes its job row only for R7, which is guarded on `pending` and touches the
+  row only if the job is still pending, which a retried job is not; `KEY SHARE` on the
+  root row conflicts only with `FOR UPDATE`/key updates on that row, which no cascade
+  issues; and the production caller runs task retry only for top-level jobs
+  (`parent_job_id.is_none()`, `:390-397`), so no parent cascade holds anything on the
+  old job. The test in §9.2 covers the new-job cascade interleaving.
 - job creation and restart seeding (`create_with_parent_tx`, `create_steps_tx`,
   `seed_steps_tx` which inserts and then updates the rows it just inserted,
   `job_step.rs:301-320`): all inside the creation transaction, on rows no other
@@ -577,10 +595,13 @@ Multi-statement transactions touching `job` or `job_step`, and their order:
 - retention `JobRepo::delete` (`job.rs:859`, called from `recovery.rs:427`):
   `DELETE FROM job WHERE job_id = $1`, whose FK cascades to `job_step` — job row then
   step rows, inside one statement. Retention only selects terminal jobs older than
-  `retention.job_days`, on which no cascade can run (a cascade is triggered only by a
-  step completion, creation, or propagation, none of which reach a terminal job).
-  Should one ever coincide, Postgres aborts one side: the cascade re-runs (Decision
-  23) and retention logs and retries the job on its next sweep. No coordination added.
+  `retention.job_days`. A cascade on such a job is not impossible (see the task-retry
+  entry: a late worker report can orchestrate a terminal job), only implausible after
+  days. If the two coincide, Postgres aborts one side: if it is the cascade, it re-runs
+  (Decision 23) and finds the job gone or unchanged; if it is retention, it logs and
+  continues (`recovery.rs:427-430`) and deletes the job on its next sweep. Accepted;
+  no coordination added, because retention must not take per-job locks for thousands
+  of rows.
 - artifact upload (`artifacts.rs:165-206`): job row `FOR UPDATE` → `job_artifact`.
   Never touches `job_step`. The cascade's R7 can wait on it; it never waits on the
   cascade.
@@ -715,7 +736,7 @@ All go live in the activation commit (§10); each has its own regression-test co
 
 No migration. No new columns. The `for_each` instance/placeholder relationship stays a
 naming convention plus `loop_source`, and no trigger or foreign key is added. The
-verification digest is computed in the `SELECT`; nothing is stored.
+verification vector is read from existing columns in the `SELECT`; nothing is stored.
 
 ## 6. Server
 
@@ -727,9 +748,10 @@ verification digest is computed in the `SELECT`; nothing is stored.
   `job_creator.rs:1979-2060`), and an internal snapshot type.
 - `stroem-db` transaction primitives (thin, one statement each):
   `CASCADE_LOCK_CLASS`, `JobRepo::cascade_lock_tx`, `JobRepo::get_status_tx`,
-  `JobRepo::mark_running_if_pending_tx`, `JobStepRepo::get_steps_with_digest` (pool;
-  `<STEP_COLUMNS>` + `digest`) and `get_snapshot_vector_for_update_tx` (`step_name`,
-  `status`, `digest`, `FOR UPDATE`; same `digest` expression via one shared const),
+  `JobRepo::mark_running_if_pending_tx`, `JobStepRepo::get_snapshot_vector_for_update_tx`
+  (`step_name`, `status`, `output::text`, `error_message` for readable statuses,
+  `FOR UPDATE`; the readable-status list is one shared const also used by
+  `Snapshot::from_rows`),
   `cancel_pending_steps_tx`, `cancel_server_managed_steps_tx`, `promote_steps_tx`,
   `skip_steps_tx`, `fail_pending_step_tx`, `start_placeholder_tx`,
   `rollup_placeholder_tx`. `create_steps_tx` already exists.
@@ -886,12 +908,22 @@ cancellation timestamps or "no settlement while live" (`:371`, `:1724`, `:1753`,
   `failed` with all non-terminal steps failed, and that an `execute` on the job
   afterwards returns an empty plan. No production hook; the gate lives in the test's
   trigger body.
-- **Task-level retry vs cascade** (Decision 24): a task with `retry` and a positive
-  delay whose root step fails; the retry job is created and, while its creation-time
-  cascade has committed and a further `execute` on the new job is held blocked by
-  connection A on the advisory lock, `try_retry_job`'s transaction is observed blocked
-  by A too (it takes the same lock first); A releases; both complete; the new job's
-  `ready` steps carry `retry_at`; no `40P01` is reported by either side.
+- **Task-level retry vs cascade** (Decision 24): a task with `retry`, a positive
+  delay, and an approval as its root step. Its first job fails (a non-approval step
+  fails after the approval is approved). Task retry creates the retry job; the test's
+  raw-SQL trigger on the approval step's transition to `suspended` (the same gate
+  technique as the compensation test, keyed `(TEST_GATE_CLASS, 2)`) blocks the retry
+  job's creation-time approval dispatch, which happens after its creation cascade has
+  committed and before `try_retry_job`'s transaction begins (`job_recovery.rs:1145-
+  1169`). While dispatch is parked on the gate, connection A takes `cascade_lock_tx(new
+  job)`; the gate is released; creation returns; `try_retry_job`'s transaction is
+  observed blocked by A (`pg_blocking_pids`); a further `execute` on the new job is
+  spawned and observed blocked too; A releases; all complete; the new job's `ready`
+  steps carry `retry_at`; no `40P01` is reported by any side.
+- **NULL vs empty error**: a failed step `a` with `error_message = NULL` and a
+  dependent `b` whose `when` renders `{{ a.error is defined }}`; a plan is computed;
+  before it applies, `a.error_message` is set to `''` (same status); verification
+  fails, the re-run sees the key present, and `b`'s outcome reflects it.
 - Timeout vs rollup: recovery fails a running placeholder by timeout; a later instance
   completion does not overwrite it. (fix 5)
 - Cancelled placeholder: rollup leaves it `cancelled`. (fix 5)
@@ -934,8 +966,9 @@ in §9.1.
   replica before the release containing commit 5 is rolled out.
 - Pure server change, no migration, no config. Ships as a patch release.
 - Commit sequence (each green against the oracle; commits 1–3 change no runtime
-  behaviour; commit 4 changes cancellation's and task retry's transaction shape as
-  described in §4.8, which is observable but does not change any outcome):
+  behaviour; commit 4 changes cancellation's and task retry's transaction shape,
+  preserving successful-path behaviour, with the atomicity and failure consequences
+  described in §4.8):
   1. `cascade::run`, `Snapshot`, `Plan`, `Change`, the internal snapshot type, and the
      `run` unit suite (§9.1 minus adoption, which lands with commit 7). The parser
      helpers stay in `job_creator.rs` and are made `pub(crate)` (`parse_for_each_items`
@@ -1002,7 +1035,7 @@ in §9.1.
 | Q31 cancellation | step sweeps take the cascade lock in one transaction that commits before publish; rule: multi-row `job_step` updates hold the lock or go per row |
 | Q32 deadlock | `40P01` inside `execute` counts as a verification failure and re-runs; no victim guarantee |
 | Q33 task-level retry | `try_retry_job`'s transaction takes the new job's cascade lock first |
-| Q34 digest not xmin | verification compares `md5(output ‖ error_message)`, exact, no version-token caveats |
+| Q34 values not xmin | verification compares `output::text` and `error_message` as nullable values, exact, no hash, no version-token caveats |
 
 ## 12. Review Log
 
@@ -1063,5 +1096,12 @@ in §9.1.
   sweep transaction commits before publish and its behavioural consequences are
   recorded; commit 4 described honestly; row-lock test uses `pg_blocking_pids` with a
   lexically-last held row; compensation test uses a test advisory gate inside the
-  trigger; task-retry-vs-cascade test added. B revised to rev 3. Sixth Codex pass
-  pending.
+  trigger; task-retry-vs-cascade test added. B revised to rev 3.
+- 2026-09-08 — Codex sixth pass: A and B both "ready with listed changes", changes
+  small enough to apply without another round: the digest conflated `NULL` and `''`
+  (renderer distinguishes them) → compare the two nullable values directly; qualify
+  the "terminal jobs have no cascade" claim and add the retry-chain-root FK lock;
+  commit-4 sentence contradicted §4.8; task-retry test needs a dispatch gate; B's
+  outage paragraph cited the stored-input range for the stored-`action_spec` path.
+- 2026-09-08 — rev 7 (this document): all six applied. Status moved to Reviewed;
+  awaiting owner sign-off, then the implementation plan.
