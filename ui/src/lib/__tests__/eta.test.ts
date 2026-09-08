@@ -36,6 +36,7 @@ function mkStep(partial: Partial<JobStep> & { step_name: string }): JobStep {
     retry_at: null,
     approval_message: null,
     approval_fields: null,
+    carried_over: false,
   };
 }
 
@@ -49,10 +50,11 @@ function mkJob(partial: Partial<JobDetail> & { steps: JobStep[] }): JobDetail {
     raw_input: null,
     output: null,
     status: partial.status ?? "running",
-    source_type: "api",
+    source_type: partial.source_type ?? "api",
     source_id: null,
     source_job_id: null,
     restart_from_step: null,
+    parent_job_id: null,
     revision: null,
     worker_id: null,
     created_at: new Date(NOW - 60_000).toISOString(),
@@ -164,6 +166,88 @@ describe("computeEta — contract for running jobs", () => {
         started_at: new Date(NOW - 5_000).toISOString() })],
     });
     const stats = mkStats(60_000, 50, [{ name: "build", p50: 60_000 }]);
+    const result = computeEta({ job, stats, now: NOW });
+    expect(result?.type).toBe("eta");
+    if (result?.type === "eta") {
+      expect(result.remainingMs).toBeGreaterThan(0);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// restart jobs (spec §6.4) — no flat p50 fallback
+// ---------------------------------------------------------------------------
+
+describe("computeEta — restart jobs", () => {
+  it("returns null for a restart job when the running step lacks stats", () => {
+    // Task-level p50 exists (adequate sample), but the running step's own
+    // stats are missing — a restart job must not fall back to the flat
+    // whole-task p50, since restart runs only a suffix of the flow.
+    const job = mkJob({
+      source_type: "restart",
+      started_at: new Date(NOW - 5_000).toISOString(),
+      steps: [
+        mkStep({
+          step_name: "build",
+          status: "running",
+          started_at: new Date(NOW - 5_000).toISOString(),
+        }),
+      ],
+    });
+    const stats = mkStats(60_000, 50, []); // no per-step stats at all
+    expect(computeEta({ job, stats, now: NOW })).toBeNull();
+  });
+
+  it("returns the step-weighted ETA for a restart job when every needed step has stats", () => {
+    const job = mkJob({
+      source_type: "restart",
+      started_at: new Date(NOW - 10_000).toISOString(),
+      steps: [
+        mkStep({
+          step_name: "build",
+          status: "running",
+          started_at: new Date(NOW - 10_000).toISOString(),
+        }),
+        mkStep({ step_name: "deploy", status: "pending" }),
+      ],
+    });
+    const stats = mkStats(60_000, 50, [
+      { name: "build", p50: 30_000 },
+      { name: "deploy", p50: 20_000 },
+    ]);
+    const result = computeEta({ job, stats, now: NOW });
+    expect(result?.type).toBe("eta");
+    if (result?.type === "eta") {
+      // runningRemaining = 30_000 - 10_000 = 20_000; pendingTotal = 20_000
+      expect(result.remainingMs).toBe(40_000);
+    }
+  });
+
+  it("does not report overrun for a restart job even when elapsed exceeds the task p50", () => {
+    // Elapsed (90s) exceeds the whole-task p50 (60s), but that comparison is
+    // meaningless for a restart job (it never ran the full flow) — no
+    // overrun, and since step stats are missing, no ETA either.
+    const job = mkJob({
+      source_type: "restart",
+      started_at: new Date(NOW - 90_000).toISOString(),
+      steps: [
+        mkStep({
+          step_name: "build",
+          status: "running",
+          started_at: new Date(NOW - 90_000).toISOString(),
+        }),
+      ],
+    });
+    const stats = mkStats(60_000, 50, []);
+    expect(computeEta({ job, stats, now: NOW })).toBeNull();
+  });
+
+  it("still uses the flat p50 fallback for a non-restart job", () => {
+    const job = mkJob({
+      started_at: new Date(NOW - 5_000).toISOString(),
+      steps: [mkStep({ step_name: "build", status: "pending" })],
+    });
+    const stats = mkStats(60_000, 50, []); // no per-step stats
     const result = computeEta({ job, stats, now: NOW });
     expect(result?.type).toBe("eta");
     if (result?.type === "eta") {

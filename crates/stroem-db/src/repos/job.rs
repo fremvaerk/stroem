@@ -5,6 +5,11 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Maximum `type: task` nesting depth, mirroring `job_creator::MAX_TASK_DEPTH`.
+/// Bounds the descendant walk in
+/// [`JobRepo::get_settled_descendants_with_running_parent_step`].
+const MAX_TASK_DEPTH: i32 = 10;
+
 const JOB_COLUMNS: &str = "job_id, workspace, task_name, mode, input, output, status, source_type, source_id, worker_id, revision, created_at, started_at, completed_at, log_path, parent_job_id, parent_step_name, timeout_secs, retry_of_job_id, retry_job_id, retry_attempt, max_retries, raw_input, source_job_id, restart_from_step";
 
 /// Escape LIKE/ILIKE special characters so the search term is a pure substring match.
@@ -466,6 +471,16 @@ impl JobRepo {
 
     /// Mark job as failed
     pub async fn mark_failed(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        Self::mark_failed_tx(pool, job_id).await
+    }
+
+    /// Executor-generic variant of [`mark_failed`]. Use inside a transaction
+    /// together with [`crate::JobStepRepo::fail_non_terminal_steps_tx`] so a
+    /// job and its steps reach `failed` atomically.
+    pub async fn mark_failed_tx<'e, E>(executor: E, job_id: Uuid) -> Result<()>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
         sqlx::query(
             r#"
             UPDATE job
@@ -474,10 +489,26 @@ impl JobRepo {
             "#,
         )
         .bind(job_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .context("Failed to mark job as failed")?;
 
+        Ok(())
+    }
+
+    /// Mark job as cancelled (stamps `completed_at`, unlike `update_status`).
+    pub async fn mark_cancelled(pool: &PgPool, job_id: Uuid) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE job
+            SET status = 'cancelled', completed_at = NOW()
+            WHERE job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .context("Failed to mark job as cancelled")?;
         Ok(())
     }
 
@@ -687,6 +718,72 @@ impl JobRepo {
         .context("Failed to get child jobs")?;
 
         Ok(jobs)
+    }
+
+    /// `type: task` **descendant** jobs that are terminal while the parent step
+    /// that spawned them is still `running` — i.e. jobs that settled
+    /// synchronously inside `create_job_for_task_inner` (all steps skipped,
+    /// or a server-dispatched root step failed) and never went through
+    /// terminal handling / parent propagation, because the creator has no
+    /// `AppState` to run it with.
+    ///
+    /// Walks the whole `parent_job_id` chain below `root_job_id`, bounded at
+    /// `MAX_TASK_DEPTH` levels, because a job that settles at creation can sit
+    /// at any depth: with P → C → G, creating C creates G, G settles, and C is
+    /// left `running` — so nothing but a descendant walk from P ever sees G.
+    /// Rows come back **deepest first**, so the caller settles G (which
+    /// propagates into C) before it reaches C itself.
+    ///
+    /// Scoped to `source_type = 'task'` deliberately: `agent_tool` children are
+    /// propagated only by normal step completion (`propagate_to_parent`'s
+    /// dedicated `agent_tool` branch), which intentionally leaves the parent
+    /// agent step `running` across multiple tool calls — such a child would
+    /// otherwise match this predicate permanently and be re-finalized
+    /// (re-firing its hooks) on every unrelated sibling-step completion. An
+    /// agent-tool child that would be born terminal is rejected at creation by
+    /// the `agent_task_tool` endpoint instead.
+    ///
+    /// Execution quiescence is also required: a descendant with a `running` or
+    /// `claimed` step of its own is still owned by a worker, so its terminal
+    /// handling must not be consumed yet. A cancelled child in particular must
+    /// keep its cancellation signal (and go on collecting log lines) until the
+    /// worker acknowledges by settling the step — reconciling it early would
+    /// clear the cancelled cache and upload the log archive while the worker
+    /// is still writing.
+    pub async fn get_settled_descendants_with_running_parent_step(
+        pool: &PgPool,
+        root_job_id: Uuid,
+    ) -> Result<Vec<JobRow>> {
+        let rows = sqlx::query_as::<_, JobRow>(&format!(
+            "WITH RECURSIVE descendants AS ( \
+                 SELECT j.*, 1 AS depth FROM job j WHERE j.parent_job_id = $1 \
+                 UNION ALL \
+                 SELECT c.*, d.depth + 1 FROM job c \
+                 JOIN descendants d ON c.parent_job_id = d.job_id \
+                 WHERE d.depth < {} \
+             ) \
+             SELECT {} FROM descendants j \
+             WHERE j.source_type = 'task' \
+               AND j.status IN ('completed', 'failed', 'cancelled', 'skipped') \
+               AND EXISTS ( \
+                   SELECT 1 FROM job_step s \
+                   WHERE s.job_id = j.parent_job_id \
+                     AND s.step_name = j.parent_step_name \
+                     AND s.status = 'running' \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM job_step ls \
+                   WHERE ls.job_id = j.job_id \
+                     AND ls.status IN ('running', 'claimed') \
+               ) \
+             ORDER BY j.depth DESC",
+            MAX_TASK_DEPTH, JOB_COLUMNS
+        ))
+        .bind(root_job_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to get settled descendants with running parent step")?;
+        Ok(rows)
     }
 
     /// Get job counts grouped by status (used for dashboard stats)
@@ -994,8 +1091,11 @@ impl JobRepo {
     /// Aggregate duration statistics over the last `limit` *completed* runs of a task.
     ///
     /// Only includes jobs with `status = 'completed'` and non-NULL `started_at` /
-    /// `completed_at`. Returns zero-sample row (all fields `None`) when no runs
-    /// match — never returns `Err` for "no data".
+    /// `completed_at`. Excludes `source_type = 'restart'` jobs (spec §6.4) —
+    /// restart jobs re-run only a suffix of the flow, so their duration is not
+    /// comparable to a full run and would skew percentiles. Returns zero-sample
+    /// row (all fields `None`) when no runs match — never returns `Err` for
+    /// "no data".
     pub async fn get_task_duration_stats(
         pool: &PgPool,
         workspace: &str,
@@ -1019,6 +1119,7 @@ impl JobRepo {
                FROM job \
                WHERE workspace = $1 AND task_name = $2 \
                  AND status = 'completed' \
+                 AND source_type <> 'restart' \
                  AND started_at IS NOT NULL AND completed_at IS NOT NULL \
                  AND completed_at >= started_at \
                ORDER BY completed_at DESC, job_id \
@@ -1053,6 +1154,7 @@ impl JobRepo {
              FROM job \
              WHERE workspace = $1 AND task_name = $2 \
                AND status = 'completed' \
+               AND source_type <> 'restart' \
                AND started_at IS NOT NULL AND completed_at IS NOT NULL \
                AND completed_at >= started_at \
              ORDER BY completed_at DESC, job_id \

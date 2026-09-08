@@ -1,10 +1,10 @@
 use crate::acl::{load_user_acl_context, make_task_path, TaskPermission};
 use crate::config::JobDefaults;
-use crate::job_creator::create_job_for_task;
+use crate::job_creator::create_job_for_task_detailed;
 use crate::state::AppState;
-use crate::web::api::get_workspace_or_error;
 use crate::web::api::middleware::AuthUser;
 use crate::web::api::triggers::TriggerInfo;
+use crate::web::api::{classify_execute_error, get_workspace_or_error};
 use crate::web::error::AppError;
 use anyhow::Context;
 use axum::{
@@ -489,6 +489,15 @@ pub async fn execute_task(
                 "Source job belongs to a different workspace".into(),
             ));
         }
+        // Same top-level-only rule as Restart: a re-run always creates a
+        // parentless job, so re-running a `type: task` child or a hook job
+        // detaches it from its parent and (for `hook`) escapes the hook
+        // recursion guard by relabelling the source type `rerun`.
+        if !crate::web::api::jobs::is_top_level_job(&source_job) {
+            return Err(AppError::BadRequest(
+                "Only top-level jobs can be re-run".into(),
+            ));
+        }
         if source_job.raw_input.is_none() {
             return Err(AppError::BadRequest(
                 "Source job predates Re-run prefill (no raw_input)".into(),
@@ -514,7 +523,7 @@ pub async fn execute_task(
 
     // 5. Create job + steps via shared function
     let revision = state.workspaces.get_revision(&ws);
-    let job_id = create_job_for_task(
+    let created = create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         &workspace,
@@ -530,147 +539,15 @@ pub async fn execute_task(
     )
     .await
     .map_err(classify_execute_error)?;
+    let job_id = created.job_id;
 
     // 6. Fire on_suspended hooks for any root-level approval steps that were
     //    suspended during job creation (FIX 2).
     crate::job_creator::fire_initial_suspended_hooks(&state, &workspace, &ws, &name, job_id).await;
+    crate::job_recovery::finalize_created_job(&state, created).await;
 
     // 7. Return job_id
     Ok(Json(ExecuteTaskResponse {
         job_id: job_id.to_string(),
     }))
-}
-
-/// Classify a `create_job_for_task` failure as a 400 (author mistake) or a 500
-/// (server/infra condition).
-///
-/// Two tiers of phrase matching, because trusting every layer of the context
-/// chain equally is unsafe once wrapped infra errors (sqlx, I/O, ...) are in
-/// the mix:
-///
-/// - **Precise phrases** (`is not shared`, `unknown workspace`, `has no
-///   connection`) are specific enough to `stroem_common::template`'s
-///   cross-workspace error text that they are safe to match anywhere in the
-///   FULL context chain (`{:#}`) — `create_job_for_task` wraps the
-///   author-facing phrase several `.context()` layers deep (e.g. "step
-///   '...': failed to resolve connection inputs" -> "Input field '...'
-///   references connection '...'" -> the actual cause).
-/// - **Legacy broad phrases** (`not found`, `does not exist`, `resolve
-///   connection`, `has no action`, `required`, `invalid`, `validation`,
-///   `merge input defaults`) are common enough that an inner infra-layer
-///   message could contain one by coincidence (e.g. a Postgres error's own
-///   "relation ... does not exist"), so they are matched on the OUTERMOST
-///   message only
-///   (`e.to_string()`, which only renders the top context layer this
-///   function's caller controls).
-///
-/// A configured-but-unavailable workspace (`"is not available"`, from
-/// `Lookup::Unavailable` in `stroem_common::template`) is a transient server
-/// condition, not an author mistake, and always stays a 500 (checked first,
-/// anywhere in the chain) even though its message also contains substrings
-/// like "workspace" that could otherwise look user-facing.
-fn classify_execute_error(e: anyhow::Error) -> AppError {
-    let chain = format!("{:#}", e);
-    if chain.contains("is not available") {
-        return AppError::Internal(e);
-    }
-    let precise_user_error = chain.contains("is not shared") // cross-workspace connection gate
-        || chain.contains("unknown workspace") // qualified ref to a workspace that is not configured
-        || chain.contains("has no connection"); // cross-workspace: owner workspace exists, connection doesn't
-    if precise_user_error {
-        return AppError::BadRequest(chain);
-    }
-    let outer = e.to_string();
-    let legacy_user_error = outer.contains("not found")
-        || outer.contains("does not exist") // connection/action missing
-        || outer.contains("resolve connection") // resolve_connection_inputs context
-        || outer.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
-        || outer.contains("required")
-        || outer.contains("invalid")
-        || outer.contains("validation")
-        || outer.contains("merge input defaults"); // task-input default template render failure
-    if legacy_user_error {
-        AppError::BadRequest(chain)
-    } else {
-        AppError::Internal(e)
-    }
-}
-
-#[cfg(test)]
-mod classify_execute_error_tests {
-    use super::*;
-
-    #[test]
-    fn unshared_cross_workspace_connection_is_bad_request() {
-        let e = anyhow::anyhow!(
-            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
-        )
-        .context("Input field 'conn' references connection 'owner.private'")
-        .context("Failed to resolve connection inputs");
-
-        let err = classify_execute_error(e);
-        match err {
-            AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unavailable_owner_workspace_is_internal() {
-        let e = anyhow::anyhow!("connection 'owner.x': workspace 'owner' is not available")
-            .context("Failed to resolve connection inputs");
-
-        let err = classify_execute_error(e);
-        assert!(
-            matches!(err, AppError::Internal(_)),
-            "expected Internal, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn legacy_phrase_buried_in_an_infra_layer_is_internal() {
-        // A Postgres-style inner error happens to contain "does not exist",
-        // but only at an inner layer, not the outermost context this
-        // function's caller actually attaches. Must not be misread as an
-        // author mistake.
-        let e =
-            anyhow::anyhow!("relation \"job_step\" does not exist").context("Failed to create job");
-
-        let err = classify_execute_error(e);
-        assert!(
-            matches!(err, AppError::Internal(_)),
-            "expected Internal, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn bad_default_template_is_bad_request() {
-        let e = anyhow::anyhow!(
-            "Failed to render default template for input field 'x': Variable `secret.nope` not found"
-        )
-        .context("Failed to merge input defaults");
-
-        let err = classify_execute_error(e);
-        match err {
-            AppError::BadRequest(msg) => {
-                assert!(msg.contains("Failed to merge input defaults"), "{msg}")
-            }
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn precise_phrase_buried_deep_in_chain_is_bad_request() {
-        let e = anyhow::anyhow!(
-            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
-        )
-        .context("Input field 'conn' references connection 'owner.private'")
-        .context("Failed to resolve connection inputs");
-
-        let err = classify_execute_error(e);
-        match err {
-            AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
-    }
 }

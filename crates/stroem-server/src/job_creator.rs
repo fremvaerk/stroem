@@ -17,7 +17,48 @@ use crate::workspace::WorkspaceManager;
 use crate::workspace_set::WorkspaceSet;
 
 /// Maximum nesting depth for type: task sub-jobs (prevents infinite recursion)
-const MAX_TASK_DEPTH: u32 = 10;
+///
+/// `pub(crate)` so `hooks::hook_chain_depth` can size its ancestry-walk hop
+/// budget off the same constant — up to this many plain `type: task` levels
+/// can sit between two `hook` links in a job's ancestry.
+pub(crate) const MAX_TASK_DEPTH: u32 = 10;
+
+/// Result of job creation. `terminal_at_creation` is true when every step was
+/// already terminal once creation-time promotion/expansion/dispatch finished
+/// (e.g. all root steps skipped by `when`, or a server-dispatched root step
+/// failed) — the caller must then run `job_recovery::finalize_created_job`
+/// so hooks/metrics/log-archive fire exactly as for an orchestrator-settled job.
+///
+/// It is also true when post-commit initialisation itself failed: promotion,
+/// `type: task` dispatch, `type: approval` dispatch and settlement all run
+/// inside one coordinated result, and any error there compensates the job to
+/// `failed` (job row and every non-terminal step, in one transaction) rather
+/// than returning a 500 over a committed job. A DB outage during that
+/// compensation still surfaces as an error to the caller.
+#[derive(Debug, Clone, Copy)]
+pub struct CreatedJob {
+    pub job_id: Uuid,
+    pub terminal_at_creation: bool,
+}
+
+/// How a job comes into being. Replaces the positional `source_job_id`, which
+/// used to mean both "resolve Re-run sentinels against this job" and "persist
+/// this lineage pointer".
+pub enum CreationMode<'a> {
+    /// Plain creation: API, scheduler, webhook, `type: task` child, hook.
+    Normal,
+    /// User clicked Re-run: `••••••` sentinels in `input` are replaced from the
+    /// source's `raw_input`; `source_job_id` is persisted.
+    Rerun { source_job_id: Uuid },
+    /// Restart From Step (spec 2026-09-07): `input` is the source's `raw_input`
+    /// replayed through the normal pipeline; carried rows are seeded in the
+    /// creation transaction; lineage + `restart_from_step` are persisted.
+    Restart {
+        source: &'a JobRow,
+        from_step: &'a str,
+        plan: &'a crate::restart::RestartPlan,
+    },
+}
 
 /// Create a job and its steps for a task in a workspace.
 ///
@@ -28,6 +69,12 @@ const MAX_TASK_DEPTH: u32 = 10;
 /// `source_job_id` — when set, the new job is treated as a Re-run of that job.
 /// Sentinel values in `input` are resolved against the source job's `raw_input`,
 /// and both `raw_input` and `source_job_id` are persisted on the new job row.
+///
+/// **Warning: drops the `terminal_at_creation` flag.** Production callers must
+/// use [`create_job_for_task_detailed`] and then call
+/// `job_recovery::finalize_created_job`, or a job that settles synchronously at
+/// creation never fires its hooks, metric, log archive or parent propagation.
+/// Kept for tests.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(pool, workspaces, workspace_config, agents_config, input))]
 pub async fn create_job_for_task(
@@ -44,6 +91,42 @@ pub async fn create_job_for_task(
     agents_config: Option<&AgentsConfig>,
     defaults: JobDefaults,
 ) -> Result<Uuid> {
+    create_job_for_task_detailed(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        revision,
+        source_job_id,
+        agents_config,
+        defaults,
+    )
+    .await
+    .map(|c| c.job_id)
+}
+
+/// Like [`create_job_for_task`] but also reports `terminal_at_creation`.
+/// HTTP/MCP/scheduler entry points use this and call
+/// `job_recovery::finalize_created_job` afterwards.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_job_for_task_detailed(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    source_job_id: Option<Uuid>,
+    agents_config: Option<&AgentsConfig>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
         pool,
@@ -56,8 +139,69 @@ pub async fn create_job_for_task(
         None,
         None,
         revision,
-        source_job_id,
+        match source_job_id {
+            Some(id) => CreationMode::Rerun { source_job_id: id },
+            None => CreationMode::Normal,
+        },
         agents_config,
+        defaults,
+    )
+    .await
+}
+
+/// Restart From Step. `plan` comes from [`crate::restart::compute_restart_set`]
+/// (also used by the dry-run endpoint). Input is the source's `raw_input`
+/// replayed through `merge_defaults` + `resolve_connection_inputs` (spec §4.4),
+/// so a restart re-resolves connections and secrets against today's workspace
+/// rather than reusing the source's frozen `input`. Legacy sources without
+/// `raw_input` are rejected exactly like Re-run.
+///
+/// Reports `terminal_at_creation` like every other creation entry point — the
+/// caller must run `job_recovery::finalize_created_job` when it is true (a
+/// restart whose whole restart set cascades to skipped settles immediately).
+#[allow(clippy::too_many_arguments)]
+pub async fn create_restart_job(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    source: &JobRow,
+    plan: &crate::restart::RestartPlan,
+    from_step: &str,
+    source_id: Option<&str>,
+    revision: Option<&str>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
+    debug_assert!(
+        plan.restart_steps.iter().any(|s| s == from_step),
+        "restart plan for '{}' does not contain it: {:?} — plan was built for a different step",
+        from_step,
+        plan.restart_steps
+    );
+    let raw = source.raw_input.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Source job {} predates Re-run prefill (no raw_input)",
+            source.job_id
+        )
+    })?;
+    create_job_for_task_inner(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        &source.task_name,
+        raw,
+        "restart",
+        source_id,
+        None,
+        None,
+        revision,
+        CreationMode::Restart {
+            source,
+            from_step,
+            plan,
+        },
+        None,
         defaults,
     )
     .await
@@ -65,8 +209,14 @@ pub async fn create_job_for_task(
 
 /// Create a child job with parent tracking.
 ///
-/// Used by `agent_task_tool` endpoint and `handle_task_steps` to create
-/// sub-jobs that propagate back to the parent step on completion.
+/// Used by `handle_task_steps` to create sub-jobs that propagate back to the
+/// parent step on completion.
+///
+/// **Warning: drops the `terminal_at_creation` flag.** Production callers must
+/// use [`create_child_job_for_task_detailed`] and then call
+/// `job_recovery::finalize_created_job` — or, for `agent_tool` children, reject
+/// the terminal case outright, since propagation of an agent-tool result
+/// depends on the worker having recorded the child id first. Kept for tests.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_child_job_for_task(
     workspaces: &WorkspaceManager,
@@ -82,6 +232,41 @@ pub async fn create_child_job_for_task(
     revision: Option<&str>,
     defaults: JobDefaults,
 ) -> Result<Uuid> {
+    create_child_job_for_task_detailed(
+        workspaces,
+        pool,
+        workspace_config,
+        workspace_name,
+        task_name,
+        input,
+        source_type,
+        source_id,
+        parent_job_id,
+        parent_step_name,
+        revision,
+        defaults,
+    )
+    .await
+    .map(|c| c.job_id)
+}
+
+/// Like [`create_child_job_for_task`] but also reports `terminal_at_creation`,
+/// so the caller can finalize (or reject) a child that settled synchronously.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_child_job_for_task_detailed(
+    workspaces: &WorkspaceManager,
+    pool: &PgPool,
+    workspace_config: &WorkspaceConfig,
+    workspace_name: &str,
+    task_name: &str,
+    input: serde_json::Value,
+    source_type: &str,
+    source_id: Option<&str>,
+    parent_job_id: Uuid,
+    parent_step_name: &str,
+    revision: Option<&str>,
+    defaults: JobDefaults,
+) -> Result<CreatedJob> {
     create_job_for_task_inner(
         workspaces,
         pool,
@@ -94,7 +279,7 @@ pub async fn create_child_job_for_task(
         Some(parent_job_id),
         Some(parent_step_name),
         revision,
-        None, // child paths never set source_job_id
+        CreationMode::Normal, // child paths never carry re-run/restart lineage
         None,
         defaults,
     )
@@ -115,10 +300,10 @@ fn create_job_for_task_inner<'a>(
     parent_job_id: Option<Uuid>,
     parent_step_name: Option<&'a str>,
     revision: Option<&'a str>,
-    source_job_id: Option<Uuid>,
+    mode: CreationMode<'a>,
     _agents_config: Option<&'a AgentsConfig>,
     defaults: JobDefaults,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<CreatedJob>> + Send + 'a>> {
     Box::pin(async move {
         // Look up task
         let task = workspace_config.tasks.get(task_name).with_context(|| {
@@ -128,38 +313,62 @@ fn create_job_for_task_inner<'a>(
             )
         })?;
 
-        // Re-run flow: if the caller named a source job, resolve any "reuse from source"
-        // sentinels in the incoming input by looking up the source's raw_input. Done
-        // BEFORE merge_defaults so a sentinel that the source did not override falls
-        // through to the schema default (supports secret rotation).
+        // Lineage resolution.
+        //
+        // Re-run flow: resolve any "reuse from source" sentinels in the incoming
+        // input by looking up the source's raw_input. Done BEFORE merge_defaults
+        // so a sentinel that the source did not override falls through to the
+        // schema default (supports secret rotation).
+        //
+        // Restart flow: `create_restart_job` already passed the source's
+        // `raw_input` as `input`, so there is nothing to resolve — only the
+        // lineage pointers to persist.
         let mut effective_input = input;
-        if let Some(src_id) = source_job_id {
-            let source_job = stroem_db::JobRepo::get(pool, src_id)
-                .await
-                .context("fetch source job for re-run")?
-                .ok_or_else(|| anyhow::anyhow!("Source job {} not found", src_id))?;
-            if source_job.workspace != workspace_name {
-                bail!(
-                    "Source job {} belongs to workspace '{}', cannot Re-run into '{}'",
-                    src_id,
-                    source_job.workspace,
-                    workspace_name
-                );
+        let (lineage_source_job_id, restart_from_step): (Option<Uuid>, Option<&str>) = match &mode {
+            CreationMode::Normal => (None, None),
+            CreationMode::Rerun { source_job_id } => {
+                let src_id = *source_job_id;
+                let source_job = stroem_db::JobRepo::get(pool, src_id)
+                    .await
+                    .context("fetch source job for re-run")?
+                    .ok_or_else(|| anyhow::anyhow!("Source job {} not found", src_id))?;
+                if source_job.workspace != workspace_name {
+                    bail!(
+                        "Source job {} belongs to workspace '{}', cannot Re-run into '{}'",
+                        src_id,
+                        source_job.workspace,
+                        workspace_name
+                    );
+                }
+                let source_raw = match source_job.raw_input {
+                    Some(v) => v,
+                    None => bail!(
+                        "Source job {} predates Re-run prefill (no raw_input)",
+                        src_id
+                    ),
+                };
+                effective_input = stroem_common::template::resolve_rerun_sentinels(
+                    &effective_input,
+                    &source_raw,
+                    &task.input,
+                )
+                .context("resolve re-run sentinels")?;
+                (Some(src_id), None)
             }
-            let source_raw = match source_job.raw_input {
-                Some(v) => v,
-                None => bail!(
-                    "Source job {} predates Re-run prefill (no raw_input)",
-                    src_id
-                ),
-            };
-            effective_input = stroem_common::template::resolve_rerun_sentinels(
-                &effective_input,
-                &source_raw,
-                &task.input,
-            )
-            .context("resolve re-run sentinels")?;
-        }
+            CreationMode::Restart {
+                source, from_step, ..
+            } => {
+                if source.workspace != workspace_name {
+                    bail!(
+                        "Source job {} belongs to workspace '{}', cannot restart into '{}'",
+                        source.job_id,
+                        source.workspace,
+                        workspace_name
+                    );
+                }
+                (Some(source.job_id), Some(*from_step))
+            }
+        };
 
         // Capture the user's submission verbatim before defaults/connections are merged.
         let raw_input_to_persist = Some(effective_input.clone());
@@ -168,6 +377,34 @@ fn create_job_for_task_inner<'a>(
         let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
         let merged_input = merge_defaults(&effective_input, &task.input, &secrets_ctx)
             .context("Failed to merge input defaults")?;
+
+        // Restart replays the source job's `raw_input` with no form in front of
+        // it, so a schema that gained a required field without a default since
+        // the source ran would otherwise create a job with incomplete input.
+        // `merge_defaults` deliberately skips required-field validation (webhook
+        // and trigger inputs do not match the task schema), so restart checks it
+        // here. The message must contain "required": `classify_execute_error`
+        // keys off that word in the OUTERMOST message to return 400, not 500.
+        if matches!(mode, CreationMode::Restart { .. }) {
+            let present = merged_input.as_object();
+            let mut missing: Vec<&str> = task
+                .input
+                .iter()
+                .filter(|(name, field)| {
+                    field.required
+                        && field.default.is_none()
+                        && !present.map(|m| m.contains_key(*name)).unwrap_or(false)
+                })
+                .map(|(name, _)| name.as_str())
+                .collect();
+            missing.sort_unstable();
+            if !missing.is_empty() {
+                bail!(
+                    "Restart input is missing required field(s) with no default: {}",
+                    missing.join(", ")
+                );
+            }
+        }
 
         // Resolve connection inputs (replace connection names with full objects).
         // Qualified names (`ws.conn`) resolve against other workspaces, gated by `shared`.
@@ -329,8 +566,8 @@ fn create_job_for_task_inner<'a>(
                 .or(defaults.job_timeout_secs),
             revision,
             raw_input_to_persist,
-            source_job_id,
-            None, // restart_from_step (feature B)
+            lineage_source_job_id,
+            restart_from_step,
         )
         .await
         .context("Failed to create job")?;
@@ -338,6 +575,16 @@ fn create_job_for_task_inner<'a>(
         JobStepRepo::create_steps_tx(&mut *tx, &new_steps)
             .await
             .context("Failed to create job steps")?;
+
+        // Restart: overwrite the freshly created rows outside the restart set
+        // with the source job's terminal state, inside the SAME transaction —
+        // a job must never be visible with carried rows still `ready`, or a
+        // worker could claim a step that is meant to be skipped entirely.
+        if let CreationMode::Restart { plan, .. } = &mode {
+            JobStepRepo::seed_steps_tx(&mut tx, job_id, &plan.carried)
+                .await
+                .context("seed carried-over steps")?;
+        }
 
         tx.commit().await.context("Failed to commit job creation")?;
 
@@ -349,24 +596,31 @@ fn create_job_for_task_inner<'a>(
 
         tracing::info!("Created job {} with {} steps", job_id, new_steps.len());
 
-        // Evaluate root steps with `when` conditions or `for_each` expressions
-        let needs_post_creation_loop = task
-            .flow
-            .values()
-            .any(|fs| (fs.depends_on.is_empty() && fs.when.is_some()) || fs.for_each.is_some());
-        if needs_post_creation_loop {
-            // Fetch job_row once — it doesn't change, but the step snapshot
-            // must be refreshed each iteration as steps are promoted/skipped.
+        // ── Post-commit initialisation ────────────────────────────────────
+        // The job row is committed; anything that fails from here on must be
+        // made visible on the job instead of surfacing as a 500 with a
+        // committed `pending` job left behind (spec §6.2 / P8).
+        //
+        // Everything a freshly committed job owes before it can be handed back
+        // lives inside this block: root-step promotion/expansion, `type: task`
+        // dispatch, `type: approval` dispatch, and final settlement. Approval
+        // dispatch in particular MUST be covered — a transient failure before
+        // `mark_suspended` leaves an approval step `ready` forever, since
+        // neither workers nor the unmatched-step sweep ever touch approvals.
+        // Settlement is covered for the same reason: an error there would
+        // otherwise return a 500 over a committed, non-terminal job.
+        //
+        // The block's value is the settled status, if the job reached a
+        // terminal state during initialisation.
+        let init: Result<Option<stroem_common::models::job::JobStatus>> = async {
+            // Promote/skip/expand root steps. Runs unconditionally: cheap when
+            // nothing is promotable, and required for Plan B's seeded jobs.
             let job_row = JobRepo::get(pool, job_id).await?.context("Job not found")?;
-
-            // Safety bound: generous limit to accommodate for_each expansion cascades.
             let max_iterations = task.flow.len() * 2 + 10;
             for _iteration in 0..max_iterations {
                 let steps_snapshot = JobStepRepo::get_steps_for_job(pool, job_id).await?;
                 let render_ctx =
                     build_step_render_context(&job_row, &steps_snapshot, workspace_config);
-
-                // Promote/skip loop: root conditions may cascade
                 let changed =
                     JobStepRepo::promote_ready_steps(pool, job_id, &task.flow, Some(&render_ctx))
                         .await?;
@@ -377,7 +631,6 @@ fn create_job_for_task_inner<'a>(
                 if changed.is_empty() && skipped.is_empty() && expanded.is_empty() {
                     break;
                 }
-
                 if _iteration + 1 == max_iterations {
                     tracing::warn!(
                         job_id = %job_id,
@@ -386,48 +639,57 @@ fn create_job_for_task_inner<'a>(
                     );
                 }
             }
-        }
 
-        // Handle any initially-ready type: task steps
-        handle_task_steps(
-            workspaces,
-            pool,
-            workspace_config,
-            workspace_name,
-            job_id,
-            task,
-            defaults,
-        )
-        .await?;
+            handle_task_steps(workspaces, pool, workspace_config, workspace_name, job_id, task, defaults)
+                .await?;
 
-        // Handle any initially-ready type: approval steps
-        if let Err(e) =
-            handle_approval_steps(pool, workspace_config, workspace_name, job_id, task).await
-        {
-            tracing::error!(
-                job_id = %job_id,
-                "Failed to handle initial approval steps: {:#}",
-                e
-            );
-        }
+            handle_approval_steps(pool, workspace_config, workspace_name, job_id, task)
+                .await
+                .context("dispatch initial approval steps")?;
 
-        // If all steps ended up terminal (e.g. all skipped by when conditions,
-        // or a step failed during server-side dispatch), settle the job now
-        // rather than waiting for the recovery sweep.
-        if needs_post_creation_loop {
-            let all_terminal = JobStepRepo::all_steps_terminal(pool, job_id).await?;
-            if all_terminal {
-                if JobStepRepo::any_step_failed(pool, job_id).await? {
-                    JobRepo::mark_failed(pool, job_id).await?;
-                    tracing::info!(job_id = %job_id, "All steps terminal at creation with a failure — job marked failed");
-                } else {
-                    JobRepo::mark_completed(pool, job_id, None).await?;
-                    tracing::info!(job_id = %job_id, "All steps terminal at creation — job marked completed");
-                }
+            // Shared settlement — identical rules to the orchestrator path.
+            let settled = crate::orchestrator::settle_if_all_terminal(pool, job_id, task)
+                .await
+                .context("settle job at creation")?;
+            if let Some(ref status) = settled {
+                tracing::info!(job_id = %job_id, ?status, "All steps terminal at creation — job settled");
             }
+            Ok(settled)
         }
+        .await;
 
-        Ok(job_id)
+        let settled = match init {
+            Ok(settled) => settled,
+            Err(e) => {
+                let msg = format!("[creation] initialisation failed: {:#}", e);
+                tracing::error!(job_id = %job_id, "{}", msg);
+                // One transaction: a half-applied compensation would leave
+                // failed steps under a non-terminal job with no live step to
+                // trigger another sweep.
+                let mut tx = pool
+                    .begin()
+                    .await
+                    .context("begin compensation transaction after initialisation error")?;
+                JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, &msg)
+                    .await
+                    .context("fail steps after initialisation error")?;
+                JobRepo::mark_failed_tx(&mut *tx, job_id)
+                    .await
+                    .context("mark job failed after initialisation error")?;
+                tx.commit()
+                    .await
+                    .context("commit compensation after initialisation error")?;
+                return Ok(CreatedJob {
+                    job_id,
+                    terminal_at_creation: true,
+                });
+            }
+        };
+
+        Ok(CreatedJob {
+            job_id,
+            terminal_at_creation: settled.is_some(),
+        })
     })
 }
 
@@ -638,13 +900,14 @@ async fn handle_task_steps_pass(
             Some(job_id),
             Some(&step.step_name),
             job.revision.as_deref(),
-            None, // source_job_id: child task jobs never inherit re-run source
-            None, // agents_config not available; orchestrator will dispatch
+            CreationMode::Normal, // child task jobs never inherit re-run/restart lineage
+            None,                 // agents_config not available; orchestrator will dispatch
             defaults,
         )
         .await
         {
-            Ok(child_job_id) => {
+            Ok(created) => {
+                let child_job_id = created.job_id;
                 tracing::info!(
                     "Created child job {} for task step '{}' -> task '{}'",
                     child_job_id,

@@ -1698,3 +1698,82 @@ async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeho
     assert_ne!(job.status, "running", "job must settle");
     Ok(())
 }
+
+// ─── Plan A / Task 2: shared settlement ──────────────────────────────────────
+
+/// A job whose only non-completed step was cancelled must settle as
+/// `cancelled`, not `completed` (the old creation-time settle did that).
+#[tokio::test]
+async fn test_settle_cancelled_step_without_failure_marks_job_cancelled() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step(vec![]));
+    let task = make_task(flow);
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "completed"),
+            step(job_id, "b", "cancelled"),
+        ],
+    )
+    .await?;
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"x": 1}))).await?;
+
+    let settled = stroem_server::orchestrator::settle_if_all_terminal(&pool, job_id, &task).await?;
+    assert_eq!(
+        settled,
+        Some(stroem_common::models::job::JobStatus::Cancelled)
+    );
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "cancelled");
+    assert!(job.completed_at.is_some());
+    Ok(())
+}
+
+/// Tolerated failure (continue_on_failure) completes the job and aggregates
+/// output from terminal steps — identical to the orchestrator path.
+#[tokio::test]
+async fn test_settle_tolerated_failure_completes_with_aggregated_output() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step_cof(vec![]));
+    flow.insert("b".to_string(), flow_step(vec![]));
+    let task = make_task(flow);
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[step(job_id, "a", "ready"), step(job_id, "b", "ready")],
+    )
+    .await?;
+    JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
+    JobStepRepo::mark_completed(&pool, job_id, "b", Some(json!({"out": "b"}))).await?;
+
+    let settled = stroem_server::orchestrator::settle_if_all_terminal(&pool, job_id, &task).await?;
+    assert_eq!(
+        settled,
+        Some(stroem_common::models::job::JobStatus::Completed)
+    );
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    assert_eq!(job.output.unwrap()["b"]["out"], "b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_settle_returns_none_while_a_step_is_live() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    let task = make_task(flow);
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(&pool, &[step(job_id, "a", "ready")]).await?;
+    let settled = stroem_server::orchestrator::settle_if_all_terminal(&pool, job_id, &task).await?;
+    assert_eq!(settled, None);
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "pending"
+    );
+    Ok(())
+}

@@ -1,17 +1,37 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import {
   AlertCircle,
   ChevronDown,
   ChevronRight,
   Circle,
   Repeat,
+  RotateCcw,
 } from "lucide-react";
 import { StepDetail } from "@/components/step-detail";
+import { RestartDialog } from "@/components/restart-dialog";
+import { Button } from "@/components/ui/button";
 import { formatDuration, formatDurationMs } from "@/lib/formatting";
+import { isTerminalJobStatus } from "@/lib/job-status";
+import { restartJob } from "@/lib/api";
+import type { RestartPlanResponse } from "@/lib/api";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep, StepDurationStats } from "@/lib/types";
 import { cn, formatActionName } from "@/lib/utils";
+
+/** Shared props threaded from the job page down to every restartable row. */
+interface RestartContext {
+  /** Status of the owning job — restart is only offered once it is terminal. */
+  jobStatus: string;
+  /** Task-level `can_execute`; false hides every restart affordance. */
+  canRestart: boolean;
+  /** Source job of a restart, used to link carried-over steps to their logs. */
+  sourceJobId?: string | null;
+  /** Opens the shared restart dialog for the named step. */
+  onRestart: (stepName: string) => void;
+  /** Step whose restart request is currently in flight, if any. */
+  restartPendingStep: string | null;
+}
 
 interface StepTimelineProps {
   jobId: string;
@@ -24,6 +44,14 @@ interface StepTimelineProps {
   stepStats?: Map<string, StepDurationStats>;
   /** Current epoch ms — passed in so child overrun calculations stay pure. */
   now?: number;
+  /** Status of the owning job — restart is only offered once it is terminal. */
+  jobStatus: string;
+  /** Task-level `can_execute`; false hides every restart affordance. */
+  canRestart: boolean;
+  /** Source job of a restart, used to link carried-over steps to their logs. */
+  sourceJobId?: string | null;
+  /** Task name, shown in the restart confirmation dialog. */
+  taskName?: string;
 }
 
 interface StepRowProps {
@@ -38,6 +66,7 @@ interface StepRowProps {
   onRefresh?: () => void;
   stats?: StepDurationStats;
   now?: number;
+  restart: RestartContext;
 }
 
 function StepRow({
@@ -51,6 +80,7 @@ function StepRow({
   onRefresh,
   stats,
   now,
+  restart,
 }: StepRowProps) {
   // Compute overrun for currently-running steps where we have stats.
   // `now` is supplied by the parent (kept pure for render); if absent we skip.
@@ -158,8 +188,16 @@ function StepRow({
                 {workerNames.get(step.worker_id) ?? step.worker_id.substring(0, 8)}
               </Link>
             )}
-            {(step.started_at || step.completed_at) && (
+            {step.carried_over && (
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                carried over
+              </span>
+            )}
+            {/* Carried-over rows never ran in this job — their timings belong
+                to the source job, so duration and p50 comparisons are hidden. */}
+            {!step.carried_over && (step.started_at || step.completed_at) && (
               <span
+                data-testid={`step-duration-${step.step_name}`}
                 className={cn(
                   "ml-auto font-mono text-xs",
                   isOverrun ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground",
@@ -168,7 +206,7 @@ function StepRow({
                 {formatDuration(step.started_at, step.completed_at)}
               </span>
             )}
-            {stats?.p50_ms != null && (
+            {!step.carried_over && stats?.p50_ms != null && (
               <span
                 className="font-mono text-[10px] text-muted-foreground/70"
                 title={`p50 ${formatDurationMs(stats.p50_ms)} / p95 ${formatDurationMs(stats.p95_ms)} over ${stats.sample_size} runs`}
@@ -190,7 +228,16 @@ function StepRow({
       </div>
       {isExpanded && (
         <div className="ml-9 mb-4">
-          <StepDetail jobId={jobId} step={step} onRefresh={onRefresh} />
+          <StepDetail
+            jobId={jobId}
+            step={step}
+            onRefresh={onRefresh}
+            jobStatus={restart.jobStatus}
+            canRestart={restart.canRestart}
+            sourceJobId={restart.sourceJobId}
+            onRestart={restart.onRestart}
+            restartPending={restart.restartPendingStep === step.step_name}
+          />
         </div>
       )}
     </div>
@@ -208,6 +255,7 @@ interface LoopGroupProps {
   instancesExpanded: boolean;
   onToggleInstances: () => void;
   onRefresh?: () => void;
+  restart: RestartContext;
 }
 
 function LoopGroup({
@@ -221,9 +269,13 @@ function LoopGroup({
   instancesExpanded,
   onToggleInstances,
   onRefresh,
+  restart,
 }: LoopGroupProps) {
   // Placeholder steps have no logs/input of their own — toggling expands iterations instead
   const isPlaceholderExpanded = instancesExpanded;
+
+  const showRestart =
+    restart.canRestart && isTerminalJobStatus(restart.jobStatus);
 
   const completedCount = instances.filter(
     (s) => s.status === "completed" || s.status === "skipped",
@@ -308,10 +360,42 @@ function LoopGroup({
                 when
               </span>
             )}
-            {(placeholder.started_at || placeholder.completed_at) && (
-              <span className="ml-auto font-mono text-xs text-muted-foreground">
-                {formatDuration(placeholder.started_at, placeholder.completed_at)}
+            {placeholder.carried_over && (
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                carried over
               </span>
+            )}
+            {!placeholder.carried_over &&
+              (placeholder.started_at || placeholder.completed_at) && (
+                <span
+                  data-testid={`step-duration-${placeholder.step_name}`}
+                  className="ml-auto font-mono text-xs text-muted-foreground"
+                >
+                  {formatDuration(
+                    placeholder.started_at,
+                    placeholder.completed_at,
+                  )}
+                </span>
+              )}
+            {/* The placeholder header only toggles its instances and never
+                opens StepDetail, so the restart affordance lives here. Both
+                click and key events are stopped so activating the button does
+                not also expand/collapse the group. */}
+            {showRestart && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-2 h-6 px-2 text-xs"
+                disabled={restart.restartPendingStep === placeholder.step_name}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  restart.onRestart(placeholder.step_name);
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <RotateCcw className="mr-1 h-3 w-3" aria-hidden="true" />
+                Restart from here
+              </Button>
             )}
           </div>
           {placeholder.error_message && (
@@ -346,6 +430,7 @@ function LoopGroup({
                 isLast={idx === instances.length - 1}
                 indented
                 onRefresh={onRefresh}
+                restart={restart}
               />
             ))}
           </div>
@@ -364,9 +449,61 @@ export function StepTimeline({
   onRefresh,
   stepStats,
   now,
+  jobStatus,
+  canRestart,
+  sourceJobId,
+  taskName = "",
 }: StepTimelineProps) {
   // User-toggled loop expansion state, keyed by placeholder step name
   const [expandedLoops, setExpandedLoops] = useState<Record<string, boolean>>({});
+
+  // Restart state — a single dialog serves both the StepDetail button and the
+  // loop-group header button, so the plan lives here rather than per-row.
+  const navigate = useNavigate();
+  const [restartStep, setRestartStep] = useState<string | null>(null);
+  const [restartPlan, setRestartPlan] = useState<RestartPlanResponse | null>(null);
+  const [restartPending, setRestartPending] = useState<string | null>(null);
+  const [restartConfirming, setRestartConfirming] = useState(false);
+
+  const handleRestart = async (stepName: string) => {
+    setRestartPending(stepName);
+    try {
+      const plan = await restartJob(jobId, stepName, true);
+      setRestartPlan(plan);
+      setRestartStep(stepName);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to plan restart");
+    } finally {
+      setRestartPending(null);
+    }
+  };
+
+  const closeRestartDialog = () => {
+    setRestartStep(null);
+    setRestartPlan(null);
+  };
+
+  const confirmRestart = async () => {
+    if (!restartStep) return;
+    setRestartConfirming(true);
+    try {
+      const res = await restartJob(jobId, restartStep, false);
+      closeRestartDialog();
+      if (res.job_id) navigate(`/jobs/${res.job_id}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to restart job");
+    } finally {
+      setRestartConfirming(false);
+    }
+  };
+
+  const restartContext: RestartContext = {
+    jobStatus,
+    canRestart,
+    sourceJobId,
+    onRestart: handleRestart,
+    restartPendingStep: restartPending,
+  };
 
   // Auto-expand: if the selected step is a loop placeholder or instance, include its group
   const effectiveExpandedLoops = useMemo(() => {
@@ -446,6 +583,7 @@ export function StepTimeline({
                 }
               }}
               onRefresh={onRefresh}
+              restart={restartContext}
             />
           );
         }
@@ -466,9 +604,19 @@ export function StepTimeline({
             onRefresh={onRefresh}
             stats={stepStats?.get(step.step_name)}
             now={now}
+            restart={restartContext}
           />
         );
       })}
+      <RestartDialog
+        open={restartStep !== null}
+        plan={restartPlan}
+        taskName={taskName}
+        stepName={restartStep ?? ""}
+        busy={restartConfirming}
+        onConfirm={confirmRestart}
+        onCancel={closeRestartDialog}
+      />
     </div>
   );
 }

@@ -20,6 +20,7 @@ pub mod oauth;
 pub mod oidc;
 pub mod orchestrator;
 pub mod recovery;
+pub mod restart;
 pub mod scheduler;
 pub mod state;
 pub mod state_storage;

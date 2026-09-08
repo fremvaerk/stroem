@@ -6,7 +6,7 @@ pub use pool::{create_pool, run_migrations};
 pub use repos::api_key::{ApiKeyRepo, ApiKeyRow};
 pub use repos::job::{DurationStatsRow, JobRepo, JobRow, RecentDurationRow, RetentionJobInfo};
 pub use repos::job_step::{
-    JobStepRepo, JobStepRow, NewJobStep, StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
+    JobStepRepo, JobStepRow, NewJobStep, Seed, StaleStepInfo, StepDurationStatsRow, WorkerStepRow,
 };
 pub use repos::oauth_authorization_code::{OAuthAuthorizationCodeRepo, OAuthAuthorizationCodeRow};
 pub use repos::oauth_client::{OAuthClientRepo, OAuthClientRow};

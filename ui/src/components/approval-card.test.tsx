@@ -35,6 +35,7 @@ function makeStep(approvalFields: Record<string, unknown>): JobStep {
     retry_at: null,
     approval_message: "Pick deployment targets",
     approval_fields: approvalFields,
+    carried_over: false,
   };
 }
 

@@ -10,46 +10,119 @@ use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow};
 use uuid::Uuid;
 
-/// Increment the `stroem_jobs_completed_total` counter for a job that has
-/// reached terminal state. Uses a DB-level CAS guard (`metrics_recorded_at`)
-/// to ensure the counter fires exactly once per job, regardless of how many
-/// code paths converge on terminal detection (orchestrate_after_step,
-/// propagate_to_parent, handle_job_terminal, cancel_job cascade).
+/// Exactly-once claim that a job's terminal side effects — hooks, sync-waiter
+/// notification, log archive upload, parent-step propagation, task-level
+/// retry-job creation, and the completion metric — have started running.
 ///
-/// The UPDATE is best-effort: if it fails (e.g. pool exhausted), we log a
-/// warning and skip incrementing rather than double-counting.
-async fn record_job_completed(pool: &sqlx::PgPool, job: &stroem_db::JobRow) {
+/// Terminal state is observed concurrently from multiple independent code
+/// paths (`orchestrate_after_step`, `propagate_to_parent`, `handle_job_terminal`,
+/// the `cancel_job` cascade), potentially on different server replicas under
+/// HA with no shared lock. Every one of those paths MUST call this function
+/// immediately after detecting a job is terminal and run propagation, retry,
+/// hook, notify, and archive logic ONLY when it returns `true` — otherwise the
+/// same job's terminal side effects (most importantly hook jobs) can fire more
+/// than once.
+///
+/// Implemented as a DB-level CAS on `metrics_recorded_at`: whichever caller
+/// wins the `UPDATE ... WHERE metrics_recorded_at IS NULL RETURNING job_id`
+/// race increments the `stroem_jobs_completed_total` counter and returns
+/// `true` — the metric emission piggybacks on the same claim rather than
+/// being a separate concern. Every other caller observes the column already
+/// set, returns `false`, and must skip all terminal side effects for this job.
+///
+/// The UPDATE is fail-closed: if it errors (e.g. pool exhausted), we return
+/// `false` rather than risk double-processing — which means this job's hooks,
+/// log archive upload and parent propagation are dropped entirely and no later
+/// path re-observes it. That is deliberate but must never be silent, so the
+/// error is logged at `error!` level AND written to the job's own log view via
+/// `append_server_log`.
+async fn claim_terminal_handling(state: &AppState, job: &stroem_db::JobRow) -> bool {
     match sqlx::query_scalar::<_, uuid::Uuid>(
         "UPDATE job SET metrics_recorded_at = NOW() \
          WHERE job_id = $1 AND metrics_recorded_at IS NULL \
          RETURNING job_id",
     )
     .bind(job.job_id)
-    .fetch_optional(pool)
+    .fetch_optional(&state.pool)
     .await
     {
         Ok(Some(_)) => {
-            // We won the CAS race — increment the counter exactly once.
+            // We won the CAS race — increment the counter and claim terminal handling.
             metrics::counter!(
                 crate::metrics::STROEM_JOBS_COMPLETED_TOTAL,
                 "status" => job.status.clone(),
             )
             .increment(1);
+            true
         }
         Ok(None) => {
-            // Another code path already recorded this job — skip to avoid
-            // double-counting.
+            // Another code path already claimed terminal handling for this job —
+            // skip to avoid double-firing hooks, double-counting, etc.
             tracing::debug!(
                 job_id = %job.job_id,
-                "record_job_completed: metrics_recorded_at already set, skipping"
+                "claim_terminal_handling: metrics_recorded_at already set, terminal handling already claimed elsewhere"
             );
+            false
+        }
+        Err(e) => {
+            tracing::error!(
+                job_id = %job.job_id,
+                error = %e,
+                "claim_terminal_handling: CAS update failed, treating as not claimed"
+            );
+            state
+                .append_server_log(
+                    job.job_id,
+                    &format!(
+                        "[orchestration] terminal handling claim failed: {e} — \
+                         hooks/archive/propagation NOT run for this job"
+                    ),
+                )
+                .await;
+            false
+        }
+    }
+}
+
+/// Drain gate: a terminal job's side effects must not be claimed while any of
+/// its own steps is still `running` or `claimed` on a worker.
+///
+/// A job row reaches a terminal status before its execution finishes whenever
+/// the status is written from outside step completion — `JobRepo::cancel`
+/// stamps `cancelled` the instant the user asks, while workers keep executing.
+/// Without this gate the FIRST worker to report a step would find the job
+/// terminal, win `claim_terminal_handling`, and `run_terminal_job_actions`
+/// would `close_log` and upload the archive while a sibling worker is still
+/// emitting lines. The later completion loses the one-shot claim, so the
+/// archive is never refreshed — before the exactly-once claim the upload
+/// simply ran again, which is why this is a regression rather than a
+/// pre-existing wart. The cancellation signal must stay visible to those
+/// workers for the same reason, so `clear_cancelled` sits behind this gate too.
+///
+/// Returns `true` when the job is drained and the caller may proceed.
+///
+/// A query error fails **open** — deliberately the opposite of
+/// `claim_terminal_handling`. Being wrong here costs at worst an early archive
+/// upload, whose content still has a complete local-JSONL fallback; deferring
+/// on the LAST worker's completion would instead drop the job's hooks
+/// entirely, with nothing left to re-observe it.
+async fn drained_for_terminal_handling(state: &AppState, job_id: Uuid) -> bool {
+    match JobStepRepo::has_live_steps(&state.pool, job_id).await {
+        Ok(false) => true,
+        Ok(true) => {
+            tracing::debug!(
+                job_id = %job_id,
+                "terminal side effects deferred: live steps remain"
+            );
+            false
         }
         Err(e) => {
             tracing::warn!(
-                job_id = %job.job_id,
+                job_id = %job_id,
                 error = %e,
-                "record_job_completed: CAS update failed, counter not incremented"
+                "drain check failed, proceeding with terminal handling"
             );
+            true
         }
     }
 }
@@ -191,6 +264,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             )
             .await;
     }
+    reconcile_settled_children(state, job_id).await;
 
     // Handle any newly-promoted type: approval steps and fire on_suspended hooks
     {
@@ -266,11 +340,27 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
                 | Some(JobStatus::Cancelled)
                 | Some(JobStatus::Skipped)
         ) {
-            // Emit the counter at terminal-state detection. The CAS guard inside
-            // record_job_completed ensures it fires exactly once per job even when
-            // multiple code paths (orchestrate_after_step, propagate_to_parent,
-            // handle_job_terminal, cancel_job cascade) race to this point.
-            record_job_completed(&state.pool, &job_after).await;
+            // Drain gate: a sibling worker may still be executing a step of
+            // this job (a cancel stamps the job terminal immediately). Its
+            // completion re-enters here and drains the job.
+            if !drained_for_terminal_handling(state, job_id).await {
+                return Ok(());
+            }
+
+            // Cancelled jobs stay in the cancelled set until they drain, so
+            // workers keep seeing the signal. Now that they have, drop it.
+            crate::cancellation::clear_cancelled(state, job_id);
+
+            // Exactly-once claim: only the winner propagates to the parent,
+            // creates a retry job, and runs terminal actions (hooks, notify,
+            // archive) for this job. See `claim_terminal_handling` doc comment.
+            if !claim_terminal_handling(state, &job_after).await {
+                tracing::debug!(
+                    job_id = %job_after.job_id,
+                    "orchestrate_after_step: terminal handling already claimed, skipping"
+                );
+                return Ok(());
+            }
 
             // If this is a child job, propagate to parent
             if let (Some(parent_job_id), Some(ref parent_step)) =
@@ -352,7 +442,16 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
 }
 
 /// Propagate a child job's terminal state to the parent step and orchestrate the parent.
-async fn propagate_to_parent(
+///
+/// For `agent_tool` children this is gated on a **registration barrier**. The
+/// worker records a child's id in the agent step's `agent_state` only after the
+/// creation response returns, so a child that settles before that write is not
+/// yet part of the conversation. Propagating it anyway would either drop the
+/// tool result or — via the parse fallback — reach ordinary `mark_completed`
+/// and settle an agent step out from under a still-running worker. Such a
+/// child is left alone; `agent_save_state` / `agent_suspend_step` replays this
+/// function for every already-terminal pending child once it registers them.
+pub async fn propagate_to_parent(
     state: &AppState,
     child_job: &stroem_db::JobRow,
     parent_job_id: Uuid,
@@ -364,67 +463,92 @@ async fn propagate_to_parent(
     if child_job.source_type == "agent_tool" {
         let parent_steps = JobStepRepo::get_steps_for_job(&state.pool, parent_job_id).await?;
         if let Some(parent_step_row) = parent_steps.iter().find(|s| s.step_name == parent_step) {
-            if let Some(ref state_val) = parent_step_row.agent_state {
-                if let Ok(mut conv_state) = serde_json::from_value::<
-                    stroem_agent::state::AgentConversationState,
-                >(state_val.clone())
+            let Some(ref state_val) = parent_step_row.agent_state else {
+                tracing::info!(
+                    child = %child_job.job_id,
+                    parent_job_id = %parent_job_id,
+                    step = %parent_step,
+                    "agent tool child {} not yet registered on step {}; propagation deferred until agent state is saved",
+                    child_job.job_id,
+                    parent_step
+                );
+                return Ok(());
+            };
+            if let Ok(mut conv_state) = serde_json::from_value::<
+                stroem_agent::state::AgentConversationState,
+            >(state_val.clone())
+            {
+                if !conv_state
+                    .pending_tool_calls
+                    .iter()
+                    .any(|tc| tc.child_job_id == child_job.job_id)
                 {
-                    let tool_result_text = if child_job.status == JobStatus::Completed.as_ref() {
-                        child_job
-                            .output
-                            .as_ref()
-                            .map(|o| serde_json::to_string(o).unwrap_or_default())
-                            .unwrap_or_else(|| "Task completed successfully".to_string())
-                    } else {
-                        format!("Task failed: {}", child_job.status)
-                    };
-
-                    if let Some(resolved) = conv_state.resolve_tool_call(child_job.job_id) {
-                        conv_state.resolved_tool_results.push(
-                            stroem_agent::state::ResolvedToolResult {
-                                tool_call_id: resolved.tool_call_id,
-                                result_text: tool_result_text,
-                            },
-                        );
-                    }
-
-                    let updated_state = serde_json::to_value(&conv_state)
-                        .context("serialize agent conversation state")?;
-                    JobStepRepo::update_agent_state(
-                        &state.pool,
-                        parent_job_id,
-                        parent_step,
-                        updated_state,
-                    )
-                    .await?;
-
-                    if conv_state.all_tool_calls_resolved() {
-                        // All tools done — mark step ready so a worker can re-claim it
-                        sqlx::query(
-                            "UPDATE job_step SET status = 'ready', ready_at = NOW(), worker_id = NULL \
-                             WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
-                        )
-                        .bind(parent_job_id)
-                        .bind(parent_step)
-                        .execute(&state.pool)
-                        .await?;
-
-                        tracing::info!(
-                            parent_job_id = %parent_job_id,
-                            step = %parent_step,
-                            "Agent step marked ready for re-claim after all task tools completed"
-                        );
-                    } else {
-                        tracing::info!(
-                            parent_job_id = %parent_job_id,
-                            step = %parent_step,
-                            pending = conv_state.pending_tool_calls.len(),
-                            "Agent tool completed, still waiting for more tools"
-                        );
-                    }
-
+                    tracing::info!(
+                        child = %child_job.job_id,
+                        parent_job_id = %parent_job_id,
+                        step = %parent_step,
+                        "agent tool child {} not yet registered on step {}; propagation deferred until agent state is saved",
+                        child_job.job_id,
+                        parent_step
+                    );
                     return Ok(());
                 }
+
+                let tool_result_text = if child_job.status == JobStatus::Completed.as_ref() {
+                    child_job
+                        .output
+                        .as_ref()
+                        .map(|o| serde_json::to_string(o).unwrap_or_default())
+                        .unwrap_or_else(|| "Task completed successfully".to_string())
+                } else {
+                    format!("Task failed: {}", child_job.status)
+                };
+
+                if let Some(resolved) = conv_state.resolve_tool_call(child_job.job_id) {
+                    conv_state.resolved_tool_results.push(
+                        stroem_agent::state::ResolvedToolResult {
+                            tool_call_id: resolved.tool_call_id,
+                            result_text: tool_result_text,
+                        },
+                    );
+                }
+
+                let updated_state = serde_json::to_value(&conv_state)
+                    .context("serialize agent conversation state")?;
+                JobStepRepo::update_agent_state(
+                    &state.pool,
+                    parent_job_id,
+                    parent_step,
+                    updated_state,
+                )
+                .await?;
+
+                if conv_state.all_tool_calls_resolved() {
+                    // All tools done — mark step ready so a worker can re-claim it
+                    sqlx::query(
+                        "UPDATE job_step SET status = 'ready', ready_at = NOW(), worker_id = NULL \
+                             WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
+                    )
+                    .bind(parent_job_id)
+                    .bind(parent_step)
+                    .execute(&state.pool)
+                    .await?;
+
+                    tracing::info!(
+                        parent_job_id = %parent_job_id,
+                        step = %parent_step,
+                        "Agent step marked ready for re-claim after all task tools completed"
+                    );
+                } else {
+                    tracing::info!(
+                        parent_job_id = %parent_job_id,
+                        step = %parent_step,
+                        pending = conv_state.pending_tool_calls.len(),
+                        "Agent tool completed, still waiting for more tools"
+                    );
+                }
+
+                return Ok(());
             }
         }
 
@@ -510,6 +634,7 @@ async fn propagate_to_parent(
                 crate::config::JobDefaults::from(state.config.as_ref()),
             )
             .await?;
+            reconcile_settled_children(state, parent_job_id).await;
 
             // Handle any newly-promoted approval steps in the parent,
             // and fire on_suspended hooks for steps that just became suspended (FIX 3).
@@ -585,31 +710,123 @@ async fn propagate_to_parent(
                         | Some(JobStatus::Cancelled)
                         | Some(JobStatus::Skipped)
                 ) {
-                    // Emit the counter via CAS guard — exactly-once even when
-                    // cancel_job cascade and this path both observe terminal state.
-                    record_job_completed(&state.pool, &parent_after).await;
-
-                    // Propagate up the chain if parent is also a child
-                    if let (Some(grandparent_id), Some(ref grandparent_step)) =
-                        (parent_after.parent_job_id, &parent_after.parent_step_name)
-                    {
-                        Box::pin(propagate_to_parent(
-                            state,
-                            &parent_after,
-                            grandparent_id,
-                            grandparent_step,
-                        ))
-                        .await?;
+                    // Drain gate: the parent may still have its own worker
+                    // steps in flight (a cascading cancel stamps every job
+                    // terminal at once). Their completion re-enters here.
+                    if !drained_for_terminal_handling(state, parent_job_id).await {
+                        return Ok(());
                     }
+                    crate::cancellation::clear_cancelled(state, parent_job_id);
 
-                    // Fire hooks, notify waiters, upload to S3
-                    run_terminal_job_actions(state, &parent_after, &parent_ws, &parent_task).await;
+                    // Exactly-once claim: only the winner propagates further up
+                    // the chain and runs terminal actions for the parent job.
+                    if claim_terminal_handling(state, &parent_after).await {
+                        // Propagate up the chain if parent is also a child.
+                        // The claim above is one-shot, so an error here must
+                        // NOT abort the parent's own terminal actions — no
+                        // later path can re-observe them. Same pattern as
+                        // `handle_job_terminal`.
+                        if let (Some(grandparent_id), Some(ref grandparent_step)) =
+                            (parent_after.parent_job_id, &parent_after.parent_step_name)
+                        {
+                            if let Err(e) = Box::pin(propagate_to_parent(
+                                state,
+                                &parent_after,
+                                grandparent_id,
+                                grandparent_step,
+                            ))
+                            .await
+                            {
+                                tracing::error!(
+                                    "Failed to propagate job {} to grandparent {}: {:#}",
+                                    parent_after.job_id,
+                                    grandparent_id,
+                                    e
+                                );
+                                state
+                                    .append_server_log(
+                                        parent_job_id,
+                                        &format!(
+                                            "[orchestration] Failed to propagate to grandparent job {}: {:#}",
+                                            grandparent_id, e
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+
+                        // Fire hooks, notify waiters, upload to S3
+                        run_terminal_job_actions(state, &parent_after, &parent_ws, &parent_task)
+                            .await;
+                    } else {
+                        tracing::debug!(
+                            job_id = %parent_after.job_id,
+                            "propagate_to_parent: terminal handling already claimed, skipping"
+                        );
+                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// Run the side effects a freshly created job may already owe.
+///
+/// - `terminal_at_creation` → `handle_job_terminal` (hooks, metrics, archive,
+///   parent propagation) — the creator itself has no `AppState`.
+/// - Always → `reconcile_settled_children`: `type: task` root steps dispatched
+///   at creation may have produced a child that settled synchronously.
+///
+/// Best-effort: creation already succeeded, so problems are logged, not returned.
+pub async fn finalize_created_job(state: &AppState, created: crate::job_creator::CreatedJob) {
+    if created.terminal_at_creation {
+        // `handle_job_terminal` can, via hook dispatch, create a `type: task` hook
+        // job that itself settles synchronously and calls back into
+        // `finalize_created_job` — box this leg to avoid an infinitely-sized future.
+        if let Err(e) = Box::pin(handle_job_terminal(state, created.job_id)).await {
+            tracing::error!(job_id = %created.job_id, "terminal handling after creation failed: {:#}", e);
+        }
+    }
+    reconcile_settled_children(state, created.job_id).await;
+}
+
+/// Descendants of `root_job_id` that are terminal while their parent step is
+/// still `running` never reached `propagate_to_parent` (they settled inside
+/// `create_job_for_task_inner`, which has no `AppState`). Run terminal handling
+/// for each; it propagates to the parent step and fires that job's hooks. The
+/// "parent step still running" predicate makes this idempotent.
+///
+/// The walk covers the WHOLE descendant chain, not just direct children: with
+/// P → C → G, a G that settles at creation leaves C `running` with no step that
+/// will ever complete, so C never orchestrates and only a descendant walk from
+/// P reaches G. Rows arrive deepest-first, so handling G settles C via
+/// `propagate_to_parent`, and the exactly-once claim makes the later visit to C
+/// in the same loop a no-op.
+pub async fn reconcile_settled_children(state: &AppState, root_job_id: Uuid) {
+    let children =
+        match JobRepo::get_settled_descendants_with_running_parent_step(&state.pool, root_job_id)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(job_id = %root_job_id, "reconcile_settled_children: {:#}", e);
+                return;
+            }
+        };
+    for child in children {
+        tracing::info!(
+            child = %child.job_id, root = %root_job_id,
+            "descendant job settled at creation — running terminal handling"
+        );
+        // `handle_job_terminal` → `propagate_to_parent` → `reconcile_settled_children`
+        // → `handle_job_terminal` forms a call cycle; box this leg to avoid an
+        // infinitely-sized future.
+        if let Err(e) = Box::pin(handle_job_terminal(state, child.job_id)).await {
+            tracing::error!(child = %child.job_id, "terminal handling for settled descendant failed: {:#}", e);
+        }
+    }
 }
 
 /// Handle a job that has just reached terminal state (completed or failed).
@@ -634,13 +851,28 @@ pub async fn handle_job_terminal(state: &AppState, job_id: Uuid) -> Result<()> {
         _ => return Ok(()),
     };
 
-    // Emit the counter via CAS guard — exactly-once even when cancel_job cascade
-    // and propagate_to_parent both converge on the same terminal job.
-    record_job_completed(&state.pool, &job).await;
+    // Drain gate: hold everything back while a worker still owns a step of
+    // this job. The cancellation signal in particular must stay visible until
+    // those workers acknowledge, so `clear_cancelled` sits behind the gate.
+    if !drained_for_terminal_handling(state, job_id).await {
+        return Ok(());
+    }
 
     // Remove from the in-memory cancelled set to prevent unbounded growth.
-    // Safe to call unconditionally — no-op if not present.
+    // Safe to call unconditionally — no-op if not present. Independent of the
+    // terminal-handling claim below (idempotent either way).
     crate::cancellation::clear_cancelled(state, job_id);
+
+    // Exactly-once claim: only the winner propagates to the parent and runs
+    // terminal actions (hooks, notify, archive) for this job. See
+    // `claim_terminal_handling` doc comment.
+    if !claim_terminal_handling(state, &job).await {
+        tracing::debug!(
+            job_id = %job_id,
+            "handle_job_terminal: terminal handling already claimed, skipping"
+        );
+        return Ok(());
+    }
 
     // Propagate to parent
     if let (Some(parent_job_id), Some(ref parent_step)) = (job.parent_job_id, &job.parent_step_name)
@@ -910,7 +1142,7 @@ async fn try_retry_job(
     };
 
     let input = failed_job.input.clone().unwrap_or_default();
-    let retry_job_id = crate::job_creator::create_job_for_task(
+    let created = crate::job_creator::create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         workspace,
@@ -926,6 +1158,7 @@ async fn try_retry_job(
     )
     .await
     .context("Failed to create retry job")?;
+    let retry_job_id = created.job_id;
 
     // Set retry tracking fields, link original → retry, and optionally set retry_at
     // in a single transaction so the retry job is never visible in a partial state.
@@ -973,6 +1206,8 @@ async fn try_retry_job(
             &task_retry_message(failed_job.retry_attempt, max, retry_job_id, delay_secs),
         )
         .await;
+
+    finalize_created_job(state, created).await;
 
     Ok(true)
 }

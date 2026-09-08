@@ -12,11 +12,12 @@ import { ServerEvents } from "@/components/server-events";
 import { ArtifactList } from "@/components/artifact-list";
 import { JsonViewer } from "@/components/json-viewer";
 import { LoadingSpinner } from "@/components/loading-spinner";
-import { getJob, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
+import { getJob, getTask, getTaskStats, cancelJob, listJobArtifacts } from "@/lib/api";
 import { useTitle } from "@/hooks/use-title";
 import { useWorkerNames } from "@/hooks/use-worker-names";
 import { formatTime, formatDuration, formatDurationMs } from "@/lib/formatting";
 import { computeEta } from "@/lib/eta";
+import { isTopLevelJob } from "@/lib/job-status";
 import type { ArtifactItem } from "@/lib/api";
 import type { JobDetail, TaskStatsResponse } from "@/lib/types";
 
@@ -33,6 +34,12 @@ export function JobDetailPage() {
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(true);
   const [cancelling, setCancelling] = useState(false);
+  // Task-level execute permission, used to gate the restart affordances.
+  // `null` means "not resolved yet" — the restart controls stay hidden until a
+  // `getTask` call actually comes back, so a View-only user never sees a button
+  // that the server will only reject. A failed fetch leaves it `null` too.
+  // Undefined `can_execute` on a successful fetch means ACL is off ⇒ allowed.
+  const [canExecute, setCanExecute] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -61,6 +68,27 @@ export function JobDetailPage() {
       })
       .catch(() => {
         /* non-fatal */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [job?.workspace, job?.task_name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch the task definition once per (workspace, task) purely for
+  // `can_execute`, which gates the "Restart from here" buttons. Failure is
+  // non-fatal: the server re-checks the permission on the restart request.
+  useEffect(() => {
+    if (!job) return;
+    let cancelled = false;
+    // Back to unknown whenever the task changes, so a stale `true` from the
+    // previous task can never authorise controls for the new one.
+    setCanExecute(null);
+    getTask(job.workspace, job.task_name)
+      .then((data) => {
+        if (!cancelled) setCanExecute(data.can_execute !== false);
+      })
+      .catch(() => {
+        /* non-fatal: permission stays unknown and the controls stay hidden */
       });
     return () => {
       cancelled = true;
@@ -209,6 +237,10 @@ export function JobDetailPage() {
     );
   }
 
+  // Re-run and Restart both create a parentless job, so neither is offered on a
+  // child, hook, agent-tool or upload job — the server rejects both with 400.
+  const topLevel = isTopLevelJob(job);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -276,14 +308,16 @@ export function JobDetailPage() {
               {cancelling ? "Cancelling..." : "Cancel Job"}
             </Button>
           )}
-          <Button variant="outline" asChild>
-            <Link
-              to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
-              state={{ sourceJobId: job.job_id, rawInput: job.raw_input }}
-            >
-              Re-run
-            </Link>
-          </Button>
+          {topLevel && (
+            <Button variant="outline" asChild>
+              <Link
+                to={`/workspaces/${encodeURIComponent(job.workspace)}/tasks/${encodeURIComponent(job.task_name)}`}
+                state={{ sourceJobId: job.job_id, rawInput: job.raw_input }}
+              >
+                Re-run
+              </Link>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -359,6 +393,31 @@ export function JobDetailPage() {
                     >
                       {job.retry_job_id.substring(0, 8)}
                     </Link>
+                  ),
+                },
+              ]
+            : []),
+          ...(job.source_job_id && job.source_type === "restart"
+            ? [
+                {
+                  label: "Restart of",
+                  value: (
+                    <span className="text-xs">
+                      <Link
+                        to={`/jobs/${job.source_job_id}`}
+                        className="font-mono text-primary hover:underline"
+                      >
+                        {job.source_job_id.substring(0, 8)}
+                      </Link>
+                      {job.restart_from_step && (
+                        <>
+                          {" from "}
+                          <span className="font-mono">
+                            {job.restart_from_step}
+                          </span>
+                        </>
+                      )}
+                    </span>
                   ),
                 },
               ]
@@ -462,6 +521,10 @@ export function JobDetailPage() {
                 onRefresh={load}
                 stepStats={stepStatsMap}
                 now={tickNow}
+                jobStatus={job.status}
+                canRestart={canExecute === true && topLevel}
+                sourceJobId={job.source_job_id}
+                taskName={job.task_name}
               />
             </>
           )}

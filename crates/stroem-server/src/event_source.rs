@@ -595,7 +595,7 @@ async fn create_event_source_job(
         }
     });
 
-    let job_id = crate::job_creator::create_job_for_task(
+    let created = crate::job_creator::create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         &workspace_config,
@@ -616,6 +616,7 @@ async fn create_event_source_job(
             source_id
         )
     })?;
+    let job_id = created.job_id;
 
     tracing::info!(
         "EventSourceManager: created job {} for event source '{}' (consumer task='{}', target_task='{}')",
@@ -624,6 +625,8 @@ async fn create_event_source_job(
         des.task,
         des.target_task,
     );
+
+    crate::job_recovery::finalize_created_job(state, created).await;
 
     Ok(())
 }

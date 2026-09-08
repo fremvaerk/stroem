@@ -56,6 +56,7 @@ Each entry in `hook.failed_steps` contains:
 | `action_name` | string | Action that was executed |
 | `error_message` | string/null | The step's error message |
 | `continue_on_failure` | bool | Whether the step had `continue_on_failure` set |
+| `carried_over` | bool | `true` if this failure was carried forward from the source run by a job restart rather than produced by this job |
 
 ## on_cancel hooks
 
@@ -246,7 +247,7 @@ tasks:
 ### Rules
 
 - `on_success`, `on_error`, and `on_cancel` are evaluated independently. A task can override one while inheriting the others.
-- Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, or `mcp` — MCP tool invocations). Child jobs from `type: task` actions do not trigger workspace hooks.
+- Workspace hooks only fire for **top-level jobs** (source type `api` — programmatic calls, `user` — authenticated API calls, `trigger` — cron triggers, `webhook` — webhook triggers, `mcp` — MCP tool invocations, `retry` — server-initiated retries, `rerun` — a user clicking **Re-run** on a past job, or `restart` — a user clicking **Restart from a step**; see [Re-running and Restarting Jobs](/stroem/guides/rerun-and-restart)). Child jobs from `type: task` actions do not trigger workspace hooks.
 - If multiple YAML files define workspace-level hooks, they are merged (extended, not replaced).
 - The same `hook.*` template context and `secret.*` variables are available as in task-level hooks.
 

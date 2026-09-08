@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
@@ -7,7 +7,7 @@ use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::FlowStep;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over";
 
 /// Job step row from database
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
@@ -56,6 +56,10 @@ pub struct JobStepRow {
     /// Pinned revision of `action_workspace` at job-creation time. `None`
     /// when `action_workspace` is `None`.
     pub action_revision: Option<String>,
+    /// `true` when this row's terminal status/output was copied from a
+    /// source job via [`JobStepRepo::seed_steps_tx`] rather than executed
+    /// in this job. See [`Seed`] and spec 2026-09-07 §5.
+    pub carried_over: bool,
 }
 
 /// New job step for creation
@@ -160,6 +164,16 @@ pub struct StepDurationStatsRow {
     pub p95_ms: Option<f64>,
     pub min_ms: Option<f64>,
     pub max_ms: Option<f64>,
+}
+
+/// One carried-over row for a restart job (spec §4.2).
+#[derive(Debug, Clone)]
+pub struct Seed {
+    pub step_name: String,
+    /// Terminal status to write: completed | failed | skipped | cancelled.
+    pub status: String,
+    pub output: Option<JsonValue>,
+    pub error_message: Option<String>,
 }
 
 /// Repository for job step operations
@@ -274,6 +288,48 @@ impl JobStepRepo {
         q.execute(executor)
             .await
             .context("Failed to create job steps")?;
+        Ok(())
+    }
+
+    /// Overwrite freshly created rows with carried-over terminal state, inside
+    /// the creation transaction. Clears every "live" column the creator may
+    /// have set (ready_at on root rows) and any execution residue.
+    ///
+    /// Takes `&mut PgConnection` (not a generic `Copy` executor) because it
+    /// issues one UPDATE per seed within a single transaction — pass `&mut tx`
+    /// at the call site (deref coercion from `Transaction<'_, Postgres>`).
+    pub async fn seed_steps_tx(
+        tx: &mut sqlx::PgConnection,
+        job_id: Uuid,
+        seeds: &[Seed],
+    ) -> Result<()> {
+        for seed in seeds {
+            let result = sqlx::query(
+                r#"
+                UPDATE job_step
+                SET status = $3, output = $4, error_message = $5,
+                    completed_at = NOW(), carried_over = TRUE,
+                    ready_at = NULL, retry_at = NULL, started_at = NULL, worker_id = NULL,
+                    agent_state = NULL, suspended_at = NULL
+                WHERE job_id = $1 AND step_name = $2
+                "#,
+            )
+            .bind(job_id)
+            .bind(&seed.step_name)
+            .bind(&seed.status)
+            .bind(&seed.output)
+            .bind(&seed.error_message)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("seed step '{}'", seed.step_name))?;
+            if result.rows_affected() != 1 {
+                bail!(
+                    "seed step '{}' matched {} rows (expected 1)",
+                    seed.step_name,
+                    result.rows_affected()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -876,6 +932,66 @@ impl JobStepRepo {
         Ok(result.rows_affected())
     }
 
+    /// Fail every non-terminal step of a job with one error message. Used when
+    /// post-commit job initialisation (promotion / expansion / dispatch) fails:
+    /// the job row already exists, so the failure must be made visible on its
+    /// steps instead of vanishing into a 500. Returns rows affected.
+    pub async fn fail_non_terminal_steps(pool: &PgPool, job_id: Uuid, error: &str) -> Result<u64> {
+        Self::fail_non_terminal_steps_tx(pool, job_id, error).await
+    }
+
+    /// Executor-generic variant of [`fail_non_terminal_steps`]. Use inside a
+    /// transaction together with [`crate::JobRepo::mark_failed_tx`] so the
+    /// job row and its steps reach `failed` in one atomic write — a half-applied
+    /// compensation leaves failed steps under a non-terminal job that no sweep
+    /// will ever revisit.
+    pub async fn fail_non_terminal_steps_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        error: &str,
+    ) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let result = sqlx::query(
+            r#"
+            UPDATE job_step
+            SET status = 'failed', error_message = $2, completed_at = NOW()
+            WHERE job_id = $1
+              AND status IN ('pending', 'ready', 'claimed', 'running', 'suspended')
+            "#,
+        )
+        .bind(job_id)
+        .bind(error)
+        .execute(executor)
+        .await
+        .context("Failed to fail non-terminal steps")?;
+        Ok(result.rows_affected())
+    }
+
+    /// Whether any step of this job is still owned by a worker — `running` or
+    /// `claimed`.
+    ///
+    /// A job row can be terminal (most obviously `cancelled`, stamped by
+    /// `JobRepo::cancel` the moment the user asks) while workers are still
+    /// executing its steps. Terminal side effects — closing and archiving the
+    /// log above all — must wait for those workers to drain, so callers gate
+    /// `claim_terminal_handling` on this returning `false`. The last worker
+    /// acknowledgement then finds the job drained and takes the claim.
+    pub async fn has_live_steps(pool: &PgPool, job_id: Uuid) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM job_step \
+                 WHERE job_id = $1 AND status IN ('running', 'claimed') \
+             )",
+        )
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to check for live steps")?;
+        Ok(exists)
+    }
+
     /// Get currently running steps for a job (for active cancellation/kill).
     pub async fn get_running_steps(pool: &PgPool, job_id: Uuid) -> Result<Vec<JobStepRow>> {
         let steps = sqlx::query_as::<_, JobStepRow>(&format!(
@@ -1144,7 +1260,9 @@ impl JobStepRepo {
 
     /// Per-step duration percentiles aggregated over the last `job_limit`
     /// completed runs of a task. Ordered by the step's average start-time within
-    /// the job (best-effort flow order). Excludes `for_each` instance rows.
+    /// the job (best-effort flow order). Excludes `for_each` instance rows and
+    /// jobs with `source_type = 'restart'` (spec §6.4) — see
+    /// [`super::job::JobRepo::get_task_duration_stats`] for why.
     pub async fn get_step_duration_stats_for_task(
         pool: &PgPool,
         workspace: &str,
@@ -1160,6 +1278,7 @@ impl JobStepRepo {
             "WITH recent_jobs AS ( \
                SELECT job_id, started_at AS job_started_at FROM job \
                WHERE workspace = $1 AND task_name = $2 AND status = 'completed' \
+                 AND source_type <> 'restart' \
                  AND started_at IS NOT NULL \
                ORDER BY completed_at DESC, job_id \
                LIMIT $3 \

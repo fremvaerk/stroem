@@ -1,9 +1,44 @@
 # Restart From Step — Design
 
-**Status:** Revised after Codex review (rev 2, 2026-09-07) — pending user approval
+**Status:** Implemented (2026-09-08)
 **Date:** 2026-09-07
 **Builds on:** `docs/internal/2026-04-28-rerun-prefill-design.md` (Re-run prefill & job
 lineage — "feature A"; this document is the deferred "feature B")
+
+**Implementation notes (deviations from this design):**
+- The migration shipped as `045_job_step_carried_over.sql`, not `044_...` — `044` was
+  taken by an unrelated index migration (`044_claim_index_agent.sql`) landed in parallel.
+- `source_id` on a restart job is `NULL` when auth is not configured, mirroring
+  `execute_task`'s existing rule rather than always recording `"api"`.
+- An unloaded workspace or a task removed from it since the source job ran returns `400`
+  (`"Workspace '{ws}' is not loaded"` / `"Task '{t}' no longer exists..."`), not a
+  404/500 — matches this endpoint's other precondition checks (§6.1) but is worth noting
+  since some other endpoints treat "workspace unavailable" as a 500.
+- `carried_failed_tolerated` is returned by the dry-run response as designed but is not
+  yet surfaced in the confirm dialog UI (tracked in `docs/internal/TODO.md`).
+- **Top-level jobs only** (added after final review, not in the original design). Restart
+  rejects a source job with a `parent_job_id`, or a `source_type` of `hook` / `task` /
+  `agent_tool` / `upload`, with `400 "Only top-level jobs can be restarted"`. The creator
+  always produces a parentless job, so restarting a `type: task` child would leave the
+  original parent's step waiting on a job tree nothing propagates back from; and
+  restarting a `hook` job would relabel it `restart`, a source type
+  `hooks::is_top_level_source` treats as top-level, re-enabling exactly the workspace-hook
+  fanout the `hook` source type exists to suppress. The identical rule was applied to
+  Re-run (`400 "Only top-level jobs can be re-run"`), which had the same pre-existing gap.
+  Shared helper `web/api/jobs.rs::is_top_level_job`, mirrored in the UI as
+  `ui/src/lib/job-status.ts::isTopLevelJob`.
+- **Required-input validation on restart** (added after final review; §4.4 promised the
+  400 but `merge_defaults` does not validate required fields). `create_job_for_task_inner`
+  now checks, for `CreationMode::Restart` only, that every `task.input` field marked
+  `required: true` with no `default` is present in the merged input, and bails with
+  `"Restart input is missing required field(s) with no default: {names}"` — a message whose
+  outermost text contains "required", which is what `classify_execute_error` keys off to
+  answer 400. Normal, re-run, webhook and trigger creation are unchanged: they keep the
+  deliberate no-validation behaviour, since their input shapes do not match the schema.
+  Only explicitly `required` fields count; a field with neither `required: true` nor a
+  default stays optional, matching how the execute form treats it.
+- The 409 message is `"Job is not in a terminal state"`, not §6.1's `"Job is still
+  running"` — the same branch also covers `pending` and an unparseable status.
 
 ## 1. Problem
 

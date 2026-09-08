@@ -49,6 +49,12 @@ pub struct FailedStepInfo {
     pub action_name: String,
     pub error_message: Option<String>,
     pub continue_on_failure: bool,
+    /// `true` when this failure was carried over from a restarted job's
+    /// source run (`job_step.carried_over`) rather than freshly produced by
+    /// this job. Lets an `on_error` hook distinguish "this job just failed"
+    /// from "this job settled failed at creation because a Restart-from-step
+    /// carried an old failure forward" (spec 2026-09-07 §6.3).
+    pub carried_over: bool,
 }
 
 /// Metadata for one artifact, available in `hook.artifacts`.
@@ -62,6 +68,97 @@ pub struct HookArtifactMeta {
     /// Path under the server origin (e.g. `/api/jobs/{id}/artifacts/{name}`).
     /// Hook templates can prefix the deployment's public base URL.
     pub url: String,
+}
+
+/// Source types whose jobs are "top-level" runs: workspace-level hooks
+/// (`on_success` / `on_error` / `on_cancel` / `on_suspended`) fall back to
+/// them when the task defines none. Child (`task`), hook, agent-tool and
+/// event-source consumer jobs are excluded. `rerun` and `restart` are
+/// user-initiated top-level runs just like `user`/`api`.
+pub(crate) fn is_top_level_source(source_type: &str) -> bool {
+    matches!(
+        source_type,
+        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry" | "rerun" | "restart"
+    )
+}
+
+/// Maximum number of `hook` links allowed in a job's ancestry before further
+/// hooks stop firing.
+///
+/// The `source_type == "hook"` recursion guard alone does not bound hook
+/// chains: a hook whose action is `type: task` creates a hook job, whose own
+/// `type: task` step creates an ordinary `source_type = "task"` child, and that
+/// child is no longer hook-sourced — so its task-level hooks fire again. Two
+/// tasks referencing each other that way (A's `on_success` runs B, B's flow
+/// runs A) produce an unbounded chain of fresh job ids that no CAS can stop.
+/// Validation rejects only direct self-reference, so the budget is enforced
+/// here at dispatch time.
+pub(crate) const MAX_HOOK_CHAIN_DEPTH: usize = 3;
+
+/// Count the `hook` links in a job's ancestry.
+///
+/// Called only once a job is known to have hooks to fire, so a job with none
+/// configured — the overwhelming majority — costs no queries at all.
+///
+/// A `hook`-sourced job continues from the job named by the UUID prefix of
+/// its `source_id` (`{job_id}` or `{job_id}/{hook}`) and adds one to the
+/// count; any other job continues from its `parent_job_id` (no count change).
+/// A top-level, non-hook job costs no queries at all.
+///
+/// The hop budget must be sized in *hook links*, not raw hops: as many as
+/// [`crate::job_creator::MAX_TASK_DEPTH`] plain `type: task` levels can sit
+/// between two `hook` links (a hook's `type: task` action creates an ordinary
+/// task-sourced child, which can itself nest `type: task` steps up to that
+/// depth before the chain reaches the next hook-sourced job). Budgeting by a
+/// fixed hop count instead let a long task chain between hook links exhaust
+/// the walk before `depth` ever reached [`MAX_HOOK_CHAIN_DEPTH`], silently
+/// under-counting and leaving the cycle unbounded. `+ 1` covers the terminal
+/// hop into the `MAX_HOOK_CHAIN_DEPTH`-th hook job itself. Still fails open on
+/// a lookup error or an exhausted budget — under-counting only ever errs
+/// towards allowing a hook, never towards suppressing one.
+async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
+    const MAX_HOPS: usize =
+        MAX_HOOK_CHAIN_DEPTH * (crate::job_creator::MAX_TASK_DEPTH as usize + 1) + 1;
+
+    let mut depth = 0usize;
+    let mut source_type = job.source_type.clone();
+    let mut source_id = job.source_id.clone();
+    let mut parent_job_id = job.parent_job_id;
+
+    for _ in 0..MAX_HOPS {
+        let next = if source_type == SourceType::Hook.as_ref() {
+            depth += 1;
+            source_id
+                .as_deref()
+                .and_then(|s| s.split('/').next())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        } else {
+            parent_job_id
+        };
+
+        let Some(next) = next else { break };
+
+        match JobRepo::get(pool, next).await {
+            Ok(Some(ancestor)) => {
+                source_type = ancestor.source_type;
+                source_id = ancestor.source_id;
+                parent_job_id = ancestor.parent_job_id;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                // Fail open: an ancestry lookup failure must not silently
+                // suppress a legitimate hook.
+                tracing::warn!(
+                    job_id = %job.job_id,
+                    "hook_chain_depth: ancestry lookup failed, treating chain as shallow: {:#}",
+                    e
+                );
+                break;
+            }
+        }
+    }
+
+    depth
 }
 
 /// Fire hooks for a job that has reached a terminal state.
@@ -92,10 +189,7 @@ pub async fn fire_hooks(
     };
 
     // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.
-    let is_top_level = matches!(
-        job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
-    );
+    let is_top_level = is_top_level_source(&job.source_type);
     let hooks: &[HookDef] = if !task_hooks.is_empty() {
         task_hooks
     } else if is_top_level {
@@ -105,6 +199,25 @@ pub async fn fire_hooks(
     };
 
     if hooks.is_empty() {
+        return;
+    }
+
+    // Chain guard: bound indirect hook cycles that the recursion guard misses.
+    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+        tracing::warn!(
+            job_id = %job.job_id,
+            "hook chain depth limit ({}) reached — not firing hooks",
+            MAX_HOOK_CHAIN_DEPTH
+        );
+        state
+            .append_server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+                     not firing hooks for this job"
+                ),
+            )
+            .await;
         return;
     }
 
@@ -154,8 +267,7 @@ pub async fn fire_hooks(
         let source_id = job.job_id.to_string();
 
         if let Err(e) = fire_single_hook(
-            &state.workspaces,
-            &state.pool,
+            state,
             workspace_config,
             &job.workspace,
             hook,
@@ -207,10 +319,7 @@ pub async fn fire_suspended_hooks(
     }
 
     // Select task-level then workspace-level on_suspended hooks
-    let is_top_level = matches!(
-        job.source_type.as_str(),
-        "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
-    );
+    let is_top_level = is_top_level_source(&job.source_type);
     let hooks: &[HookDef] = if !task.on_suspended.is_empty() {
         &task.on_suspended
     } else if is_top_level && !workspace_config.on_suspended.is_empty() {
@@ -220,6 +329,25 @@ pub async fn fire_suspended_hooks(
     };
 
     if hooks.is_empty() {
+        return;
+    }
+
+    // Chain guard: bound indirect hook cycles that the recursion guard misses.
+    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+        tracing::warn!(
+            job_id = %job.job_id,
+            "hook chain depth limit ({}) reached — not firing on_suspended hooks",
+            MAX_HOOK_CHAIN_DEPTH
+        );
+        state
+            .append_server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+                     not firing hooks for this job"
+                ),
+            )
+            .await;
         return;
     }
 
@@ -252,8 +380,7 @@ pub async fn fire_suspended_hooks(
     let defaults = crate::config::JobDefaults::from(state.config.as_ref());
     for (i, hook) in hooks.iter().enumerate() {
         if let Err(e) = fire_single_hook(
-            &state.workspaces,
-            &state.pool,
+            state,
             workspace_config,
             &job.workspace,
             hook,
@@ -341,6 +468,7 @@ async fn build_hook_context(
                 action_name: s.action_name.clone(),
                 error_message: s.error_message.clone(),
                 continue_on_failure,
+                carried_over: s.carried_over,
             }
         })
         .collect();
@@ -386,8 +514,7 @@ async fn build_hook_context(
 
 #[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
-    workspaces: &crate::workspace::WorkspaceManager,
-    pool: &PgPool,
+    state: &AppState,
     workspace_config: &WorkspaceConfig,
     workspace: &str,
     hook: &HookDef,
@@ -396,8 +523,8 @@ async fn fire_single_hook(
     revision: Option<&str>,
     defaults: crate::config::JobDefaults,
 ) -> anyhow::Result<()> {
-    // Note: `state` is not available here — fire_initial_suspended_hooks is called
-    // by the top-level callers of create_job_for_task which do have AppState.
+    let workspaces = &state.workspaces;
+    let pool = &state.pool;
     // Resolve action
     let action = workspace_config
         .actions
@@ -433,7 +560,7 @@ async fn fire_single_hook(
             .as_ref()
             .context("type: task action missing task field")?;
 
-        let job_id = crate::job_creator::create_job_for_task(
+        let created = crate::job_creator::create_job_for_task_detailed(
             workspaces,
             pool,
             workspace_config,
@@ -449,6 +576,7 @@ async fn fire_single_hook(
         )
         .await
         .context("Failed to create hook task job")?;
+        let job_id = created.job_id;
 
         tracing::info!(
             "Fired hook task job {} for action '{}' -> task '{}' (source: {})",
@@ -457,6 +585,8 @@ async fn fire_single_hook(
             task_ref,
             source_id
         );
+
+        crate::job_recovery::finalize_created_job(state, created).await;
 
         return Ok(());
     }
@@ -549,10 +679,7 @@ mod tests {
             _ => return None,
         };
 
-        let is_top_level = matches!(
-            job_source_type,
-            "api" | "user" | "trigger" | "webhook" | "mcp" | "retry"
-        );
+        let is_top_level = is_top_level_source(job_source_type);
         let hooks: &[HookDef] = if !task_hooks.is_empty() {
             task_hooks
         } else if is_top_level {
@@ -587,6 +714,7 @@ mod tests {
                 action_name: "build-app".to_string(),
                 error_message: Some("exit code 1".to_string()),
                 continue_on_failure: false,
+                carried_over: false,
             }],
             artifacts: vec![],
             revision: None,
@@ -684,6 +812,7 @@ mod tests {
                 action_name: "deploy-app".to_string(),
                 error_message: Some(traceback.to_string()),
                 continue_on_failure: false,
+                carried_over: false,
             }],
             artifacts: vec![],
             revision: None,
@@ -1066,6 +1195,27 @@ mod tests {
         assert_eq!(selected[0].action, "ws-alert");
     }
 
+    /// Workspace fallback fires for rerun-sourced top-level jobs (a Re-run's
+    /// failure must not be silently dropped just because it isn't `api`/`user`).
+    #[test]
+    fn test_workspace_fallback_fires_for_rerun_sourced_jobs() {
+        let task = make_task_def(vec![], vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "rerun", "failed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-alert");
+    }
+
+    /// Workspace fallback fires for restart-sourced top-level jobs.
+    #[test]
+    fn test_workspace_fallback_fires_for_restart_sourced_jobs() {
+        let task = make_task_def(vec![], vec![], vec![]);
+        let ws = make_workspace_config(vec![], vec![make_hook("ws-alert")], vec![]);
+
+        let selected = select_hooks_for_job(&ws, "restart", "failed", &task).unwrap();
+        assert_eq!(selected[0].action, "ws-alert");
+    }
+
     /// No hooks at all — returns None rather than an empty slice.
     #[test]
     fn test_no_hooks_anywhere_returns_none() {
@@ -1298,6 +1448,121 @@ mod tests {
             "list_hook_artifacts must surface DB errors as Err rather than yielding an empty list — \
              otherwise hook templates would render `hook.artifacts == []` on a transient outage \
              (indistinguishable from a job that legitimately produced no artifacts)"
+        );
+    }
+
+    // ─── hook_chain_depth hop-budget regression (B1, carried from Plan A review) ──
+
+    /// `hook_chain_depth` must budget its ancestry walk in *hook links*, not
+    /// raw hops. Up to [`crate::job_creator::MAX_TASK_DEPTH`] (10) plain
+    /// `type: task` levels can sit between two `hook` links: a hook whose
+    /// action is `type: task` creates a job with `source_type = "hook"` and
+    /// `parent_job_id = None` (`fire_single_hook` never threads a parent
+    /// through), which resets the `type: task` nesting counter — so
+    /// `MAX_TASK_DEPTH` alone does not bound how many task levels can appear
+    /// between two hook links.
+    ///
+    /// This builds a synthetic ancestry with 3 hook links
+    /// (`MAX_HOOK_CHAIN_DEPTH`), each separated by 9 plain `type: task`
+    /// levels — one under the `MAX_TASK_DEPTH` cap, so the chain itself is
+    /// legal. That costs 3 * (9 + 1) = 30 raw ancestry hops, which fits the
+    /// fixed budget (`MAX_HOOK_CHAIN_DEPTH * (MAX_TASK_DEPTH + 1) + 1 = 34`)
+    /// but blows through the old fixed 20-hop cap — under which
+    /// `hook_chain_depth` would under-count this chain to a constant depth of
+    /// 1 forever (`floor(20 / 10)`), no matter how deep the true chain grew,
+    /// leaving the cycle this guards against unbounded.
+    ///
+    /// Talks to a real Postgres so the walk exercises the actual
+    /// `JobRepo::get` ancestry lookups, not a mock. No workspace or task
+    /// config is needed — `hook_chain_depth` only reads `source_type`,
+    /// `source_id`, and `parent_job_id`, so the synthetic rows below never
+    /// have to resolve to a real flow.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hook_chain_depth_counts_hook_links_across_intermediate_task_levels() {
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::postgres::Postgres;
+
+        const INTERMEDIATE_LEVELS: usize = 9;
+        const HOOK_LINKS: usize = 3;
+
+        let container = Postgres::default().start().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let url = format!("postgres://postgres:postgres@localhost:{port}/postgres");
+        let pool = stroem_db::create_pool(&url).await.unwrap();
+        stroem_db::run_migrations(&pool).await.unwrap();
+
+        // Genesis: an ordinary top-level job whose (synthetic) "on_success"
+        // fires the first hook link below.
+        let mut current = JobRepo::create(
+            &pool,
+            "default",
+            "genesis",
+            "distributed",
+            None,
+            "api",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..HOOK_LINKS {
+            // The hook link itself: `source_type = "hook"`, `source_id` =
+            // the job that fired it, `parent_job_id = None` — exactly what
+            // `fire_single_hook`'s `type: task` branch produces.
+            let mut node = JobRepo::create_with_parent(
+                &pool,
+                "default",
+                "hook-target",
+                "distributed",
+                None,
+                "hook",
+                Some(&current.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+            // INTERMEDIATE_LEVELS plain `type: task` levels, each an
+            // ordinary parent-chained child (`source_type = "task"`).
+            for _ in 0..INTERMEDIATE_LEVELS {
+                node = JobRepo::create_with_parent(
+                    &pool,
+                    "default",
+                    "hook-target",
+                    "distributed",
+                    None,
+                    "task",
+                    None,
+                    Some(node),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+
+            current = node;
+        }
+
+        let final_job = JobRepo::get(&pool, current).await.unwrap().unwrap();
+        let depth = hook_chain_depth(&pool, &final_job).await;
+        assert!(
+            depth >= MAX_HOOK_CHAIN_DEPTH,
+            "expected the walk to see all {HOOK_LINKS} hook links (>= {MAX_HOOK_CHAIN_DEPTH}), \
+             got {depth} — a chain with {INTERMEDIATE_LEVELS} intermediate task levels per hook \
+             link must not defeat the hop budget"
         );
     }
 }

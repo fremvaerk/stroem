@@ -310,6 +310,7 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .route("/jobs", get(jobs::list_jobs))
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/jobs/{id}/cancel", post(jobs::cancel_job))
+        .route("/jobs/{id}/restart", post(jobs::restart_job))
         .route("/jobs/{id}/steps/{step}/approve", post(jobs::approve_step))
         .route("/jobs/{id}/logs", get(jobs::get_job_logs))
         .route("/jobs/{id}/steps/{step}/logs", get(jobs::get_step_logs))
@@ -358,4 +359,139 @@ pub fn build_api_routes(state: Arc<AppState>) -> Router {
         .merge(protected)
         .merge(public)
         .with_state(state)
+}
+
+/// Classify a `create_job_for_task` failure as a 400 (author mistake) or a 500
+/// (server/infra condition).
+///
+/// Two tiers of phrase matching, because trusting every layer of the context
+/// chain equally is unsafe once wrapped infra errors (sqlx, I/O, ...) are in
+/// the mix:
+///
+/// - **Precise phrases** (`is not shared`, `unknown workspace`, `has no
+///   connection`) are specific enough to `stroem_common::template`'s
+///   cross-workspace error text that they are safe to match anywhere in the
+///   FULL context chain (`{:#}`) — `create_job_for_task` wraps the
+///   author-facing phrase several `.context()` layers deep (e.g. "step
+///   '...': failed to resolve connection inputs" -> "Input field '...'
+///   references connection '...'" -> the actual cause).
+/// - **Legacy broad phrases** (`not found`, `does not exist`, `resolve
+///   connection`, `has no action`, `required`, `invalid`, `validation`,
+///   `merge input defaults`) are common enough that an inner infra-layer
+///   message could contain one by coincidence (e.g. a Postgres error's own
+///   "relation ... does not exist"), so they are matched on the OUTERMOST
+///   message only
+///   (`e.to_string()`, which only renders the top context layer this
+///   function's caller controls).
+///
+/// A configured-but-unavailable workspace (`"is not available"`, from
+/// `Lookup::Unavailable` in `stroem_common::template`) is a transient server
+/// condition, not an author mistake, and always stays a 500 (checked first,
+/// anywhere in the chain) even though its message also contains substrings
+/// like "workspace" that could otherwise look user-facing.
+pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
+    let chain = format!("{:#}", e);
+    if chain.contains("is not available") {
+        return AppError::Internal(e);
+    }
+    let precise_user_error = chain.contains("is not shared") // cross-workspace connection gate
+        || chain.contains("unknown workspace") // qualified ref to a workspace that is not configured
+        || chain.contains("has no connection"); // cross-workspace: owner workspace exists, connection doesn't
+    if precise_user_error {
+        return AppError::BadRequest(chain);
+    }
+    let outer = e.to_string();
+    let legacy_user_error = outer.contains("not found")
+        || outer.contains("does not exist") // connection/action missing
+        || outer.contains("resolve connection") // resolve_connection_inputs context
+        || outer.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
+        || outer.contains("required")
+        || outer.contains("invalid")
+        || outer.contains("validation")
+        || outer.contains("merge input defaults"); // task-input default template render failure
+    if legacy_user_error {
+        AppError::BadRequest(chain)
+    } else {
+        AppError::Internal(e)
+    }
+}
+
+#[cfg(test)]
+mod classify_execute_error_tests {
+    use super::*;
+
+    #[test]
+    fn unshared_cross_workspace_connection_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "connection 'owner.private' exists in workspace 'owner' but is not shared (set `shared: true` on it in workspace 'owner')"
+        )
+        .context("Input field 'conn' references connection 'owner.private'")
+        .context("Failed to resolve connection inputs");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("is not shared"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unavailable_owner_workspace_is_internal() {
+        let e = anyhow::anyhow!("connection 'owner.x': workspace 'owner' is not available")
+            .context("Failed to resolve connection inputs");
+
+        let err = classify_execute_error(e);
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_phrase_buried_in_an_infra_layer_is_internal() {
+        // A Postgres-style inner error happens to contain "does not exist",
+        // but only at an inner layer, not the outermost context this
+        // function's caller actually attaches. Must not be misread as an
+        // author mistake.
+        let e =
+            anyhow::anyhow!("relation \"job_step\" does not exist").context("Failed to create job");
+
+        let err = classify_execute_error(e);
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected Internal, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bad_default_template_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "Failed to render default template for input field 'x': Variable `secret.nope` not found"
+        )
+        .context("Failed to merge input defaults");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("Failed to merge input defaults"), "{msg}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restart_missing_required_input_is_bad_request() {
+        // `create_job_for_task_inner` bails with this exact phrasing when a
+        // restart replays input that no longer satisfies the task schema. The
+        // word "required" must sit in the OUTERMOST message — that is what this
+        // function keys off to answer 400 instead of 500.
+        let e =
+            anyhow::anyhow!("Restart input is missing required field(s) with no default: extra");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => assert!(msg.contains("extra"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
 }

@@ -507,7 +507,7 @@ impl StromMcpHandler {
 
         let source_id = source_id_for_audit(&self.auth);
         let revision = self.state.workspaces.get_revision(&params.workspace);
-        let job_id = crate::job_creator::create_job_for_task(
+        let created = crate::job_creator::create_job_for_task_detailed(
             &self.state.workspaces,
             &self.state.pool,
             &ws_config,
@@ -523,6 +523,7 @@ impl StromMcpHandler {
         )
         .await
         .map_err(|e| internal_err(format!("Failed to create job: {e}")))?;
+        let job_id = created.job_id;
 
         // Fire on_suspended hooks for any root-level approval steps that were
         // suspended during job creation (FIX 2).
@@ -534,6 +535,7 @@ impl StromMcpHandler {
             job_id,
         )
         .await;
+        crate::job_recovery::finalize_created_job(&self.state, created).await;
 
         Ok(json_result(
             &serde_json::json!({ "job_id": job_id.to_string() }),

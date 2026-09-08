@@ -38,6 +38,7 @@ export default defineConfig({
             { label: "Conditional Flow Steps", slug: "guides/conditionals" },
             { label: "Loops", slug: "guides/loops" },
             { label: "Retry Mechanisms", slug: "guides/retry" },
+            { label: "Re-running and Restarting Jobs", slug: "guides/rerun-and-restart" },
             { label: "Input & Output", slug: "guides/input-and-output" },
             { label: "Triggers", slug: "guides/triggers" },
             { label: "Hooks", slug: "guides/hooks" },

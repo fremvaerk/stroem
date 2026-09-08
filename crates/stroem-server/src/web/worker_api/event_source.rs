@@ -92,7 +92,7 @@ pub async fn emit_event(
 
     let revision = state.workspaces.get_revision(&req.workspace);
 
-    let job_id = crate::job_creator::create_job_for_task(
+    let created = crate::job_creator::create_job_for_task_detailed(
         &state.workspaces,
         &state.pool,
         &workspace_config,
@@ -114,6 +114,7 @@ pub async fn emit_event(
         )
     })
     .map_err(AppError::Internal)?;
+    let job_id = created.job_id;
 
     // Fire on_suspended hooks for any root-level approval steps that were
     // suspended during job creation (mirrors the scheduler pattern).
@@ -125,6 +126,7 @@ pub async fn emit_event(
         job_id,
     )
     .await;
+    crate::job_recovery::finalize_created_job(&state, created).await;
 
     tracing::info!(
         "emit_event: created job {} for task '{}' in workspace '{}' (source_id='{}')",

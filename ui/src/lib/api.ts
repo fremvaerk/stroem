@@ -438,6 +438,37 @@ export async function cancelJob(id: string): Promise<{ status: string }> {
   });
 }
 
+/**
+ * Result of `POST /api/jobs/{id}/restart`.
+ *
+ * With `dry_run: true` the server returns the plan only (no `job_id`); with
+ * `dry_run: false` it creates the job and echoes the same plan alongside the
+ * new `job_id`. `carried_failed` lists carried-over steps that ended failed and
+ * are NOT tolerated by the current flow; `carried_failed_tolerated` lists the
+ * ones covered by `continue_on_failure`.
+ */
+export interface RestartPlanResponse {
+  job_id?: string;
+  restart_steps: string[];
+  carried_over: string[];
+  carried_failed: string[];
+  carried_failed_tolerated?: string[];
+}
+
+export async function restartJob(
+  jobId: string,
+  fromStep: string,
+  dryRun: boolean,
+): Promise<RestartPlanResponse> {
+  return apiFetch<RestartPlanResponse>(
+    `/api/jobs/${encodeURIComponent(jobId)}/restart`,
+    {
+      method: "POST",
+      body: JSON.stringify({ from_step: fromStep, dry_run: dryRun }),
+    },
+  );
+}
+
 export async function getStepLogs(
   jobId: string,
   stepName: string,

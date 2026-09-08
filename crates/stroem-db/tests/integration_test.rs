@@ -1,10 +1,11 @@
 use anyhow::Result;
 use chrono::{Duration, Utc};
+use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::FlowStep;
 use stroem_db::{
-    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, TaskStateRepo,
+    run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, Seed, TaskStateRepo,
     UserAuthLinkRepo, UserRepo, WorkerRepo, WorkspaceStateRepo,
 };
 use testcontainers::runners::AsyncRunner;
@@ -5075,5 +5076,618 @@ async fn test_unmatched_sweep_reports_agent_step_without_agent_worker() -> Resul
             .any(|s| s.job_id == job_id && s.step_name == "think"),
         "agent step with no agent worker must be reported as unmatched: {unmatched:?}"
     );
+    Ok(())
+}
+
+// ─── Plan A / Task 1: settlement helpers ─────────────────────────────────────
+
+fn plain_step(job_id: Uuid, name: &str, status: &str) -> NewJobStep {
+    NewJobStep {
+        job_id,
+        step_name: name.to_string(),
+        action_name: "noop".to_string(),
+        action_type: "script".to_string(),
+        action_image: None,
+        action_spec: None,
+        input: None,
+        status: status.to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }
+}
+
+#[tokio::test]
+async fn test_job_mark_cancelled_sets_completed_at() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_cancelled(&pool, job_id).await?;
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "cancelled");
+    assert!(
+        job.completed_at.is_some(),
+        "mark_cancelled must stamp completed_at"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_non_terminal_steps_only_touches_live_rows() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            plain_step(job_id, "done", "completed"),
+            plain_step(job_id, "waiting", "pending"),
+            plain_step(job_id, "queued", "ready"),
+        ],
+    )
+    .await?;
+    let n = JobStepRepo::fail_non_terminal_steps(&pool, job_id, "init exploded").await?;
+    assert_eq!(n, 2);
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let by: std::collections::HashMap<_, _> =
+        steps.iter().map(|s| (s.step_name.as_str(), s)).collect();
+    assert_eq!(by["done"].status, "completed", "terminal rows untouched");
+    assert_eq!(by["waiting"].status, "failed");
+    assert_eq!(
+        by["waiting"].error_message.as_deref(),
+        Some("init exploded")
+    );
+    assert_eq!(by["queued"].status, "failed");
+    assert!(by["queued"].completed_at.is_some());
+    Ok(())
+}
+
+/// Creation-time compensation writes the failed steps and the failed job in
+/// one transaction, so the two can never be half-applied. Rolling the
+/// transaction back must leave both untouched.
+#[tokio::test]
+async fn test_compensation_writes_are_atomic() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(job_id, "s", "ready")]).await?;
+
+    // Both writes inside a rolled-back transaction: neither may survive.
+    let mut tx = pool.begin().await?;
+    JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, "boom").await?;
+    JobRepo::mark_failed_tx(&mut *tx, job_id).await?;
+    tx.rollback().await?;
+
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "pending"
+    );
+    assert_eq!(
+        JobStepRepo::get_steps_for_job(&pool, job_id).await?[0].status,
+        "ready"
+    );
+
+    // Committing applies both together.
+    let mut tx = pool.begin().await?;
+    JobStepRepo::fail_non_terminal_steps_tx(&mut *tx, job_id, "boom").await?;
+    JobRepo::mark_failed_tx(&mut *tx, job_id).await?;
+    tx.commit().await?;
+
+    assert_eq!(JobRepo::get(&pool, job_id).await?.unwrap().status, "failed");
+    let step = &JobStepRepo::get_steps_for_job(&pool, job_id).await?[0];
+    assert_eq!(step.status, "failed");
+    assert_eq!(step.error_message.as_deref(), Some("boom"));
+    Ok(())
+}
+
+/// `get_settled_descendants_with_running_parent_step` must be scoped to
+/// `source_type = 'task'` descendants only. `agent_tool` children are
+/// propagated only by normal step completion (`propagate_to_parent`'s
+/// dedicated `agent_tool` branch), and an agent-tool child that would be born
+/// terminal is rejected outright at creation by `agent_task_tool` — so an
+/// `agent_tool` child is never this predicate's business, and including one
+/// would match permanently (the parent agent step stays `running` across tool
+/// calls) and re-fire its hooks on every unrelated sibling-step completion.
+#[tokio::test]
+async fn test_get_settled_descendants_with_running_parent_step_excludes_agent_tool() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // The parent step that "spawned" both children is still running.
+    JobStepRepo::create_steps(&pool, &[plain_step(parent_id, "step-a", "running")]).await?;
+
+    // An agent_tool child settled (completed) while the parent agent step is
+    // running — this must NOT be treated as a synchronously-settled type:task
+    // child; agent-tool results reach the agent step only through normal step
+    // completion, and a terminal-at-creation one is rejected at creation.
+    let agent_tool_child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "agent_tool",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("step-a"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, agent_tool_child_id, None).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert!(
+        settled.is_empty(),
+        "agent_tool child must not match the settled-child predicate: {settled:?}"
+    );
+
+    // A type:task child settled (completed) while the parent step is
+    // running — this IS the synchronous-settle-at-creation case the
+    // predicate exists to find.
+    let task_child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("step-a"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, task_child_id, None).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "exactly the task-sourced child should be returned: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, task_child_id);
+
+    Ok(())
+}
+
+/// `get_settled_descendants_with_running_parent_step` must walk the WHOLE
+/// descendant chain, not just direct children. P → C → G, where G settled at
+/// creation while C's spawning step is still `running` and C itself is not
+/// terminal: nothing else will ever reach G (no step of C completes, so C's
+/// orchestration never runs), so reconciliation rooted at P must find it.
+#[tokio::test]
+async fn test_get_settled_descendants_walks_grandchildren() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(parent_id, "p-step", "running")]).await?;
+
+    // C: a type:task child of P, still running, with its own running task step.
+    let child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("p-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(child_id, "c-step", "running")]).await?;
+
+    // G: a type:task grandchild that settled at creation under C's running step.
+    let grandchild_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "grandchild-task",
+        "distributed",
+        None,
+        "task",
+        Some(&child_id.to_string()),
+        Some(child_id),
+        Some("c-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, grandchild_id, None).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "the settled grandchild must be found from the root: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, grandchild_id);
+
+    // Simulate G's terminal handling: its parent step completes, C settles.
+    // G no longer matches (its parent step is no longer running) and C now
+    // does (P's step is still running and C has no live step of its own).
+    JobStepRepo::mark_completed(&pool, child_id, "c-step", None).await?;
+    JobRepo::mark_completed(&pool, child_id, None).await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "after G propagates into C, only C matches: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, child_id);
+
+    Ok(())
+}
+
+/// Rows must come back deepest-first so that handling a deep descendant
+/// propagates into its own parent before a shallower sibling branch is
+/// handled. Two independent branches under P: a settled direct child, and a
+/// running child whose own grandchild settled.
+#[tokio::test]
+async fn test_get_settled_descendants_orders_deepest_first() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            plain_step(parent_id, "shallow", "running"),
+            plain_step(parent_id, "deep", "running"),
+        ],
+    )
+    .await?;
+
+    // Branch 1: a settled direct child (depth 1).
+    let shallow_child = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "shallow-child",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("shallow"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, shallow_child, None).await?;
+
+    // Branch 2: a running child whose own grandchild settled (depth 2).
+    let mid_child = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "mid-child",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("deep"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(mid_child, "m-step", "running")]).await?;
+    let deep_grandchild = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "deep-grandchild",
+        "distributed",
+        None,
+        "task",
+        Some(&mid_child.to_string()),
+        Some(mid_child),
+        Some("m-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(&pool, deep_grandchild, None).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(settled.len(), 2, "both branches must be found: {settled:?}");
+    assert_eq!(
+        settled[0].job_id, deep_grandchild,
+        "deepest descendant must come first: {settled:?}"
+    );
+    assert_eq!(settled[1].job_id, shallow_child);
+
+    Ok(())
+}
+
+/// A terminal descendant whose own worker is still executing a step must NOT
+/// be reconciled: a cancelled child keeps its cancellation signal (and its
+/// final log lines) until the worker acknowledges. Only once every step of
+/// the child is settled may reconciliation consume its terminal handling.
+#[tokio::test]
+async fn test_get_settled_descendants_excludes_jobs_with_live_steps() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(parent_id, "p-step", "running")]).await?;
+
+    // A cancelled type:task child whose own step is still running on a worker.
+    let child_id = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        Some(&parent_id.to_string()),
+        Some(parent_id),
+        Some("p-step"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(child_id, "live", "running")]).await?;
+    JobRepo::mark_cancelled(&pool, child_id).await?;
+
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert!(
+        settled.is_empty(),
+        "a cancelled child with a live step must not be reconciled yet: {settled:?}"
+    );
+
+    // A `claimed` step is equally live — the worker owns it.
+    sqlx::query("UPDATE job_step SET status = 'claimed' WHERE job_id = $1 AND step_name = $2")
+        .bind(child_id)
+        .bind("live")
+        .execute(&pool)
+        .await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert!(
+        settled.is_empty(),
+        "a claimed step is still live: {settled:?}"
+    );
+
+    // Once the worker acknowledges the cancellation, the child is quiescent
+    // and reconciliation may consume its terminal handling.
+    sqlx::query("UPDATE job_step SET status = 'cancelled', completed_at = NOW() WHERE job_id = $1 AND step_name = $2")
+        .bind(child_id)
+        .bind("live")
+        .execute(&pool)
+        .await?;
+    let settled =
+        JobRepo::get_settled_descendants_with_running_parent_step(&pool, parent_id).await?;
+    assert_eq!(
+        settled.len(),
+        1,
+        "a quiescent cancelled child must be reconciled: {settled:?}"
+    );
+    assert_eq!(settled[0].job_id, child_id);
+
+    Ok(())
+}
+
+// ─── Plan B / Task 1: seeding carried-over rows ──────────────────────────────
+
+#[tokio::test]
+async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            plain_step(job_id, "a", "ready"),
+            plain_step(job_id, "b", "pending"),
+        ],
+    )
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    JobStepRepo::seed_steps_tx(
+        &mut tx,
+        job_id,
+        &[
+            Seed {
+                step_name: "a".into(),
+                status: "completed".into(),
+                output: Some(json!({"k": 1})),
+                error_message: None,
+            },
+            Seed {
+                step_name: "b".into(),
+                status: "failed".into(),
+                output: None,
+                error_message: Some("old boom".into()),
+            },
+        ],
+    )
+    .await?;
+    tx.commit().await?;
+
+    let by: std::collections::HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(by["a"].status, "completed");
+    assert_eq!(by["a"].output.as_ref().unwrap()["k"], 1);
+    assert!(by["a"].carried_over);
+    assert!(
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT ready_at FROM job_step WHERE job_id=$1 AND step_name='a'"
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await?
+        .is_none(),
+        "ready_at cleared on a seeded root row"
+    );
+    assert!(by["a"].completed_at.is_some());
+    assert_eq!(by["b"].status, "failed");
+    assert_eq!(by["b"].error_message.as_deref(), Some("old boom"));
+    assert!(by["b"].carried_over);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_seed_steps_tx_unknown_step_aborts() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "t",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobStepRepo::create_steps(&pool, &[plain_step(job_id, "a", "ready")]).await?;
+    let mut tx = pool.begin().await?;
+    let err = JobStepRepo::seed_steps_tx(
+        &mut tx,
+        job_id,
+        &[Seed {
+            step_name: "ghost".into(),
+            status: "completed".into(),
+            output: None,
+            error_message: None,
+        }],
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("ghost"), "{err:#}");
     Ok(())
 }

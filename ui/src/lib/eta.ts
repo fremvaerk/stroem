@@ -99,6 +99,13 @@ export function computeEta(args: ComputeEtaArgs): EtaResult {
   const taskP50 = stats.task.p50_ms;
   if (taskP50 == null) return null;
 
+  // Restart jobs (spec §6.4) only re-run a suffix of the flow, so the
+  // whole-task p50 is not a meaningful reference for them: neither the flat
+  // ETA fallback nor the overrun comparison against it applies. A restart
+  // job can still get a step-weighted ETA below when every needed step has
+  // its own stats.
+  const isRestart = job.source_type === "restart";
+
   const stepIdx = indexSteps(stats);
 
   const elapsedTotalMs = job.started_at
@@ -108,7 +115,7 @@ export function computeEta(args: ComputeEtaArgs): EtaResult {
   // ── Overrun has priority over ETA ───────────────────────────────────────
   // Compute against the task-level reference so the message stays meaningful
   // even when individual step stats are missing.
-  if (elapsedTotalMs > taskP50) {
+  if (!isRestart && elapsedTotalMs > taskP50) {
     return {
       type: "overrun",
       overrunMs: elapsedTotalMs - taskP50,
@@ -146,5 +153,7 @@ export function computeEta(args: ComputeEtaArgs): EtaResult {
 
   // ── Flat fallback ──────────────────────────────────────────────────────
   // Either no step is running yet (pending job) or step stats are incomplete.
+  // Never for a restart job — the whole-task p50 assumes a full run.
+  if (isRestart) return null;
   return { type: "eta", remainingMs: Math.max(0, taskP50 - elapsedTotalMs) };
 }

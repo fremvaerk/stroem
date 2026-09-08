@@ -35,6 +35,7 @@ function makeStep(overrides: Partial<JobStep> = {}): JobStep {
     retry_at: null,
     approval_message: null,
     approval_fields: null,
+    carried_over: false,
     ...overrides,
   };
 }
@@ -56,16 +57,23 @@ function renderTimeline(
   steps: JobStep[],
   stepStats?: Map<string, StepDurationStats>,
   now?: number,
+  opts: {
+    jobStatus?: string;
+    canRestart?: boolean;
+    selectedStep?: string | null;
+  } = {},
 ) {
   return render(
     <MemoryRouter>
       <StepTimeline
         jobId="job-1"
         steps={steps}
-        selectedStep={null}
+        selectedStep={opts.selectedStep ?? null}
         onSelectStep={() => {}}
         stepStats={stepStats}
         now={now}
+        jobStatus={opts.jobStatus ?? "completed"}
+        canRestart={opts.canRestart ?? false}
       />
     </MemoryRouter>,
   );
@@ -237,5 +245,102 @@ describe("StepTimeline", () => {
     renderTimeline([step]);
 
     expect(screen.queryByText(/attempt \d/)).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Carried-over rows
+  // -------------------------------------------------------------------------
+  it("shows a 'carried over' badge and suppresses duration/p50 for carried rows", () => {
+    const step = makeStep({ step_name: "build", carried_over: true });
+    const stats = new Map([["build", makeStats({ p50_ms: 4500 })]]);
+
+    renderTimeline([step], stats);
+
+    expect(screen.getByText("carried over")).toBeInTheDocument();
+    expect(screen.queryByTestId("step-duration-build")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("step-p50-build")).not.toBeInTheDocument();
+  });
+
+  it("keeps the duration badge for rows that are not carried over", () => {
+    const step = makeStep({ step_name: "build", carried_over: false });
+
+    renderTimeline([step]);
+
+    expect(screen.queryByText("carried over")).not.toBeInTheDocument();
+    expect(screen.getByTestId("step-duration-build")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Restart from here — loop group header
+  // -------------------------------------------------------------------------
+  function loopSteps() {
+    const placeholder = makeStep({
+      step_name: "process",
+      loop_source: null,
+      loop_total: 2,
+      for_each_expr: "items",
+    });
+    const instance0 = makeStep({
+      step_name: "process[0]",
+      loop_source: "process",
+      loop_index: 0,
+      loop_total: null,
+    });
+    const instance1 = makeStep({
+      step_name: "process[1]",
+      loop_source: "process",
+      loop_index: 1,
+      loop_total: null,
+    });
+    return [placeholder, instance0, instance1];
+  }
+
+  it("renders a 'Restart from here' button on the loop header for a terminal job", () => {
+    renderTimeline(loopSteps(), undefined, undefined, {
+      jobStatus: "failed",
+      canRestart: true,
+    });
+
+    expect(
+      screen.getByRole("button", { name: /restart from here/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render the loop-header restart button while the job is running", () => {
+    renderTimeline(loopSteps(), undefined, undefined, {
+      jobStatus: "running",
+      canRestart: true,
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /restart from here/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not render the loop-header restart button without execute permission", () => {
+    renderTimeline(loopSteps(), undefined, undefined, {
+      jobStatus: "failed",
+      canRestart: false,
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /restart from here/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never renders a restart button on loop instance rows", () => {
+    // Selecting the placeholder auto-expands the group so instance rows render.
+    renderTimeline(loopSteps(), undefined, undefined, {
+      jobStatus: "failed",
+      canRestart: true,
+      selectedStep: "process",
+    });
+
+    expect(screen.getByText("process[0]")).toBeInTheDocument();
+    expect(screen.getByText("process[1]")).toBeInTheDocument();
+    // Only the loop header carries the button — never the instances.
+    expect(
+      screen.getAllByRole("button", { name: /restart from here/i }),
+    ).toHaveLength(1);
   });
 });

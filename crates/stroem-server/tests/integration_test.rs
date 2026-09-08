@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{
-    ActionDef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep, HookDef,
-    InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
+    ActionDef, AgentToolRef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep,
+    HookDef, InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
     create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
@@ -9483,6 +9483,96 @@ async fn test_refresh_unauthenticated_request_when_auth_enabled() -> Result<()> 
         .method("POST")
         .uri("/api/workspaces/default/refresh")
         .body(Body::empty())
+        .unwrap();
+    let response = router.oneshot(req).await?;
+    assert_eq!(response.status(), 401);
+    Ok(())
+}
+
+// ─── ACL: POST /api/jobs/{id}/restart (Restart From Step) ───────────
+
+fn authed_post_json(uri: &str, token: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+/// A terminal source job in `default`/`hello-world` for the restart ACL tests.
+/// The ACL check runs before any state validation, so the job only has to exist.
+async fn seed_restart_source_job(pool: &PgPool) -> Result<Uuid> {
+    JobRepo::create(
+        pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "acl"})),
+        "api",
+        None,
+        None,
+        Some(json!({"name": "acl"})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_restart_view_only_user_gets_403() -> Result<()> {
+    // Restart creates a job, so it needs Run — View is not enough, and the
+    // refusal must be 403 (the task is visible), not 404.
+    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let job_id = seed_restart_source_job(&pool).await?;
+    let token = acl_login(&router, ACL_VIEWER_EMAIL).await?;
+
+    let response = router
+        .oneshot(authed_post_json(
+            &format!("/api/jobs/{job_id}/restart"),
+            &token,
+            json!({"from_step": "greet"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 403);
+    let body = body_json(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Insufficient permissions to restart"),
+        "unexpected body: {body}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_restart_denied_user_gets_404() -> Result<()> {
+    // A user the ACL denies must not learn that the job exists.
+    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let job_id = seed_restart_source_job(&pool).await?;
+    let token = acl_login(&router, ACL_NOBODY_EMAIL).await?;
+
+    let response = router
+        .oneshot(authed_post_json(
+            &format!("/api/jobs/{job_id}/restart"),
+            &token,
+            json!({"from_step": "greet"}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 404);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_restart_unauthenticated_when_auth_enabled() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_auth_and_acl().await?;
+    let job_id = seed_restart_source_job(&pool).await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/jobs/{job_id}/restart"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(json!({"from_step": "greet"}).to_string()))
         .unwrap();
     let response = router.oneshot(req).await?;
     assert_eq!(response.status(), 401);
@@ -19683,6 +19773,64 @@ async fn setup_with_workspace(
     Ok((router, pool, temp_dir, container))
 }
 
+/// Like `setup_with_workspace`, but returns the `AppState` directly instead of
+/// consuming it into a `Router` — for tests that call `job_creator` /
+/// `job_recovery` functions directly rather than going through HTTP.
+async fn setup_state_with_workspace(
+    workspace: WorkspaceConfig,
+) -> Result<(
+    AppState,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+
+    Ok((state, pool, temp_dir, container))
+}
+
 // ─── Test: approval step reaches suspended after its dependency completes ─────
 
 #[tokio::test]
@@ -23407,5 +23555,1759 @@ async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> 
         "job must close as failed, not stay running"
     );
     assert!(job.completed_at.is_some());
+    Ok(())
+}
+
+// ─── Plan A / Task 3: creation-time settlement uses the shared routine ───────
+
+/// A root `type: task` step that fails at dispatch but is `continue_on_failure`
+/// must leave the job `completed` (the orchestrator rule), not `failed` (the
+/// old creation-time rule).
+#[tokio::test]
+async fn test_creation_settle_honours_continue_on_failure() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-missing".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("nonexistent-task".to_string()),
+            ..greet_action
+        },
+    );
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "dispatch".to_string(),
+        FlowStep {
+            action: "run-missing".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: true,
+            // `when` forces the step through the creation-time promotion
+            // cascade and therefore through `settle_if_all_terminal`. Without
+            // it the old creation-time rule never ran and the test would pass
+            // against either implementation.
+            when: Some("true".to_string()),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("tolerant-root".to_string(), TaskDef { flow, ..base_task });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/tolerant-root/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(steps[0].status, "failed", "{steps:?}");
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        job.status, "completed",
+        "tolerated failure must complete the job: {job:?}"
+    );
+    assert!(job.completed_at.is_some());
+    Ok(())
+}
+
+/// `create_job_for_task_detailed` reports whether the job settled at creation.
+#[tokio::test]
+async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    // Root step with `when: "false"` → skipped at creation → job terminal at creation.
+    let mut flow = HashMap::new();
+    flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "all-skipped".to_string(),
+        TaskDef {
+            flow,
+            ..base_task.clone()
+        },
+    );
+    // Plain root step → not terminal at creation.
+    let mut flow2 = HashMap::new();
+    flow2.insert(
+        "run".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "live".to_string(),
+        TaskDef {
+            flow: flow2,
+            ..base_task
+        },
+    );
+
+    let (pool, _container) = {
+        let container = Postgres::default().start().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let pool = create_pool(&format!(
+            "postgres://postgres:postgres@localhost:{}/postgres",
+            port
+        ))
+        .await?;
+        run_migrations(&pool).await?;
+        (pool, container)
+    };
+    let mgr = WorkspaceManager::from_config("default", workspace.clone());
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &mgr,
+        &pool,
+        &workspace,
+        "default",
+        "all-skipped",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    assert!(created.terminal_at_creation);
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &mgr,
+        &pool,
+        &workspace,
+        "default",
+        "live",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    assert!(!created.terminal_at_creation);
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "pending"
+    );
+    Ok(())
+}
+
+// ─── Plan A / Task 4: terminal-at-creation side effects ──────────────────────
+
+/// Root job that settles at creation (all steps skipped) must run terminal
+/// handling: the workspace `on_success` hook job is created.
+#[tokio::test]
+async fn test_all_skipped_job_at_creation_fires_workspace_hook() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("all-skipped".to_string(), TaskDef { flow, ..base_task });
+    workspace.on_success.push(HookDef {
+        action: "greet".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/all-skipped/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "exactly one on_success hook job: {jobs:?}"
+    );
+    assert!(hook_jobs[0]
+        .source_id
+        .as_deref()
+        .unwrap_or("")
+        .starts_with(&job_id.to_string()));
+    Ok(())
+}
+
+/// A `type: task` child that settles synchronously at creation (its only step
+/// is skipped by `when`) must propagate to the parent step; the parent job
+/// must complete instead of staying `running` (P5).
+#[tokio::test]
+async fn test_child_settled_at_creation_propagates_to_parent() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-child".to_string(),
+        TaskDef {
+            flow: child_flow,
+            ..base_task.clone()
+        },
+    );
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-instant".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-child".to_string()),
+            ..greet_action
+        },
+    );
+    let mut flow = HashMap::new();
+    flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-instant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("parent".to_string(), TaskDef { flow, ..base_task });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].status, "completed",
+        "parent step must reflect the settled child: {steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+    Ok(())
+}
+
+/// The settle-at-creation fix must reach any depth, not just direct children.
+/// P → C → G: creating C creates G, G settles instantly (its only root step is
+/// `when: "false"`), and C is left `running` with no step that will ever
+/// complete — so C never orchestrates and only a descendant walk rooted at P
+/// finds G. Both intermediate steps must complete and P must complete (I2).
+#[tokio::test]
+async fn test_grandchild_settled_at_creation_propagates_up_the_chain() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let greet_action = workspace.actions["greet"].clone();
+
+    // G: only root step skipped by `when` → terminal the moment it is created.
+    let mut grandchild_flow = HashMap::new();
+    grandchild_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-grandchild".to_string(),
+        TaskDef {
+            flow: grandchild_flow,
+            ..base_task.clone()
+        },
+    );
+    workspace.actions.insert(
+        "run-instant-grandchild".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-grandchild".to_string()),
+            ..greet_action.clone()
+        },
+    );
+
+    // C: a single `type: task` step that spawns G.
+    let mut middle_flow = HashMap::new();
+    middle_flow.insert(
+        "grandchild".to_string(),
+        FlowStep {
+            action: "run-instant-grandchild".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "middle".to_string(),
+        TaskDef {
+            flow: middle_flow,
+            ..base_task.clone()
+        },
+    );
+    workspace.actions.insert(
+        "run-middle".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("middle".to_string()),
+            ..greet_action
+        },
+    );
+
+    // P: a single `type: task` step that spawns C.
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-middle".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "parent".to_string(),
+        TaskDef {
+            flow: parent_flow,
+            ..base_task
+        },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let parent_steps = JobStepRepo::get_steps_for_job(&pool, parent_id).await?;
+    assert_eq!(
+        parent_steps[0].status, "completed",
+        "parent step must settle once the grandchild is reconciled: {parent_steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, parent_id).await?.unwrap().status,
+        "completed",
+        "parent job must not hang on a grandchild that settled at creation"
+    );
+
+    // The middle job and its own task step must be settled too.
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let middle = all_jobs
+        .iter()
+        .find(|j| j.parent_job_id == Some(parent_id))
+        .expect("middle child job must exist")
+        .clone();
+    assert_eq!(middle.status, "completed", "middle job: {middle:?}");
+    let middle_steps = JobStepRepo::get_steps_for_job(&pool, middle.job_id).await?;
+    assert_eq!(
+        middle_steps[0].status, "completed",
+        "middle task step must reflect the settled grandchild: {middle_steps:?}"
+    );
+    Ok(())
+}
+
+/// An agent task-tool child that would be born terminal (its only root step is
+/// skipped by `when`) can never deliver a tool result: propagation into the
+/// agent step only happens when a step of the child completes, and the worker
+/// has not yet recorded the child id in `agent_state`, so finalizing it here
+/// would corrupt the agent step. The endpoint must fail loudly instead of
+/// handing back an id the agent would wait on forever (I1).
+#[tokio::test]
+async fn test_agent_task_tool_rejects_child_born_terminal() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let greet_action = workspace.actions["greet"].clone();
+
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-child".to_string(),
+        TaskDef {
+            flow: child_flow,
+            ..base_task.clone()
+        },
+    );
+
+    // An agent action allowed to call `instant-child` as a task tool.
+    workspace.actions.insert(
+        "assistant".to_string(),
+        ActionDef {
+            action_type: "agent".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-5".to_string()),
+            prompt: Some("do the thing".to_string()),
+            tools: vec![AgentToolRef::Task {
+                task: "instant-child".to_string(),
+            }],
+            ..greet_action
+        },
+    );
+    let mut agent_flow = HashMap::new();
+    agent_flow.insert(
+        "think".to_string(),
+        FlowStep {
+            action: "assistant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "agent-flow".to_string(),
+        TaskDef {
+            flow: agent_flow,
+            ..base_task
+        },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/agent-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/think/task-tool", job_id),
+            json!({"task_name": "instant-child", "input": {}}),
+        ))
+        .await?;
+    assert!(
+        response.status().is_server_error(),
+        "a task-tool child that settles at creation must be rejected, got {}",
+        response.status()
+    );
+
+    // No child is left for the agent to wait on: `get_child_jobs` returns only
+    // pending/running children, so an empty list means nothing is in flight.
+    let live_children = JobRepo::get_child_jobs(&pool, job_id).await?;
+    assert!(
+        live_children.is_empty(),
+        "no non-terminal agent-tool child may survive the rejection: {live_children:?}"
+    );
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    for child in all_jobs.iter().filter(|j| j.parent_job_id == Some(job_id)) {
+        let steps = JobStepRepo::get_steps_for_job(&pool, child.job_id).await?;
+        for step in steps {
+            assert!(
+                !["pending", "ready", "claimed", "running"].contains(&step.status.as_str()),
+                "no claimable step may survive the rejection: {step:?}"
+            );
+        }
+    }
+
+    // The agent step itself is untouched — the worker is still running it.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].status, "ready",
+        "the agent step must not be settled by the rejection: {steps:?}"
+    );
+    Ok(())
+}
+
+/// The born-terminal rejection must also catch a child that settles because of
+/// a NESTED synchronous settlement: the tool task's only step is a `type: task`
+/// action targeting a task whose every root step is skipped. The grandchild
+/// settles at creation, leaving the tool child `running` with no step that will
+/// ever complete — the agent would wait forever. `agent_task_tool` must
+/// reconcile the child's own subtree before deciding (B3).
+#[tokio::test]
+async fn test_agent_task_tool_rejects_nested_settled_child() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let greet_action = workspace.actions["greet"].clone();
+
+    // G: every root step skipped — terminal the moment it is created.
+    let mut grandchild_flow = HashMap::new();
+    grandchild_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-grandchild".to_string(),
+        TaskDef {
+            flow: grandchild_flow,
+            ..base_task.clone()
+        },
+    );
+    workspace.actions.insert(
+        "run-instant-grandchild".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-grandchild".to_string()),
+            ..greet_action.clone()
+        },
+    );
+
+    // C: the tool task — its only step is the `type: task` action to G.
+    let mut tool_flow = HashMap::new();
+    tool_flow.insert(
+        "delegate".to_string(),
+        FlowStep {
+            action: "run-instant-grandchild".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "nested-tool".to_string(),
+        TaskDef {
+            flow: tool_flow,
+            ..base_task.clone()
+        },
+    );
+
+    workspace.actions.insert(
+        "assistant".to_string(),
+        ActionDef {
+            action_type: "agent".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-5".to_string()),
+            prompt: Some("do the thing".to_string()),
+            tools: vec![AgentToolRef::Task {
+                task: "nested-tool".to_string(),
+            }],
+            ..greet_action
+        },
+    );
+    let mut agent_flow = HashMap::new();
+    agent_flow.insert(
+        "think".to_string(),
+        FlowStep {
+            action: "assistant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "agent-flow".to_string(),
+        TaskDef {
+            flow: agent_flow,
+            ..base_task
+        },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/agent-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/think/task-tool", job_id),
+            json!({"task_name": "nested-tool", "input": {}}),
+        ))
+        .await?;
+    assert!(
+        response.status().is_server_error(),
+        "a task-tool child that settles through a nested grandchild must be rejected, got {}",
+        response.status()
+    );
+
+    // The agent step is untouched — the worker is still running it.
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].status, "ready",
+        "the agent step must not be settled by the rejection: {steps:?}"
+    );
+    Ok(())
+}
+
+/// Build a workspace whose `agent-flow` task has a single `agent` step named
+/// `think`, allowed to call `noop-tool` as a task tool.
+fn agent_tool_test_workspace() -> WorkspaceConfig {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let greet_action = workspace.actions["greet"].clone();
+
+    let mut tool_flow = HashMap::new();
+    tool_flow.insert(
+        "work".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "noop-tool".to_string(),
+        TaskDef {
+            flow: tool_flow,
+            ..base_task.clone()
+        },
+    );
+
+    workspace.actions.insert(
+        "assistant".to_string(),
+        ActionDef {
+            action_type: "agent".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-5".to_string()),
+            prompt: Some("do the thing".to_string()),
+            tools: vec![AgentToolRef::Task {
+                task: "noop-tool".to_string(),
+            }],
+            ..greet_action
+        },
+    );
+    let mut agent_flow = HashMap::new();
+    agent_flow.insert(
+        "think".to_string(),
+        FlowStep {
+            action: "assistant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "agent-flow".to_string(),
+        TaskDef {
+            flow: agent_flow,
+            ..base_task
+        },
+    );
+    workspace
+}
+
+/// Create a terminal `agent_tool` child of `parent_job_id` / `step`.
+async fn settled_agent_tool_child(
+    pool: &PgPool,
+    parent_job_id: Uuid,
+    step: &str,
+    output: Option<Value>,
+) -> Result<Uuid> {
+    let child_id = JobRepo::create_with_parent(
+        pool,
+        "default",
+        "noop-tool",
+        "distributed",
+        None,
+        "agent_tool",
+        Some(&format!("{}/{}", parent_job_id, step)),
+        Some(parent_job_id),
+        Some(step),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    JobRepo::mark_completed(pool, child_id, output).await?;
+    Ok(child_id)
+}
+
+/// Registration barrier: a terminal `agent_tool` child whose parent agent step
+/// has no `agent_state` yet must NOT be propagated. Falling through to ordinary
+/// propagation would `mark_completed` an agent step whose worker is still
+/// running it. `propagate_to_parent` must return `Ok` and leave the step alone
+/// until the worker registers the child (B3).
+#[tokio::test]
+async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<()> {
+    let workspace = agent_tool_test_workspace();
+    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        "default",
+        "agent-flow",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    let job_id = created.job_id;
+
+    // The worker has claimed the agent step but not yet saved any agent state.
+    sqlx::query("UPDATE job_step SET status = 'running' WHERE job_id = $1 AND step_name = $2")
+        .bind(job_id)
+        .bind("think")
+        .execute(&pool)
+        .await?;
+
+    let child_id = settled_agent_tool_child(&pool, job_id, "think", None).await?;
+    let child = JobRepo::get(&pool, child_id).await?.unwrap();
+
+    stroem_server::job_recovery::propagate_to_parent(&state, &child, job_id, "think").await?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].status, "running",
+        "an unregistered agent-tool child must not settle the agent step: {steps:?}"
+    );
+    let job_status = JobRepo::get(&pool, job_id).await?.unwrap().status;
+    assert!(
+        !matches!(
+            job_status.as_str(),
+            "completed" | "failed" | "cancelled" | "skipped"
+        ),
+        "the agent job must not settle: {job_status}"
+    );
+    Ok(())
+}
+
+/// Once the worker registers a pending tool call whose child is ALREADY
+/// terminal, the deferred propagation must be replayed: the tool result lands
+/// in `agent_state.resolved_tool_results` and the step goes back to `ready`
+/// for re-claim (B3).
+#[tokio::test]
+async fn test_agent_save_state_replays_already_terminal_child() -> Result<()> {
+    let workspace = agent_tool_test_workspace();
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/agent-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    sqlx::query("UPDATE job_step SET status = 'running' WHERE job_id = $1 AND step_name = $2")
+        .bind(job_id)
+        .bind("think")
+        .execute(&pool)
+        .await?;
+
+    let child_id =
+        settled_agent_tool_child(&pool, job_id, "think", Some(json!({"answer": 42}))).await?;
+
+    // The worker only now records the pending tool call — the child settled first.
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/think/agent-state", job_id),
+            json!({
+                "agent_state": {
+                    "messages": [],
+                    "turn": 1,
+                    "total_input_tokens": 0,
+                    "total_output_tokens": 0,
+                    "pending_tool_calls": [{
+                        "tool_call_id": "call-1",
+                        "tool_name": "strom_task_noop_tool",
+                        "child_job_id": child_id.to_string(),
+                    }],
+                }
+            }),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert_eq!(
+        steps[0].status, "ready",
+        "the agent step must be released for re-claim once the tool result lands: {steps:?}"
+    );
+    let agent_state = steps[0]
+        .agent_state
+        .as_ref()
+        .expect("agent state must be persisted");
+    assert!(
+        agent_state["pending_tool_calls"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the pending tool call must be resolved: {agent_state}"
+    );
+    let resolved = agent_state["resolved_tool_results"].as_array().unwrap();
+    assert_eq!(resolved.len(), 1, "one tool result expected: {agent_state}");
+    assert_eq!(resolved[0]["tool_call_id"], "call-1");
+    assert!(
+        resolved[0]["result_text"].as_str().unwrap().contains("42"),
+        "the child's output must reach the conversation: {agent_state}"
+    );
+    Ok(())
+}
+
+/// Cancelling a parent that has a live `type: task` child converges on the
+/// parent's terminal handling from two directions: the child's
+/// `handle_job_terminal` → `propagate_to_parent`, and the outer `cancel_job`
+/// frame's own `handle_job_terminal`. The exactly-once claim must let only one
+/// of them fire the parent's `on_cancel` hooks and log upload (I3).
+#[tokio::test]
+async fn test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+
+    // Parent: a single `type: task` step spawning `cleanup` (one script step).
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "parent".to_string(),
+        TaskDef {
+            flow: parent_flow,
+            ..base_task
+        },
+    );
+    // Workspace-level on_cancel: fires for the top-level parent job only.
+    workspace.on_cancel.push(HookDef {
+        action: "greet".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let child = JobRepo::get_child_jobs(&pool, parent_id)
+        .await?
+        .into_iter()
+        .next()
+        .expect("child job must exist");
+
+    // A worker claims the child's script step, so the child is genuinely running.
+    let worker_id = register_test_worker(&pool).await;
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed = body_json(response).await;
+    assert_eq!(
+        claimed["job_id"].as_str().unwrap(),
+        child.job_id.to_string()
+    );
+    let claimed_step = claimed["step_name"].as_str().unwrap().to_string();
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/{}/start", child.job_id, claimed_step),
+            json!({"worker_id": worker_id}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        JobRepo::get(&pool, child.job_id).await?.unwrap().status,
+        "running"
+    );
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/cancel", parent_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        JobRepo::get(&pool, parent_id).await?.unwrap().status,
+        "cancelled"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, child.job_id).await?.unwrap().status,
+        "cancelled",
+        "the cancel must cascade into the child job"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    let parent_hook_jobs: Vec<_> = hook_jobs
+        .iter()
+        .filter(|j| {
+            j.source_id
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(&parent_id.to_string())
+        })
+        .collect();
+    assert_eq!(
+        parent_hook_jobs.len(),
+        1,
+        "the parent's on_cancel hook must fire exactly once: {hook_jobs:?}"
+    );
+    // The child task defines no on_cancel, and workspace hooks are top-level only.
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "no other hook job may fire from the cascade: {hook_jobs:?}"
+    );
+    Ok(())
+}
+
+/// Discriminating variant of `test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once`:
+/// that test passes even without the exactly-once CAS, because claiming and
+/// starting the child's script step makes it genuinely `running`, so
+/// `cancel_job(child)` takes the `has_running_steps == true` branch and never
+/// calls `handle_job_terminal(child)` itself — only ONE path ever reaches the
+/// parent's terminal handling.
+///
+/// Here the child's script step is left UNCLAIMED (no worker registered at
+/// all). `cancel_job(child)` cancels it via `cancel_pending_steps`, finds no
+/// running steps, and calls `handle_job_terminal(child)` synchronously —
+/// which `propagate_to_parent`s into the parent's terminal handling — WHILE
+/// still inside the `for child in &child_jobs` loop of the outer
+/// `cancel_job(parent)` call. That outer frame *also* calls
+/// `handle_job_terminal(parent)` once the loop returns, because the parent's
+/// own `type: task` step was already cancelled directly by
+/// `cancel_server_managed_steps` before the loop ran (it has `worker_id IS
+/// NULL`, so it never shows up as a "running step" the outer check waits
+/// for). Two independent call paths race for the parent's terminal actions;
+/// only the exactly-once claim in `claim_terminal_handling` keeps the
+/// `on_cancel` hook from firing twice (B2, parked from Plan A review).
+#[tokio::test]
+async fn test_cancel_cascade_discriminates_exactly_once_claim_with_unclaimed_child() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+
+    // Parent: a single `type: task` step spawning `cleanup` (one script step).
+    let mut parent_flow = HashMap::new();
+    parent_flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "parent".to_string(),
+        TaskDef {
+            flow: parent_flow,
+            ..base_task
+        },
+    );
+    // Workspace-level on_cancel: fires for the top-level parent job only.
+    workspace.on_cancel.push(HookDef {
+        action: "greet".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let child = JobRepo::get_child_jobs(&pool, parent_id)
+        .await?
+        .into_iter()
+        .next()
+        .expect("child job must exist");
+
+    // No worker registered, no claim — the child's script step stays `ready`.
+    let child_steps = JobStepRepo::get_steps_for_job(&pool, child.job_id).await?;
+    assert_eq!(
+        child_steps.len(),
+        1,
+        "expected the child's single script step: {child_steps:?}"
+    );
+    assert_eq!(
+        child_steps[0].status, "ready",
+        "the child's step must stay unclaimed for this test to discriminate the CAS"
+    );
+
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/cancel", parent_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        JobRepo::get(&pool, parent_id).await?.unwrap().status,
+        "cancelled"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, child.job_id).await?.unwrap().status,
+        "cancelled",
+        "the cancel must cascade into the child job"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    let parent_hook_jobs: Vec<_> = hook_jobs
+        .iter()
+        .filter(|j| {
+            j.source_id
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(&parent_id.to_string())
+        })
+        .collect();
+    assert_eq!(
+        parent_hook_jobs.len(),
+        1,
+        "the parent's on_cancel hook must fire exactly once, even when two \
+         independent paths race for its terminal handling: {hook_jobs:?}"
+    );
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "no other hook job may fire from the cascade: {hook_jobs:?}"
+    );
+    Ok(())
+}
+
+/// `reconcile_settled_children` must be safe to call repeatedly for the same
+/// parent: once the settled child has been finalized (its hooks fired, the
+/// parent step marked completed), calling it again must be a no-op, not a
+/// second round of hook firing (Critical 2 in the Task 4 review).
+#[tokio::test]
+async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut child_flow = HashMap::new();
+    child_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-child".to_string(),
+        TaskDef {
+            flow: child_flow,
+            // Task-level on_success hook — fires once when the child settles.
+            on_success: vec![HookDef {
+                action: "greet".to_string(),
+                input: HashMap::new(),
+            }],
+            ..base_task.clone()
+        },
+    );
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-instant".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-child".to_string()),
+            ..greet_action
+        },
+    );
+    let mut flow = HashMap::new();
+    flow.insert(
+        "child".to_string(),
+        FlowStep {
+            action: "run-instant".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("parent".to_string(), TaskDef { flow, ..base_task });
+
+    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        "default",
+        "parent",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    stroem_server::job_recovery::finalize_created_job(&state, created).await;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    assert_eq!(
+        steps[0].status, "completed",
+        "parent step must reflect the settled child after the first finalize: {steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    // Call reconcile_settled_children twice more, directly, simulating extra
+    // orchestration passes converging on the same already-settled child.
+    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "child's on_success hook must fire exactly once across repeated reconcile calls: {jobs:?}"
+    );
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    assert_eq!(
+        steps[0].status, "completed",
+        "parent step must remain completed after repeated reconcile calls: {steps:?}"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    Ok(())
+}
+
+/// A hook job must never trigger a further hook, even when its action is
+/// `type: task` and the target task itself declares `on_success`, and even
+/// when that target task settles synchronously at creation (which now drives
+/// it through `finalize_created_job` -> `handle_job_terminal` ->
+/// `fire_hooks`). `fire_hooks`'s recursion guard checks `source_type ==
+/// "hook"` before it even looks at task-level vs. workspace-level hooks, so
+/// this must hold regardless of what hooks the target task defines
+/// (Important 5 in the Task 4 review).
+#[tokio::test]
+async fn test_hook_of_hook_does_not_recurse() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+
+    // Target task for the workspace's on_success hook: settles synchronously
+    // at creation (its only step is skipped), and declares its own
+    // on_success hook — which must NOT fire, because the job that reaches
+    // terminal state here has source_type == "hook".
+    let mut target_flow = HashMap::new();
+    target_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "instant-hook-target".to_string(),
+        TaskDef {
+            flow: target_flow,
+            on_success: vec![HookDef {
+                action: "greet".to_string(),
+                input: HashMap::new(),
+            }],
+            ..base_task.clone()
+        },
+    );
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-instant-hook-target".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("instant-hook-target".to_string()),
+            ..greet_action
+        },
+    );
+
+    // Root task: settles synchronously at creation (all steps skipped), so
+    // the root job completes without needing a worker and fires the
+    // workspace-level on_success hook via `finalize_created_job`.
+    let mut root_flow = HashMap::new();
+    root_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "root".to_string(),
+        TaskDef {
+            flow: root_flow,
+            ..base_task
+        },
+    );
+    workspace.on_success.push(HookDef {
+        action: "run-instant-hook-target".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+    let response = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/root/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "completed"
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "exactly one hook job — the target task's own on_success must not fire (no hook-of-hook): {jobs:?}"
+    );
+    Ok(())
+}
+
+/// A cancel stamps the job `cancelled` immediately, while its workers keep
+/// running. The FIRST worker to report a step would otherwise find the job
+/// terminal, win `claim_terminal_handling`, and close + archive the log while
+/// the second worker is still emitting; the second completion then loses the
+/// one-shot claim and the archive is never refreshed. Terminal side effects
+/// must wait until no step is `running`/`claimed` (B4).
+#[tokio::test]
+async fn test_terminal_handling_waits_for_live_steps_to_drain() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+
+    // Two independent script steps — both claimable at once.
+    let mut flow = HashMap::new();
+    for name in ["alpha", "beta"] {
+        flow.insert(
+            name.to_string(),
+            FlowStep {
+                action: "greet".to_string(),
+                depends_on: vec![],
+                input: HashMap::new(),
+                ..base_step.clone()
+            },
+        );
+    }
+    workspace
+        .tasks
+        .insert("two-steps".to_string(), TaskDef { flow, ..base_task });
+    workspace.on_cancel.push(HookDef {
+        action: "greet".to_string(),
+        input: HashMap::new(),
+    });
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/two-steps/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // A worker claims both steps.
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "drain-worker",
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+    for _ in 0..2 {
+        let response = router
+            .clone()
+            .oneshot(worker_request(
+                "POST",
+                "/worker/jobs/claim",
+                json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            !body_json(response).await["job_id"].is_null(),
+            "both steps must be claimable"
+        );
+    }
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    assert!(
+        steps
+            .iter()
+            .all(|s| matches!(s.status.as_str(), "claimed" | "running")),
+        "both steps must be live on the worker: {steps:?}"
+    );
+
+    // Cancel: the job row goes terminal while both steps are still live.
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/cancel", job_id),
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
+        "cancelled"
+    );
+
+    let claimed_at = |pool: PgPool, job_id: Uuid| async move {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT metrics_recorded_at FROM job WHERE job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+    };
+    let hook_job_count = |pool: PgPool| async move {
+        JobRepo::list(&pool, Some("default"), None, None, None, 100, 0)
+            .await
+            .map(|jobs| jobs.iter().filter(|j| j.source_type == "hook").count())
+    };
+
+    // First worker acknowledgement: the job is still not drained.
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/alpha/complete", job_id),
+            json!({"exit_code": 0, "output": {"ok": true}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(
+        claimed_at(pool.clone(), job_id).await?.is_none(),
+        "terminal handling must not be claimed while `beta` is still live"
+    );
+    assert_eq!(
+        hook_job_count(pool.clone()).await?,
+        0,
+        "the on_cancel hook must not fire before every worker has drained"
+    );
+
+    // Second acknowledgement drains the job.
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/beta/complete", job_id),
+            json!({"exit_code": 0, "output": {"ok": true}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(
+        claimed_at(pool.clone(), job_id).await?.is_some(),
+        "the drained job must claim terminal handling"
+    );
+    assert_eq!(
+        hook_job_count(pool.clone()).await?,
+        1,
+        "the on_cancel hook must fire exactly once, after the drain"
+    );
+
+    Ok(())
+}
+
+/// Approval dispatch is part of the coordinated initialisation result. A
+/// transient failure before `mark_suspended` would otherwise be swallowed,
+/// returning a "successful" creation with an approval step stuck `ready`
+/// forever — workers and the unmatched-step sweep both skip approvals. The
+/// creator must instead compensate: every non-terminal step and the job itself
+/// go to `failed`, in one transaction (S2/S3).
+#[tokio::test]
+async fn test_approval_dispatch_failure_compensates_the_job() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let greet_action = workspace.actions["greet"].clone();
+
+    workspace.actions.insert(
+        "gate".to_string(),
+        ActionDef {
+            action_type: "approval".to_string(),
+            script: None,
+            message: Some("please approve".to_string()),
+            ..greet_action
+        },
+    );
+    let mut flow = HashMap::new();
+    flow.insert(
+        "approve".to_string(),
+        FlowStep {
+            action: "gate".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("needs-approval".to_string(), TaskDef { flow, ..base_task });
+
+    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+
+    // Fault injection: make the `mark_suspended` write fail, standing in for a
+    // transient DB error between step promotion and suspension.
+    sqlx::raw_sql(
+        "CREATE FUNCTION fail_suspend() RETURNS trigger AS $$          BEGIN RAISE EXCEPTION 'injected suspend failure'; END; $$ LANGUAGE plpgsql;          CREATE TRIGGER fail_suspend_trg BEFORE UPDATE ON job_step          FOR EACH ROW WHEN (NEW.status = 'suspended') EXECUTE FUNCTION fail_suspend();",
+    )
+    .execute(&pool)
+    .await?;
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        "default",
+        "needs-approval",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+
+    assert!(
+        created.terminal_at_creation,
+        "a failed initialisation must hand back a terminal job"
+    );
+    assert_eq!(
+        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        "failed",
+        "the job must be compensated to failed, not left non-terminal"
+    );
+    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    assert_eq!(
+        steps[0].status, "failed",
+        "the approval step must not be left ready: {steps:?}"
+    );
+    assert!(
+        steps[0]
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("initialisation failed"),
+        "the step must carry the initialisation error: {steps:?}"
+    );
+
+    Ok(())
+}
+
+/// The `source_type == "hook"` recursion guard does not bound an INDIRECT hook
+/// cycle: task C's `on_success` runs a `type: task` hook action targeting task
+/// H, whose only step is a `type: task` action back to C. The C job created
+/// under H is `source_type = "task"`, not `"hook"`, so its own task-level
+/// `on_success` fires again — each round producing fresh job ids that no CAS
+/// can stop. `MAX_HOOK_CHAIN_DEPTH` must terminate the chain (B1).
+#[tokio::test]
+async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let greet_action = workspace.actions["greet"].clone();
+
+    workspace.actions.insert(
+        "run-hook-target".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("hook-target".to_string()),
+            ..greet_action.clone()
+        },
+    );
+    workspace.actions.insert(
+        "run-cycle".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("cycle".to_string()),
+            ..greet_action
+        },
+    );
+
+    // C: settles at creation (its only root step is skipped), and its
+    // task-level on_success runs H.
+    let mut cycle_flow = HashMap::new();
+    cycle_flow.insert(
+        "never".to_string(),
+        FlowStep {
+            action: "greet".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            when: Some("false".to_string()),
+            ..base_step.clone()
+        },
+    );
+    workspace.tasks.insert(
+        "cycle".to_string(),
+        TaskDef {
+            flow: cycle_flow,
+            on_success: vec![HookDef {
+                action: "run-hook-target".to_string(),
+                input: HashMap::new(),
+            }],
+            ..base_task.clone()
+        },
+    );
+
+    // H: its only step is a type:task action back to C.
+    let mut hook_target_flow = HashMap::new();
+    hook_target_flow.insert(
+        "again".to_string(),
+        FlowStep {
+            action: "run-cycle".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "hook-target".to_string(),
+        TaskDef {
+            flow: hook_target_flow,
+            ..base_task
+        },
+    );
+
+    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace.clone()).await?;
+
+    let created = stroem_server::job_creator::create_job_for_task_detailed(
+        &state.workspaces,
+        &state.pool,
+        &workspace,
+        "default",
+        "cycle",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None,
+        JobDefaults::default(),
+    )
+    .await?;
+    stroem_server::job_recovery::finalize_created_job(&state, created).await;
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0).await?;
+    let after_create = jobs.len();
+    assert!(
+        after_create <= 8,
+        "the indirect hook cycle must be bounded, got {after_create} jobs: {jobs:?}"
+    );
+
+    // Extra orchestration passes must not restart the chain.
+    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    let first = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0)
+        .await?
+        .len();
+    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    let second = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0)
+        .await?
+        .len();
+    assert_eq!(
+        (first, second),
+        (after_create, after_create),
+        "job count must be stable across repeated reconcile cycles"
+    );
+
+    // The suppression is visible in the job's own log view.
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0).await?;
+    let mut found = false;
+    for job in &jobs {
+        let meta = stroem_server::log_storage::JobLogMeta {
+            workspace: job.workspace.clone(),
+            task_name: job.task_name.clone(),
+            created_at: job.created_at,
+        };
+        if let Ok(text) = state.log_storage.get_log(job.job_id, &meta, false).await {
+            if text.contains("hook chain depth") {
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        found,
+        "a `_server` log line must record the depth-limit suppression: {jobs:?}"
+    );
+
     Ok(())
 }
