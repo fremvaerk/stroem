@@ -19806,6 +19806,7 @@ async fn setup_state_with_workspace(
             "default".to_string(),
             WorkspaceSourceDef::Folder {
                 path: temp_dir.path().to_string_lossy().to_string(),
+                triggers: true,
             },
         )]),
         libraries: HashMap::new(),
