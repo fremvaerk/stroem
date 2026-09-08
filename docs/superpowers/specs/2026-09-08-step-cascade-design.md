@@ -1,10 +1,13 @@
 # Step Cascade — Design
 
-**Status:** Draft, revision 3 (2026-09-08, after second Codex review)
+**Status:** Draft, revision 4 (2026-09-08, after third Codex review)
 **Date:** 2026-09-08
 **Origin:** architecture review 2026-09-07/08, candidate "Make the step cascade a pure
 module"; first internal seam of the later "Job settlement" module (separate branch, not
 covered here).
+**Builds on:** `2026-09-08-fail-or-retry-design.md` (prerequisite branch, ships first).
+After it lands, no step row is ever observable as `failed` while a retry is owed, and
+this design is purely status-driven: it contains no retry logic.
 
 ## 1. Problem
 
@@ -41,9 +44,6 @@ observed in production or flagged in code:
 - Read-classify-write with no lock: two orchestrators on the same job classify against
   stale snapshots. The `AND status = 'pending'` guards prevent corrupt transitions but not
   lost cascade work (`job_step.rs:684-690`, in-file TODO).
-- A step is observable as `failed` between `mark_failed` and the retry reset that
-  follows in the same handler (`job_recovery.rs:186-209`). Any concurrent cascade in
-  that window skips its dependents or fails its loop as if the failure were final.
 - Loop rollup is keyed on the completing instance and its writes are unguarded
   (`job_step.rs:465-505`): a later instance completion overwrites a cancelled or
   timed-out placeholder.
@@ -52,14 +52,14 @@ observed in production or flagged in code:
 
 ## 2. Decisions
 
-Settled in the design walk on 2026-09-08 (Q1–Q13), after the first Codex review
-(Q14–Q23) and after the second (Q24–Q27).
+Settled in the design walk on 2026-09-08 (Q1–Q13) and after three Codex reviews
+(Q14–Q30).
 
 1. **Scope:** cascade only on this branch. The settlement module (absorbing
    `finalize_created_job` and `reconcile_settled_children`) is a separate branch with its
-   own design.
+   own design. The atomic fail-or-retry change is a separate prerequisite branch.
 2. **Behaviour policy:** preserving, except defects the new shape fixes by construction
-   with no extra code (§4.10 lists all seven). The fixes go live in the one activation
+   with no extra code (§4.10 lists all six). The fixes go live in the one activation
    commit (§10); each has its own regression-test commit.
 3. **Home:** `crates/stroem-server/src/cascade.rs`. Orchestration policy, not persistence.
 4. **Shape:** a `run` returning a `Plan` of `Change`s (closed enum) plus the snapshot it
@@ -73,12 +73,13 @@ Settled in the design walk on 2026-09-08 (Q1–Q13), after the first Codex revie
 7. **Fixpoint in memory:** `run` iterates to the fixpoint on its own snapshot with the
    phase boundaries today's loop has (§4.4), synthesising instance rows after an expand,
    and returns the full plan. One read before, one verify-and-write after.
-8. **Rendering outside the lock; whole-snapshot compare-and-apply inside** (Q15, Q24):
-   the snapshot is read and `run` executes with no transaction open; `execute` then
-   begins a transaction, takes the job's advisory lock, re-reads the job status and every
-   step's `(status, retry_attempt)`, and applies only if that vector is identical to the
-   one the plan was computed from. Any difference rolls back and re-runs from a fresh
-   snapshot, at most three times.
+8. **Rendering outside the lock; verified, row-locked apply inside** (Q15, Q24, Q29,
+   Q30): the snapshot is read and `run` executes with no transaction open; `execute`
+   then begins a transaction, takes the job's advisory lock, re-reads the job status and
+   every step row's `(status, xmin-for-context-visible-rows)` **with `FOR UPDATE` on the
+   step rows**, and applies only if that vector is identical to the one the plan was
+   computed from. Any difference rolls back and re-runs from a fresh snapshot, at most
+   three times. Batched statements assert their row counts.
 9. **Loop rollup and sequential advance join the cascade** as global rules over the
    snapshot (§4.3 R5/R6) with an explicit failure-precedence policy (Q26);
    `check_loop_completion` is deleted.
@@ -90,24 +91,23 @@ Settled in the design walk on 2026-09-08 (Q1–Q13), after the first Codex revie
 12. **Vocabulary:** new `CONTEXT.md` glossary at the repo root, cross-referenced from
     CLAUDE.md; CLAUDE.md gains a `### Step Cascade` section.
 13. **Lock:** a transaction-scoped Postgres advisory lock in the two-integer form,
-    `(CASCADE_LOCK_CLASS, hashtext(job_id))` (§4.7.1), not the job row (Q23). The
-    cascade never queues behind an artifact upload holding the row lock across a blob
-    write, nor behind cancellation, worker start or log-upload row updates. Creation
-    compensation takes the same lock first (§4.7).
+    `(CASCADE_LOCK_CLASS, hashtext(job_id))` (§4.7.1), not the job row (Q23). Acquiring
+    it never waits on an artifact upload, cancellation, worker start or log upload. The
+    one job-row write the cascade makes (R7) can wait behind an artifact upload's row
+    lock for the duration of that upload; see §4.7 lock inventory. Creation compensation
+    takes the same advisory lock first (§4.7).
 14. **Phase model** (Q14): a pass runs rollup/advance, then promote and cascade-skip with
     a context built before them, then skip-unreachable, then retirement/expansion with a
     context rebuilt after those changes. Changes apply to the snapshot phase by phase.
     No order-independence claim.
-15. **Effective terminality with retry ownership** (Q16, Q25): wherever a rule reads a
-    status — dependency satisfaction for R2/R3/R4, instance terminality for R5/R6 — a
-    `failed` step with `retry_attempt < max_retries` whose failure path runs the retry
-    check (`action_type != "task"`) is **not** terminal. Fix by construction.
+15. **No retry logic in the cascade** (Q28, reversing Q16/Q25): a `failed` row is
+    failed. The prerequisite branch guarantees a row owed a retry is never `failed`.
 16. **Stronger guards on placeholder writes** (Q17): retirement requires `pending`,
     rollup requires `running`. Column behaviour preserved (failure keeps `output`,
     completion keeps `error_message`). Fix by construction.
 17. **Sequential failure precedence** (Q18, Q26): for a running sequential placeholder,
-    any effectively-failed or cancelled instance without `continue_on_failure` skips
-    every pending instance; only otherwise is `[i+1]` promoted. Not claimed equivalent to
+    any `failed` or `cancelled` instance without `continue_on_failure` skips every
+    pending instance; only otherwise is `[i+1]` promoted. Not claimed equivalent to
     today's keyed rule; the divergences are listed in §4.3 and tested.
 18. **Error propagation** (Q20): a rollup error is a cascade error and aborts before
     settlement, as promote/skip/expand errors already do. `check_loop_completion`'s
@@ -123,16 +123,19 @@ Settled in the design walk on 2026-09-08 (Q1–Q13), after the first Codex revie
 ## 3. Non-Goals
 
 - Changing any user-visible semantics of `when`, `for_each`, `sequential`,
-  `continue_on_failure`, or step status transitions, beyond the seven fixes in §4.10.
-- Settlement (`settle_if_all_terminal`), terminal handling, propagation, hooks, the
-  step-retry reset, task retry. They run before or after the cascade exactly as today.
-- Fixing the pre-existing defect that a `type: task` step's retry config is never
-  honoured (child propagation and dispatch failure bypass the retry check,
-  `job_recovery.rs:575-617`, `job_creator.rs:743`). Logged to TODO; the cascade only
-  stops waiting for a retry those paths never schedule (Decision 15).
+  `continue_on_failure`, or step status transitions, beyond the six fixes in §4.10.
+- Settlement (`settle_if_all_terminal`), terminal handling, propagation, hooks, task
+  retry. They run before or after the cascade exactly as today.
+- Retry. Decided at the failure mark by the prerequisite branch. The cascade neither
+  reads `retry_attempt`/`max_retries` nor distinguishes failure origins.
+- Fixing the pre-existing gaps in which failure paths honour step retry: child-job
+  propagation (`job_recovery.rs:575`), task dispatch failure (`job_creator.rs:743`) and
+  approval dispatch/render failure (`job_creator.rs:1435`, `:1473`) never retry, while
+  a `type: task` step timed out by recovery does. Logged to TODO for the transition
+  candidate; unchanged here.
 - Fixing recovery's unguarded `mark_failed` on timed-out steps (`job_step.rs:502`),
-  which can overwrite a `completed` row. The cascade tolerates it through whole-snapshot
-  verification; the guard belongs to the transition candidate.
+  which can overwrite a `completed` row. The cascade tolerates it through verification
+  and row locks; the guard belongs to the transition candidate.
 - Moving `build_step_render_context` or unifying the render-context builders
   (review candidate 7). The cascade calls the existing builder.
 - Removing the `Option<&WorkspaceConfig>` parameter from `on_step_completed`
@@ -154,8 +157,7 @@ for its **instances** (`step[0]`, `step[1]`, …); **retirement** is a placehold
 whose instances already exist being moved to `running`; **rollup** is a running
 placeholder becoming `completed`/`failed` once every instance is terminal; a **plan** is
 the ordered list of changes one `run` produced together with the snapshot vector it
-assumed; a step is **retry-pending** when it is `failed` but its own handler will reset
-it (Decision 15).
+assumed.
 
 ### 4.2 Interface
 
@@ -184,11 +186,12 @@ pub enum RollupOutcome {
 }
 
 /// The pre-run state `run` computed from. One entry per step row, in `step_name`
-/// order, plus the job status. `execute` applies a plan only if the database still
-/// holds exactly this vector.
+/// order, plus the job status. `version` is the row's `xmin` for rows whose status
+/// enters the template context (completed, skipped, failed, suspended) and `None`
+/// otherwise. `execute` applies a plan only if the database still holds this vector.
 pub struct Snapshot {
     pub job_status: JobStatus,
-    pub steps: Vec<(String, StepStatus, i32 /* retry_attempt */)>,
+    pub steps: Vec<(String, StepStatus, Option<u64> /* version */)>,
 }
 
 /// What one `run` decided.
@@ -209,9 +212,10 @@ pub fn run(
 ) -> Result<Plan>;
 
 /// Applies `plan.changes` inside `tx`, in order. Every step-row statement carries the
-/// guard from §4.6; after a successful verification a zero-row match on a step row is a
-/// bug and returns an error (the caller rolls back). The job-row update of R7 is the one
-/// statement allowed to match zero rows.
+/// guard from §4.6 and asserts its affected-row count equals the number of rows the
+/// change names; after a successful verification under row locks a shortfall is a
+/// bug and returns an error (the caller rolls back). The job-row update of R7 is the
+/// one statement allowed to match zero rows.
 pub async fn apply(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
@@ -235,34 +239,38 @@ functions do; no rule error is propagated (rule errors become `Fail` changes, §
 a plan (an `Adopt` followed by a `Rollup` of the same placeholder) are ordered by the
 change list and guarded by §4.6, not by `assumed`.
 
+**Columns a rule or template can read**, and how each is covered by verification:
+`status` (all rows, compared directly); `output`, `error_message` (context rows only;
+covered by `xmin`); `when_condition`, `for_each_expr`, `loop_source`, `loop_index`,
+`loop_total`, `loop_item`, `action_type`, `action_spec`, `timeout_secs`, the retry
+columns (immutable after row creation except the retry columns, which only change with
+a status change under the prerequisite branch); `job.status` (compared directly);
+`job.input`, `job.revision` (immutable after creation). Columns no rule reads:
+`agent_state`, `suspended_at`, `ready_at`, `started_at`, `completed_at`, `retry_at`,
+`worker_id`. A row whose status is `running`/`claimed`/`ready`/`pending` may have those
+written (agent-state saves, claims, heartbeats) without invalidating a plan, which is
+why `version` is `None` for it.
+
 ### 4.3 Rules evaluated by `run`
 
 Rule inputs come from the same sources they do today and the implementation must not
 change which source a rule reads:
 
 - row: `status`, `when_condition`, `for_each_expr`, `loop_source`, `loop_index`,
-  `output`, `retry_attempt`, `max_retries`, `action_type`;
+  `output`;
 - flow (`task.flow[step]`): `depends_on`, `continue_on_failure`, `sequential`. A row
   whose name is absent from the flow is ignored by R1–R4; for R5/R6 a placeholder absent
   from the flow behaves as `sequential = false`, `continue_on_failure = false` (today's
   `unwrap_or_default`, `job_creator.rs:1236`).
 
-**Effective status** (Decision 15). A row is **retry-pending** when
-`status = failed`, `max_retries` is `Some(m)` with `retry_attempt < m`, and
-`action_type != "task"`. Every rule below that tests for `failed`, or for terminality,
-treats a retry-pending row as **not failed and not terminal** (as if it were `running`).
-The ownership condition mirrors which failure paths run the retry check: worker
-completion, recovery sweeps and approval reject go through `orchestrate_after_step`
-(`job_recovery.rs:186`); `type: task` failures go through `propagate_to_parent` and
-`fail_task_step`, which never reset the row.
+Statuses are read literally. A `failed` row is failed (Decision 15).
 
 **Dependency satisfaction** (shared by R2 and R4): every dependency is `completed` or
-`skipped`, or `failed` (not retry-pending) / `cancelled` when the step has
-`continue_on_failure`.
+`skipped`, or `failed`/`cancelled` when the step has `continue_on_failure`.
 
 **R0 — Adopt.** A `pending` placeholder present in the flow for which a row named
 `"{placeholder}[0]"` exists → `Adopt`. Evaluated before R4 so a partially expanded
-placeholder is never re-expanded. (Fix; today the guard at `job_creator.rs:973-977`
+placeholder is never re-expanded. (Fix 6; today the guard at `job_creator.rs:973-977`
 leaves it `pending` forever.)
 
 **R1 — Cascade-skip (all deps skipped).** A `pending` step present in the flow, not a
@@ -282,16 +290,16 @@ Truthiness is `stroem_common::template::evaluate_condition` unchanged (empty, `f
 `0`, `null`, `none` after trim, case-insensitive → false).
 
 **R3 — Skip unreachable.** A `pending` step present in the flow, not a placeholder,
-without `continue_on_failure`, with at least one dependency `failed` (not retry-pending)
-or `cancelled` → `Skip`. A `skipped` dependency does not trigger this rule. Applies with
-or without a workspace config.
+without `continue_on_failure`, with at least one dependency `failed` or `cancelled` →
+`Skip`. A `skipped` dependency does not trigger this rule. Applies with or without a
+workspace config.
 
 **R4 — Placeholder retirement / expansion.** A `pending` placeholder (row
 `for_each_expr.is_some()`) present in the flow, not adopted by R0, evaluated only when a
 workspace config is present (with `None`, placeholders stay `pending` whatever their
 dependencies):
-- dependencies not satisfied, and at least one `failed` (not retry-pending) /
-  `cancelled` without `continue_on_failure` → `Skip`;
+- dependencies not satisfied, and at least one `failed`/`cancelled` without
+  `continue_on_failure` → `Skip`;
 - dependencies not satisfied otherwise → no change;
 - non-empty dependency list, all `skipped`, no `continue_on_failure` → `Skip`;
 - `when` falsy → `Skip`; `when` error → `Fail { "when condition error: …" }`;
@@ -300,20 +308,21 @@ dependencies):
 - more than `MAX_FOR_EACH_ITEMS` (10 000) items →
   `Fail { "for_each produced {} items (max {})" }`;
 - otherwise → `Expand`, with instances built as today (copied action columns and retry
-  columns, `when_condition: None`, `for_each_expr: None`, `loop_*` set; all `ready` when
+  configuration columns, `retry_attempt` left to its DB default of 0,
+  `when_condition: None`, `for_each_expr: None`, `loop_*` set; all `ready` when
   parallel, `[0]` `ready` and the rest `pending` when `sequential`).
 
 The `when` and `for_each` templates are rendered against the context built for this
 phase (§4.4), as today's two `build_step_render_context` calls at
 `job_creator.rs:1040`/`:1055` both use the post-promote snapshot.
 
-**Instance terminality** (shared by R5 and R6): an instance is terminal when its status
-is `completed`, `skipped`, `cancelled`, or `failed` and not retry-pending.
+**Instance terminality** (shared by R5 and R6): status is `completed`, `skipped`,
+`cancelled` or `failed`.
 
 **R5 — Sequential advance.** For a `running` placeholder present in the flow with
 `sequential = true`, with instance rows sorted by `loop_index`:
-1. if any instance is `failed` (not retry-pending) or `cancelled`, and the flow step has
-   no `continue_on_failure` → `Skip` for every `pending` instance; nothing else for this
+1. if any instance is `failed` or `cancelled`, and the flow step has no
+   `continue_on_failure` → `Skip` for every `pending` instance; nothing else for this
    placeholder;
 2. otherwise, for each terminal instance `i` whose `[i+1]` exists and is `pending` →
    `Promote { "{placeholder}[i+1]" }`.
@@ -322,18 +331,17 @@ Divergences from today's keyed `check_loop_completion` (`job_creator.rs:1248-129
 deliberate and tested (§9.1):
 - R5 runs on every cascade of the job, not only when an instance of this loop completes
   (self-healing, fix 3).
-- In the state `[failed, completed, pending]` (reachable via recovery's unguarded
-  timeout write landing on `[0]` after `[1]` completed) today promotes `[2]` on `[1]`'s
-  completion and skips it on `[0]`'s later re-orchestration; R5 skips it immediately.
-  Same eventual state, no intermediate promotion.
-- A retry-pending instance is neither terminal nor failed; today the keyed check runs
-  only after the reset, so it never sees this state at all. After the reset the row is
-  `ready`, and both agree.
+- **Behavioural change:** in the state `[failed, completed, pending]` (reachable via
+  recovery's unguarded timeout write landing on `[0]` after `[1]` completed) today
+  promotes `[2]` on `[1]`'s completion, and a worker may claim and run it before `[0]`'s
+  later re-orchestration skips whatever is still pending. R5 never promotes `[2]`. The
+  new outcome is "the loop stops at the first failure", which is the documented meaning
+  of `sequential` without `continue_on_failure`.
 - R5 requires the placeholder to be `running` (fix 5).
 
 **R6 — Rollup.** For a `running` placeholder that has at least one instance row and
 whose instances are all terminal:
-- any instance `failed` (not retry-pending) and no `continue_on_failure` →
+- any instance `failed` and no `continue_on_failure` →
   `Rollup { Failed("for_each loop failed: instances {:?} failed") }` with the failed
   `loop_index` list in ascending order, formatted exactly as today;
 - otherwise → `Rollup { Completed(array) }`: one element per existing instance row,
@@ -386,8 +394,8 @@ unit tests in §9.1.
 Applying a `Change` to the snapshot:
 - `Promote` / `Skip` / `Fail` set the row's status (and `error_message` for `Fail`).
 - `Expand` sets the placeholder to `running` and appends synthetic `JobStepRow`s for the
-  instances (status per R4; `loop_source` set; timestamps `now`; worker/output/error
-  empty). `Adopt` sets the placeholder to `running`.
+  instances (status per R4; `loop_source` set; `retry_attempt` 0; timestamps `now`;
+  worker/output/error empty). `Adopt` sets the placeholder to `running`.
 - `Rollup` sets the placeholder's status and `output`/`error_message`.
 
 Synthetic rows never reach `apply` as rows; `apply` inserts from the `NewJobStep`s.
@@ -434,11 +442,12 @@ repo primitives. Guards, with today's equivalent noted:
 Column preservation as today: `Fail` and `Rollup::Failed` do not touch `output`;
 `Rollup::Completed` does not touch `error_message`.
 
-Zero-row policy. After §4.7's verification every step-row guard is known to hold, so a
-zero-row match on a step-row statement is a programming error: `apply` returns `Err` and
-the caller rolls back. The job-row update (Expand/Adopt step 3) is exempt: it is
-conditional on `job.status = 'pending'` and legitimately matches zero rows once the job
-is already `running` (today's `mark_running_if_pending_server`, `job.rs:434`).
+Row-count policy. Every step-row statement compares its affected-row count with the
+number of step names it carries. After §4.7's verification under `FOR UPDATE` no other
+writer can have moved those rows, so a shortfall is a programming error: `apply` returns
+`Err` and the caller rolls back. The job-row update (Expand/Adopt step 3) is exempt: it
+is conditional on `job.status = 'pending'` and legitimately matches zero rows once the
+job is already `running` (today's `mark_running_if_pending_server`, `job.rs:434`).
 
 For `Expand` the placeholder update runs first, then the insert, so instances exist only
 if the placeholder transition is in the same committed transaction (fix 1).
@@ -455,9 +464,13 @@ loop:
 
   BEGIN
     SELECT pg_advisory_xact_lock(CASCADE_LOCK_CLASS, hashtext($1))   -- §4.7.1
-    current = Snapshot { job_status: SELECT status FROM job WHERE job_id=$1,
-                         steps: SELECT step_name, status, retry_attempt
-                                FROM job_step WHERE job_id=$1 ORDER BY step_name }
+    current.steps = SELECT step_name, status,
+                           CASE WHEN status IN ('completed','skipped','failed','suspended')
+                                THEN xmin::text::bigint END
+                    FROM job_step WHERE job_id = $1
+                    ORDER BY step_name
+                    FOR UPDATE                                        -- row locks, all steps
+    current.job_status = SELECT status FROM job WHERE job_id = $1     -- no lock
     if current != plan.assumed:
         ROLLBACK; attempt += 1
         if attempt == 3: return Err("cascade verification failed 3 times")
@@ -468,32 +481,45 @@ loop:
   return plan
 ```
 
-**Verification contract.** A plan is applied only if the job's status and every step
-row's `(status, retry_attempt)` are exactly what `run` computed from. There is no
-argument about which rows matter: any status change to any row of the job between
-snapshot and apply — cancellation (`JobRepo::cancel` on the job row,
-`cancel_pending_steps` on step rows), a recovery timeout write, a worker claim or
-completion, an approval, a retry reset (which also bumps `retry_attempt`), another
-cascade's commit — makes the vector differ and forces a re-run on a fresh snapshot.
-Template-visible data (`output`, `error_message`) changes only together with a status
-change, so it is covered. The one write that verification cannot see is a retry reset
-that has not happened yet: a row that is `failed` at snapshot and will be reset by its
-own handler after apply. Decision 15 handles that by never letting a rule act on a
-retry-pending row.
+The outside read uses the same `SELECT` shape (minus `FOR UPDATE`) so that `assumed`
+and `current` are built by one function.
 
-**What the lock serialises.** Two `execute`s for one job run their verify-and-apply
-phases one at a time; the second's verification sees the first's commits and re-runs.
-Creation compensation (`job_creator.rs:663-694`) takes the same advisory lock as its
-first statement, so a cascade can never interleave with a compensation on the same job;
-its step-then-job write order is otherwise unchanged.
+**Verification contract.** A plan is applied only if the job's status, every step row's
+status, and the version of every context-visible row are exactly what `run` computed
+from. Any status change to any row of the job between snapshot and verification —
+cancellation (`JobRepo::cancel` on the job row, `cancel_pending_steps` on step rows), a
+recovery timeout write, a worker claim or completion, an approval, a retry (which under
+the prerequisite is a `running → ready` status change), another cascade's commit — and
+any same-status rewrite of a context-visible row (approval message,
+`job_creator.rs:1487`; an unguarded `mark_completed`/`mark_failed` on an already
+terminal row, `job_step.rs:480`/`:504`) changes the vector and forces a re-run on a
+fresh snapshot.
 
-**Lock inventory (unchanged elsewhere).** Worker claim locks `job_step` rows with
-`FOR UPDATE SKIP LOCKED` and commits before any orchestration; completion, approval, and
-recovery write through the pool and commit before calling the cascade; artifact upload
-holds a job-row lock across its blob write, which the advisory lock never waits on;
-cancellation, worker start and log upload are single-row `UPDATE`s on `job`. `apply`'s
-own job `UPDATE` (R7) is one statement and briefly takes the row lock; it can wait behind
-an artifact upload for that duration only.
+**Protection through apply.** The verification `SELECT … FOR UPDATE` locks every step
+row of the job until commit. Any writer that would change one of those rows between
+verification and apply (recovery's select-then-fail, `recovery.rs:123-143`; a worker
+completing; cancellation's step sweep) blocks until the cascade commits, then proceeds
+against the committed state with its own guards. The job row is not locked by
+verification; R7's `UPDATE` takes its row lock at write time and is guarded on
+`status = 'pending'`, so a cancellation landing between verification and R7 makes R7 a
+no-op, and the cancelled job's steps are cancelled by the sweep once the cascade's row
+locks release.
+
+**Lock order and inventory.** The cascade's order is: advisory lock → step rows
+(`FOR UPDATE`) → job row (R7 `UPDATE`). Creation compensation uses the same order
+(advisory lock → `fail_non_terminal_steps_tx` → `mark_failed_tx`). Every other writer:
+- worker claim: `job_step` rows `FOR UPDATE SKIP LOCKED` (`job_step.rs:366`); a job
+  whose rows are cascade-locked is skipped for that poll;
+- worker completion, approval, recovery, cancellation, the retry mark: single
+  autocommitted statements on `job_step` or `job`, no lock held across statements;
+- artifact upload: job row `FOR UPDATE` held across the blob write, then `job_artifact`
+  only (`artifacts.rs:165-206`); never touches `job_step`;
+- worker start, log upload: single-row `UPDATE`s on `job`.
+No transaction other than the cascade and compensation holds a step-row lock while
+waiting for anything, and nothing holds the job row while waiting for step rows, so
+there is no cycle. R7 can wait behind an in-flight artifact upload for the duration of
+that upload's blob write; that wait happens while the cascade holds the step-row locks,
+so workers polling that job skip it for the same duration. Accepted (Decision 13).
 
 **Commit before anything else.** `execute` commits before returning. Settlement, task
 and approval dispatch, child-job creation and propagation to a parent all happen after
@@ -509,10 +535,14 @@ form. Postgres keys the two-integer form separately from the single-`bigint` for
 (`objsubid` 2 vs 1), so it cannot collide with leader election's
 `pg_try_advisory_lock(0x5354524D4C445201)` (`leader.rs:26-35`) whatever the hash
 yields. `CASCADE_LOCK_CLASS` is a `pub const i32` in stroem-db (`0x5354_5243`, "STRC");
-any future two-integer advisory lock must use a different class. Precedent for the
-transaction-scoped form: creation compensation already runs a multi-statement
-transaction on a pooled connection (`job_creator.rs:669-680`); `pg_advisory_xact_lock`
-releases at transaction end, commit or rollback.
+any future two-integer advisory lock must use a different class. `hashtext` is
+deterministic within a database (no per-session seed). Residual risk: two job ids
+hashing to the same 32-bit value serialise their cascades against each other; harmless.
+One SQL helper, `JobRepo::cascade_lock_tx`, is the only place the expression is written;
+compensation calls it too. Precedent for the transaction-scoped form: creation
+compensation already runs a multi-statement transaction on a pooled connection
+(`job_creator.rs:669-680`); `pg_advisory_xact_lock` releases at transaction end, commit
+or rollback.
 
 ### 4.8 Callers after the change
 
@@ -523,13 +553,11 @@ releases at transaction end, commit or rollback.
   loop (R5/R6 need no context) where today it cannot; no production caller passes `None`.
 - `job_creator::create_job_for_task_inner`, `init` block: the loop at `:618-641`
   becomes one `cascade::execute(pool, job_id, task, Some(workspace_config))`. The
-  compensation path (`:663-694`) additionally takes the cascade advisory lock as its
-  first statement; its transaction and write order are otherwise unchanged, so the
+  compensation path (`:663-694`) additionally calls `cascade_lock_tx` as its first
+  statement; its transaction and write order are otherwise unchanged, so the
   atomic-compensation invariant in CLAUDE.md (Task Actions) holds.
-- `job_recovery.rs:226` and `:601`: the `check_loop_completion` calls are removed. The
-  step-retry reset (`:186-209`) is unchanged: when it resets the step it returns early
-  and **no cascade runs**, as today. `propagate_to_parent` (`:563-624`) has no retry
-  check before its cascade, as today (see §3, task-step retry). A rollup error now
+- `job_recovery.rs:226` and `:601`: the `check_loop_completion` calls are removed.
+  `propagate_to_parent` (`:563-624`) is otherwise unchanged. A rollup error now
   propagates out of `on_step_completed` (Decision 18) where `check_loop_completion`'s
   was logged and ignored.
 - `job_creator::orchestrate_after_server_step_failure` is unchanged (it calls
@@ -557,8 +585,8 @@ releases at transaction end, commit or rollback.
 - Only `failed` instances fail a loop; `cancelled` instances do not.
 - Rollup output has one element per existing instance row, `null` where the row has no
   output. Missing indices are not padded.
-- The step-retry reset's early return: no cascade after a successful reset.
-- A `type: task` step's retry config is not honoured on failure (pre-existing, §3).
+- Instance rows start at `retry_attempt = 0` (DB default), not the placeholder's value.
+- Which failure paths honour step retry (§3).
 
 ### 4.10 Fixed by construction (Decision 2)
 
@@ -567,32 +595,25 @@ All go live in the activation commit (§10); each has its own regression-test co
 
 1. **for_each crash hole** — instance insert and placeholder transition commit together
    (§4.6).
-2. **Lost cascade work under concurrency** — advisory lock plus whole-snapshot
-   compare-and-apply (§4.7).
+2. **Lost cascade work under concurrency** — advisory lock plus verified, row-locked
+   apply (§4.7).
 3. **Self-healing rollup and advance** — R5/R6 run on every cascade. Covers the case
    where today's sequential failure path skips rows and then checks terminality against
    a stale snapshot (`job_creator.rs:1282`, `:1307`), leaving the rollup for a later
    keyed call that may never come.
-4. **Retry-pending rows are not acted on** — a concurrent cascade in the window between
-   `mark_failed` and the retry reset no longer skips the step's dependents (R2/R3/R4)
-   nor fails its loop (R5/R6).
+4. **Stale reads cannot be applied** — any write to a job's rows between snapshot and
+   verification forces a re-run, and none can land between verification and commit
+   (§4.7); today's autocommitted statements apply stale decisions.
 5. **Placeholder writes guarded** — a cancelled or timed-out placeholder is never
    overwritten by a later rollup or retirement (§4.6).
 6. **Adoption of partial expansions** — placeholders stranded by past crash-hole
    incidents are moved to `running` and roll up normally (R0).
-7. **Stale reads cannot be applied** — any write to the job's rows between snapshot and
-   apply forces a re-run (§4.7); today's autocommitted statements apply stale decisions.
-
-Cost named for fix 4: a handler that crashes between `mark_failed` and the reset leaves
-a retry-pending row forever; its dependents then stay `pending` where today a later
-cascade would skip them and settle the job `failed`. Today the same crash leaves the job
-stuck unless another step happens to complete; the "failed but never orchestrated"
-sweep belongs to the settlement branch (TODO).
 
 ## 5. Data Model
 
 No migration. No new columns. The `for_each` instance/placeholder relationship stays a
-naming convention plus `loop_source`, and no trigger or foreign key is added.
+naming convention plus `loop_source`, and no trigger or foreign key is added. `xmin` is
+a system column present on every row; reading it needs no schema change.
 
 ## 6. Server
 
@@ -603,11 +624,11 @@ naming convention plus `loop_source`, and no trigger or foreign key is added.
   `render_for_each_template`, `MAX_FOR_EACH_ITEMS` (with their existing unit tests,
   `job_creator.rs:1979-2060`), and an internal snapshot type.
 - `stroem-db` transaction primitives (thin, one statement each):
-  `cascade_lock_tx(tx, job_id)` and `CASCADE_LOCK_CLASS`,
-  `JobRepo::get_status_tx`, `JobRepo::mark_running_if_pending_tx`,
-  `JobStepRepo::get_status_vector_tx`, `promote_steps_tx`, `skip_steps_tx`,
-  `fail_pending_step_tx`, `start_placeholder_tx`, `rollup_placeholder_tx`.
-  `create_steps_tx` already exists.
+  `CASCADE_LOCK_CLASS`, `JobRepo::cascade_lock_tx`, `JobRepo::get_status_tx`,
+  `JobRepo::mark_running_if_pending_tx`, `JobStepRepo::get_snapshot_vector` (pool) and
+  `get_snapshot_vector_for_update_tx` (same `SELECT`, `FOR UPDATE`), `promote_steps_tx`,
+  `skip_steps_tx`, `fail_pending_step_tx`, `start_placeholder_tx`,
+  `rollup_placeholder_tx`. `create_steps_tx` already exists.
 
 ### 6.2 Deleted (activation commit)
 
@@ -623,31 +644,30 @@ naming convention plus `loop_source`, and no trigger or foreign key is added.
 
 `settle_if_all_terminal`, `handle_task_steps`, `handle_approval_steps`,
 `orchestrate_after_step` (minus the deleted call), `propagate_to_parent` (minus the
-deleted call), the step-retry reset, task retry, hooks, cancellation, recovery.
+deleted call), task retry, hooks, cancellation, recovery.
 
 ## 7. Documentation
 
 - `CONTEXT.md` (new): step cascade, placeholder, instance, retirement, adoption,
-  rollup, plan, snapshot, change, retry-pending, settlement (pointer to the later
-  design). Links back to CLAUDE.md.
+  rollup, plan, snapshot, change, settlement (pointer to the later design). Links back
+  to CLAUDE.md.
 - `CLAUDE.md`: link to `CONTEXT.md` in the overview; new `### Step Cascade` section
-  (interface, phase order, effective status, the advisory lock class and the two-integer
-  rule, "commit before dispatch", callers, the rule that new context variables keep
-  `job` first); rewrite the "Placeholder resolution lives inside the orchestrator
-  cascade" paragraph under For-Each Loops and the failed-dep note to point at
-  R0/R4/R5/R6; remove the "Do NOT call `expand_for_each_steps` after
-  `on_step_completed`" warning; correct the truthiness summary under Conditional Flow
-  Steps (`null`/`none` are also false, trimmed, case-insensitive); under Retry
-  Mechanism, describe retry-pending and the task-step ownership gap.
+  (interface, phase order, the verification vector and row locks, the advisory lock
+  class and the two-integer rule, lock order, "commit before dispatch", callers, the
+  rule that new context variables keep `job` first); rewrite the "Placeholder
+  resolution lives inside the orchestrator cascade" paragraph under For-Each Loops and
+  the failed-dep note to point at R0/R4/R5/R6; remove the "Do NOT call
+  `expand_for_each_steps` after `on_step_completed`" warning; correct the truthiness
+  summary under Conditional Flow Steps (`null`/`none` are also false, trimmed,
+  case-insensitive).
 - `crates/stroem-db/README.md:86`: remove the orchestration API it advertises.
 - `docs/internal/TODO.md`: close the in-file TODOs from `job_step.rs:678-690` if tracked;
-  add: `type: task` step retry config never honoured (child propagation / dispatch
-  failure bypass the retry check); recovery's unguarded `mark_failed` can overwrite a
-  `completed` row; "failed but never orchestrated" sweep (settlement branch); remove the
-  `None` workspace-config mode (settlement branch); move `build_step_render_context`
-  (candidate 7).
-- No user-facing docs change: user-visible semantics are unchanged except the seven
-  fixes, none of which changes a documented behaviour.
+  add: which failure paths honour step retry is inconsistent (§3); recovery's unguarded
+  `mark_failed` can overwrite a `completed` row; remove the `None` workspace-config mode
+  (settlement branch); move `build_step_render_context` (candidate 7).
+- No user-facing docs change except one line under the `for_each` guide's `sequential`
+  section stating that a failed instance stops the loop immediately (R5 behavioural
+  change).
 
 ## 8. Known Limitations
 
@@ -658,13 +678,12 @@ deleted call), the step-retry reset, task retry, hooks, cancellation, recovery.
   branch.
 - Rendering can run `vals`; the cascade runs it outside any lock but does not bound it.
 - Three verification failures in a row surface as an error from `on_step_completed`.
-  Under the advisory lock the only writers that can cause a mismatch are cancellation,
-  recovery timeouts, worker claims/completions on other steps of the job, approvals and
-  the retry reset; three in a row on one job is pathological and the error is logged
-  with the job id.
-- Retry-pending detection is a heuristic over `(status, retry_attempt, max_retries,
-  action_type)`; it is exact for today's failure paths and must be revisited if a new
-  failure path is added without the retry check (CLAUDE.md records the rule).
+  The writers that can cause a mismatch are cancellation, recovery timeouts, worker
+  claims/completions on other steps of the job, approvals and retries; three in a row
+  on one job is pathological and the error is logged with the job id.
+- While a cascade holds its step-row locks (verification through commit, a handful of
+  statements plus at most one wait on an artifact upload for R7), workers skip that
+  job's ready steps and single-statement writers on its step rows wait.
 
 ## 9. Tests
 
@@ -682,29 +701,25 @@ A row builder and a flow builder. Cases assert on the returned `Plan`:
 - **phase-order fixtures**: Codex's counterexample (`p` expands because `a` was skipped
   earlier in the same pass); a `when` that inspects a loop rolled up in P0 of the same
   pass sees it; a `when` that references a step **skipped** in P1 of the same pass does
-  not see it until the next pass (a `ready` row never enters the context, so promotion
-  is not the right fixture)
-- **retry-pending fixtures**: dep `a` failed with budget, `b` stays pending (R3 does not
-  fire) and is not satisfied for R2; the same with `a` a `type: task` step → `b` is
-  skipped (ownership rule); `a` failed with budget exhausted → `b` skipped; a placeholder
-  whose dep is retry-pending stays pending
+  not see it until the next pass
 - placeholder: failed dep skips it; cof keeps it; all-deps-skipped skips it; `when`
   false skips; `when` error fails; expression error fails; empty array skips; >10 000
   fails with the exact text; literal JSON array vs Tera string; parallel vs sequential
-  instance statuses; placeholder absent from the flow is ignored; `[0]` exists → `Adopt`
+  instance statuses; instances carry `retry_attempt = 0`; placeholder absent from the
+  flow is ignored; `[0]` exists → `Adopt`
 - sequential advance: promote next; failure skips all pending, including a pending
   successor of a completed later instance (`[failed, completed, pending]`); cof promotes
-  past a failure; no-op while `[i]` is `ready`/`running`; no-op while `[i]` is
-  retry-pending; a `type: task` instance failed with budget is terminal and skips the
-  rest; failure followed by immediate rollup in the same `run`
+  past a failure; no-op while `[i]` is `ready`/`running`; a cancelled middle instance
+  without cof skips the rest, with cof promotes past it; failure followed by immediate
+  rollup in the same `run`
 - rollup: completed array in `loop_index` order with `null` for missing output; failed
   list text; only `failed` fails the loop, `cancelled` does not; no rollup while any
-  instance is non-terminal or retry-pending; a `type: task` instance failed with budget
-  rolls up as failed; no rollup for a non-running placeholder; no rollup with zero
-  instances; missing flow entry → non-sequential, no cof
+  instance is non-terminal; no rollup for a non-running placeholder; no rollup with
+  zero instances; missing flow entry → non-sequential, no cof
 - downstream `when` sees an expanded placeholder's rollup output within the same `run`
 - termination: a large DAG reaches the fixpoint; a snapshot at fixpoint returns an
-  empty plan (idempotency); `assumed` equals the input vector
+  empty plan (idempotency); `assumed` equals the input vector including `version` only
+  for context-visible rows
 - rows absent from the flow are ignored
 - the `test_convergence_without_continue_on_failure` scenario
 
@@ -723,26 +738,31 @@ cancellation timestamps or "no settlement while live" (`:371`, `:1724`, `:1753`,
 - `apply` timestamps: `Promote` sets `ready_at`; `Skip`/`Fail`/`Rollup` set
   `completed_at`; `Expand`/`Adopt` set `started_at` (assertions transferred from the
   deleted DB tests).
-- **Verification-mismatch handshake** (no code hook): connection A begins a transaction
-  and takes the cascade lock for the job; the test spawns `execute` on the pool, which
-  computes its plan and blocks on the lock; connection C cancels one pending step and
-  commits; A rolls back, releasing the lock; `execute` verifies, sees the mismatch,
-  re-runs, and its returned plan carries no change for the cancelled row; final state
-  reflects the cancellation. A second variant has C reset a `failed` instance for retry
-  (`reset_for_retry`) and asserts the loop is not rolled up. (fixes 2, 7)
+- `apply` row-count assertion: a plan whose `Promote` names a row that is not `pending`
+  returns `Err` and leaves no partial writes.
+- **Verification-mismatch handshake** (no code hook). Fixture: a job where a completed
+  step `a` has a pending dependent `b` (so the plan is non-empty). Connection A begins a
+  transaction and calls `cascade_lock_tx` for the job; the test spawns `execute` on the
+  pool and polls `pg_locks` until a row for that advisory key shows `granted = false`
+  (the cascade has computed its plan and is blocked); connection C cancels `b` and
+  commits; A rolls back; `execute` verifies, sees the mismatch, re-runs, and its
+  returned plan carries no change for `b`; final state has `b` cancelled. A second
+  variant has C rewrite `a`'s output with same status (`mark_completed` again) and
+  asserts the re-run rendered `b`'s `when` against the new output. (fixes 2, 4)
+- **Row-lock protection**: with `execute` blocked on the advisory lock as above but
+  after A releases and before commit, this cannot be observed from outside; instead:
+  connection A runs the verification `SELECT … FOR UPDATE` itself for a job and holds
+  it; a recovery-style `mark_failed` on one of that job's steps from connection C is
+  shown blocked in `pg_locks`; A commits; C proceeds. Proves the window is closed.
 - Concurrency: two `execute`s for the same job run concurrently after two sibling steps
   complete; the join step is promoted exactly once and the final state equals a serial
   run. (fix 2)
-- Compensation interleaving: connection A holds the cascade lock; a creation whose init
-  fails is driven to its compensation on the pool and blocks; A releases; compensation
-  completes; final job `failed` with all non-terminal steps failed; then an `execute`
-  on the job returns an empty plan.
-- Retry vs unrelated cascade: instance `x[1]` `failed` with a retry remaining, a
-  cascade triggered by an unrelated step does not roll up `x` and does not skip a step
-  depending on `x`; after the reset and a successful re-run, `x` rolls up `completed`.
-  (fix 4)
-- Task-step retry ownership: a `type: task` step failed by child propagation with retry
-  budget is treated as terminal; its dependents are skipped. (fix 4, ownership)
+- Compensation interleaving: create a job whose `type: task` dispatch is made to fail
+  (existing injected-failure fixture, `integration_test.rs:25130` pattern); a barrier
+  after init's cascade has committed (observe the root step `ready`) and before the
+  injected dispatch failure; connection A then holds `cascade_lock_tx`; compensation
+  blocks; A releases; compensation completes; final job `failed` with all non-terminal
+  steps failed; an `execute` on the job afterwards returns an empty plan.
 - Timeout vs rollup: recovery fails a running placeholder by timeout; a later instance
   completion does not overwrite it. (fix 5)
 - Cancelled placeholder: rollup leaves it `cancelled`. (fix 5)
@@ -750,6 +770,8 @@ cancellation timestamps or "no settlement while live" (`:371`, `:1724`, `:1753`,
   and, once instances are terminal, rolls it up. (fix 6)
 - Self-healing: placeholder `running`, all instances terminal, no prior rollup → one
   `execute` rolls it up. (fix 3)
+- R5 behavioural change: `[failed, completed, pending]` → `[2]` skipped, placeholder
+  failed, never promoted.
 - Parent/child: a child job's cascade and its parent's cascade run concurrently; both
   complete.
 - `on_step_completed` and creation-time cascade produce identical results for the same
@@ -775,31 +797,34 @@ in §9.1.
 
 ## 10. Rollout
 
+- Prerequisite: the fail-or-retry branch is merged and released first.
 - Pure server change, no migration, no config. Ships as a patch release.
-- Commit sequence (each green against the oracle; nothing before commit 5 changes
-  runtime behaviour):
+- Commit sequence (each green against the oracle; commits 1–3 change no runtime
+  behaviour; commit 4 adds one inert lock acquisition):
   1. `cascade::run`, `Snapshot`, `Plan`, `Change`, the internal snapshot type, and the
-     `run` unit suite (§9.1 minus adoption, which lands with commit 8). The parser
-     helpers are **not** moved yet; `run` calls them at their current location.
-  2. stroem-db transaction primitives, `CASCADE_LOCK_CLASS`, `cascade_lock_tx`, and
-     `apply` + its integration tests (transactional, timestamps).
-  3. `execute` (lock, verify, retry) + the verification-handshake and concurrency tests,
-     driven directly against `execute` on fixture jobs.
-  4. Creation compensation takes the cascade lock as its first statement +
-     compensation-interleaving test. No cascade uses the lock in production yet, so this
-     is inert.
+     `run` unit suite (§9.1 minus adoption, which lands with commit 7). The parser
+     helpers stay in `job_creator.rs` and are made `pub(crate)` (`parse_for_each_items`
+     `:1155`, `render_for_each_template` `:1181`, `MAX_FOR_EACH_ITEMS` `:933`) so `run`
+     can call them.
+  2. stroem-db transaction primitives, `CASCADE_LOCK_CLASS`, `cascade_lock_tx`, the
+     snapshot-vector queries, and `apply` + its integration tests (transactional,
+     timestamps, row-count).
+  3. `execute` (lock, verify, retry) + the verification-handshake, row-lock and
+     concurrency tests, driven directly against `execute` on fixture jobs.
+  4. Creation compensation calls `cascade_lock_tx` as its first statement +
+     compensation-interleaving test. No cascade uses the lock in production yet.
   5. **Activation**: `on_step_completed` and the creation-time loop switched to
      `execute`; `check_loop_completion` and its two calls, `expand_for_each_steps`,
      `promote_ready_steps`, `skip_unreachable_steps` and their four DB tests deleted;
-     parser helpers and their tests moved into `cascade.rs`;
-     `test_convergence_without_continue_on_failure` rewritten. Fixes 1–5 and 7 go live
-     here.
-  6. Regression-test commits, one per fix: self-healing (3), retry vs unrelated cascade
-     and task-step ownership (4), timeout-vs-rollup and cancelled placeholder (5),
-     `on_step_completed` vs creation equivalence.
+     parser helpers and their tests moved into `cascade.rs` (the `pub(crate)` grants go
+     away with them); `test_convergence_without_continue_on_failure` rewritten. Fixes
+     1–5 go live here.
+  6. Regression-test commits, one per fix: self-healing (3), timeout-vs-rollup and
+     cancelled placeholder (5), R5 behavioural change, `on_step_completed` vs creation
+     equivalence, parent/child.
   7. Adoption: R0 in `run`, `Adopt` in `apply`, unit fixtures and the integration test
      (fix 6).
-  8. Docs: `CONTEXT.md`, CLAUDE.md, DB README, TODO.md.
+  8. Docs: `CONTEXT.md`, CLAUDE.md, DB README, TODO.md, `for_each` guide line.
   9. Prune container tests whose every assertion is now covered by a `run` twin.
 
 ## 11. Resolved Questions
@@ -813,7 +838,7 @@ in §9.1.
 | Q5 tests | container suite is the oracle; unit tests at the interface; prune last |
 | Q6 inputs | task, job row, steps, `Option<&WorkspaceConfig>`; context built inside |
 | Q7 fixpoint | in memory, inside `run` |
-| Q8 atomicity | one transaction (rev 1: job row lock; superseded by Q15/Q23/Q24) |
+| Q8 atomicity | one transaction (rev 1: job row lock; superseded by Q15/Q23/Q24/Q30) |
 | Q9 rollup | absorbed as global rules; `check_loop_completion` deleted |
 | Q10 repo fns | deleted with their four tests |
 | Q11 `None` mode | preserved on this branch |
@@ -821,16 +846,19 @@ in §9.1.
 | Q13 lock sharing | accept sharing the job row lock (superseded by Q23) |
 | Q14 phase model | reproduce today's phase boundaries; two contexts per pass; P0 is an extension |
 | Q15 rendering vs lock | render outside; verify and apply inside; retry ×3 |
-| Q16 retry-aware terminality | retry-pending rows are non-terminal (extended by Q25) |
+| Q16 retry-aware terminality | superseded by Q28 |
 | Q17 placeholder guards | keep stronger guards; preserve column behaviour |
 | Q18 sequential advance | global rule (policy restated by Q26) |
 | Q20 rollup errors | propagate (abort before settlement) |
 | Q22 partial expansions | adopt (R0) |
 | Q23 lock | advisory xact lock keyed on job id, not the row lock |
-| Q24 verification | whole-snapshot vector (job status + every step's status and retry_attempt) |
-| Q25 retry ownership | effective status everywhere; `action_type != "task"` |
-| Q26 sequential failure | failure precedence over successor promotion; no equivalence claim |
+| Q24 verification | whole-snapshot vector (refined by Q29) |
+| Q25 retry ownership | superseded by Q28 |
+| Q26 sequential failure | failure precedence over successor promotion; stated as a behavioural change |
 | Q27 commit sequence | land unused, one activation commit, test commits after, adoption later |
+| Q28 retry | no retry logic in the cascade; atomic fail-or-retry is a prerequisite branch |
+| Q29 verification vector | job status + every step's status + `xmin` for context-visible rows |
+| Q30 verify→apply window | `FOR UPDATE` on all step rows at verification; row-count assertions |
 
 ## 12. Review Log
 
@@ -839,20 +867,25 @@ in §9.1.
   verdict "not ready": phase ordering observable; `run` not pure (`vals`); compensation
   lock-order inversion; job lock does not stabilise steps; missed test caller; plus
   should-fixes on R4/R5/R6 semantics, guards, termination, lock inventory, tests, docs.
-- 2026-09-08 — rev 2: phase model (§4.4), render-outside/verify-touched-rows (§4.7),
-  advisory lock, compensation lock, retry-aware terminality for R5/R6, adoption, R5
-  keyed-equivalent form, guard table, test mapping.
-- 2026-09-08 — Codex second pass on rev 2, verdict "not ready": three blockers closed
-  (phase order, rendering, compensation, test caller); touched-row verification
-  insufficient (retry window on ordinary deps, unguarded recovery overwrite, job-status
-  cancellation not covered, `assumed` contract, R7 zero-row); retry budget ≠ scheduled
-  retry for `type: task` instances; R5 not exactly equivalent
-  (`[failed, completed, pending]`); measure ranks and pass bound; P0 is an extension;
-  wrong next-pass fixture; advisory key collision with leader; commit sequence gaps.
-- 2026-09-08 — rev 3 (this document): whole-snapshot verification (Q24, §4.7); effective
-  status with retry ownership across all rules (Q25, §4.3); R5 failure precedence and
-  listed divergences (Q26); `Snapshot` in `Plan`, R7 zero-row exemption (§4.2, §4.6);
-  two-integer lock key with class const (§4.7.1); measure over all six statuses, bound
-  `4|U|`, P0 stated as extension (§4.4); fixtures corrected (§9.1); handshake spec'd
-  (§9.2); activation-commit sequence (Q27, §10); task-step retry bypass and recovery
-  overwrite logged as pre-existing (§3, §7). Third Codex pass pending.
+- 2026-09-08 — rev 2: phase model, render-outside/verify-touched-rows, advisory lock,
+  compensation lock, retry-aware terminality for R5/R6, adoption, R5 keyed-equivalent
+  form, guard table, test mapping.
+- 2026-09-08 — Codex second pass, verdict "not ready": touched-row verification
+  insufficient; retry budget ≠ scheduled retry; R5 not equivalent; measure and P0
+  wording; fixture; advisory key collision; commit sequence gaps.
+- 2026-09-08 — rev 3: whole-snapshot status verification; effective status with
+  `action_type != "task"` ownership; R5 failure precedence; two-integer lock key;
+  activation-commit sequence.
+- 2026-09-08 — Codex third pass, verdict "not ready": status equality does not imply
+  output/error equality (approval message, same-status rewrites); verify→apply window
+  unprotected; `action_type` is not a retry-ownership discriminator (approval dispatch
+  bypasses, task timeouts do not, cascade-generated failures never retry); R5 "same
+  eventual state" too strong; Decision 13 vs R7; test staging and `pub(crate)` gaps.
+- 2026-09-08 — rev 4 (this document): retry logic removed from the cascade, atomic
+  fail-or-retry made a prerequisite branch (Q28, `2026-09-08-fail-or-retry-design.md`);
+  verification vector adds `xmin` for context-visible rows (Q29); verification `SELECT`
+  takes `FOR UPDATE` on all step rows, row-count assertions, lock order stated (Q30);
+  R5 divergence restated as a behavioural change with a user-doc line; Decision 13
+  reworded; column coverage enumerated (§4.2); handshake needs a non-empty plan and a
+  `pg_locks` observation, compensation test gets a barrier, `pub(crate)` grants and
+  commit numbering fixed (§9.2, §10). Fourth Codex pass pending.
