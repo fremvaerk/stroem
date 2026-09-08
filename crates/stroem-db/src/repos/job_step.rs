@@ -533,49 +533,6 @@ impl JobStepRepo {
         Ok(())
     }
 
-    /// Reset a failed step for retry: push current error to retry_history,
-    /// increment retry_attempt, clear runtime fields, set status back to 'ready'
-    /// with a future retry_at for backoff.
-    pub async fn reset_for_retry(
-        pool: &PgPool,
-        job_id: Uuid,
-        step_name: &str,
-        retry_at: DateTime<Utc>,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            r#"
-            UPDATE job_step
-            SET
-                retry_history = retry_history || jsonb_build_array(jsonb_build_object(
-                    'attempt', retry_attempt,
-                    'error', error_message,
-                    'started_at', started_at,
-                    'failed_at', completed_at
-                )),
-                retry_attempt = retry_attempt + 1,
-                status = 'ready',
-                ready_at = NOW(),
-                retry_at = $3,
-                worker_id = NULL,
-                started_at = NULL,
-                completed_at = NULL,
-                error_message = NULL,
-                output = NULL,
-                agent_state = NULL,
-                suspended_at = NULL
-            WHERE job_id = $1 AND step_name = $2 AND status = 'failed'
-            "#,
-        )
-        .bind(job_id)
-        .bind(step_name)
-        .bind(retry_at)
-        .execute(pool)
-        .await
-        .context("Failed to reset step for retry")?;
-
-        Ok(result.rows_affected() > 0)
-    }
-
     /// Record a step failure and decide its retry in ONE transaction, so a row
     /// that will be retried is never observable as `failed`.
     ///
@@ -1250,35 +1207,6 @@ impl JobStepRepo {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Reject a suspended approval step: atomically transitions from `suspended` to `failed`.
-    ///
-    /// Returns `true` if the update was applied (the step was still suspended).
-    /// Returns `false` when the step has already left the suspended state (e.g. timed out
-    /// or approved concurrently), so callers can surface a conflict error without doing a
-    /// separate read-then-write.
-    pub async fn reject_step(
-        pool: &PgPool,
-        job_id: Uuid,
-        step_name: &str,
-        error_message: &str,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            r#"
-            UPDATE job_step
-            SET status = 'failed', error_message = $1, completed_at = NOW()
-            WHERE job_id = $2 AND step_name = $3 AND status = 'suspended'
-            "#,
-        )
-        .bind(error_message)
-        .bind(job_id)
-        .bind(step_name)
-        .execute(pool)
-        .await
-        .context("Failed to reject suspended step")?;
-
-        Ok(result.rows_affected() > 0)
-    }
-
     /// Transition an approval step from `ready` to `suspended`, recording the suspension time.
     ///
     /// The `AND status = 'ready'` guard prevents double-suspension races.
@@ -1435,9 +1363,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Verify that `approve_step` and `reject_step` return `Result<bool>` and
-    /// document the expected semantic: `true` means the row was updated,
-    /// `false` means the step was not in the suspended state.
+    /// Verify the `Result<bool>` contract of `approve_step`, and document that
+    /// rejection now goes through `fail_or_retry` with `expected = [Suspended]`,
+    /// returning `FailOutcome::NotApplied` where `reject_step` returned `false`.
     ///
     /// We cannot call the real SQL in a unit test, so we test the type contract
     /// by checking the value we'd compute from `rows_affected`.

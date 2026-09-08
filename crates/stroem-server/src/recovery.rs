@@ -88,32 +88,35 @@ async fn sweep(state: &AppState) -> Result<()> {
                     )
                     .await;
 
-                JobStepRepo::mark_failed(
-                    &state.pool,
+                let outcome = crate::job_recovery::fail_step(
+                    state,
                     step_info.job_id,
                     &step_info.step_name,
                     &error_msg,
+                    &[],
                 )
                 .await?;
 
-                if let Err(e) =
-                    orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
-                {
-                    tracing::error!(
-                        "Failed to orchestrate after recovering step '{}/{}': {:#}",
-                        step_info.job_id,
-                        step_info.step_name,
-                        e
-                    );
-                    state
-                        .append_server_log(
+                if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
+                    if let Err(e) =
+                        orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
+                    {
+                        tracing::error!(
+                            "Failed to orchestrate after recovering step '{}/{}': {:#}",
                             step_info.job_id,
-                            &format!(
-                                "[recovery] Failed to orchestrate after recovering step '{}': {:#}",
-                                step_info.step_name, e
-                            ),
-                        )
-                        .await;
+                            step_info.step_name,
+                            e
+                        );
+                        state
+                            .append_server_log(
+                                step_info.job_id,
+                                &format!(
+                                    "[recovery] Failed to orchestrate after recovering step '{}': {:#}",
+                                    step_info.step_name, e
+                                ),
+                            )
+                            .await;
+                    }
                 }
             }
         }
@@ -140,31 +143,35 @@ async fn sweep(state: &AppState) -> Result<()> {
             step_info.step_name
         );
 
-        JobStepRepo::mark_failed(
-            &state.pool,
+        let outcome = crate::job_recovery::fail_step(
+            state,
             step_info.job_id,
             &step_info.step_name,
             &error_msg,
+            &[],
         )
         .await?;
 
-        if let Err(e) = orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
-        {
-            tracing::error!(
-                "Failed to orchestrate after step timeout '{}/{}': {:#}",
-                step_info.job_id,
-                step_info.step_name,
-                e
-            );
-            state
-                .append_server_log(
+        if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
+            if let Err(e) =
+                orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
+            {
+                tracing::error!(
+                    "Failed to orchestrate after step timeout '{}/{}': {:#}",
                     step_info.job_id,
-                    &format!(
-                        "[recovery] Failed to orchestrate after step timeout '{}': {:#}",
-                        step_info.step_name, e
-                    ),
-                )
-                .await;
+                    step_info.step_name,
+                    e
+                );
+                state
+                    .append_server_log(
+                        step_info.job_id,
+                        &format!(
+                            "[recovery] Failed to orchestrate after step timeout '{}': {:#}",
+                            step_info.step_name, e
+                        ),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -189,31 +196,35 @@ async fn sweep(state: &AppState) -> Result<()> {
             step_info.step_name
         );
 
-        JobStepRepo::mark_failed(
-            &state.pool,
+        let outcome = crate::job_recovery::fail_step(
+            state,
             step_info.job_id,
             &step_info.step_name,
             error_msg,
+            &[],
         )
         .await?;
 
-        if let Err(e) = orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
-        {
-            tracing::error!(
-                "Failed to orchestrate after approval timeout '{}/{}': {:#}",
-                step_info.job_id,
-                step_info.step_name,
-                e
-            );
-            state
-                .append_server_log(
+        if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
+            if let Err(e) =
+                orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
+            {
+                tracing::error!(
+                    "Failed to orchestrate after approval timeout '{}/{}': {:#}",
                     step_info.job_id,
-                    &format!(
-                        "[recovery] Failed to orchestrate after approval timeout '{}': {:#}",
-                        step_info.step_name, e
-                    ),
-                )
-                .await;
+                    step_info.step_name,
+                    e
+                );
+                state
+                    .append_server_log(
+                        step_info.job_id,
+                        &format!(
+                            "[recovery] Failed to orchestrate after approval timeout '{}': {:#}",
+                            step_info.step_name, e
+                        ),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -253,31 +264,35 @@ async fn sweep(state: &AppState) -> Result<()> {
             step_info.step_name
         );
 
-        JobStepRepo::mark_failed(
-            &state.pool,
+        let outcome = crate::job_recovery::fail_step(
+            state,
             step_info.job_id,
             &step_info.step_name,
             error_msg,
+            &[],
         )
         .await?;
 
-        if let Err(e) = orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
-        {
-            tracing::error!(
-                "Failed to orchestrate after unmatched step '{}/{}': {:#}",
-                step_info.job_id,
-                step_info.step_name,
-                e
-            );
-            state
-                .append_server_log(
+        if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
+            if let Err(e) =
+                orchestrate_after_step(state, step_info.job_id, &step_info.step_name).await
+            {
+                tracing::error!(
+                    "Failed to orchestrate after unmatched step '{}/{}': {:#}",
                     step_info.job_id,
-                    &format!(
-                        "[recovery] Failed to orchestrate after unmatched step '{}': {:#}",
-                        step_info.step_name, e
-                    ),
-                )
-                .await;
+                    step_info.step_name,
+                    e
+                );
+                state
+                    .append_server_log(
+                        step_info.job_id,
+                        &format!(
+                            "[recovery] Failed to orchestrate after unmatched step '{}': {:#}",
+                            step_info.step_name, e
+                        ),
+                    )
+                    .await;
+            }
         }
     }
 

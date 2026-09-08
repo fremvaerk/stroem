@@ -17,6 +17,7 @@ use serde_json::json;
 use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
+use stroem_common::models::job::StepStatus;
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
 
@@ -1070,12 +1071,20 @@ pub async fn approve_step(
             reason
         };
 
-        // FIX 1: atomic reject — only succeeds if step is still suspended
-        let applied = JobStepRepo::reject_step(&state.pool, job_id, &step_name, &reason)
-            .await
-            .context("reject suspended step")?;
+        // Atomic reject — only succeeds if step is still suspended; decides
+        // retry in the same transaction (a rejected approval with retry budget
+        // becomes `ready` again, as today).
+        let outcome = crate::job_recovery::fail_step(
+            &state,
+            job_id,
+            &step_name,
+            &reason,
+            &[StepStatus::Suspended],
+        )
+        .await
+        .context("reject suspended step")?;
 
-        if !applied {
+        if matches!(outcome, stroem_db::FailOutcome::NotApplied) {
             return Err(AppError::Conflict(
                 "Step is no longer in suspended state".to_string(),
             ));
@@ -1091,21 +1100,23 @@ pub async fn approve_step(
             )
             .await;
 
-        if let Err(e) =
-            crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await
-        {
-            tracing::error!(
-                "Failed to orchestrate after rejection of step '{}' in job {}: {:#}",
-                step_name,
-                job_id,
-                e
-            );
-            state
-                .append_server_log(
+        if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
+            if let Err(e) =
+                crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await
+            {
+                tracing::error!(
+                    "Failed to orchestrate after rejection of step '{}' in job {}: {:#}",
+                    step_name,
                     job_id,
-                    &format!("[approval] Orchestration error after rejection: {:#}", e),
-                )
-                .await;
+                    e
+                );
+                state
+                    .append_server_log(
+                        job_id,
+                        &format!("[approval] Orchestration error after rejection: {:#}", e),
+                    )
+                    .await;
+            }
         }
 
         Ok(Json(json!({"status": "rejected"})))

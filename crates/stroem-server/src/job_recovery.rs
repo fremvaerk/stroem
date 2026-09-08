@@ -164,7 +164,6 @@ pub(crate) fn retry_log_line(step_name: &str, outcome: &stroem_db::FailOutcome) 
 ///
 /// Does NOT orchestrate. Callers run `orchestrate_after_step` when the outcome is
 /// `Failed` and do nothing when it is `RetryScheduled` — the step is `ready` again.
-#[allow(dead_code)] // wired in Task 3
 pub(crate) async fn fail_step(
     state: &AppState,
     job_id: Uuid,
@@ -230,47 +229,6 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             return Ok(());
         }
     };
-
-    // Check if the just-completed step failed and should be retried.
-    // This must run BEFORE check_loop_completion so that a failed for-each
-    // instance gets reset to 'ready' before the loop-completion logic sees it
-    // as a permanent failure and marks the placeholder step failed.
-    if let Some(step_row) = JobStepRepo::get_step(&state.pool, job_id, step_name).await? {
-        if step_row.status == StepStatus::Failed.as_ref() {
-            if let Some(max) = step_row.max_retries {
-                if step_row.retry_attempt < max {
-                    let delay_secs = compute_retry_delay(&step_row);
-                    let retry_at =
-                        chrono::Utc::now() + chrono::Duration::seconds(delay_secs as i64);
-
-                    if JobStepRepo::reset_for_retry(&state.pool, job_id, step_name, retry_at)
-                        .await?
-                    {
-                        state
-                            .append_server_log(
-                                job_id,
-                                &step_retry_message(
-                                    step_name,
-                                    step_row.retry_attempt,
-                                    max,
-                                    delay_secs,
-                                ),
-                            )
-                            .await;
-                        // Step is back to 'ready' — do NOT cascade failure
-                        return Ok(());
-                    }
-                } else {
-                    state
-                        .append_server_log(
-                            job_id,
-                            &step_retries_exhausted_message(step_name, step_row.retry_attempt, max),
-                        )
-                        .await;
-                }
-            }
-        }
-    }
 
     // Check if this is a loop instance completing — handle sequential promotion
     // and loop completion before running the orchestrator

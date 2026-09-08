@@ -376,16 +376,21 @@ async fn fail_claimed_step(
     );
     state.append_server_log(job_id, error_msg).await;
 
-    if let Err(e) = JobStepRepo::mark_failed(&state.pool, job_id, step_name, error_msg).await {
-        tracing::error!("Failed to mark step as failed after render error: {:#}", e);
-    } else {
-        // Trigger orchestration so the job can progress (fail/skip downstream steps)
-        if let Err(e) = crate::job_recovery::orchestrate_after_step(state, job_id, step_name).await
-        {
-            let orch_msg = format!("Failed to orchestrate after render failure: {:#}", e);
-            tracing::error!("{}", orch_msg);
-            state.append_server_log(job_id, &orch_msg).await;
+    match crate::job_recovery::fail_step(state, job_id, step_name, error_msg, &[]).await {
+        Err(e) => {
+            tracing::error!("Failed to mark step as failed after render error: {:#}", e);
         }
+        Ok(stroem_db::FailOutcome::Failed { .. }) => {
+            // Trigger orchestration so the job can progress (fail/skip downstream steps)
+            if let Err(e) =
+                crate::job_recovery::orchestrate_after_step(state, job_id, step_name).await
+            {
+                let orch_msg = format!("Failed to orchestrate after render failure: {:#}", e);
+                tracing::error!("{}", orch_msg);
+                state.append_server_log(job_id, &orch_msg).await;
+            }
+        }
+        Ok(_) => {} // retry scheduled: step is ready again, nothing to orchestrate
     }
 
     (
@@ -914,9 +919,14 @@ pub async fn complete_step(
         let error_msg = req
             .error
             .unwrap_or_else(|| format!("Process exited with code {}", req.exit_code.unwrap_or(1)));
-        JobStepRepo::mark_failed(&state.pool, job_id, &step_name, &error_msg)
+        // Failure and retry decision in one transaction: a retried step is
+        // `ready` again and needs no orchestration.
+        let outcome = crate::job_recovery::fail_step(&state, job_id, &step_name, &error_msg, &[])
             .await
             .context("mark step failed")?;
+        if !matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
+            return Ok(Json(json!({"status": "ok"})));
+        }
     } else {
         JobStepRepo::mark_completed(
             &state.pool,
