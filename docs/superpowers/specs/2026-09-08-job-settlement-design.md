@@ -1,6 +1,6 @@
 # Job Settlement — Design
 
-**Status:** Draft, revision 1 (2026-09-08). Awaiting Codex review.
+**Status:** Revision 2 (2026-09-08). Codex pass 1 verdict "not ready" (step 3 read as a loop; retry job not finalized in §6.3); both fixed plus the four low findings. Awaiting Codex confirmation.
 **Date:** 2026-09-08
 **Origin:** architecture review 2026-09-07/08, candidate 2 "Job settlement", entered
 through candidate 1 (the step cascade, now on `main`).
@@ -249,7 +249,7 @@ Callers after the switch:
 |---|---|---|
 | `step_settled` | `orchestrate_after_step` | worker `complete_step` (success path), approve; recovery phases where the outcome is not a failure write |
 | `step_failed` | `fail_step` + `orchestrate_after_step` | worker `complete_step` (failure), claim-time render failure, four recovery phases, approval reject |
-| `job_created` | `finalize_created_job` | `web/api/tasks.rs`, `web/api/jobs.rs` (restart, rerun), `web/hooks.rs`, `web/worker_api/event_source.rs`, `mcp/tools.rs`, `scheduler.rs`, `event_source.rs`, `settlement/hooks.rs`, `settlement/retry.rs` |
+| `job_created` | `finalize_created_job` | `web/api/tasks.rs` (execute, including re-run via `source_job_id`), `web/api/jobs.rs` (restart), `web/hooks.rs`, `web/worker_api/event_source.rs`, `mcp/tools.rs`, `scheduler.rs`, `event_source.rs`, `settlement/hooks.rs`, `settlement/retry.rs` |
 | `agent_child_created` | `reconcile_settled_children` + inline check | `web/worker_api/jobs.rs::agent_task_tool` |
 | `agent_children_registered` | inline loop over `propagate_to_parent` | `agent_save_state`, `agent_suspend_step` |
 | `cancel` | `cancel_job` | `web/api/jobs.rs`, `mcp/tools.rs`, `recovery.rs`, `scheduler.rs`, `event_source.rs` (three) |
@@ -276,7 +276,13 @@ async fn advance(&self, job_id: Uuid) -> Result<()>;
    source types (moved from `job_recovery.rs`), else warn and `Ok(())`. A missing
    workspace logs `[orchestration] workspace '…' not loaded` to the job and returns
    `Ok(())`.
-3. **While the job row is non-terminal** (`pending` or `running`):
+3. **If the job row is non-terminal** (`pending` or `running`), run the following
+   **once**. This is not a loop: today's copies run this sequence once per call and
+   rely on the next step completion, approval or recovery tick to call in again; a
+   job with a `ready` step waiting for a worker stays `running` for as long as the
+   worker takes, and nothing in a–d changes that. The only fixpoints are inside the
+   pieces (`cascade::execute` re-runs on a guard miss, `handle_task_steps` repeats
+   while a pass fails a step).
    a. `cascade_and_settle(pool, job_id, task, config)`.
    b. `dispatch::handle_task_steps(...)`; on `Err` log at `error!` and write
       `[orchestration] Failed to handle task steps: …` to the job; continue (D1).
@@ -300,8 +306,12 @@ async fn advance(&self, job_id: Uuid) -> Result<()>;
           the rest (the claim is consumed).
       ii. retry when the plan says so: `retry::create_retry_job` (§8.1); on success write
           the task-retry log line, `upload_to_archive` and `job_completion.notify`, then
-          return (hooks fire only after retries are exhausted, as today). On failure fall
-          through to hooks (as today).
+          `Box::pin(self.job_created(created))` for the new retry job and return (hooks
+          fire only after retries are exhausted, as today). The `job_created` call is
+          what today's `try_retry_job` does with `finalize_created_job`: a retry job that
+          is itself terminal at creation must take its own claim, fire its own hooks, and
+          get its own retry decision. On creation failure fall through to hooks (as
+          today).
       iii. `hooks::fire_hooks`; if this job is itself a hook job that failed, write the
           failure summary to the originating job parsed from `source_id`.
       iv. `job_completion.notify(job_id, status)`.
@@ -398,6 +408,11 @@ impl JobRepo {
 }
 ```
 
+`COALESCE` because `failed` and `cancelled` pass `NULL` and must not clear an existing
+output, while `completed` passes a value; since the predicate allows exactly one
+terminal write per job, this is observably identical to today's unconditional
+`output = $1` in `mark_completed`.
+
 `settle_if_all_terminal` and `worker_completed_job` use it. The "never overwrite an
 explicit cancellation" re-read in today's decider goes away; a `false` return means the
 row was already terminal and the caller reports the status it re-reads. `mark_completed`,
@@ -418,7 +433,10 @@ task defines `retry`. `JobRepo::create_with_parent_tx` gains a `max_retries: Opt
 parameter (its wrappers pass `None`; the creator passes the value). Retry jobs get their
 `retry_of_job_id`, `retry_attempt`, and the original's `retry_job_id` back-link from
 `retry::create_retry_job`'s linking transaction, as today; that transaction no longer
-needs to write `max_retries` because creation did.
+needs to write `max_retries` because creation did. Child (`type: task`) jobs go through
+the same creator, so they carry `max_retries` too; `TerminalPlan.retry` gates on
+top-level, so a child never retries. The only visible effect is a non-null
+`max_retries` in a child's `GET /api/jobs/{id}` response, which the UI does not render.
 
 **Coverage.** The retry decision is `TerminalPlan.retry`, computed in step 4d for every
 path into terminal handling: worker completion, propagation, creation-time terminal,
@@ -432,7 +450,10 @@ Regression tests: (1) a task with `retry: { max_attempts: 2 }` whose only step f
 through the worker path produces a retry job with `source_type = "retry"` and
 `retry_of_job_id` set, with **no** raw-SQL seeding of `max_retries`; (2) the same task
 with its only root step failing at creation (a `type: task` step naming an unknown task)
-also produces a retry job. The five existing task-retry tests keep passing unchanged.
+also produces a retry job; (3) with `max_attempts: 3`, a retry job that itself fails at
+creation (the unknown-task case again) produces a second retry job, proving the retry
+job was finalized through `job_created` and got its own retry decision. The five
+existing task-retry tests keep passing unchanged.
 
 ### 8.2 D4: hook jobs through the shared step builder
 
@@ -519,7 +540,8 @@ New regression tests (container):
 
 - D1 parent dispatch failure still fires hooks and counts once.
 - D2 `settle` against a cancelled row is a no-op.
-- D3 two retry-job tests without raw-SQL seeding.
+- D3 three retry-job tests without raw-SQL seeding (worker path, creation-time
+  failure, retry job that itself fails at creation).
 - D4 hook job step carries action retry and default timeout.
 - `CreatedJob` privatization: compile-level; no test.
 - `agent_child_created` and `agent_children_registered`: covered by the existing
@@ -577,3 +599,8 @@ trailers in commits.
   tests are the oracle; `test_hook_job_completes_through_orchestrator` in particular
   exercises the created step end to end.
 - **`#[must_use]` residual hole** (§9). Accepted and documented.
+- **One unpredicated terminal write remains.** The creator's compensation
+  (`fail_non_terminal_steps_tx` + `mark_failed_tx`) is deliberately outside D2. A cancel
+  landing between the creation commit and the compensation transaction is overwritten
+  back to `failed`. Pre-existing, very narrow, and not closed by this design; D2 closes
+  the settlement and worker-completion writes only.
