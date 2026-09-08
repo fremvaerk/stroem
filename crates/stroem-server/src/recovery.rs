@@ -37,9 +37,11 @@ async fn run_loop(state: AppState, cancel: CancellationToken) {
             }
         }
 
-        // HA gate: only the leader sweeps. Sweep phases are individually
-        // idempotent (fail_step decides retry atomically at the write), but two replicas racing
-        // would double-log and double-orchestrate. Keep work on the leader.
+        // HA gate: only the leader sweeps. Sweep phases are NOT idempotent:
+        // failure transitions are atomic, but a duplicate failure report for the
+        // same step consumes another retry (fail_step with expected = [] does not
+        // check the prior status), so two replicas racing would double-log,
+        // double-orchestrate and double-consume retry budget. Keep work on the leader.
         if !state.leader.is_leader() {
             continue;
         }

@@ -1258,3 +1258,69 @@ async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
     );
     Ok(())
 }
+
+/// Characterization: `fail_or_retry` with `expected = []` does not look at the
+/// prior status, so a duplicate failure report for the same step consumes a
+/// second retry. This is why the recovery sweep is leader-gated rather than
+/// safe to run on every replica (see `recovery.rs`).
+#[tokio::test]
+async fn test_fail_or_retry_duplicate_reports_consume_budget() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
+
+    let first = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    let second = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom again", &[], |_| 7).await?;
+    assert!(
+        matches!(first, FailOutcome::RetryScheduled { attempt: 1, .. }),
+        "got {first:?}"
+    );
+    assert!(
+        matches!(second, FailOutcome::RetryScheduled { attempt: 2, .. }),
+        "the second report is not rejected as a duplicate, got {second:?}"
+    );
+
+    let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert_eq!(row.retry_attempt, 2, "both reports consumed budget");
+    let history = row.retry_history.as_array().unwrap();
+    assert_eq!(history.len(), 3, "seed + one entry per report");
+    assert_eq!(history[0], seed_history_entry());
+    assert_eq!(history[1]["error"], "boom");
+    assert_eq!(history[2]["error"], "boom again");
+    Ok(())
+}
+
+/// A rejection that arrives after the step was already approved (and completed)
+/// is not applied: the `[Suspended]` precondition fails and the row is untouched.
+#[tokio::test]
+async fn test_fail_or_retry_reject_after_approve_is_not_applied() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
+    sqlx::query("UPDATE job_step SET status = 'completed' WHERE job_id = $1 AND step_name = 's'")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let before = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+
+    let outcome = JobStepRepo::fail_or_retry(
+        &pool,
+        job_id,
+        "s",
+        "rejected",
+        &[StepStatus::Suspended],
+        |_| 7,
+    )
+    .await?;
+    assert_eq!(outcome, FailOutcome::NotApplied);
+
+    let after = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert_eq!(after.status, "completed");
+    assert_eq!(after.retry_attempt, before.retry_attempt);
+    assert_eq!(after.retry_history, before.retry_history);
+    assert_eq!(after.error_message, before.error_message);
+    assert_eq!(after.output, before.output);
+    assert_eq!(after.worker_id, before.worker_id);
+    assert!(after.retry_at.is_none(), "no retry was scheduled");
+    Ok(())
+}
