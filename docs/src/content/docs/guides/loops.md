@@ -81,7 +81,7 @@ flow:
 
 In sequential mode:
 - Instance `[0]` starts immediately; `[1]` starts after `[0]` completes, etc.
-- If an instance fails and `continue_on_failure` is not set, remaining instances are skipped
+- If an instance fails (and `continue_on_failure` is not set) every remaining instance is skipped immediately and the loop step fails.
 - Useful for ordered operations like database migrations
 
 ## The `each` Variable

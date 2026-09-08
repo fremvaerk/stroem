@@ -86,14 +86,9 @@ JobStepRepo::get_ready_steps(pool, job_id).await?;
 // Orchestration helpers
 JobStepRepo::all_steps_terminal(pool, job_id).await?;
 JobStepRepo::any_step_failed(pool, job_id).await?;
-JobStepRepo::promote_ready_steps(pool, job_id, &flow).await?;
 ```
 
-The `promote_ready_steps` function implements the orchestrator's dependency resolution logic:
-1. Fetches all steps for a job
-2. Finds pending steps whose dependencies are all completed
-3. Promotes them to `ready` status
-4. Returns the names of newly promoted steps
+Step orchestration lives in the server crate (`cascade.rs`); this crate exposes only the transaction primitives it applies.
 
 ### Concurrency Safety
 
@@ -176,8 +171,8 @@ let step = JobStepRepo::claim_ready_step(
 // Execute step, then mark completed
 JobStepRepo::mark_completed(&pool, job_id, &step.step_name, None).await?;
 
-// Promote dependent steps
-JobStepRepo::promote_ready_steps(&pool, job_id, &flow).await?;
+// Promoting dependent steps is server-side orchestration logic (see
+// crates/stroem-server/src/cascade.rs), not part of this crate's API.
 ```
 
 ## Testing
@@ -202,7 +197,6 @@ RUST_LOG=debug cargo test -p stroem-db
 - `test_create_steps_and_claim` - Step creation and claiming
 - `test_claim_concurrency` - Concurrent claim safety (10 workers, 10 steps, no double-claims)
 - `test_step_lifecycle` - Complete step state transition
-- `test_promote_ready_steps` - DAG dependency resolution
 - `test_worker_register_and_heartbeat` - Worker management
 - `test_all_steps_terminal` - Job completion detection
 - `test_any_step_failed` - Failure detection

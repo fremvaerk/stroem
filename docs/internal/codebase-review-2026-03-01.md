@@ -39,6 +39,7 @@
 - ~~**`block_in_place` in spawned tasks** (`workspace/mod.rs:330`) — breaks on `current_thread` runtime~~ **FIXED** (uses `spawn_blocking`)
 
 ### Performance
+*Superseded 2026-09-08: the promote/skip/expand loop and `check_loop_completion` were replaced by `crates/stroem-server/src/cascade.rs`; see CLAUDE.md § Step Cascade.*
 - ~~**Missing partial GIN index** on `job_step(status='ready', action_type!='task')`~~ **FIXED** (migration 009)
 - ~~**N+1 queries in orchestration**: `promote_ready_steps` fetches ALL steps then updates one-by-one~~ **FIXED** (batch `UPDATE ... WHERE step_name = ANY($2)`)
 - ~~**Log file opened/closed on every append** (`log_storage.rs:129-146`) — 4 syscalls per chunk with 100 concurrent steps~~ **FIXED** (DashMap file handle cache + close_log flush)
@@ -314,6 +315,7 @@ CREATE INDEX idx_job_step_ready_tags
 ```
 
 #### 1.3 N+1 Queries in Orchestration Hot Path — High — FIXED
+*Superseded 2026-09-08: the promote/skip/expand loop and `check_loop_completion` were replaced by `crates/stroem-server/src/cascade.rs`; see CLAUDE.md § Step Cascade.*
 **File:** `job_step.rs:361-469`, `orchestrator.rs:28-35`
 
 `promote_ready_steps` fetches ALL steps, builds status map, then issues one UPDATE per promotable step. `skip_unreachable_steps` does the same fetch again. Worst case: 10-step linear DAG issues ~10 fetch-all + ~10 individual UPDATEs.

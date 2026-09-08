@@ -59,6 +59,10 @@ Last updated: 2026-06-03.
 - [ ] Step retry is honoured only on the seven `fail_step` paths; `propagate_to_parent` (child failed), `fail_task_step` (dispatch failure) and approval dispatch/render failures bypass it. Decide whether `type: task` / approval steps should retry on those paths (transition candidate). Pre-existing; surfaced during the step-cascade design review 2026-09-08.
 - [ ] Approval steps with `retry` configured: a rejected or timed-out approval with budget left returns to `ready` but is excluded from worker claim and from the unmatched-step sweep, and `handle_approval_steps` runs only inside `orchestrate_after_step`, which the retry path skips — the job wedges unless another step completes. Pre-existing. Either reject `retry` on approval steps in validation or re-dispatch the approval on `RetryScheduled`. Surfaced by the fail-or-retry final review 2026-09-08.
 - [ ] `fail_step` callers other than approval reject pass `expected = []`, so a late failure report (e.g. a worker completion racing a recovery timeout) can revive a `completed`/`cancelled`/`skipped` step into a fresh `ready` retry — identical to the old unguarded `mark_failed`. Consider `expected = [Running, Suspended]` at the recovery and completion sites. Surfaced by the fail-or-retry final review 2026-09-08.
+- [ ] Cascade concurrency hardening (advisory lock, row-locked verification, cancellation/task-retry lock order) — spec `docs/superpowers/specs/2026-09-08-cascade-concurrency-hardening-design.md`.
+- [ ] Remove the `Option<&WorkspaceConfig>` mode from `on_step_completed` (test-only; ~80 call sites pass `None`) — settlement branch.
+- [ ] Move `build_step_render_context` out of `job_creator.rs` (render-context candidate); `cascade.rs` and `job_creator.rs` currently reference each other.
+- [ ] Recovery's `mark_failed` on timed-out steps is unguarded and can overwrite a `completed` row.
 
 ## Simplification (from codex review 2026-03-17)
 
@@ -717,7 +721,7 @@ Last updated: 2026-06-03.
 - [ ] Integration: for_each with `when` condition false → step skipped without expansion
 - [ ] Integration: for_each with empty array → step skipped
 - [ ] Integration: for_each with dynamic template expression from upstream output
-- [ ] Unit: `check_loop_completion` output aggregation ordered by loop_index
+- [x] Unit: rollup output aggregation ordered by loop_index — `check_loop_completion` replaced by cascade rule R6; covered by `rollup_completed_orders_by_index_with_null_for_missing_output_and_cancelled_ok` — `crates/stroem-server/src/cascade.rs`
 
 ### Minor
 - [x] Test 12 comment says "skipped as unreachable" but cascade-skip now happens in `promote_ready_steps` — update comment — `orchestrator_test.rs`

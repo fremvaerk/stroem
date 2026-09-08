@@ -3,6 +3,7 @@
 ## Project Overview
 
 Strøm is a workflow/task orchestration platform. Backend in Rust, frontend in React.
+Domain vocabulary lives in `CONTEXT.md`; read it alongside this file.
 Phase 1 (MVP) complete: end-to-end workflow execution via API and CLI.
 Phase 2a complete: JWT authentication backend + WebSocket log streaming.
 Phase 2b complete: React UI with shadcn/ui, embedded in Rust binary via rust-embed.
@@ -208,12 +209,24 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Server-side: recovery sweep Phase 2 (steps) + Phase 3 (jobs). Worker-side: `tokio::time::timeout`
 - **Server-level defaults**: `default_step_timeout` / `default_job_timeout` on `ServerConfig`. Applied at job-creation time: when `flow_step.timeout` or `task.timeout` is absent, the default fills in. Visible via the API and enforced by the same recovery sweep. Same caps as explicit timeouts (24h/7d). `None` = no default (existing behaviour, unbounded). Resolved into a `JobDefaults` Copy struct threaded through `create_job_for_task` / `create_child_job_for_task` / `handle_task_steps`. To opt a single task out of the global default, set the task's `timeout` to the maximum (`86400s` / `7d`).
 
+### Step Cascade
+- `crates/stroem-server/src/cascade.rs` — one pure fixpoint replaces the old promote→skip→expand loops and the keyed loop rollup. `run(task, job, steps, workspace_config) -> Plan` never touches the DB; `apply(conn, job_id, plan)` composes stroem-db `_tx` primitives with affected-row-count checks; `execute(pool, ...)` reads, runs, applies in ONE transaction and re-runs on a guard miss (max 3).
+- **Phase order per pass is part of the interface**: P0 rollup/advance (R5/R6) → context A → P1 cascade-skip + promote with `when` (R1/R2) → P2 skip-unreachable (R3) → context B → P3 adopt + retire/expand (R0/R4). A `when` in P1 does not see a skip from the same phase until the next pass; expansion in P3 does. Do not reorder.
+- Callers: `orchestrator::on_step_completed` (worker completion, approval, recovery, propagation) and the creation-time init block in `job_creator.rs`. Both call `execute` then continue as before. `check_loop_completion`, `expand_for_each_steps`, `promote_ready_steps`, `skip_unreachable_steps` no longer exist.
+- `execute` commits before returning; settlement, task/approval dispatch and propagation run after it, outside any transaction. Never wrap `execute` in a larger transaction.
+- Guards: `Promote`/`Skip`/`Fail` require `pending`; `Expand`/`Adopt` require the placeholder `pending`; `Rollup` requires `running` (so a cancelled or timed-out placeholder is never overwritten). The R7 job-row `UPDATE` may match zero rows. A `Fail` for a placeholder is guarded where the old code was not.
+- `run` renders templates (which may call the `vals` subprocess); that is why it runs before the apply transaction opens.
+- Known, unchanged from before the cascade: two cascades on one job can race (lost work, `job_step.rs` TODO history); a same-status `output`/`error_message` rewrite between snapshot and apply is not detected; `try_retry_job`'s transaction (job row then steps) inverts the cascade's order (steps then job row). All three are closed by `docs/superpowers/specs/2026-09-08-cascade-concurrency-hardening-design.md`.
+- New context variables in `build_step_render_context` must be inserted BEFORE completed-step outputs (a step named `job` shadows `job`).
+- Deployment: the fail-or-retry change (CLAUDE.md § Retry Mechanism) must be running on every server replica before the release containing the cascade activation is rolled out.
+
 ### Conditional Flow Steps (`when`)
 - `FlowStep.when: Option<String>` — Tera expression evaluated at step promotion time
-- Truthy if non-empty and not `"false"` or `"0"`. Condition-false → `skipped`
+- Truthy if non-empty and, after trim and lowercase, not "false", "0", "null" or "none".
 - All-deps-skipped rule: if ALL deps are skipped, step is cascade-skipped
 - Skipped steps have `{ "output": null }` in render context for downstream `when` expressions
 - Condition evaluation errors → step fails (not silently skipped)
+- Evaluated in cascade phase P1 (see Step Cascade).
 
 ### For-Each Loops (`for_each`)
 - `FlowStep.for_each: Option<serde_json::Value>` — Tera template string or literal JSON array
@@ -221,9 +234,10 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Creates N instance steps (`step[0]`, `step[1]`, ...) from placeholder. `each.item` + `each.index` injected at claim time.
 - Sequential: `[i+1]` promoted after `[i]` completes. Output aggregated as ordered array on placeholder.
 - `when` + `for_each`: `when` evaluated first; if falsy, step skipped without expansion
-- **Failed/cancelled dependency**: a placeholder whose dep failed or was cancelled (and is not `continue_on_failure`) is marked `skipped` by `expand_for_each_steps` itself — `skip_unreachable_steps` deliberately ignores placeholders, so this is the only place it can be retired. Regression test: `test_failed_dep_skips_for_each_placeholder_directly_downstream`.
+- **Placeholder lifecycle has one owner**: `cascade.rs` rules R0 (adopt), R4 (retire/expand), R5 (sequential advance), R6 (rollup). A placeholder whose dependency failed or was cancelled (without `continue_on_failure`) is retired `skipped` by R4; rollup and sequential advance are global rules re-evaluated on every cascade of the job (self-healing), not keyed on the completing instance.
+- **Sequential failure stops the loop immediately**: any `failed`/`cancelled` instance without `continue_on_failure` skips every pending instance, even a successor of a later completed instance (`[failed, completed, pending]` → `[2]` skipped).
+- Only `failed` instances fail a loop; `cancelled` instances count as terminal but do not. Rollup output has one element per existing instance, `null` where the instance produced none.
 - Empty array → skipped; non-array → fails; instance failure → placeholder fails (unless `continue_on_failure`)
-- **Placeholder resolution lives inside the orchestrator cascade**: `promote_ready_steps` / `skip_unreachable_steps` deliberately ignore `for_each` placeholders; `job_creator::expand_for_each_steps` (expand / cascade-skip / fail) is called inside the promote→skip→expand loop in `orchestrator::on_step_completed` (and the creation-time loop in `create_job_for_task_inner`), so a placeholder skipped because its upstream failed is seen by the terminal check and the job closes. Do NOT call `expand_for_each_steps` after `on_step_completed` as a separate pass — that ordering left jobs stuck `running` (2026-09-02).
 
 ### Task State Snapshots
 - Immutable state snapshots persisted across job runs per workspace+task

@@ -15,6 +15,8 @@ Strøm workflows currently have no flow control beyond linear dependencies and `
 
 ## 5a. Conditionals (`when`) — Detailed Implementation Plan
 
+*Superseded 2026-09-08: the promote/skip/expand loop and `check_loop_completion` were replaced by `crates/stroem-server/src/cascade.rs`; see CLAUDE.md § Step Cascade.*
+
 ### YAML syntax
 
 ```yaml
