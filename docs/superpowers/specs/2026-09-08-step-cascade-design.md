@@ -313,8 +313,10 @@ phase (§4.4), as today's two `build_step_render_context` calls at
 **R5 — Sequential advance.** For a `running` placeholder present in the flow with
 `sequential = true`, with instance rows sorted by `loop_index`:
 1. if any instance is `failed` or `cancelled`, and the flow step has no
-   `continue_on_failure` → `Skip` for every `pending` instance; nothing else for this
-   placeholder;
+   `continue_on_failure` → `Skip` for every `pending` instance; the skips suppress
+   successor promotion for this placeholder in this pass; once no pending instance
+   remains, R6 applies as for any other running placeholder (a failed sequential loop
+   rolls up on the following pass);
 2. otherwise, for each terminal instance `i` whose `[i+1]` exists and is `pending` →
    `Promote { "{placeholder}[i+1]" }`.
 
@@ -877,3 +879,4 @@ in §9.1.
   minimal single-transaction apply with guard-miss re-run, and five by-construction
   fixes. The two pre-existing races and the task-retry inversion are listed as
   limitations, unchanged from today.
+- 2026-09-08 — final review: R5 text amended to match the implemented R5→R6 fall-through (ruling b).
