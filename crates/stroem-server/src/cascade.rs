@@ -48,7 +48,7 @@ pub struct Plan {
 }
 
 /// A step is terminal in one of these four statuses.
-pub(crate) fn is_terminal(status: &str) -> bool {
+fn is_terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "skipped" | "cancelled")
 }
 
@@ -64,7 +64,7 @@ const CANCELLED: &str = "cancelled";
 const MAX_FOR_EACH_ITEMS: usize = 10000;
 
 /// Parse the for_each expression and return the items array.
-pub(crate) fn parse_for_each_items(
+fn parse_for_each_items(
     expr: &str,
     render_ctx: &serde_json::Value,
 ) -> Result<Vec<serde_json::Value>> {
@@ -120,13 +120,13 @@ fn render_for_each_template(
 }
 
 /// In-memory copy of a job's step rows that the fixpoint mutates.
-pub(crate) struct Snapshot {
-    pub(crate) rows: Vec<JobStepRow>,
+struct Snapshot {
+    rows: Vec<JobStepRow>,
     index: HashMap<String, usize>,
 }
 
 impl Snapshot {
-    pub(crate) fn new(rows: Vec<JobStepRow>) -> Self {
+    fn new(rows: Vec<JobStepRow>) -> Self {
         let index = rows
             .iter()
             .enumerate()
@@ -145,7 +145,7 @@ impl Snapshot {
     }
 
     /// Apply one change to the in-memory rows (§4.4).
-    pub(crate) fn apply(&mut self, change: &Change) {
+    fn apply(&mut self, change: &Change) {
         match change {
             Change::Promote { step } => {
                 if let Some(r) = self.get_mut(step) {
@@ -307,7 +307,9 @@ fn phase_rollup(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
                 // instance — but with nothing left to skip, fall through to R6.
             }
             for i in instances.iter().filter(|i| is_terminal(&i.status)) {
-                let next_idx = i.loop_index.unwrap_or(0) + 1;
+                // A row with no `loop_index` has no successor to name.
+                let Some(idx) = i.loop_index else { continue };
+                let next_idx = idx + 1;
                 if let Some(next) = instances
                     .iter()
                     .find(|n| n.loop_index == Some(next_idx) && n.status == PENDING)
@@ -321,12 +323,15 @@ fn phase_rollup(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
 
         // R6
         if instances.iter().all(|i| is_terminal(&i.status)) {
+            // Whether the loop failed is decided by the statuses; the diagnostic
+            // list names only the instances that actually carry a `loop_index`.
+            let any_failed = instances.iter().any(|i| i.status == FAILED);
             let failed_indices: Vec<i32> = instances
                 .iter()
                 .filter(|i| i.status == FAILED)
-                .map(|i| i.loop_index.unwrap_or(0))
+                .filter_map(|i| i.loop_index)
                 .collect();
-            let outcome = if !failed_indices.is_empty() && !cof {
+            let outcome = if any_failed && !cof {
                 RollupOutcome::Failed(format!(
                     "for_each loop failed: instances {:?} failed",
                     failed_indices
@@ -653,12 +658,14 @@ fn expect_rows(n: u64, expected: usize, step: &str) -> Result<(), ApplyError> {
 /// runs of consecutive `Promote`s and `Skip`s into one statement each; every
 /// step-row statement must affect exactly the rows it names.
 pub async fn apply(
-    conn: &mut sqlx::PgConnection,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     job_id: Uuid,
     plan: &Plan,
 ) -> Result<Applied, ApplyError> {
     let mut a = Applied::default();
     let mut i = 0;
+    // §4.7: step rows move in change order, then the job row once, last.
+    let mut mark_job_running = false;
     let changes = &plan.changes;
     while i < changes.len() {
         match &changes[i] {
@@ -668,7 +675,7 @@ pub async fn apply(
                     names.push(step.clone());
                     i += 1;
                 }
-                let n = JobStepRepo::promote_steps_tx(&mut *conn, job_id, &names).await?;
+                let n = JobStepRepo::promote_steps_tx(&mut **tx, job_id, &names).await?;
                 expect_rows(n, names.len(), &names.join(","))?;
                 a.promoted += names.len();
             }
@@ -678,12 +685,12 @@ pub async fn apply(
                     names.push(step.clone());
                     i += 1;
                 }
-                let n = JobStepRepo::skip_steps_tx(&mut *conn, job_id, &names).await?;
+                let n = JobStepRepo::skip_steps_tx(&mut **tx, job_id, &names).await?;
                 expect_rows(n, names.len(), &names.join(","))?;
                 a.skipped += names.len();
             }
             Change::Fail { step, error } => {
-                let n = JobStepRepo::fail_pending_step_tx(&mut *conn, job_id, step, error).await?;
+                let n = JobStepRepo::fail_pending_step_tx(&mut **tx, job_id, step, error).await?;
                 expect_rows(n, 1, step)?;
                 a.failed += 1;
                 i += 1;
@@ -694,17 +701,17 @@ pub async fn apply(
             } => {
                 // Placeholder transition FIRST, then the insert: instances exist only
                 // if the transition is in the same committed transaction (fix 1).
-                let n = JobStepRepo::start_placeholder_tx(&mut *conn, job_id, placeholder).await?;
+                let n = JobStepRepo::start_placeholder_tx(&mut **tx, job_id, placeholder).await?;
                 expect_rows(n, 1, placeholder)?;
-                JobStepRepo::create_steps_tx(&mut *conn, instances).await?;
-                JobRepo::mark_running_if_pending_tx(&mut *conn, job_id).await?; // zero rows allowed (R7)
+                JobStepRepo::create_steps_tx(&mut **tx, instances).await?;
+                mark_job_running = true; // zero rows allowed (R7); issued after the loop
                 a.expanded += 1;
                 i += 1;
             }
             Change::Adopt { placeholder } => {
-                let n = JobStepRepo::start_placeholder_tx(&mut *conn, job_id, placeholder).await?;
+                let n = JobStepRepo::start_placeholder_tx(&mut **tx, job_id, placeholder).await?;
                 expect_rows(n, 1, placeholder)?;
-                JobRepo::mark_running_if_pending_tx(&mut *conn, job_id).await?;
+                mark_job_running = true;
                 a.adopted += 1;
                 i += 1;
             }
@@ -714,11 +721,11 @@ pub async fn apply(
             } => {
                 let n = match outcome {
                     RollupOutcome::Completed(out) => {
-                        JobStepRepo::complete_placeholder_tx(&mut *conn, job_id, placeholder, out)
+                        JobStepRepo::complete_placeholder_tx(&mut **tx, job_id, placeholder, out)
                             .await?
                     }
                     RollupOutcome::Failed(err) => {
-                        JobStepRepo::fail_placeholder_tx(&mut *conn, job_id, placeholder, err)
+                        JobStepRepo::fail_placeholder_tx(&mut **tx, job_id, placeholder, err)
                             .await?
                     }
                 };
@@ -727,6 +734,9 @@ pub async fn apply(
                 i += 1;
             }
         }
+    }
+    if mark_job_running {
+        JobRepo::mark_running_if_pending_tx(&mut **tx, job_id).await?; // zero rows allowed (R7)
     }
     Ok(a)
 }
@@ -754,6 +764,8 @@ pub async fn execute(
     task: &TaskDef,
     workspace_config: Option<&WorkspaceConfig>,
 ) -> Result<Plan> {
+    // Why the last attempt was thrown away, for the exhaustion message.
+    let mut last_cause = String::from("no re-run recorded");
     for attempt in 1..=MAX_ATTEMPTS {
         let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
         let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
@@ -777,10 +789,12 @@ pub async fn execute(
             Err(ApplyError::GuardMiss { step }) => {
                 tx.rollback().await.ok();
                 tracing::warn!(job_id = %job_id, attempt, step = %step, "Cascade guard miss — re-running");
+                last_cause = format!("guard miss on step '{step}'");
             }
             Err(ApplyError::Db(e)) if is_deadlock(&e) => {
                 tx.rollback().await.ok();
                 tracing::warn!(job_id = %job_id, attempt, "Cascade deadlock (40P01) — re-running");
+                last_cause = "deadlock (40P01)".to_string();
             }
             Err(ApplyError::Db(e)) => {
                 tx.rollback().await.ok();
@@ -789,9 +803,10 @@ pub async fn execute(
         }
     }
     bail!(
-        "cascade guard miss {} times for job {}",
+        "cascade re-ran {} times without applying for job {}; last cause: {}",
         MAX_ATTEMPTS,
-        job_id
+        job_id,
+        last_cause
     )
 }
 
@@ -1486,6 +1501,31 @@ mod tests {
             )]
         );
         assert_eq!(oks, ["y"], "cof loop completes even with a failed instance");
+    }
+
+    /// An instance row with no `loop_index` (legacy/hand-written data): R5 has no
+    /// successor to name for it, and R6's diagnostic list simply omits it.
+    #[test]
+    fn instance_without_loop_index_is_skipped_by_r5_and_omitted_from_r6_text() {
+        let t = task(vec![("x", fs_seq(&[]))]);
+        let mut orphan = instance("x", 0, "failed", None);
+        orphan.loop_index = None;
+        orphan.step_name = "x[?]".to_string();
+        let rows = vec![placeholder("x", "running", "[1]"), orphan];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(
+            names(&plan),
+            ["rollup-fail:x"],
+            "no successor promotion for an index-less instance"
+        );
+        let Change::Rollup {
+            outcome: RollupOutcome::Failed(e),
+            ..
+        } = &plan.changes[0]
+        else {
+            panic!("expected a failed rollup, got {:?}", plan.changes[0]);
+        };
+        assert_eq!(e, "for_each loop failed: instances [] failed");
     }
 
     #[test]

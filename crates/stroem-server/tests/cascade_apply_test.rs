@@ -198,6 +198,88 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
     Ok(())
 }
 
+/// §4.7: the job row moves once, after every step row. A plan that adopts a
+/// placeholder, rolls it up and promotes its dependent applies cleanly and
+/// leaves the job `running`.
+#[tokio::test]
+async fn apply_adopt_rollup_promote_issues_the_job_update_last() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            placeholder(job_id, "p", "pending"),
+            instance(job_id, "p", 0, "completed"),
+            instance(job_id, "p", 1, "completed"),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+    let plan = Plan {
+        changes: vec![
+            Change::Adopt {
+                placeholder: "p".into(),
+            },
+            Change::Rollup {
+                placeholder: "p".into(),
+                outcome: RollupOutcome::Completed(json!([1, 2])),
+            },
+            Change::Promote { step: "d".into() },
+        ],
+    };
+    let mut tx = pool.begin().await?;
+    let applied = apply(&mut tx, job_id, &plan).await.unwrap();
+    tx.commit().await?;
+    assert_eq!(applied.adopted, 1);
+    assert_eq!(applied.rolled_up, 1);
+    assert_eq!(applied.promoted, 1);
+
+    let s = step_statuses(&pool, job_id).await;
+    assert_eq!(s["p"], "completed");
+    assert_eq!(s["d"], "ready");
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "running", "the single job update still lands");
+    Ok(())
+}
+
+/// Instances start a fresh retry budget: the placeholder's `retry_attempt` is
+/// never inherited, only its retry *configuration*.
+#[tokio::test]
+async fn apply_expand_starts_instances_at_retry_attempt_zero() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(&pool, &[placeholder(job_id, "p", "pending")]).await?;
+    sqlx::query(
+        "UPDATE job_step SET retry_attempt = 3, max_retries = 2 \
+         WHERE job_id = $1 AND step_name = 'p'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+    let plan = Plan {
+        changes: vec![Change::Expand {
+            placeholder: "p".into(),
+            instances: vec![NewJobStep {
+                max_retries: Some(2),
+                ..instance(job_id, "p", 0, "ready")
+            }],
+        }],
+    };
+    let mut tx = pool.begin().await?;
+    apply(&mut tx, job_id, &plan).await.unwrap();
+    tx.commit().await?;
+
+    let row: (i32, Option<i32>) = sqlx::query_as(
+        "SELECT retry_attempt, max_retries FROM job_step WHERE job_id = $1 AND step_name = 'p[0]'",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.0, 0, "instance starts at retry_attempt 0");
+    assert_eq!(row.1, Some(2), "but inherits the retry budget");
+    Ok(())
+}
+
 #[tokio::test]
 async fn apply_guard_miss_returns_error_and_writes_nothing_after_rollback() -> Result<()> {
     let (pool, _c) = setup_db().await?;
