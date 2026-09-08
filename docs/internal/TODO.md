@@ -56,6 +56,7 @@ Last updated: 2026-06-03.
 - [x] Move agent dispatch from server to workers — workers now claim agent steps, execute LLM calls, and manage MCP connections. Server only validates provider names. stroem-agent crate holds shared dispatch logic.
 - [x] No default timeout for running jobs/steps — added `default_step_timeout` / `default_job_timeout` to `ServerConfig` (capped at 24h / 7d). Resolved into a `JobDefaults` Copy struct threaded through `create_job_for_task` / `create_child_job_for_task` / `handle_task_steps`. Applied at job-creation time so the DB row carries the effective timeout (visible via API, enforced by the existing recovery sweep). Hooks, retries, and `type: task` sub-jobs all inherit. Explicit `flow_step.timeout` / `task.timeout` wins. `None` = no default (existing behaviour). 7 unit tests + 5 integration tests.
 - [x] Folder workspace revision pinning — server-side TarballCache keyed by (workspace, revision), workers download pinned revision via `?revision=` query param, ClaimResponse includes job revision, stale cache entries cleaned up during retention sweep
+- [ ] Step retry is honoured only on the seven `fail_step` paths; `propagate_to_parent` (child failed), `fail_task_step` (dispatch failure) and approval dispatch/render failures bypass it. Decide whether `type: task` / approval steps should retry on those paths (transition candidate). Pre-existing; surfaced during the step-cascade design review 2026-09-08.
 
 ## Simplification (from codex review 2026-03-17)
 
