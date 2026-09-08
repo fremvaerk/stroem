@@ -22321,6 +22321,154 @@ async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
     Ok(())
 }
 
+/// Build a workspace whose `loop-task` is a single non-sequential `for_each`
+/// flow step `x` over one item, so job creation leaves `x` running with one
+/// instance `x[0]`.
+fn loop_rollup_workspace() -> WorkspaceConfig {
+    use stroem_common::duration::HumanDuration;
+    use stroem_common::models::workflow::{BackoffStrategy, FlowStep, RetryConfig, TaskDef};
+
+    let mut workspace = retry_workspace(RetryConfig {
+        max_attempts: 1,
+        delay: HumanDuration(0),
+        backoff: BackoffStrategy::Fixed,
+        jitter: false,
+    });
+    let mut flow = HashMap::new();
+    flow.insert(
+        "x".to_string(),
+        FlowStep {
+            action: "flaky".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: Some(json!(["a"])),
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "loop-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+    workspace
+}
+
+/// A placeholder already terminal (failed by a recovery timeout, or cancelled)
+/// is never overwritten by a rollup, all the way through the real worker
+/// `/complete` route — not just through a direct `on_step_completed` call.
+/// The old keyed rollup ran inside `check_loop_completion`, *before*
+/// `on_step_completed`, so the direct-call test never covered this path.
+#[tokio::test]
+async fn test_rollup_never_overwrites_terminal_placeholder_via_worker_completion() -> Result<()> {
+    for terminal in ["failed", "cancelled"] {
+        let workspace = loop_rollup_workspace();
+        let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+        let job_id = create_job_for_task(
+            &pool,
+            &workspace,
+            "default",
+            "loop-task",
+            json!({}),
+            "api",
+            None,
+            None,
+            None, // source_job_id
+            None,
+            JobDefaults::default(),
+        )
+        .await?;
+
+        // Creation expanded `x` into a single instance. Force the placeholder
+        // terminal (what a recovery timeout or a cancellation leaves behind) and
+        // put the instance back in a worker's hands.
+        let worker_id = register_test_worker(&pool).await;
+        sqlx::query(
+            "UPDATE job_step SET status = $2, error_message = 'timed out', completed_at = NOW() \
+             WHERE job_id = $1 AND step_name = 'x'",
+        )
+        .bind(job_id)
+        .bind(terminal)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "UPDATE job_step SET status = 'running', worker_id = $2, started_at = NOW() \
+             WHERE job_id = $1 AND step_name = 'x[0]'",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .execute(&pool)
+        .await?;
+
+        let before: (
+            String,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT status, error_message, completed_at FROM job_step \
+                 WHERE job_id = $1 AND step_name = 'x'",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(before.0, terminal);
+
+        let resp = router
+            .clone()
+            .oneshot(worker_request(
+                "POST",
+                &format!("/worker/jobs/{}/steps/x%5B0%5D/complete", job_id),
+                json!({"exit_code": 0, "output": {"ok": true}}),
+            ))
+            .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after: (
+            String,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<Value>,
+        ) = sqlx::query_as(
+            "SELECT status, error_message, completed_at, output FROM job_step \
+             WHERE job_id = $1 AND step_name = 'x'",
+        )
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(after.0, terminal, "{terminal} placeholder status untouched");
+        assert_eq!(
+            after.1.as_deref(),
+            Some("timed out"),
+            "{terminal} placeholder error_message untouched"
+        );
+        assert_eq!(
+            after.2, before.2,
+            "{terminal} placeholder completed_at untouched"
+        );
+        assert_eq!(after.3, None, "{terminal} placeholder output untouched");
+    }
+    Ok(())
+}
+
 /// Retry no longer depends on the workspace being loaded (spec §3 change 2):
 /// the step is `ready` with `retry_at` even when orchestration could not find
 /// the workspace, and a later claim proceeds on the stored input/spec.

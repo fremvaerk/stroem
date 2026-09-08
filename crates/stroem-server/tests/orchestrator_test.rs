@@ -1824,52 +1824,9 @@ async fn test_sequential_failure_skips_later_pending_instances() -> Result<()> {
 
 // ─── Test: `on_step_completed` vs creation equivalence, and parent/child ──
 
-/// The same DAG cascaded once at creation and once via on_step_completed ends in
-/// the same statuses (both callers go through cascade::execute).
-#[tokio::test]
-async fn test_creation_and_orchestrator_cascades_agree() -> Result<()> {
-    let (pool, _container) = setup_db().await?;
-    let task = make_task(HashMap::from([
-        ("a".to_string(), flow_step(vec![])),
-        ("b".to_string(), flow_step_when(vec!["a"], "false")),
-        ("c".to_string(), flow_step(vec!["b"])),
-        ("d".to_string(), flow_step_cof(vec!["b"])),
-    ]));
-    let expected = |s: &HashMap<String, String>| {
-        assert_eq!(s["b"], "skipped");
-        assert_eq!(s["c"], "skipped", "all deps skipped → cascade-skip");
-        assert_eq!(s["d"], "ready", "cof survives a skipped dep");
-    };
-    // via the orchestrator
-    let j1 = create_job(&pool).await;
-    JobStepRepo::create_steps(
-        &pool,
-        &[
-            step(j1, "a", "completed"),
-            step_when(j1, "b", "pending", "false"),
-            step(j1, "c", "pending"),
-            step(j1, "d", "pending"),
-        ],
-    )
-    .await?;
-    on_step_completed(&pool, j1, "a", &task, Some(&WorkspaceConfig::new())).await?;
-    expected(&step_statuses(&pool, j1).await);
-    // via execute directly on an identical snapshot (what creation calls)
-    let j2 = create_job(&pool).await;
-    JobStepRepo::create_steps(
-        &pool,
-        &[
-            step(j2, "a", "completed"),
-            step_when(j2, "b", "pending", "false"),
-            step(j2, "c", "pending"),
-            step(j2, "d", "pending"),
-        ],
-    )
-    .await?;
-    stroem_server::cascade::execute(&pool, j2, &task, Some(&WorkspaceConfig::new())).await?;
-    expected(&step_statuses(&pool, j2).await);
-    Ok(())
-}
+// Creation-time cascade equivalence is covered by
+// integration_test::test_create_job_for_task_root_when_false_skips_at_creation /
+// _root_when_true_becomes_ready, which drive real job creation.
 
 /// A child job's cascade and its parent's cascade run concurrently; both complete.
 #[tokio::test]
@@ -1896,7 +1853,7 @@ async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
     JobStepRepo::create_steps(
         &pool,
         &[
-            step(parent, "spawn", "running"),
+            step(parent, "spawn", "completed"),
             step(parent, "after", "pending"),
         ],
     )
@@ -1915,17 +1872,26 @@ async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
         ("c2".to_string(), flow_step(vec!["c1"])),
     ]));
     let ws = WorkspaceConfig::new();
-    let (a, b) = tokio::join!(
-        on_step_completed(&pool, parent, "spawn", &ptask, Some(&ws)),
-        on_step_completed(&pool, child, "c1", &ctask, Some(&ws)),
-    );
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(
+            on_step_completed(&pool, parent, "spawn", &ptask, Some(&ws)),
+            on_step_completed(&pool, child, "c1", &ctask, Some(&ws)),
+        )
+    })
+    .await
+    .expect("both cascades finished within 30s");
     a?;
     b?;
-    assert_eq!(step_statuses(&pool, child).await["c2"], "ready");
+    // Both plans are non-empty, so both cascades actually applied under the join.
     assert_eq!(
         step_statuses(&pool, parent).await["after"],
-        "pending",
-        "spawn still running"
+        "ready",
+        "the parent's dependent was promoted"
+    );
+    assert_eq!(
+        step_statuses(&pool, child).await["c2"],
+        "ready",
+        "the child's dependent was promoted"
     );
     Ok(())
 }

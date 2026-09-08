@@ -540,7 +540,9 @@ async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
 
     sqlx::query("COMMIT").execute(&mut *a).await?;
 
-    let plan = spawned.await??;
+    let plan = tokio::time::timeout(std::time::Duration::from_secs(30), spawned)
+        .await
+        .expect("the blocked execute unblocked once the lock holder committed")??;
     assert!(
         plan.changes.is_empty(),
         "the re-run after the guard miss sees join already ready and plans nothing"
