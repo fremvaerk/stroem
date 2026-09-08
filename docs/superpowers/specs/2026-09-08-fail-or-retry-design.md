@@ -1,6 +1,6 @@
 # Atomic Fail-or-Retry — Design
 
-**Status:** Draft, revision 2 (2026-09-08, after Codex review)
+**Status:** Draft, revision 3 (2026-09-08, after second Codex review)
 **Date:** 2026-09-08
 **Origin:** prerequisite of `2026-09-08-step-cascade-design.md` (Q28); first slice of the
 architecture-review candidate "One interface for every step status transition".
@@ -111,8 +111,13 @@ WHERE job_id = $1 AND step_name = $2
 ```
 
 Every column today's reset clears is cleared; the history entry carries the same four
-keys with the same meanings. `retry_at = NOW() + delay` is computed in Rust from the
-locked row via `delay_for`, as today via `compute_retry_delay`.
+keys with the same meanings. Clocks, stated: `failed_at` and `ready_at` use the
+database clock (`NOW()`), as `mark_failed`'s `completed_at` and `reset_for_retry`'s
+`ready_at` do today; `retry_at` is `Utc::now() + delay` sampled in Rust **after** the
+`SELECT … FOR UPDATE` returns and before the `UPDATE` is issued, bound as a parameter,
+as today's `retry_at` is sampled in Rust (`job_recovery.rs:190-191`) — the only
+difference is that today's sample is taken after the job/workspace/task lookup and
+this one before it. The mixed Rust/DB clock usage is unchanged from today.
 
 Callers, by site:
 
@@ -141,9 +146,14 @@ match JobStepRepo::fail_or_retry(pool, job_id, step, &reason, &[StepStatus::Susp
 
 `orchestrate_after_step`'s retry block (`:186-222`) is deleted; the function starts at
 the job/workspace/task lookup and proceeds to loop completion. `reset_for_retry` and
-`JobStepRepo::reject_step` are deleted (their only callers are replaced).
-`compute_retry_delay`, `step_retry_message`, `step_retries_exhausted_message` are
-unchanged (their unit test `retry_messages_count_executions_consistently` stays).
+`JobStepRepo::reject_step` are deleted (their only production callers are replaced; the
+stroem-db approve/reject test at `job_step.rs:1317` compares row counts and keeps
+compiling, but its description is updated to name `fail_or_retry`).
+`compute_retry_delay`, `step_retry_message`, `step_retries_exhausted_message`
+(`job_recovery.rs:1050-1092`) are today private to `job_recovery`; they become
+`pub(crate)` so `web/worker_api/jobs.rs`, `recovery.rs` and `web/api/jobs.rs` can call
+them. Their bodies and the unit test `retry_messages_count_executions_consistently` are
+unchanged.
 
 ## 3. Semantics preserved, and the two that change
 
@@ -160,11 +170,21 @@ Changed, both by construction:
    (§1) is gone.
 2. **Retry no longer depends on the workspace being loaded.** Today the retry check sits
    *after* `orchestrate_after_step`'s job/workspace/task lookup (`:148-185`), so if the
-   workspace is temporarily unavailable the function returns early and the step stays
-   `failed` with its retry budget unused. Now the decision is made at the failure write,
-   before any lookup. A consequence: `retry_at` is anchored a few milliseconds earlier
-   (at the write, not after the lookup). Neither is a regression; both are recorded in
-   CLAUDE.md.
+   workspace is unavailable at that moment the function returns early and the step
+   stays `failed` with its retry budget unused. No recovery sweep revisits a `failed`
+   row to schedule its retry (`recovery.rs:67-264` select running, timed-out, suspended
+   and unmatched-ready rows only); the budget is used only if something later calls
+   `orchestrate_after_step` for that same step, which nothing does by design. Now the
+   decision is made at the failure write, before any lookup, so the step is `ready`
+   with `retry_at` regardless of workspace availability. Consequence to state plainly:
+   a worker may claim that retry while the workspace is still unavailable, and the
+   claim path then behaves exactly as it does today for any `ready` step of an
+   unavailable workspace (`web/worker_api/jobs.rs:608-652`: the stored `action_spec`
+   is used when the workspace cannot be resolved). This is the same behaviour a
+   freshly-promoted step already has; it is not new to retries. `retry_at` is sampled
+   before the lookup instead of after it; no bound on the difference is claimed.
+
+Both changes are recorded in CLAUDE.md.
 
 ## 4. Tests
 
@@ -187,7 +207,10 @@ Changed, both by construction:
 - Regression for the window: a step fails with retries remaining while another step's
   cascade runs concurrently; the dependent is never skipped, the loop is never failed.
 - Regression for change 2: a step fails with retries remaining while its workspace is
-  unloaded; the step is `ready` with `retry_at` set.
+  unloaded (TestApp with the workspace removed from the manager after job creation);
+  the step is `ready` with `retry_at` set; a worker claim after `retry_at` succeeds and
+  the claimed step carries the stored `action_spec`, matching what a claim of any other
+  `ready` step of that workspace returns in the same state.
 
 ## 5. Rollout
 
@@ -207,3 +230,7 @@ observable as `failed`; retry does not depend on the workspace being loaded".
   reset columns listed; `Failed` needs attempt/max for the exhausted log; "only
   observable difference" too strong → §3 lists the two changes; `FOR SHARE` test does
   not prove the window → replaced (§4); replica-wide rollout before the cascade (§5).
+- 2026-09-08 — Codex second pass, "ready with listed changes": helpers are private →
+  `pub(crate)` (§2); `retry_at` clock and sampling point stated (§2); change 2 restated
+  precisely with the claim-during-outage consequence and test (§3, §4); approve/reject
+  test description (§2). This revision (rev 3) applies all four.
