@@ -21697,9 +21697,13 @@ async fn test_step_retry_resets_failed_step() -> Result<()> {
     Ok(())
 }
 
-/// A step that fails with retry budget is `ready` the instant the failure is
-/// recorded, so an orchestration for ANY other step of the job cannot see it as
-/// failed and skip its dependents.
+/// Guards against reintroducing a post-hoc failed-then-reset at `complete_step`:
+/// the failure write must leave the step `ready`, so a cascade for any other step
+/// of the job cannot skip its dependents. The test awaits `complete_step` before
+/// running the sibling cascade, so it does not itself race the two; the atomicity
+/// property is proved structurally (one `UPDATE` on the retry branch of
+/// `JobStepRepo::fail_or_retry`) and sampled by
+/// `test_fail_or_retry_never_exposes_failed_on_retry_path` in stroem-db.
 #[tokio::test]
 async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
     use stroem_common::duration::HumanDuration;

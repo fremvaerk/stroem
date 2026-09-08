@@ -1071,9 +1071,11 @@ pub async fn approve_step(
             reason
         };
 
-        // Atomic reject — only succeeds if step is still suspended; decides
-        // retry in the same transaction (a rejected approval with retry budget
-        // becomes `ready` again, as today).
+        // Atomic reject — only succeeds if the step is still suspended; decides
+        // retry in the same transaction. A rejected approval with retry budget
+        // returns to `ready` (as today) and is re-suspended only by a later
+        // orchestration of this job (`handle_approval_steps`); if no other step
+        // completes, it stays `ready` — see TODO.md "approval steps with retry".
         let outcome = crate::job_recovery::fail_step(
             &state,
             job_id,

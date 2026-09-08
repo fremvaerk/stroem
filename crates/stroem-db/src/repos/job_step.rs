@@ -562,12 +562,16 @@ impl JobStepRepo {
         .context("lock step row for fail_or_retry")?;
 
         let Some(row) = row else {
-            tx.rollback().await.ok();
+            if let Err(e) = tx.rollback().await {
+                tracing::debug!("fail_or_retry rollback after NotApplied: {e:#}");
+            }
             return Ok(FailOutcome::NotApplied);
         };
 
         if !expected.is_empty() && !expected.iter().any(|s| s.as_ref() == row.status) {
-            tx.rollback().await.ok();
+            if let Err(e) = tx.rollback().await {
+                tracing::debug!("fail_or_retry rollback after NotApplied: {e:#}");
+            }
             return Ok(FailOutcome::NotApplied);
         }
 
