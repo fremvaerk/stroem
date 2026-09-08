@@ -310,9 +310,15 @@ async fn execute_empty_plan_touches_nothing() -> Result<()> {
     Ok(())
 }
 
-/// Guard-miss re-run through `execute`: a stale plan is never applied.
+/// Proves `execute` re-reads the job/steps on each loop iteration rather than
+/// reusing a stale snapshot — NOT the `Err(GuardMiss) => rollback; continue` retry
+/// arm itself. `b` is already `cancelled` by the time `execute` takes its first
+/// (only) snapshot, so `run` plans nothing and `execute` returns through the
+/// empty-plan early exit without ever calling `apply`. See
+/// `execute_retries_after_a_real_guard_miss` for a test that forces a genuine
+/// mid-flight guard miss and exercises the retry arm.
 #[tokio::test]
-async fn execute_reruns_after_a_guard_miss() -> Result<()> {
+async fn execute_replans_from_a_fresh_snapshot() -> Result<()> {
     let (pool, _c) = setup_db().await?;
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(
@@ -368,6 +374,95 @@ async fn execute_concurrently_promotes_join_once() -> Result<()> {
     let (p1, p2) = (p1?, p2?);
     let promoted = p1.changes.len() + p2.changes.len();
     assert_eq!(promoted, 1, "exactly one of them applied the promotion");
+    assert_eq!(step_statuses(&pool, job_id).await["join"], "ready");
+    Ok(())
+}
+
+/// Deterministically exercises the `Err(GuardMiss) => rollback; continue` retry
+/// arm, rather than relying on `execute_concurrently_promotes_join_once`'s race.
+///
+/// A dedicated connection `a` opens a transaction and issues (but does not
+/// commit) the same `UPDATE job_step SET status = 'ready' ... WHERE status =
+/// 'pending'` that `execute`'s `apply` would issue for `join`. That gives `a` an
+/// exclusive row lock on `join` while the committed row is still `pending`.
+///
+/// `execute` is spawned concurrently on the pool: its snapshot SELECT sees the
+/// still-committed `pending` status (under READ COMMITTED, `a`'s uncommitted
+/// write is invisible), so it plans `Promote{join}` and its own `apply` issues
+/// the same `UPDATE ... WHERE status = 'pending'` — which blocks on `a`'s row
+/// lock instead of racing it. Once we observe (via `pg_stat_activity`) that the
+/// blocked backend is actually waiting, we commit `a`. The blocked UPDATE then
+/// requalifies its `WHERE` clause against the just-committed row (now `ready`),
+/// matches zero rows, and `expect_rows` turns that into a real `GuardMiss` —
+/// forcing `execute` through rollback + re-run, not just re-reading a snapshot
+/// that was already stale before the first read (unlike
+/// `execute_replans_from_a_fresh_snapshot`). The re-run's fresh snapshot sees
+/// `join` already `ready` and plans nothing. Without the retry loop, `execute`
+/// would instead return `Err` ("cascade guard miss...").
+#[tokio::test]
+async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "l", "completed"),
+            step(job_id, "r", "completed"),
+            step(job_id, "join", "pending"),
+        ],
+    )
+    .await?;
+    let task = make_task(HashMap::from([
+        ("l".to_string(), flow_step(vec![])),
+        ("r".to_string(), flow_step(vec![])),
+        ("join".to_string(), flow_step(vec!["l", "r"])),
+    ]));
+    let ws = WorkspaceConfig::new();
+
+    let mut a = pool.acquire().await?;
+    sqlx::query("BEGIN").execute(&mut *a).await?;
+    sqlx::query(
+        "UPDATE job_step SET status = 'ready', ready_at = NOW() \
+         WHERE job_id = $1 AND step_name = 'join' AND status = 'pending'",
+    )
+    .bind(job_id)
+    .execute(&mut *a)
+    .await?;
+
+    let spawned = {
+        let pool = pool.clone();
+        let task = task.clone();
+        let ws = ws.clone();
+        tokio::spawn(async move { execute(&pool, job_id, &task, Some(&ws)).await })
+    };
+
+    // Wait for `execute`'s own UPDATE to actually block on `a`'s held row lock,
+    // bounded so a regression that never blocks fails fast instead of hanging.
+    let mut waited = 0;
+    loop {
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE wait_event_type = 'Lock' AND query ILIKE '%job_step%'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if blocked >= 1 {
+            break;
+        }
+        waited += 1;
+        if waited >= 200 {
+            anyhow::bail!("timed out waiting for execute's UPDATE to block on the held row lock");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    sqlx::query("COMMIT").execute(&mut *a).await?;
+
+    let plan = spawned.await??;
+    assert!(
+        plan.changes.is_empty(),
+        "the re-run after the guard miss sees join already ready and plans nothing"
+    );
     assert_eq!(step_statuses(&pool, job_id).await["join"], "ready");
     Ok(())
 }
