@@ -977,3 +977,214 @@ async fn test_action_workspace_and_revision_round_trip_when_null() -> Result<()>
 
     Ok(())
 }
+
+// ─── fail_or_retry ───────────────────────────────────────────────────
+
+use stroem_common::models::job::StepStatus;
+use stroem_db::FailOutcome;
+
+/// Insert one running step with the given retry budget and return nothing.
+async fn make_running_step_with_retry(
+    pool: &PgPool,
+    job_id: Uuid,
+    name: &str,
+    max_retries: Option<i32>,
+) -> Result<()> {
+    let step = make_step(job_id, name, "running");
+    JobStepRepo::create_steps(pool, &[step]).await?;
+    sqlx::query(
+        "UPDATE job_step SET max_retries = $3, retry_backoff_secs = 7, retry_strategy = 'fixed', \
+         started_at = NOW() - INTERVAL '5 seconds', worker_id = NULL, \
+         output = '{\"partial\": true}'::jsonb, agent_state = '{\"turn\": 1}'::jsonb \
+         WHERE job_id = $1 AND step_name = $2",
+    )
+    .bind(job_id)
+    .bind(name)
+    .bind(max_retries)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_or_retry_schedules_retry_when_budget_remains() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
+
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    assert_eq!(
+        outcome,
+        FailOutcome::RetryScheduled {
+            attempt: 1,
+            max: 2,
+            delay_secs: 7
+        }
+    );
+
+    let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert_eq!(row.status, "ready");
+    assert_eq!(row.retry_attempt, 1);
+    assert!(row.retry_at.is_some(), "retry_at must be set");
+    let retry_in = (row.retry_at.unwrap() - chrono::Utc::now()).num_seconds();
+    assert!(
+        (5..=7).contains(&retry_in),
+        "retry_at ≈ now + 7s, got {retry_in}s"
+    );
+    assert!(row.worker_id.is_none());
+    assert!(row.started_at.is_none());
+    assert!(row.completed_at.is_none());
+    assert!(row.error_message.is_none());
+    assert!(row.output.is_none());
+    assert!(row.agent_state.is_none());
+    assert!(row.suspended_at.is_none());
+
+    let history = row.retry_history.as_array().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["attempt"], 0);
+    assert_eq!(history[0]["error"], "boom");
+    assert!(
+        history[0]["started_at"].is_string(),
+        "started_at copied from the row"
+    );
+    assert!(
+        history[0]["failed_at"].is_string(),
+        "failed_at is this failure's time"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_or_retry_fails_when_budget_exhausted() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    make_running_step_with_retry(&pool, job_id, "s", Some(1)).await?;
+    sqlx::query("UPDATE job_step SET retry_attempt = 1 WHERE job_id = $1 AND step_name = 's'")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    assert_eq!(
+        outcome,
+        FailOutcome::Failed {
+            attempt: 1,
+            max: Some(1)
+        }
+    );
+
+    let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.error_message.as_deref(), Some("boom"));
+    assert!(row.completed_at.is_some());
+    assert_eq!(row.retry_attempt, 1, "unchanged");
+    assert_eq!(row.retry_history.as_array().unwrap().len(), 0, "unchanged");
+    assert!(row.output.is_some(), "mark_failed never touches output");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_or_retry_fails_when_no_retry_configured() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    make_running_step_with_retry(&pool, job_id, "s", None).await?;
+
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    assert_eq!(
+        outcome,
+        FailOutcome::Failed {
+            attempt: 0,
+            max: None
+        }
+    );
+    let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert_eq!(row.status, "failed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_or_retry_precondition() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
+
+    // Expected suspended, row is running → nothing written.
+    let outcome = JobStepRepo::fail_or_retry(
+        &pool,
+        job_id,
+        "s",
+        "rejected",
+        &[StepStatus::Suspended],
+        |_| 7,
+    )
+    .await?;
+    assert_eq!(outcome, FailOutcome::NotApplied);
+    let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
+    assert_eq!(row.status, "running");
+    assert_eq!(row.retry_attempt, 0);
+    assert!(row.error_message.is_none());
+
+    // Now suspend it and the precondition holds.
+    sqlx::query("UPDATE job_step SET status = 'suspended' WHERE job_id = $1 AND step_name = 's'")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let outcome = JobStepRepo::fail_or_retry(
+        &pool,
+        job_id,
+        "s",
+        "rejected",
+        &[StepStatus::Suspended],
+        |_| 7,
+    )
+    .await?;
+    assert!(matches!(outcome, FailOutcome::RetryScheduled { .. }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fail_or_retry_missing_row_is_not_applied() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "nope", "boom", &[], |_| 7).await?;
+    assert_eq!(outcome, FailOutcome::NotApplied);
+    Ok(())
+}
+
+/// The retry branch is ONE UPDATE: a concurrent reader can only ever observe
+/// `running` (before) or `ready` (after), never `failed`. Probabilistic check;
+/// the structural guarantee is the single statement in the implementation.
+#[tokio::test]
+async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = make_job(&pool, "t").await?;
+    for i in 0..50 {
+        let name = format!("s{i}");
+        make_running_step_with_retry(&pool, job_id, &name, Some(5)).await?;
+    }
+    let reader_pool = pool.clone();
+    let reader = tokio::spawn(async move {
+        let mut seen_failed = 0u32;
+        for _ in 0..2000 {
+            let statuses: Vec<String> =
+                sqlx::query_scalar("SELECT status FROM job_step WHERE job_id = $1")
+                    .bind(job_id)
+                    .fetch_all(&reader_pool)
+                    .await
+                    .unwrap();
+            seen_failed += statuses.iter().filter(|s| s.as_str() == "failed").count() as u32;
+            tokio::task::yield_now().await;
+        }
+        seen_failed
+    });
+    for i in 0..50 {
+        let name = format!("s{i}");
+        JobStepRepo::fail_or_retry(&pool, job_id, &name, "boom", &[], |_| 1).await?;
+    }
+    assert_eq!(
+        reader.await?,
+        0,
+        "a retried step must never be observable as failed"
+    );
+    Ok(())
+}

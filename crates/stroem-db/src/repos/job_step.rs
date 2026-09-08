@@ -179,6 +179,23 @@ pub struct Seed {
 /// Repository for job step operations
 pub struct JobStepRepo;
 
+/// Result of [`JobStepRepo::fail_or_retry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailOutcome {
+    /// Precondition not met (row missing or not in one of `expected`). Nothing written.
+    NotApplied,
+    /// Retries exhausted or none configured. Row is `failed`.
+    /// `attempt` is the row's `retry_attempt` (unchanged), `max` its `max_retries`.
+    Failed { attempt: i32, max: Option<i32> },
+    /// Row went straight to `ready` with `retry_at`; never observable as `failed`.
+    /// `attempt` is the NEW `retry_attempt` (post-increment).
+    RetryScheduled {
+        attempt: i32,
+        max: i32,
+        delay_secs: u64,
+    },
+}
+
 impl JobStepRepo {
     /// Create steps for a job (batch insert)
     pub async fn create_steps(pool: &PgPool, steps: &[NewJobStep]) -> Result<()> {
@@ -557,6 +574,110 @@ impl JobStepRepo {
         .context("Failed to reset step for retry")?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Record a step failure and decide its retry in ONE transaction, so a row
+    /// that will be retried is never observable as `failed`.
+    ///
+    /// * `expected` — when non-empty, the row must currently be in one of these
+    ///   statuses or nothing is written (`NotApplied`). Approval rejection passes
+    ///   `[Suspended]`; every other caller passes `[]`.
+    /// * `delay_for` — computes the retry delay in seconds from the locked row
+    ///   (the server passes `compute_retry_delay`).
+    pub async fn fail_or_retry(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        error: &str,
+        expected: &[StepStatus],
+        delay_for: impl FnOnce(&JobStepRow) -> u64,
+    ) -> Result<FailOutcome> {
+        let mut tx = pool.begin().await.context("begin fail_or_retry")?;
+
+        let row = sqlx::query_as::<_, JobStepRow>(&format!(
+            "SELECT {} FROM job_step WHERE job_id = $1 AND step_name = $2 FOR UPDATE",
+            STEP_COLUMNS
+        ))
+        .bind(job_id)
+        .bind(step_name)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("lock step row for fail_or_retry")?;
+
+        let Some(row) = row else {
+            tx.rollback().await.ok();
+            return Ok(FailOutcome::NotApplied);
+        };
+
+        if !expected.is_empty() && !expected.iter().any(|s| s.as_ref() == row.status) {
+            tx.rollback().await.ok();
+            return Ok(FailOutcome::NotApplied);
+        }
+
+        let outcome = match row.max_retries {
+            Some(max) if row.retry_attempt < max => {
+                let delay_secs = delay_for(&row);
+                let retry_at = Utc::now() + chrono::Duration::seconds(delay_secs as i64);
+                sqlx::query(
+                    r#"
+                    UPDATE job_step
+                    SET
+                        retry_history = retry_history || jsonb_build_array(jsonb_build_object(
+                            'attempt', retry_attempt,
+                            'error', $3::text,
+                            'started_at', started_at,
+                            'failed_at', NOW()
+                        )),
+                        retry_attempt = retry_attempt + 1,
+                        status = 'ready',
+                        ready_at = NOW(),
+                        retry_at = $4,
+                        worker_id = NULL,
+                        started_at = NULL,
+                        completed_at = NULL,
+                        error_message = NULL,
+                        output = NULL,
+                        agent_state = NULL,
+                        suspended_at = NULL
+                    WHERE job_id = $1 AND step_name = $2
+                    "#,
+                )
+                .bind(job_id)
+                .bind(step_name)
+                .bind(error)
+                .bind(retry_at)
+                .execute(&mut *tx)
+                .await
+                .context("schedule step retry")?;
+                FailOutcome::RetryScheduled {
+                    attempt: row.retry_attempt + 1,
+                    max,
+                    delay_secs,
+                }
+            }
+            _ => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_step
+                    SET status = 'failed', error_message = $3, completed_at = NOW()
+                    WHERE job_id = $1 AND step_name = $2
+                    "#,
+                )
+                .bind(job_id)
+                .bind(step_name)
+                .bind(error)
+                .execute(&mut *tx)
+                .await
+                .context("mark step failed")?;
+                FailOutcome::Failed {
+                    attempt: row.retry_attempt,
+                    max: row.max_retries,
+                }
+            }
+        };
+
+        tx.commit().await.context("commit fail_or_retry")?;
+        Ok(outcome)
     }
 
     /// Get a single step by job_id and step_name.
