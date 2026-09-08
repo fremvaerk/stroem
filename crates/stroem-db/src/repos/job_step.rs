@@ -308,6 +308,126 @@ impl JobStepRepo {
         Ok(())
     }
 
+    /// Cascade primitive: pending → ready for every named step. Returns rows affected.
+    pub async fn promote_steps_tx<'e, E>(executor: E, job_id: Uuid, names: &[String]) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'ready', ready_at = NOW() \
+             WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'",
+        )
+        .bind(job_id)
+        .bind(names)
+        .execute(executor)
+        .await
+        .context("promote_steps_tx")?;
+        Ok(r.rows_affected())
+    }
+
+    /// Cascade primitive: pending → skipped for every named step. Returns rows affected.
+    pub async fn skip_steps_tx<'e, E>(executor: E, job_id: Uuid, names: &[String]) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'skipped', completed_at = NOW() \
+             WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'",
+        )
+        .bind(job_id)
+        .bind(names)
+        .execute(executor)
+        .await
+        .context("skip_steps_tx")?;
+        Ok(r.rows_affected())
+    }
+
+    /// Cascade primitive: pending → failed with an error. Returns rows affected.
+    pub async fn fail_pending_step_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        name: &str,
+        error: &str,
+    ) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'pending'",
+        )
+        .bind(job_id)
+        .bind(name)
+        .bind(error)
+        .execute(executor)
+        .await
+        .context("fail_pending_step_tx")?;
+        Ok(r.rows_affected())
+    }
+
+    /// Cascade primitive: placeholder pending → running. Returns rows affected.
+    pub async fn start_placeholder_tx<'e, E>(executor: E, job_id: Uuid, name: &str) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'running', started_at = NOW() \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'pending'",
+        )
+        .bind(job_id)
+        .bind(name)
+        .execute(executor)
+        .await
+        .context("start_placeholder_tx")?;
+        Ok(r.rows_affected())
+    }
+
+    /// Cascade primitive: running placeholder → completed with aggregated output.
+    pub async fn complete_placeholder_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        name: &str,
+        output: &JsonValue,
+    ) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'completed', output = $3, completed_at = NOW() \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(name)
+        .bind(output)
+        .execute(executor)
+        .await
+        .context("complete_placeholder_tx")?;
+        Ok(r.rows_affected())
+    }
+
+    /// Cascade primitive: running placeholder → failed.
+    pub async fn fail_placeholder_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        name: &str,
+        error: &str,
+    ) -> Result<u64>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        let r = sqlx::query(
+            "UPDATE job_step SET status = 'failed', error_message = $3, completed_at = NOW() \
+             WHERE job_id = $1 AND step_name = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(name)
+        .bind(error)
+        .execute(executor)
+        .await
+        .context("fail_placeholder_tx")?;
+        Ok(r.rows_affected())
+    }
+
     /// Overwrite freshly created rows with carried-over terminal state, inside
     /// the creation transaction. Clears every "live" column the creator may
     /// have set (ready_at on root rows) and any execution residue.

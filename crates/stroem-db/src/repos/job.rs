@@ -447,6 +447,20 @@ impl JobRepo {
         Ok(())
     }
 
+    /// Transaction variant of `mark_running_if_pending_server`. Zero rows is normal
+    /// once the job is already running.
+    pub async fn mark_running_if_pending_tx<'e, E>(executor: E, job_id: Uuid) -> Result<()>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query("UPDATE job SET status = 'running', started_at = NOW() WHERE job_id = $1 AND status = 'pending'")
+            .bind(job_id)
+            .execute(executor)
+            .await
+            .context("mark_running_if_pending_tx")?;
+        Ok(())
+    }
+
     /// Mark job as completed
     pub async fn mark_completed(
         pool: &PgPool,

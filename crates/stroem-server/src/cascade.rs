@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use stroem_common::models::job::StepStatus;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
-use stroem_db::{JobRow, JobStepRow, NewJobStep};
+use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow, NewJobStep};
+use uuid::Uuid;
 
 use crate::job_creator::{build_step_render_context, parse_for_each_items, MAX_FOR_EACH_ITEMS};
 
@@ -25,8 +26,6 @@ pub enum Change {
         instances: Vec<NewJobStep>,
     },
     /// Placeholder pending → running, instances already exist (R0). No insert.
-    // used from Task 2 onward
-    #[allow(dead_code)]
     Adopt { placeholder: String },
     /// running placeholder → completed(output) | failed(error)
     Rollup {
@@ -538,6 +537,134 @@ pub fn run(
         changes.extend(pass);
     }
     Ok(Plan { changes })
+}
+
+/// Counts per change kind, for the log line and for tests.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Applied {
+    pub promoted: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub expanded: usize,
+    pub adopted: usize,
+    pub rolled_up: usize,
+}
+
+#[derive(Debug)]
+pub enum ApplyError {
+    /// A step-row statement affected fewer rows than the plan named: some row is
+    /// no longer in the status the snapshot assumed. The caller rolls back.
+    GuardMiss {
+        step: String,
+    },
+    Db(anyhow::Error),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::GuardMiss { step } => write!(f, "cascade guard miss on step '{step}'"),
+            ApplyError::Db(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+impl std::error::Error for ApplyError {}
+impl From<anyhow::Error> for ApplyError {
+    fn from(e: anyhow::Error) -> Self {
+        ApplyError::Db(e)
+    }
+}
+
+fn expect_rows(n: u64, expected: usize, step: &str) -> Result<(), ApplyError> {
+    if n as usize == expected {
+        Ok(())
+    } else {
+        Err(ApplyError::GuardMiss {
+            step: step.to_string(),
+        })
+    }
+}
+
+/// Apply `plan.changes` in order inside the caller's transaction (§4.6). Batches
+/// runs of consecutive `Promote`s and `Skip`s into one statement each; every
+/// step-row statement must affect exactly the rows it names.
+pub async fn apply(
+    conn: &mut sqlx::PgConnection,
+    job_id: Uuid,
+    plan: &Plan,
+) -> Result<Applied, ApplyError> {
+    let mut a = Applied::default();
+    let mut i = 0;
+    let changes = &plan.changes;
+    while i < changes.len() {
+        match &changes[i] {
+            Change::Promote { .. } => {
+                let mut names = Vec::new();
+                while let Some(Change::Promote { step }) = changes.get(i) {
+                    names.push(step.clone());
+                    i += 1;
+                }
+                let n = JobStepRepo::promote_steps_tx(&mut *conn, job_id, &names).await?;
+                expect_rows(n, names.len(), &names.join(","))?;
+                a.promoted += names.len();
+            }
+            Change::Skip { .. } => {
+                let mut names = Vec::new();
+                while let Some(Change::Skip { step }) = changes.get(i) {
+                    names.push(step.clone());
+                    i += 1;
+                }
+                let n = JobStepRepo::skip_steps_tx(&mut *conn, job_id, &names).await?;
+                expect_rows(n, names.len(), &names.join(","))?;
+                a.skipped += names.len();
+            }
+            Change::Fail { step, error } => {
+                let n = JobStepRepo::fail_pending_step_tx(&mut *conn, job_id, step, error).await?;
+                expect_rows(n, 1, step)?;
+                a.failed += 1;
+                i += 1;
+            }
+            Change::Expand {
+                placeholder,
+                instances,
+            } => {
+                // Placeholder transition FIRST, then the insert: instances exist only
+                // if the transition is in the same committed transaction (fix 1).
+                let n = JobStepRepo::start_placeholder_tx(&mut *conn, job_id, placeholder).await?;
+                expect_rows(n, 1, placeholder)?;
+                JobStepRepo::create_steps_tx(&mut *conn, instances).await?;
+                JobRepo::mark_running_if_pending_tx(&mut *conn, job_id).await?; // zero rows allowed (R7)
+                a.expanded += 1;
+                i += 1;
+            }
+            Change::Adopt { placeholder } => {
+                let n = JobStepRepo::start_placeholder_tx(&mut *conn, job_id, placeholder).await?;
+                expect_rows(n, 1, placeholder)?;
+                JobRepo::mark_running_if_pending_tx(&mut *conn, job_id).await?;
+                a.adopted += 1;
+                i += 1;
+            }
+            Change::Rollup {
+                placeholder,
+                outcome,
+            } => {
+                let n = match outcome {
+                    RollupOutcome::Completed(out) => {
+                        JobStepRepo::complete_placeholder_tx(&mut *conn, job_id, placeholder, out)
+                            .await?
+                    }
+                    RollupOutcome::Failed(err) => {
+                        JobStepRepo::fail_placeholder_tx(&mut *conn, job_id, placeholder, err)
+                            .await?
+                    }
+                };
+                expect_rows(n, 1, placeholder)?;
+                a.rolled_up += 1;
+                i += 1;
+            }
+        }
+    }
+    Ok(a)
 }
 
 #[cfg(test)]
