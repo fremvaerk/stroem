@@ -22362,6 +22362,15 @@ async fn test_step_retry_scheduled_when_workspace_unavailable() -> Result<()> {
         .await?;
     assert_eq!(claim.status(), StatusCode::OK);
 
+    // A marker in the stored input, so the claim below can be shown to use it.
+    sqlx::query(
+        "UPDATE job_step SET input = '{\"marker\": \"outage-42\"}'::jsonb \
+         WHERE job_id = $1 AND step_name = 'step1'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
     // Make the job's workspace unresolvable before the failure is reported.
     sqlx::query("UPDATE job SET workspace = 'gone' WHERE job_id = $1")
         .bind(job_id)
@@ -22404,6 +22413,16 @@ async fn test_step_retry_scheduled_when_workspace_unavailable() -> Result<()> {
     let body = body_json(claim2).await;
     assert_eq!(body["job_id"].as_str().unwrap(), job_id.to_string());
     assert_eq!(body["step_name"].as_str().unwrap(), "step1");
+    assert_eq!(
+        body["input"]["marker"].as_str(),
+        Some("outage-42"),
+        "the claim falls back to the stored input when the workspace is unavailable"
+    );
+    assert!(
+        body["action_spec"].is_object(),
+        "the stored action spec is still rendered, got {:?}",
+        body["action_spec"]
+    );
     Ok(())
 }
 

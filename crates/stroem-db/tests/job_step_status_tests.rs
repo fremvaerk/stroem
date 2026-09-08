@@ -983,7 +983,11 @@ async fn test_action_workspace_and_revision_round_trip_when_null() -> Result<()>
 use stroem_common::models::job::StepStatus;
 use stroem_db::FailOutcome;
 
-/// Insert one running step with the given retry budget and return nothing.
+/// Insert one running step with the given retry budget.
+///
+/// EVERY column the retry branch is supposed to clear is seeded non-NULL, so the
+/// NULL assertions in the tests below are non-vacuous, and `retry_history` starts
+/// with a sentinel entry so "appended" can be told from "overwritten".
 async fn make_running_step_with_retry(
     pool: &PgPool,
     job_id: Uuid,
@@ -992,18 +996,41 @@ async fn make_running_step_with_retry(
 ) -> Result<()> {
     let step = make_step(job_id, name, "running");
     JobStepRepo::create_steps(pool, &[step]).await?;
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        pool,
+        worker_id,
+        &format!("worker-{name}"),
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
     sqlx::query(
         "UPDATE job_step SET max_retries = $3, retry_backoff_secs = 7, retry_strategy = 'fixed', \
-         started_at = NOW() - INTERVAL '5 seconds', worker_id = NULL, \
-         output = '{\"partial\": true}'::jsonb, agent_state = '{\"turn\": 1}'::jsonb \
+         worker_id = $4, \
+         started_at = NOW() - INTERVAL '5 seconds', \
+         completed_at = NOW() - INTERVAL '1 second', \
+         error_message = 'stale', \
+         output = '{\"partial\": true}'::jsonb, \
+         agent_state = '{\"turn\": 1}'::jsonb, \
+         suspended_at = NOW() - INTERVAL '3 seconds', \
+         retry_history = '[{\"attempt\": -1, \"error\": \"seed\"}]'::jsonb \
          WHERE job_id = $1 AND step_name = $2",
     )
     .bind(job_id)
     .bind(name)
     .bind(max_retries)
+    .bind(worker_id)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// The sentinel `retry_history` entry seeded by `make_running_step_with_retry`.
+fn seed_history_entry() -> serde_json::Value {
+    serde_json::json!({"attempt": -1, "error": "seed"})
 }
 
 #[tokio::test]
@@ -1012,7 +1039,9 @@ async fn test_fail_or_retry_schedules_retry_when_budget_remains() -> Result<()> 
     let job_id = make_job(&pool, "t").await?;
     make_running_step_with_retry(&pool, job_id, "s", Some(2)).await?;
 
+    let before = chrono::Utc::now();
     let outcome = JobStepRepo::fail_or_retry(&pool, job_id, "s", "boom", &[], |_| 7).await?;
+    let after = chrono::Utc::now();
     assert_eq!(
         outcome,
         FailOutcome::RetryScheduled {
@@ -1040,18 +1069,38 @@ async fn test_fail_or_retry_schedules_retry_when_budget_remains() -> Result<()> 
     assert!(row.suspended_at.is_none());
 
     let history = row.retry_history.as_array().unwrap();
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0]["attempt"], 0);
-    assert_eq!(history[0]["error"], "boom");
+    assert_eq!(history.len(), 2, "the entry is APPENDED, not written fresh");
+    assert_eq!(history[0], seed_history_entry(), "seed entry untouched");
+    assert_eq!(history[1]["attempt"], 0, "pre-increment attempt");
+    assert_eq!(history[1]["error"], "boom", "the incoming failure");
+
+    // `started_at` is this attempt's start, copied from the row (seeded 5s old),
+    // NOT the time of the failure write.
+    let started_at = parse_ts(&history[1]["started_at"]);
+    let started_age = (before - started_at).num_seconds();
     assert!(
-        history[0]["started_at"].is_string(),
-        "started_at copied from the row"
+        (4..=15).contains(&started_age),
+        "started_at must be the row's own (seeded ~5s before the call), got {started_age}s before"
     );
+
+    // `failed_at` is this failure's time, taken from the DB clock inside the write.
+    let failed_at = parse_ts(&history[1]["failed_at"]);
     assert!(
-        history[0]["failed_at"].is_string(),
-        "failed_at is this failure's time"
+        failed_at >= before - chrono::Duration::seconds(1)
+            && failed_at <= after + chrono::Duration::seconds(1),
+        "failed_at {failed_at} must fall inside [{before}, {after}] (±1s)"
     );
     Ok(())
+}
+
+/// Parse a timestamp that Postgres rendered into `retry_history` JSON.
+fn parse_ts(v: &serde_json::Value) -> chrono::DateTime<chrono::Utc> {
+    let s = v
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a timestamp string, got {v}"));
+    chrono::DateTime::parse_from_rfc3339(s)
+        .unwrap_or_else(|e| panic!("{s} is not RFC3339: {e}"))
+        .with_timezone(&chrono::Utc)
 }
 
 #[tokio::test]
@@ -1078,7 +1127,11 @@ async fn test_fail_or_retry_fails_when_budget_exhausted() -> Result<()> {
     assert_eq!(row.error_message.as_deref(), Some("boom"));
     assert!(row.completed_at.is_some());
     assert_eq!(row.retry_attempt, 1, "unchanged");
-    assert_eq!(row.retry_history.as_array().unwrap().len(), 0, "unchanged");
+    assert_eq!(
+        row.retry_history.as_array().unwrap(),
+        &vec![seed_history_entry()],
+        "the fail branch must not append to retry_history"
+    );
     assert!(row.output.is_some(), "mark_failed never touches output");
     Ok(())
 }
@@ -1122,7 +1175,11 @@ async fn test_fail_or_retry_precondition() -> Result<()> {
     let row = JobStepRepo::get_step(&pool, job_id, "s").await?.unwrap();
     assert_eq!(row.status, "running");
     assert_eq!(row.retry_attempt, 0);
-    assert!(row.error_message.is_none());
+    assert_eq!(
+        row.error_message.as_deref(),
+        Some("stale"),
+        "nothing was written, so the seeded error_message survives"
+    );
 
     // Now suspend it and the precondition holds.
     sqlx::query("UPDATE job_step SET status = 'suspended' WHERE job_id = $1 AND step_name = 's'")
@@ -1164,7 +1221,8 @@ async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
     }
     let reader_pool = pool.clone();
     let reader = tokio::spawn(async move {
-        let mut seen_failed = 0u32;
+        let mut unexpected: Vec<String> = Vec::new();
+        let mut short_polls = 0u32;
         for _ in 0..2000 {
             let statuses: Vec<String> =
                 sqlx::query_scalar("SELECT status FROM job_step WHERE job_id = $1")
@@ -1172,19 +1230,31 @@ async fn test_fail_or_retry_never_exposes_failed_on_retry_path() -> Result<()> {
                     .fetch_all(&reader_pool)
                     .await
                     .unwrap();
-            seen_failed += statuses.iter().filter(|s| s.as_str() == "failed").count() as u32;
+            if statuses.len() != 50 {
+                short_polls += 1;
+            }
+            for s in statuses {
+                if s != "running" && s != "ready" {
+                    unexpected.push(s);
+                }
+            }
             tokio::task::yield_now().await;
         }
-        seen_failed
+        (unexpected, short_polls)
     });
     for i in 0..50 {
         let name = format!("s{i}");
         JobStepRepo::fail_or_retry(&pool, job_id, &name, "boom", &[], |_| 1).await?;
     }
+    let (unexpected, short_polls) = reader.await?;
+    assert!(
+        unexpected.is_empty(),
+        "every observed status must be running or ready, saw {unexpected:?}"
+    );
     assert_eq!(
-        reader.await?,
-        0,
-        "a retried step must never be observable as failed"
+        short_polls, 0,
+        "every poll must have seen all 50 rows (a shorter read would make the \
+         status assertion vacuous)"
     );
     Ok(())
 }
