@@ -230,25 +230,6 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
         }
     };
 
-    // Check if this is a loop instance completing — handle sequential promotion
-    // and loop completion before running the orchestrator
-    if let Err(e) =
-        crate::job_creator::check_loop_completion(&state.pool, job_id, step_name, &task).await
-    {
-        tracing::error!(
-            "Failed to check loop completion for job {} step '{}': {:#}",
-            job_id,
-            step_name,
-            e
-        );
-        state
-            .append_server_log(
-                job_id,
-                &format!("[orchestration] Failed to check loop completion: {:#}", e),
-            )
-            .await;
-    }
-
     // Run orchestrator: promote steps, skip unreachable, expand/resolve
     // for_each placeholders (inside the cascade), check terminal.
     orchestrator::on_step_completed(&state.pool, job_id, step_name, &task, Some(&workspace))
@@ -606,24 +587,7 @@ pub async fn propagate_to_parent(
                 }
             };
 
-            // Check if the completed parent step is a loop instance — handle
-            // sequential promotion and loop completion before orchestrating
-            if let Err(e) = crate::job_creator::check_loop_completion(
-                &state.pool,
-                parent_job_id,
-                parent_step,
-                &parent_task,
-            )
-            .await
-            {
-                tracing::error!(
-                    "Failed to check loop completion for parent step '{}': {:#}",
-                    parent_step,
-                    e
-                );
-            }
-
-            // Run orchestrator for parent job (includes for_each expansion)
+            // Run orchestrator for parent job (includes for_each rollup/expansion)
             orchestrator::on_step_completed(
                 &state.pool,
                 parent_job_id,

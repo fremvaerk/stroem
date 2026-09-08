@@ -10,7 +10,7 @@ use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow, NewJobStep};
 use uuid::Uuid;
 
-use crate::job_creator::{build_step_render_context, parse_for_each_items, MAX_FOR_EACH_ITEMS};
+use crate::job_creator::build_step_render_context;
 
 /// One state transition the cascade wants applied. Closed enum.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +59,65 @@ const COMPLETED: &str = "completed";
 const FAILED: &str = "failed";
 const SKIPPED: &str = "skipped";
 const CANCELLED: &str = "cancelled";
+
+/// Maximum number of for_each instances (runtime limit)
+const MAX_FOR_EACH_ITEMS: usize = 10000;
+
+/// Parse the for_each expression and return the items array.
+pub(crate) fn parse_for_each_items(
+    expr: &str,
+    render_ctx: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>> {
+    // Try parsing as a JSON literal first (for literal arrays stored as JSON strings)
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(expr) {
+        match value {
+            serde_json::Value::Array(arr) => return Ok(arr),
+            serde_json::Value::String(template) => {
+                // It's a JSON-encoded string — this is a Tera template
+                return render_for_each_template(&template, render_ctx);
+            }
+            _ => {
+                bail!(
+                    "for_each expression must evaluate to a JSON array, got {}",
+                    value
+                );
+            }
+        }
+    }
+
+    // If not valid JSON, treat as a raw Tera template
+    render_for_each_template(expr, render_ctx)
+}
+
+/// Render a Tera template and parse the result as a JSON array.
+fn render_for_each_template(
+    template: &str,
+    render_ctx: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>> {
+    let rendered = stroem_common::template::render_template(template, render_ctx)
+        .context("Failed to render for_each template")?;
+    let value: serde_json::Value = serde_json::from_str(&rendered).with_context(|| {
+        // Detect the common "[object]" rendering that Tera produces for
+        // objects/arrays and suggest the fix.
+        if rendered.contains("[object]") {
+            format!(
+                "for_each template rendered to non-JSON: {}. \
+                 Hint: Tera renders objects/arrays as \"[object]\". \
+                 Use the `json_encode()` filter, e.g. {{{{ step.output | json_encode() }}}}",
+                rendered,
+            )
+        } else {
+            format!("for_each template rendered to non-JSON: {}", rendered)
+        }
+    })?;
+    match value {
+        serde_json::Value::Array(arr) => Ok(arr),
+        _ => bail!(
+            "for_each expression must evaluate to a JSON array, got {}",
+            value
+        ),
+    }
+}
 
 /// In-memory copy of a job's step rows that the fixpoint mutates.
 pub(crate) struct Snapshot {
@@ -1577,5 +1636,131 @@ mod tests {
         assert_eq!(s["b"], "ready");
         assert_eq!(s["c"], "skipped");
         assert_eq!(s["d"], "pending", "d waits for b");
+    }
+
+    // --- for_each expression parser tests (moved with the helpers from job_creator) ---
+
+    #[test]
+    fn test_parse_for_each_items_literal_array() {
+        let expr = r#"["us-east-1","eu-west-1","ap-south-1"]"#;
+        let ctx = json!({});
+        let items = parse_for_each_items(expr, &ctx).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].as_str().unwrap(), "us-east-1");
+        assert_eq!(items[1].as_str().unwrap(), "eu-west-1");
+        assert_eq!(items[2].as_str().unwrap(), "ap-south-1");
+    }
+
+    #[test]
+    fn test_parse_for_each_items_json_encoded_template_string() {
+        // When a for_each Tera template is serialised via serde_json::Value::to_string()
+        // the string is JSON-encoded (quoted). parse_for_each_items parses the outer JSON
+        // string value, discovers it is a Tera template, renders it, then parses the
+        // rendered result as a JSON array.
+        let expr = r#""{{ input.items }}""#; // JSON-encoded Tera template
+        let ctx = json!({"input": {"items": "[1,2,3]"}});
+        let items = parse_for_each_items(expr, &ctx).unwrap();
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_for_each_items_non_array_fails() {
+        let expr = r#"42"#;
+        let ctx = json!({});
+        let result = parse_for_each_items(expr, &ctx);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must evaluate to a JSON array"),
+            "Error should mention 'must evaluate to a JSON array'"
+        );
+    }
+
+    #[test]
+    fn test_parse_for_each_items_empty_array() {
+        let expr = r#"[]"#;
+        let ctx = json!({});
+        let items = parse_for_each_items(expr, &ctx).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_parse_for_each_items_numeric_elements() {
+        let expr = r#"[1, 2, 3]"#;
+        let ctx = json!({});
+        let items = parse_for_each_items(expr, &ctx).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].as_i64().unwrap(), 1);
+        assert_eq!(items[2].as_i64().unwrap(), 3);
+    }
+
+    // --- render_for_each_template: error message tests ---
+
+    #[test]
+    fn test_for_each_object_rendering_suggests_json_encode() {
+        // Tera renders objects as "[object]" — the error message should
+        // suggest using the json_encode() filter.
+        let ctx = json!({"step1": {"output": [{"a": 1}, {"a": 2}]}});
+        let result = render_for_each_template("{{ step1.output }}", &ctx);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("[object]"),
+            "Error should contain '[object]': {}",
+            msg
+        );
+        assert!(
+            msg.contains("json_encode()"),
+            "Error should suggest json_encode(): {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_for_each_non_json_error_without_object_hint() {
+        // When the rendered output is non-JSON but not the [object] pattern,
+        // the error should not include the json_encode hint.
+        let ctx = json!({"step1": {"output": "hello"}});
+        let result = render_for_each_template("{{ step1.output }}", &ctx);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("non-JSON"),
+            "Error should mention non-JSON: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("json_encode"),
+            "Error should NOT suggest json_encode for plain strings: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_for_each_valid_json_non_array_errors() {
+        // A template that renders to valid JSON but not an array should
+        // produce a clear "must evaluate to a JSON array" error.
+        let ctx = json!({"count": 5});
+        let result = render_for_each_template("{{ count }}", &ctx);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("must evaluate to a JSON array"),
+            "Error should mention array requirement: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_for_each_json_encode_filter_produces_correct_result() {
+        // Validates that applying json_encode() — the fix suggested by the
+        // error hint — actually works for arrays of objects.
+        let ctx = json!({"step1": {"output": [{"x": 1}, {"x": 2}]}});
+        let items = render_for_each_template("{{ step1.output | json_encode() }}", &ctx).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["x"], 1);
+        assert_eq!(items[1]["x"], 2);
     }
 }

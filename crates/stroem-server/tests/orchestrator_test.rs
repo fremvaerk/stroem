@@ -643,8 +643,8 @@ async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
 /// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.go }}"`),
 /// C (pending, depends on B).  When A completes with `{"go": false}`, B is
 /// skipped by its `when` condition.  C's only dep (B) is then skipped, so the
-/// all-deps-skipped rule in `promote_ready_steps` cascade-skips C in the same
-/// orchestrator call, without needing a separate `skip_unreachable_steps` pass.
+/// all-deps-skipped rule (R2) cascade-skips C in the same orchestrator call,
+/// without needing a separate blocked-dependency pass (R3).
 #[tokio::test]
 async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -799,7 +799,7 @@ async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> 
 /// Steps: A (ready), B (pending, depends on A, `when: "{{ a.output.deploy }}"`),
 /// C (pending, depends on A, `when: "false"`).  When A completes with
 /// `{"deploy": "yes"}`, both `when` conditions must be resolved in the same
-/// `promote_ready_steps` call: B → ready (truthy), C → skipped (falsy).
+/// cascade pass: B → ready (truthy), C → skipped (falsy).
 #[tokio::test]
 async fn test_sibling_when_branches_truthy_and_falsy_evaluated_together() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -1014,13 +1014,27 @@ async fn test_convergence_without_continue_on_failure() -> Result<()> {
 
     let ws = WorkspaceConfig::new();
 
-    // A completes — render context has input.use_fast = true
+    // A completes — the job's stored input carries use_fast = true
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    // Build context with use_fast = true
-    let ctx = json!({"input": {"use_fast": true}});
-    let changed = JobStepRepo::promote_ready_steps(&pool, job_id, &task.flow, Some(&ctx)).await?;
-    assert!(changed.contains(&"b".to_string()), "B should be promoted");
-    assert!(changed.contains(&"c".to_string()), "C should be skipped");
+    sqlx::query("UPDATE job SET input = '{\"use_fast\": true}'::jsonb WHERE job_id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+    let plan = stroem_server::cascade::execute(&pool, job_id, &task, Some(&ws)).await?;
+    assert!(
+        plan.changes
+            .contains(&stroem_server::cascade::Change::Promote {
+                step: "b".to_string()
+            }),
+        "B should be promoted"
+    );
+    assert!(
+        plan.changes
+            .contains(&stroem_server::cascade::Change::Skip {
+                step: "c".to_string()
+            }),
+        "C should be skipped"
+    );
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "ready", "B must be ready (use_fast=true)");
@@ -1605,11 +1619,12 @@ async fn test_for_each_placeholder_skip_cascades_to_downstream_step() -> Result<
 
 // ─── Regression: for_each placeholder directly downstream of a FAILED step ────
 
-/// Codex review finding (2026-09-07): `skip_unreachable_steps` ignores
-/// `for_each` placeholders and `expand_for_each_steps` just `continue`s when a
-/// dependency is failed/cancelled, so a placeholder whose dependency FAILED
-/// (not skipped) stays `pending` forever and the job never settles. The
-/// 2026-09-02 fix only covered a *skipped* dependency.
+/// Codex review finding (2026-09-07): the old blocked-dependency pass ignored
+/// `for_each` placeholders and the old expansion pass just `continue`d when a
+/// dependency was failed/cancelled, so a placeholder whose dependency FAILED
+/// (not skipped) stayed `pending` forever and the job never settled. The
+/// 2026-09-02 fix only covered a *skipped* dependency. The cascade retires the
+/// placeholder itself (R4).
 #[tokio::test]
 async fn test_failed_dep_skips_for_each_placeholder_directly_downstream() -> Result<()> {
     let (pool, _container) = setup_db().await?;

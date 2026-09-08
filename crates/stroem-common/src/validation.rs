@@ -180,8 +180,8 @@ fn validate_workflow_config_inner(
             //
             // Known limitation — variable references: we cannot validate which
             // step names are referenced in the expression at parse time, because
-            // the full step output context is only built at runtime during
-            // `promote_ready_steps`. A typo like `{{ step_nme.output.value }}`
+            // the full step output context is only built at runtime by the
+            // step cascade. A typo like `{{ step_nme.output.value }}`
             // (missing 'a') passes this check and surfaces as a condition
             // evaluation failure when the job runs.
             //

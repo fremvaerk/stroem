@@ -17957,9 +17957,9 @@ fn when_test_workspace_with_flow(
 }
 
 /// When a task has a root step (no dependencies) with `when: "false"`, the
-/// post-creation promote loop must evaluate the condition immediately and mark
-/// the step `skipped`.  Any dependent steps must cascade to `skipped` via
-/// `skip_unreachable_steps`.
+/// creation-time cascade must evaluate the condition immediately and mark
+/// the step `skipped`.  Any dependent steps must cascade to `skipped` in the
+/// same cascade (R2/R3).
 #[tokio::test]
 async fn test_create_job_for_task_root_when_false_skips_at_creation() -> Result<()> {
     let (_router, pool, _tmp, _container) = setup().await?;
@@ -22166,10 +22166,10 @@ async fn test_step_retry_window_closed_under_concurrent_cascade() -> Result<()> 
     Ok(())
 }
 
-/// The loop-rollup variant of the window: a sibling instance's completion runs
-/// `check_loop_completion` while the failing instance sits inside its retry
-/// UPDATE. Under the old failed-then-reset code the rollup saw every instance
-/// terminal with one `failed`, and marked the placeholder failed.
+/// The loop-rollup variant of the window: a cascade runs the loop rollup (R6)
+/// while the failing instance sits inside its retry UPDATE. Under the old
+/// failed-then-reset code the rollup saw every instance terminal with one
+/// `failed`, and marked the placeholder failed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
     use stroem_common::duration::HumanDuration;
@@ -22290,7 +22290,7 @@ async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
     await_retry_gate_blocked(&pool).await?;
 
     // The sibling instance's rollup runs while `x[0]`'s failure is in flight.
-    stroem_server::job_creator::check_loop_completion(&pool, job_id, "x[1]", &task).await?;
+    stroem_server::cascade::execute(&pool, job_id, &task, Some(&workspace)).await?;
 
     sqlx::query("SELECT pg_advisory_unlock(4242, 1)")
         .execute(&mut *gate)
