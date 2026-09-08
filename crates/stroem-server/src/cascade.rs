@@ -1579,6 +1579,112 @@ mod tests {
         assert_eq!(names(&plan), ["rollup-ok:x", "promote:after"]);
     }
 
+    /// P0 runs before the context that P1's `when` templates are rendered
+    /// against, so even a root step that does not depend on the loop sees the
+    /// rollup output in the same `run`.
+    #[test]
+    fn independent_root_when_sees_loop_rollup_in_same_run() {
+        let t = task(vec![("x", fs(&[])), ("r", fs(&[]))]);
+        let rows = vec![
+            placeholder("x", "running", "[1]"),
+            instance("x", 0, "completed", Some(json!(5))),
+            row_when("r", "pending", "{{ x.output[0] == 5 }}"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["rollup-ok:x", "promote:r"]);
+    }
+
+    /// Instances inherit the placeholder's retry *configuration*. They never
+    /// inherit its spent budget: `NewJobStep` has no `retry_attempt` field, so
+    /// every inserted row starts at the column default of 0 (asserted against a
+    /// real database in `cascade_apply_test`).
+    #[test]
+    fn instances_start_at_retry_attempt_zero() {
+        let t = task(vec![("x", fs(&[]))]);
+        let mut ph = placeholder("x", "pending", "[\"a\",\"b\"]");
+        ph.retry_attempt = 3;
+        ph.max_retries = Some(2);
+        ph.retry_backoff_secs = Some(7);
+        ph.retry_strategy = Some("exponential".to_string());
+        ph.retry_jitter = true;
+        let plan = run(&t, &job(None), &[ph], Some(&ws())).unwrap();
+        let Change::Expand { instances, .. } = &plan.changes[0] else {
+            panic!("expected an Expand, got {:?}", plan.changes[0]);
+        };
+        assert_eq!(instances.len(), 2);
+        for inst in instances {
+            assert_eq!(inst.max_retries, Some(2));
+            assert_eq!(inst.retry_backoff_secs, Some(7));
+            assert_eq!(inst.retry_strategy.as_deref(), Some("exponential"));
+            assert!(inst.retry_jitter);
+        }
+    }
+
+    /// A cancelled instance stops a sequential loop the way a failed one does
+    /// (R5 failure precedence), but it does not make the loop fail: R6 sees no
+    /// `failed` instance and rolls up completed, with `null` for every instance
+    /// that produced no output.
+    #[test]
+    fn sequential_cancelled_middle_without_cof_skips_rest_then_rolls_up_completed() {
+        let t = task(vec![("x", fs_seq(&[]))]);
+        let rows = vec![
+            placeholder("x", "running", "[1,2,3]"),
+            instance("x", 0, "completed", Some(json!("a"))),
+            instance("x", 1, "cancelled", None),
+            instance("x", 2, "pending", None),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["skip:x[2]", "rollup-ok:x"]);
+        let Change::Rollup {
+            outcome: RollupOutcome::Completed(out),
+            ..
+        } = &plan.changes[1]
+        else {
+            panic!("expected a completed rollup, got {:?}", plan.changes[1]);
+        };
+        assert_eq!(out, &json!(["a", null, null]));
+    }
+
+    /// A placeholder whose name is absent from the flow has no `sequential` and
+    /// no `continue_on_failure` to read, so R6 defaults both to false and a
+    /// failed instance fails the loop.
+    #[test]
+    fn missing_flow_placeholder_rolls_up_failed_without_cof() {
+        let t = task(vec![]);
+        let rows = vec![
+            placeholder("x", "running", "[1,2]"),
+            instance("x", 0, "completed", Some(json!("a"))),
+            instance("x", 1, "failed", None),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["rollup-fail:x"]);
+    }
+
+    /// A 300-deep chain behind a failed root cascade-skips entirely in one
+    /// `run`, well inside the pass bound.
+    #[test]
+    fn long_cascade_skip_chain_converges() {
+        const N: usize = 300;
+        let mut flow = vec![("root".to_string(), fs(&[]))];
+        let mut rows = vec![row("root", "failed")];
+        for i in 0..N {
+            let prev = if i == 0 {
+                "root".to_string()
+            } else {
+                format!("s{}", i - 1)
+            };
+            flow.push((format!("s{i}"), fs(&[prev.as_str()])));
+            rows.push(row(&format!("s{i}"), "pending"));
+        }
+        let t = task_owned(flow);
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(plan.changes.len(), N, "one Skip per pending step");
+        let s = final_statuses(&plan, &rows);
+        for i in 0..N {
+            assert_eq!(s[&format!("s{i}")], "skipped", "s{i}");
+        }
+    }
+
     // ── termination / idempotency / context ──────────────────────────
 
     #[test]

@@ -137,6 +137,10 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
             placeholder(job_id, "p", "pending"),
             placeholder(job_id, "q", "running"),
             instance(job_id, "q", 0, "completed"),
+            placeholder(job_id, "r", "pending"),
+            instance(job_id, "r", 0, "completed"),
+            placeholder(job_id, "f", "running"),
+            instance(job_id, "f", 0, "failed"),
         ],
     )
     .await?;
@@ -156,6 +160,13 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
                 placeholder: "q".into(),
                 outcome: RollupOutcome::Completed(json!([1])),
             },
+            Change::Adopt {
+                placeholder: "r".into(),
+            },
+            Change::Rollup {
+                placeholder: "f".into(),
+                outcome: RollupOutcome::Failed("for_each loop failed: instances [0] failed".into()),
+            },
         ],
     };
     let mut tx = pool.begin().await?;
@@ -165,7 +176,8 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
     assert_eq!(applied.skipped, 1);
     assert_eq!(applied.failed, 1);
     assert_eq!(applied.expanded, 1);
-    assert_eq!(applied.rolled_up, 1);
+    assert_eq!(applied.adopted, 1);
+    assert_eq!(applied.rolled_up, 2);
 
     let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let by = |n: &str| rows.iter().find(|r| r.step_name == n).unwrap();
@@ -190,6 +202,16 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
     assert_eq!(by("q").status, "completed");
     assert_eq!(by("q").output, Some(json!([1])));
     assert!(by("q").completed_at.is_some());
+    assert_eq!(by("r").status, "running");
+    assert!(by("r").started_at.is_some(), "Adopt sets started_at");
+    assert_eq!(by("f").status, "failed");
+    assert_eq!(
+        by("f").error_message.as_deref(),
+        Some("for_each loop failed: instances [0] failed"),
+        "a failed rollup records the error"
+    );
+    assert!(by("f").completed_at.is_some());
+    assert_eq!(by("f").output, None, "a failed rollup leaves output alone");
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(
         job.status, "running",
