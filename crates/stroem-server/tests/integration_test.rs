@@ -20082,6 +20082,99 @@ async fn test_approval_reject_fails_job() -> Result<()> {
     Ok(())
 }
 
+/// Rejecting an approval step that still has retry budget must log the
+/// rejection BEFORE the retry line. The reject handler therefore calls
+/// `fail_or_retry` directly and appends the `[retry]` line itself, rather than
+/// going through `job_recovery::fail_step` (which logs the retry inside the
+/// failure write, i.e. before anything said the step was rejected).
+#[tokio::test]
+async fn test_approval_reject_logs_rejection_before_retry() -> Result<()> {
+    let (router, pool, _tmp, _container) =
+        setup_with_workspace(test_workspace_with_approval()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/deploy-flow/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let _worker_id = register_test_worker(&pool).await;
+    let resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/greet/complete", job_id),
+            json!({"output": {"result": "greeted"}}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Give the suspended approval step a retry budget so rejection schedules a retry.
+    sqlx::query(
+        "UPDATE job_step SET max_retries = 2, retry_backoff_secs = 0, retry_strategy = 'fixed' \
+         WHERE job_id = $1 AND step_name = 'review'",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            &format!("/api/jobs/{}/steps/review/approve", job_id),
+            json!({"approved": false, "rejection_reason": "Plan looks wrong"}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let review = steps.iter().find(|s| s.step_name == "review").unwrap();
+    assert_eq!(
+        review.status, "ready",
+        "a rejected approval with retry budget goes back to ready, never failed"
+    );
+
+    // Server log lines are `step: "_server"` entries in the job's JSONL log.
+    let resp = router
+        .oneshot(api_get(&format!("/api/jobs/{}/logs", job_id)))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let lines: Vec<String> = body["logs"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["line"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+
+    let rejected_at = lines
+        .iter()
+        .position(|l| l.starts_with("[approval]") && l.contains("rejected"))
+        .expect("rejection line must be logged");
+    let retry_at = lines
+        .iter()
+        .position(|l| l.starts_with("[retry]"))
+        .expect("retry line must be logged");
+    assert!(
+        rejected_at < retry_at,
+        "rejection must be logged before the retry line, got {:?}",
+        lines
+    );
+    Ok(())
+}
+
 // ─── Test: approving a non-suspended step returns 409 ────────────────────────
 
 #[tokio::test]

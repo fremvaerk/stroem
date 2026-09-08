@@ -1072,16 +1072,21 @@ pub async fn approve_step(
         };
 
         // Atomic reject — only succeeds if the step is still suspended; decides
-        // retry in the same transaction. A rejected approval with retry budget
-        // returns to `ready` (as today) and is re-suspended only by a later
-        // orchestration of this job (`handle_approval_steps`); if no other step
-        // completes, it stays `ready` — see TODO.md "approval steps with retry".
-        let outcome = crate::job_recovery::fail_step(
-            &state,
+        // retry in the same transaction. Called directly rather than through
+        // `job_recovery::fail_step` so the `[approval] ... rejected` line is
+        // logged BEFORE any `[retry]` line: `fail_step` appends the retry line
+        // itself, which would read as a retry of a step nothing had yet
+        // rejected. A rejected approval with retry budget returns to `ready`
+        // and is re-suspended only by a later orchestration of this job
+        // (`handle_approval_steps`); if no other step completes, it stays
+        // `ready` — see TODO.md "approval steps with retry".
+        let outcome = JobStepRepo::fail_or_retry(
+            &state.pool,
             job_id,
             &step_name,
             &reason,
             &[StepStatus::Suspended],
+            crate::job_recovery::compute_retry_delay,
         )
         .await
         .context("reject suspended step")?;
@@ -1101,6 +1106,10 @@ pub async fn approve_step(
                 ),
             )
             .await;
+
+        if let Some(line) = crate::job_recovery::retry_log_line(&step_name, &outcome) {
+            state.append_server_log(job_id, &line).await;
+        }
 
         if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
             if let Err(e) =
