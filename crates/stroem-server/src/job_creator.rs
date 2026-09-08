@@ -1178,7 +1178,7 @@ pub(crate) fn parse_for_each_items(
 }
 
 /// Render a Tera template and parse the result as a JSON array.
-pub(crate) fn render_for_each_template(
+fn render_for_each_template(
     template: &str,
     render_ctx: &serde_json::Value,
 ) -> Result<Vec<serde_json::Value>> {

@@ -655,13 +655,17 @@ mod tests {
         }
     }
     fn task(flow: Vec<(&str, FlowStep)>) -> TaskDef {
+        task_owned(flow.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+    /// Same as [`task`], for generated flows whose names are owned `String`s.
+    fn task_owned(flow: Vec<(String, FlowStep)>) -> TaskDef {
         TaskDef {
             name: None,
             description: None,
             mode: "distributed".to_string(),
             folder: None,
             input: HashMap::new(),
-            flow: flow.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            flow: flow.into_iter().collect(),
             timeout: None,
             retry: None,
             on_success: vec![],
@@ -892,11 +896,15 @@ mod tests {
 
     #[test]
     fn when_in_p1_does_not_see_a_skip_from_the_same_phase_until_next_pass() {
-        // `a` and `b` are both roots; b's when references a. In P1 both are
-        // evaluated on the phase-start snapshot: a is skipped, but b sees no `a`
-        // (undefined → error would fail b). Then in pass 2, b sees a as skipped.
-        // Use a template that is an error when a is undefined and truthy when
-        // a is defined: `{{ a.output }}` renders "" for skipped a (null) → falsy.
+        // `a` and `b` are both roots; b's `when` references a. P1 evaluates both
+        // against the SAME phase-start snapshot, where `a` is still pending and so
+        // absent from the render context. b therefore takes the `else` branch and
+        // errors on the undefined `a`, which fails it in pass 1 — a is skipped by
+        // the same phase, but b never sees that skip, because a failed step is
+        // terminal and is never re-evaluated in a later pass.
+        //
+        // This is the phase model's defining trade-off: within one phase, decisions
+        // are made on one consistent snapshot; only the NEXT pass observes them.
         let t = task(vec![("a", fs(&[])), ("b", fs(&[]))]);
         let rows = vec![
             row_when("a", "pending", "false"),
@@ -1106,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn rollup_completed_orders_by_index_with_null_gaps_and_cancelled_ok() {
+    fn rollup_completed_orders_by_index_with_null_for_missing_output_and_cancelled_ok() {
         let t = task(vec![("x", fs(&[]))]);
         let rows = vec![
             placeholder("x", "running", "[1,2,3]"),
@@ -1122,6 +1130,35 @@ mod tests {
             }] => {
                 assert_eq!(placeholder, "x");
                 assert_eq!(out, &json!(["a", null, "c"]));
+            }
+            other => panic!(
+                "unexpected plan {:?}",
+                names(&Plan {
+                    changes: other.to_vec()
+                })
+            ),
+        }
+    }
+
+    #[test]
+    fn rollup_completed_has_one_element_per_existing_instance() {
+        // The rollup array is built from the instance ROWS, not from loop_total:
+        // a missing index is not a null hole, it is simply absent. Instances [0]
+        // and [2] exist (loop_total says 3) → a two-element array.
+        let t = task(vec![("x", fs(&[]))]);
+        let rows = vec![
+            placeholder("x", "running", "[1,2,3]"),
+            instance("x", 0, "completed", Some(json!("a"))),
+            instance("x", 2, "completed", Some(json!("c"))),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        match &plan.changes[..] {
+            [Change::Rollup {
+                placeholder,
+                outcome: RollupOutcome::Completed(out),
+            }] => {
+                assert_eq!(placeholder, "x");
+                assert_eq!(out, &json!(["a", "c"]), "no null inserted for absent [1]");
             }
             other => panic!(
                 "unexpected plan {:?}",
@@ -1223,7 +1260,7 @@ mod tests {
     // ── termination / idempotency / context ──────────────────────────
 
     #[test]
-    fn fixpoint_is_idempotent_and_terminates_on_a_wide_dag() {
+    fn fixpoint_is_idempotent_on_a_long_linear_chain() {
         let mut flow = vec![("root", fs(&[]))];
         let mut rows = vec![row("root", "completed")];
         for i in 0..300 {
@@ -1252,6 +1289,43 @@ mod tests {
     }
 
     #[test]
+    fn fixpoint_promotes_a_wide_fan_out_in_one_pass() {
+        // One completed root with 200 independent dependents: every one of them
+        // is promotable against the same snapshot, so a single pass clears them.
+        const WIDTH: usize = 200;
+        let mut flow = vec![("root".to_string(), fs(&[]))];
+        let mut rows = vec![row("root", "completed")];
+        for i in 0..WIDTH {
+            let name = format!("s{i}");
+            flow.push((name.clone(), fs(&["root"])));
+            rows.push(row(&name, "pending"));
+        }
+        let t = task_owned(flow);
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+
+        assert_eq!(plan.changes.len(), WIDTH, "every dependent is promoted");
+        let mut promoted: Vec<String> = names(&plan);
+        promoted.sort();
+        let mut expected: Vec<String> = (0..WIDTH).map(|i| format!("promote:s{i}")).collect();
+        expected.sort();
+        assert_eq!(promoted, expected);
+
+        let s = final_statuses(&plan, &rows);
+        assert!(
+            (0..WIDTH).all(|i| s[&format!("s{i}")] == "ready"),
+            "all dependents end ready"
+        );
+
+        // And the result is a fixpoint: re-running on the promoted snapshot is a no-op.
+        let mut snap = rows.clone();
+        for r in snap.iter_mut().skip(1) {
+            r.status = "ready".to_string();
+        }
+        let again = run(&t, &job(None), &snap, Some(&ws())).unwrap();
+        assert!(again.changes.is_empty());
+    }
+
+    #[test]
     fn job_input_and_secret_reach_when_templates() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&["a"]))]);
         let rows = vec![
@@ -1262,6 +1336,27 @@ mod tests {
         assert_eq!(names(&plan), ["promote:b"]);
         let plan = run(&t, &job(Some(json!({"fast": false}))), &rows, Some(&ws())).unwrap();
         assert_eq!(names(&plan), ["skip:b"]);
+
+        // `secret` only reaches the context when the workspace actually has one:
+        // build_step_render_context omits the key for an empty secrets map.
+        let mut with_secret = ws();
+        with_secret.secrets.insert("API_KEY".into(), json!("k"));
+        let rows = vec![
+            row("a", "completed"),
+            row_when("b", "pending", "{{ secret.API_KEY == \"k\" }}"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&with_secret)).unwrap();
+        assert_eq!(
+            names(&plan),
+            ["promote:b"],
+            "secret reached the when template"
+        );
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(
+            names(&plan),
+            ["fail:b"],
+            "without the secret in the config the key is undefined"
+        );
     }
 
     /// Mirrors orchestrator_test::test_convergence_without_continue_on_failure.
