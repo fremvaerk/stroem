@@ -136,6 +136,58 @@ fn meta_from_job(job: &JobRow) -> JobLogMeta {
     }
 }
 
+/// The server-log line for a `fail_or_retry` outcome, or `None` when there is
+/// nothing to log (no retry configured, or nothing was applied).
+pub(crate) fn retry_log_line(step_name: &str, outcome: &stroem_db::FailOutcome) -> Option<String> {
+    use stroem_db::FailOutcome::*;
+    match outcome {
+        RetryScheduled {
+            attempt,
+            max,
+            delay_secs,
+        } => Some(step_retry_message(
+            step_name,
+            attempt - 1,
+            *max,
+            *delay_secs,
+        )),
+        Failed {
+            attempt,
+            max: Some(max),
+        } => Some(step_retries_exhausted_message(step_name, *attempt, *max)),
+        Failed { max: None, .. } | NotApplied => None,
+    }
+}
+
+/// Record a step failure, deciding its retry atomically (see
+/// `JobStepRepo::fail_or_retry`), and append the matching server-log line.
+///
+/// Does NOT orchestrate. Callers run `orchestrate_after_step` when the outcome is
+/// `Failed` and do nothing when it is `RetryScheduled` — the step is `ready` again.
+#[allow(dead_code)] // wired in Task 3
+pub(crate) async fn fail_step(
+    state: &AppState,
+    job_id: Uuid,
+    step_name: &str,
+    error: &str,
+    expected: &[StepStatus],
+) -> Result<stroem_db::FailOutcome> {
+    let outcome = JobStepRepo::fail_or_retry(
+        &state.pool,
+        job_id,
+        step_name,
+        error,
+        expected,
+        compute_retry_delay,
+    )
+    .await
+    .with_context(|| format!("fail_or_retry for step '{}' of job {}", step_name, job_id))?;
+    if let Some(line) = retry_log_line(step_name, &outcome) {
+        state.append_server_log(job_id, &line).await;
+    }
+    Ok(outcome)
+}
+
 /// After a step reaches terminal state, run the orchestrator for its job,
 /// handle task steps, and propagate to parent if this is a child job.
 ///
@@ -1047,7 +1099,7 @@ fn extract_first_failure(steps: &[JobStepRow]) -> String {
 /// retries only (`RetryConfig.max_attempts`), so both sides of the slash are
 /// converted to execution counts: `retry_attempt + 1` of `max_retries + 1`.
 /// This matches the UI step timeline (`attempt N/M`).
-fn step_retry_message(
+pub(crate) fn step_retry_message(
     step_name: &str,
     retry_attempt: i32,
     max_retries: i32,
@@ -1063,7 +1115,11 @@ fn step_retry_message(
 }
 
 /// Server-log line for the final failed execution of a step (no retries left).
-fn step_retries_exhausted_message(step_name: &str, retry_attempt: i32, max_retries: i32) -> String {
+pub(crate) fn step_retries_exhausted_message(
+    step_name: &str,
+    retry_attempt: i32,
+    max_retries: i32,
+) -> String {
     format!(
         "[retry] Step '{}' retries exhausted ({}/{})",
         step_name,
@@ -1089,7 +1145,7 @@ fn task_retry_message(
 }
 
 /// Compute the retry delay in seconds for a step based on its retry config.
-fn compute_retry_delay(step: &JobStepRow) -> u64 {
+pub(crate) fn compute_retry_delay(step: &JobStepRow) -> u64 {
     let base_secs = step.retry_backoff_secs.unwrap_or(30) as u64;
     let strategy = step.retry_strategy.as_deref().unwrap_or("fixed");
     let attempt = step.retry_attempt.max(0) as u32;
@@ -1235,6 +1291,35 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
+
+    /// `fail_step` passes the PRE-increment attempt to `step_retry_message`
+    /// (the outcome carries the post-increment one), so the log line keeps
+    /// today's "attempt N/M" arithmetic.
+    #[test]
+    fn fail_step_log_line_uses_pre_increment_attempt() {
+        let outcome = stroem_db::FailOutcome::RetryScheduled {
+            attempt: 1,
+            max: 2,
+            delay_secs: 7,
+        };
+        let line = retry_log_line("s", &outcome).unwrap();
+        assert_eq!(line, "[retry] Step 's' attempt 1/3 failed, retrying in 7s");
+
+        let outcome = stroem_db::FailOutcome::Failed {
+            attempt: 2,
+            max: Some(2),
+        };
+        let line = retry_log_line("s", &outcome).unwrap();
+        assert_eq!(line, "[retry] Step 's' retries exhausted (3/3)");
+
+        let outcome = stroem_db::FailOutcome::Failed {
+            attempt: 0,
+            max: None,
+        };
+        assert!(retry_log_line("s", &outcome).is_none());
+
+        assert!(retry_log_line("s", &stroem_db::FailOutcome::NotApplied).is_none());
+    }
 
     // `max_retries` stores RetryConfig.max_attempts, which counts retries and
     // excludes the initial execution: max 2 ⇒ 3 executions. Every message
