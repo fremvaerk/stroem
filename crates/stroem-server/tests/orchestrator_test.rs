@@ -153,6 +153,14 @@ fn flow_step_cof(depends_on: Vec<&str>) -> FlowStep {
     }
 }
 
+/// Build a `FlowStep` with `continue_when_skipped = true`.
+fn flow_step_cws(depends_on: Vec<&str>) -> FlowStep {
+    FlowStep {
+        continue_when_skipped: true,
+        ..flow_step(depends_on)
+    }
+}
+
 /// Build a `FlowStep` with a `when` condition expression.
 fn flow_step_when(depends_on: Vec<&str>, when_expr: &str) -> FlowStep {
     FlowStep {
@@ -1948,5 +1956,159 @@ async fn test_adopts_partially_expanded_placeholder() -> Result<()> {
         3,
         "no re-expansion"
     );
+    Ok(())
+}
+
+// ─── continue_when_skipped (spec 2026-09-09) ─────────────────────────────────
+
+/// A → B (`when` false) → C (`continue_when_skipped`): C runs and the job
+/// completes once C completes.
+#[tokio::test]
+async fn test_continue_when_skipped_runs_after_condition_skip() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert(
+        "b".to_string(),
+        flow_step_when(vec!["a"], "{{ a.output.go }}"),
+    );
+    flow.insert("c".to_string(), flow_step_cws(vec!["b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step_when(job_id, "b", "pending", "{{ a.output.go }}"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"go": false}))).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
+
+    let statuses = step_statuses(&pool, job_id).await;
+    assert_eq!(statuses["b"], "skipped");
+    assert_eq!(
+        statuses["c"], "ready",
+        "C runs although its only dependency was skipped"
+    );
+    let rows: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(rows["b"].skip_reason.as_deref(), Some("condition"));
+    assert!(rows["c"].skip_reason.is_none());
+
+    JobStepRepo::mark_completed(&pool, job_id, "c", Some(json!({"ok": true}))).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+    Ok(())
+}
+
+/// A fails → B skipped unreachable → C (`continue_when_skipped`) is ALSO
+/// skipped unreachable; the job fails.
+#[tokio::test]
+async fn test_continue_when_skipped_does_not_run_after_upstream_failure() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("a".to_string(), flow_step(vec![]));
+    flow.insert("b".to_string(), flow_step(vec!["a"]));
+    flow.insert("c".to_string(), flow_step_cws(vec!["b"]));
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "ready"),
+            step(job_id, "b", "pending"),
+            step(job_id, "c", "pending"),
+        ],
+    )
+    .await?;
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
+
+    let rows: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(rows["b"].status, "skipped");
+    assert_eq!(rows["b"].skip_reason.as_deref(), Some("unreachable"));
+    assert_eq!(rows["c"].status, "skipped");
+    assert_eq!(rows["c"].skip_reason.as_deref(), Some("unreachable"));
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "failed");
+    Ok(())
+}
+
+/// Writer contract (spec §11.2): after a cascade that produces every kind of
+/// skip, no skipped row is left without a reason.
+#[tokio::test]
+async fn test_every_skipped_row_has_a_reason() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let mut flow = HashMap::new();
+    flow.insert("x".to_string(), flow_step(vec![]));
+    flow.insert("cond".to_string(), flow_step_when(vec!["x"], "false"));
+    flow.insert("casc".to_string(), flow_step(vec!["cond"]));
+    flow.insert("f".to_string(), flow_step(vec![]));
+    flow.insert("unreach".to_string(), flow_step(vec!["f"]));
+    flow.insert(
+        "empty".to_string(),
+        FlowStep {
+            for_each: Some(json!([])),
+            ..flow_step(vec!["x"])
+        },
+    );
+    let task = make_task(flow);
+
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "x", "ready"),
+            step_when(job_id, "cond", "pending", "false"),
+            step(job_id, "casc", "pending"),
+            step(job_id, "f", "ready"),
+            step(job_id, "unreach", "pending"),
+            step_for_each(job_id, "empty", "pending", "[]"),
+        ],
+    )
+    .await?;
+    let ws = WorkspaceConfig::new();
+
+    JobStepRepo::mark_completed(&pool, job_id, "x", None).await?;
+    JobStepRepo::mark_failed(&pool, job_id, "f", "boom").await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
+
+    let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let reasons: HashMap<_, _> = rows
+        .iter()
+        .filter(|s| s.status == "skipped")
+        .map(|s| (s.step_name.clone(), s.skip_reason.clone()))
+        .collect();
+    assert_eq!(reasons["cond"].as_deref(), Some("condition"));
+    assert_eq!(reasons["casc"].as_deref(), Some("cascade"));
+    assert_eq!(reasons["unreach"].as_deref(), Some("unreachable"));
+    assert_eq!(reasons["empty"].as_deref(), Some("empty"));
+    let missing: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM job_step WHERE job_id = $1 AND status = 'skipped' AND skip_reason IS NULL",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(missing, 0);
     Ok(())
 }

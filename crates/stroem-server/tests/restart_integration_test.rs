@@ -542,6 +542,11 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         .collect();
     assert_eq!(by["c"].status, "skipped");
     assert!(!by["c"].carried_over);
+    // Spec §5: a carried skipped row keeps its reason; the freshly cascaded
+    // `c` is unreachable because its only dependency `b` was unreachable.
+    assert!(by["b"].carried_over);
+    assert_eq!(by["b"].skip_reason.as_deref(), Some("unreachable"));
+    assert_eq!(by["c"].skip_reason.as_deref(), Some("unreachable"));
     Ok(())
 }
 
