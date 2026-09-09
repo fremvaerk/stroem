@@ -59,7 +59,9 @@ shape and each carrying its own regression test (§9):
 - D2 settlement write predicated on the row still being non-terminal (§7);
 - D3 task-level retry persisted at creation and decided on every terminal path (§8.1);
 - D4 single-action hook jobs built through the shared step builder and finalized
-  through the module (§8.2).
+  through the module (§8.2);
+- D5 a `fail_or_retry` DB error for one step no longer aborts the whole recovery
+  sweep tick — `recovery.rs` logs it against that job and moves on to the next step.
 
 The `Option<&WorkspaceConfig>` mode of `on_step_completed` is removed (§5.2).
 
@@ -337,15 +339,24 @@ today.
 
 Inside step 3, a task-dispatch or approval-dispatch error is logged, written to the
 job's log, and does not abort. Today the parent leg of `propagate_to_parent` returns the
-task-dispatch error with `?`, which skips the parent's drain, claim and terminal
-actions; since the claim would then never be taken by anyone, those actions are lost.
+task-dispatch error with `?`.
 This `?` abort fired only on errors that ESCAPE `handle_task_steps` entirely (a step row
 missing its `action_spec` or `task` field, or a DB error) — ordinary dispatch failures
 such as an unknown task name were already caught inside `handle_task_steps_pass` via
 `fail_task_step` and never propagated as `Err`, so D1's scope is narrower than "any
 task-dispatch failure."
-Regression test: a parent whose `type: task` step dispatch fails (unknown task name)
-still settles, fires its `on_error` hook and increments the completion counter once.
+What that abort actually cost is the REST of the advance for that call — reconcile,
+approval dispatch and the `on_suspended` hooks — and not terminal handling, which was
+never reachable at that point: the job cannot be terminal while the step whose dispatch
+errored is still non-terminal, so the drain, claim and terminal actions were not due on
+that pass anyway.
+Regression tests: `test_parent_dispatch_failure_after_child_settles_still_runs_terminal_actions`
+(a parent whose `type: task` step names an unknown task still settles, fires its
+`on_error` hook and counts once) and
+`test_parent_dispatch_error_escapes_but_approvals_still_dispatch` (a `type: task` step
+row with a NULL `action_spec` makes `handle_task_steps` return `Err`; the error is
+logged to the parent's job log and the approval sibling promoted by the same cascade
+still reaches `suspended`).
 
 ### 6.5 `propagate.rs`
 

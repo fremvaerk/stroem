@@ -26727,3 +26727,165 @@ async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_ac
 
     Ok(())
 }
+
+/// D1 (spec §6.4), the escaping-error half. An unknown task name is caught
+/// *inside* `handle_task_steps_pass` by `fail_task_step`, so it never reached
+/// the old parent-leg abort. The only error that ESCAPES `handle_task_steps`
+/// is a malformed `type: task` step row — `dispatch.rs`'s
+/// `.context("Missing action_spec for task step")?`. Before the settlement
+/// module that `?` aborted the whole parent leg, skipping the REST of
+/// `advance` step 3: reconcile, approval dispatch and `on_suspended` hooks.
+/// (Terminal handling was not reachable at that point — the job cannot be
+/// terminal while the erroring step is still `ready`.)
+///
+/// Here the parent has `first` (a `type: task` step), and two steps that go
+/// ready together when it completes: `broken` (its `action_spec` nulled out
+/// behind the creator's back) and `gate` (an approval). The dispatch error
+/// must be logged and swallowed, and `gate` must still reach `suspended`.
+#[tokio::test]
+async fn test_parent_dispatch_error_escapes_but_approvals_still_dispatch() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+    let greet_action = workspace.actions["greet"].clone();
+
+    // Approval action for the sibling step that must still be dispatched.
+    workspace.actions.insert(
+        "gate-action".to_string(),
+        ActionDef {
+            action_type: "approval".to_string(),
+            script: None,
+            message: Some("please approve".to_string()),
+            ..greet_action
+        },
+    );
+
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "first".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    // A well-formed `type: task` step at creation; its `action_spec` is nulled
+    // out below, which is the only way to make `handle_task_steps` return Err.
+    flow.insert(
+        "broken".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec!["first".to_string()],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    flow.insert(
+        "gate".to_string(),
+        FlowStep {
+            action: "gate-action".to_string(),
+            depends_on: vec!["first".to_string()],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace
+        .tasks
+        .insert("parent".to_string(), TaskDef { flow, ..base_task });
+
+    let (state, pool, _tmp, _container) = setup_state_with_workspace(workspace).await?;
+    let router = build_router(state.clone(), CancellationToken::new());
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // Corrupt the pending `broken` row: a `type: task` step with no
+    // `action_spec` makes `dispatch.rs` bail with `?` once it goes ready.
+    let nulled = sqlx::query(
+        "UPDATE job_step SET action_spec = NULL WHERE job_id = $1 AND step_name = 'broken'",
+    )
+    .bind(parent_id)
+    .execute(&pool)
+    .await?
+    .rows_affected();
+    assert_eq!(
+        nulled, 1,
+        "the `broken` step row must exist to be corrupted"
+    );
+
+    // `first` dispatched a child at creation. Complete the child's only step
+    // through the worker API: child settles → propagation → parent `advance`.
+    let children = JobRepo::get_child_jobs(&pool, parent_id).await?;
+    assert_eq!(children.len(), 1, "`first` must dispatch exactly one child");
+    let child_id = children[0].job_id;
+
+    let worker_id = register_test_worker(&pool).await;
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed = body_json(response).await;
+    assert_eq!(claimed["job_id"].as_str().unwrap(), child_id.to_string());
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/clean/complete", child_id),
+            json!({"output": {"greeting": "hi"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The dispatch error is swallowed and recorded on the parent's log view.
+    let parent = JobRepo::get(&pool, parent_id).await?.unwrap();
+    let meta = stroem_server::log_storage::JobLogMeta {
+        workspace: parent.workspace.clone(),
+        task_name: parent.task_name.clone(),
+        created_at: parent.created_at,
+    };
+    let log = state.log_storage.get_log(parent_id, &meta, false).await?;
+    assert!(
+        log.contains("[orchestration] Failed to handle task steps:"),
+        "the escaping dispatch error must be logged to the parent job: {log}"
+    );
+
+    // …and the rest of advance step 3 still ran: the approval sibling that
+    // went ready in the same cascade is dispatched.
+    let steps: HashMap<String, _> = JobStepRepo::get_steps_for_job(&pool, parent_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(steps["first"].status, "completed");
+    assert_eq!(
+        steps["gate"].status, "suspended",
+        "approval dispatch must survive the dispatch error: {:?}",
+        steps["gate"]
+    );
+
+    // The parent is not terminal here, so terminal handling was never in play.
+    assert_eq!(
+        parent.status, "running",
+        "the parent stays running with a ready `broken` step and a suspended gate"
+    );
+
+    Ok(())
+}

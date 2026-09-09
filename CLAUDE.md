@@ -248,7 +248,11 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - **`advance`** — the one body (`pub`, so tests can drive a job from an arbitrary row state; production code goes through the entries above) — moves a job as far as its rows allow, once per call (not a loop; the next step completion, approval or recovery tick re-enters):
   1. If the job row is non-terminal: `cascade_and_settle` → dispatch newly-promoted `type: task` steps → `reconcile` (descendants that settled at creation under a still-`running` parent step) → dispatch newly-promoted `type: approval` steps and fire their `on_suspended` hooks.
   2. If the job row is terminal: **drain** (`JobStepRepo::has_live_steps`; a live step → stop here) → clear the cancel signal → **claim** (the exactly-once CAS) → build the `TerminalPlan` and run it in order: **propagate** to the parent step → **retry-or-hooks** (task-level retry job if the plan allows it, else `fire_hooks`) → notify sync waiters → close and archive the log.
-  An unresolvable workspace or task does not skip drain/claim/propagation — only retry, hooks, notify and archive are skipped (matches the old `handle_job_terminal`; pinned by `metrics_test::cascading_cancel_counts_parent_exactly_once`).
+  An unresolvable workspace or task does not skip drain/claim/propagation — only retry, hooks, notify and archive are skipped (matches the old `handle_job_terminal`; pinned by `metrics_test::cascading_cancel_counts_parent_exactly_once`). The workspace-missing log line has two wordings, both inherited: a terminal job gets the old terminal path's `… not found for terminal job … — skipping hooks and S3 upload` warning, a non-terminal one the old `orchestrate_after_step` error.
+
+- **A dispatch error inside step 1 is logged, not propagated** (D1). Only an error that ESCAPES `handle_task_steps` reaches this — a `type: task` step row missing its `action_spec`, or a DB error; an unknown task name is already caught inside `handle_task_steps_pass` by `fail_task_step`. Before the settlement module the parent leg of propagation returned it with `?`, which skipped the REST of that advance — reconcile, approval dispatch, `on_suspended` hooks. Terminal handling was never reachable there: the job cannot be terminal while the erroring step is still non-terminal. Regression tests: `test_parent_dispatch_failure_after_child_settles_still_runs_terminal_actions` and `test_parent_dispatch_error_escapes_but_approvals_still_dispatch`.
+
+- **Retry fall-through fires hooks.** `TerminalPlan.hooks` is `HookKind::None` whenever `plan.retry` is true, so `advance` re-derives the kind with `terminal::hook_kind(&job.status)` when `retry::create_retry_job` returns `Ok(None)` or `Err` — the failure is final after all and `on_error` must fire. `hooks::fire_hooks` (the 4-arg wrapper, for callers holding only a row) uses `hook_kind` for the same reason.
 
 - **Drain before claim, and why**: a job row can be terminal while its workers still run (`JobRepo::cancel` stamps `cancelled` immediately). Without the gate the first worker to report would win the one-shot claim and `close_log` + archive while a sibling is still emitting; the later completion loses the claim and the archive is never refreshed. `clear_cancelled` sits behind the same gate so the cancellation signal stays visible until the workers acknowledge.
 
@@ -475,6 +479,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - Config: `heartbeat_timeout_secs` (120), `sweep_interval_secs` (60), `unmatched_step_timeout_secs` (30)
 - Data retention: optional `retention` section with `worker_hours`, `job_days`
 - Strategy: fail, don't retry — avoids non-idempotent side effects
+- A `fail_or_retry` DB error for one step is logged to that job and the sweep continues with the next step; before the settlement module it aborted the tick.
 - HA: gated on `state.leader.is_leader()`. Followers run the loop but skip sweeps.
 
 ### High Availability (multi-replica server)
