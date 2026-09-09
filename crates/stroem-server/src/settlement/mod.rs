@@ -276,7 +276,7 @@ impl Settlement {
         // - task-level hooks should fire regardless of how the task was invoked
         // - S3 upload is per-job (each child has its own log file)
         // - job_completion.notify() is a no-op when no sync waiters exist
-        terminal::run_terminal_actions(self, &job, workspace, task).await;
+        terminal::run_terminal_actions(self, &job, workspace, task, plan.hooks).await;
         Ok(())
     }
 
@@ -565,7 +565,13 @@ impl Settlement {
         JobRepo::mark_completed(&self.pool, job_id, output)
             .await
             .context("mark job completed")?;
-        self.advance(job_id).await
+        // The completion WRITE is the worker's contract and its failure must
+        // reach the worker as a 5xx; terminal handling is best-effort and only
+        // logged, as it was before the settlement module.
+        if let Err(e) = self.advance(job_id).await {
+            tracing::error!("Failed to handle job terminal state: {:#}", e);
+        }
+        Ok(())
     }
 }
 

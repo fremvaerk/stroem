@@ -1,3 +1,4 @@
+use super::terminal::{plan, HookKind};
 use super::Settlement;
 use anyhow::Context;
 use serde::Serialize;
@@ -161,19 +162,34 @@ async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
     depth
 }
 
-/// Fire hooks for a job that has reached a terminal state.
+/// Fire the hooks a terminal `job` owes, deriving the kind from its own row.
 ///
-/// - Jobs with `source_type = "hook"` never trigger further hooks (recursion guard).
-/// - Selects `on_success`, `on_error`, or `on_cancel` hooks based on job status.
-/// - Task-level hooks take priority; workspace-level hooks fire as fallback for top-level jobs only.
-/// - Each hook creates a new single-step job with `source_type = "hook"`.
-/// - Failures are logged but never affect the original job.
-#[tracing::instrument(skip(s, workspace_config, task))]
+/// Convenience wrapper over [`fire_hooks_of_kind`] for callers that hold a job
+/// row but no [`super::terminal::TerminalPlan`]. `advance` passes the plan's kind directly.
 pub async fn fire_hooks(
     s: &Settlement,
     workspace_config: &WorkspaceConfig,
     job: &stroem_db::JobRow,
     task: &TaskDef,
+) {
+    fire_hooks_of_kind(s, workspace_config, job, task, plan(job).hooks).await
+}
+
+/// Fire hooks for a job that has reached a terminal state, selecting the hook
+/// lists by the terminal plan's [`HookKind`] rather than by re-deriving them
+/// from the job status.
+///
+/// - Jobs with `source_type = "hook"` never trigger further hooks (recursion guard).
+/// - Task-level hooks take priority; workspace-level hooks fire as fallback for top-level jobs only.
+/// - Each hook creates a new single-step job with `source_type = "hook"`.
+/// - Failures are logged but never affect the original job.
+#[tracing::instrument(skip(s, workspace_config, task))]
+pub async fn fire_hooks_of_kind(
+    s: &Settlement,
+    workspace_config: &WorkspaceConfig,
+    job: &stroem_db::JobRow,
+    task: &TaskDef,
+    kind: HookKind,
 ) {
     // Recursion guard: hook jobs never trigger further hooks
     if job.source_type == SourceType::Hook.as_ref() {
@@ -181,11 +197,11 @@ pub async fn fire_hooks(
     }
 
     // Select task-level and workspace-level hooks for this event type
-    let (task_hooks, ws_hooks) = match job.status.parse::<JobStatus>().ok() {
-        Some(JobStatus::Completed) => (&task.on_success, &workspace_config.on_success),
-        Some(JobStatus::Failed) => (&task.on_error, &workspace_config.on_error),
-        Some(JobStatus::Cancelled) => (&task.on_cancel, &workspace_config.on_cancel),
-        _ => return,
+    let (task_hooks, ws_hooks) = match kind {
+        HookKind::Success => (&task.on_success, &workspace_config.on_success),
+        HookKind::Error => (&task.on_error, &workspace_config.on_error),
+        HookKind::Cancel => (&task.on_cancel, &workspace_config.on_cancel),
+        HookKind::None => return,
     };
 
     // Task hooks take priority. Workspace hooks are fallback for top-level jobs only.

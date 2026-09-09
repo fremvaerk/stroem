@@ -195,11 +195,14 @@ pub(super) async fn run_terminal_actions(
     job: &JobRow,
     workspace: &WorkspaceConfig,
     task: &TaskDef,
+    kind: HookKind,
 ) {
     let job_id = job.job_id;
 
-    // Fire hooks (best-effort)
-    hooks::fire_hooks(s, workspace, job, task).await;
+    // Fire hooks (best-effort). The kind comes from the plan, not from a
+    // second status match here; `HookKind::None` fires nothing, which is the
+    // `skipped` and retry-pending cases.
+    hooks::fire_hooks_of_kind(s, workspace, job, task, kind).await;
 
     // If a hook job failed, log it to the original job's server events
     if job.source_type == SourceType::Hook.as_ref() && job.status == JobStatus::Failed.as_ref() {

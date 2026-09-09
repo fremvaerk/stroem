@@ -1031,13 +1031,10 @@ pub async fn complete_job(
 ) -> Result<impl IntoResponse, AppError> {
     // Mark completed, then handle terminal state: S3 upload, parent
     // propagation, hooks
-    if let Err(e) = state
+    state
         .settlement()
         .worker_completed_job(job_id, req.output.map(into_exposed))
-        .await
-    {
-        tracing::error!("Failed to handle job terminal state: {:#}", e);
-    }
+        .await?;
 
     Ok(Json(json!({"status": "ok"})))
 }
