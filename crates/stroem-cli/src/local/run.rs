@@ -177,8 +177,12 @@ async fn run_dag(
                 }
             }
 
-            // Check all-deps-skipped cascade
-            if !step.depends_on.is_empty() && step.depends_on.iter().all(|d| skipped.contains(d)) {
+            // Check all-deps-skipped cascade (spec 2026-09-09 §2.5: the CLI
+            // never produces `unreachable`, so the flag alone decides)
+            if !step.depends_on.is_empty()
+                && !step.continue_when_skipped
+                && step.depends_on.iter().all(|d| skipped.contains(d))
+            {
                 eprintln!(
                     "--- Step: {} [SKIPPED] (all dependencies skipped) ---",
                     step_name
@@ -567,7 +571,7 @@ fn cascade_skip(
             if completed.contains(name) {
                 continue;
             }
-            if step.depends_on.is_empty() {
+            if step.depends_on.is_empty() || step.continue_when_skipped {
                 continue;
             }
             // All deps must be in completed, and all must be skipped
@@ -970,6 +974,31 @@ mod tests {
         assert!(!skipped.contains("c"));
     }
 
+    #[test]
+    fn test_cascade_skip_respects_continue_when_skipped() {
+        let mut flow = HashMap::new();
+        flow.insert("a".to_string(), make_step("act", vec![]));
+        let mut b = make_step("act", vec!["a"]);
+        b.continue_when_skipped = true;
+        flow.insert("b".to_string(), b);
+        flow.insert("c".to_string(), make_step("act", vec!["b"]));
+
+        let mut completed = HashSet::new();
+        let mut skipped = HashSet::new();
+        let mut outputs = HashMap::new();
+        completed.insert("a".to_string());
+        skipped.insert("a".to_string());
+        outputs.insert("a".to_string(), None);
+
+        cascade_skip(&flow, &mut completed, &mut skipped, &mut outputs);
+
+        assert!(!skipped.contains("b"), "b opted in to run after a skip");
+        assert!(
+            !skipped.contains("c"),
+            "c waits for b, which has not completed"
+        );
+    }
+
     // --- Integration tests ---
 
     #[tokio::test]
@@ -1087,6 +1116,46 @@ tasks:
             .unwrap();
         assert_eq!(summary.completed, 0);
         assert_eq!(summary.skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_continue_when_skipped_runs_after_false_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.yaml"),
+            r#"
+actions:
+  greet:
+    type: script
+    script: echo hello
+tasks:
+  conditional:
+    flow:
+      check:
+        action: greet
+        when: "false"
+      report:
+        action: greet
+        depends_on: [check]
+        continue_when_skipped: true
+      follow:
+        action: greet
+        depends_on: [check]
+"#,
+        )
+        .unwrap();
+
+        let (config, _) = workspace_loader::load_workspace(dir.path()).unwrap();
+        let task = &config.tasks["conditional"];
+        let input = json!({});
+        let cancel = CancellationToken::new();
+
+        let summary = run_dag(task, &config, &input, dir.path(), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(summary.completed, 1, "report ran");
+        assert_eq!(summary.skipped, 2, "check (condition) and follow (cascade)");
+        assert_eq!(summary.failed, 0);
     }
 
     #[tokio::test]
