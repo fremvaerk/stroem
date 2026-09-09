@@ -666,7 +666,7 @@ pub struct RestartJobRequest {
 /// child (or an agent tool call, or a manually uploaded state job) would produce
 /// a detached job tree that nothing propagates back to the original parent, and
 /// restarting a `hook` job would relabel it `restart` — a source type
-/// [`crate::hooks::is_top_level_source`] treats as top-level, re-enabling the
+/// [`crate::settlement::hooks::is_top_level_source`] treats as top-level, re-enabling the
 /// very workspace-hook fanout that `hook` exists to suppress.
 const DERIVED_SOURCE_TYPES: &[&str] = &["hook", "task", "agent_tool", "upload"];
 
@@ -808,7 +808,7 @@ pub async fn restart_job(
     )
     .await;
     let new_job_id = created.job_id;
-    crate::job_recovery::finalize_created_job(&state, created).await;
+    state.settlement().job_created(created).await;
 
     Ok((
         StatusCode::CREATED,
@@ -1038,9 +1038,7 @@ pub async fn approve_step(
             )
             .await;
 
-        if let Err(e) =
-            crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await
-        {
+        if let Err(e) = state.settlement().step_settled(job_id, &step_name).await {
             tracing::error!(
                 "Failed to orchestrate after approval of step '{}' in job {}: {:#}",
                 step_name,
@@ -1073,8 +1071,8 @@ pub async fn approve_step(
 
         // Atomic reject — only succeeds if the step is still suspended; decides
         // retry in the same transaction. Called directly rather than through
-        // `job_recovery::fail_step` so the `[approval] ... rejected` line is
-        // logged BEFORE any `[retry]` line: `fail_step` appends the retry line
+        // `Settlement::step_failed` so the `[approval] ... rejected` line is
+        // logged BEFORE any `[retry]` line: `step_failed` appends the retry line
         // itself, which would read as a retry of a step nothing had yet
         // rejected. A rejected approval with retry budget returns to `ready`
         // and is re-suspended only by a later orchestration of this job
@@ -1086,7 +1084,7 @@ pub async fn approve_step(
             &step_name,
             &reason,
             &[StepStatus::Suspended],
-            crate::job_recovery::compute_retry_delay,
+            crate::settlement::retry::compute_retry_delay,
         )
         .await
         .context("reject suspended step")?;
@@ -1107,14 +1105,12 @@ pub async fn approve_step(
             )
             .await;
 
-        if let Some(line) = crate::job_recovery::retry_log_line(&step_name, &outcome) {
+        if let Some(line) = crate::settlement::retry::retry_log_line(&step_name, &outcome) {
             state.append_server_log(job_id, &line).await;
         }
 
         if matches!(outcome, stroem_db::FailOutcome::Failed { .. }) {
-            if let Err(e) =
-                crate::job_recovery::orchestrate_after_step(&state, job_id, &step_name).await
-            {
+            if let Err(e) = state.settlement().step_settled(job_id, &step_name).await {
                 tracing::error!(
                     "Failed to orchestrate after rejection of step '{}' in job {}: {:#}",
                     step_name,

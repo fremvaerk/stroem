@@ -395,7 +395,7 @@ async fn jobs_completed_counter_includes_status_label() -> Result<()> {
     let router = build_router_with(&h, config).await;
 
     // Exercise the counter macro shape used in
-    // `job_recovery::handle_job_terminal`. The production site is verified
+    // `Settlement::advance`. The production site is verified
     // by the grep check below.
     metrics::counter!(
         stroem_server::metrics::STROEM_JOBS_COMPLETED_TOTAL,
@@ -583,8 +583,8 @@ async fn metrics_success_response_has_cache_control_no_store() -> Result<()> {
 /// Before the DB CAS guard fix, `cancel_job(parent)` would increment
 /// `stroem_jobs_completed_total` for the parent TWICE:
 ///
-/// 1. Via `propagate_to_parent(child → parent)` inside `handle_job_terminal(child)`.
-/// 2. Via `handle_job_terminal(parent)` called directly at the end of `cancel_job(parent)`.
+/// 1. Via `Settlement::propagate(child → parent)` inside `advance(child)`.
+/// 2. Via `advance(parent)` called directly at the end of `cancel_job(parent)`.
 ///
 /// With the fix, both callers race on:
 ///   UPDATE job SET metrics_recorded_at = NOW()
@@ -668,10 +668,10 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
         .sum();
 
     // Cancel the parent — this cascades synchronously through:
-    //   cancel_job(parent) → cancel_job(child) → handle_job_terminal(child)
-    //   → propagate_to_parent(child, parent) → [parent terminal detected]
+    //   cancel_job(parent) → cancel_job(child) → advance(child)
+    //   → propagate(child, parent) → [parent terminal detected]
     //   → claim_terminal_handling(parent)  [attempt 1 — wins CAS]
-    //   back in cancel_job(parent): handle_job_terminal(parent)
+    //   back in cancel_job(parent): advance(parent)
     //   → claim_terminal_handling(parent)  [attempt 2 — CAS guard blocks it]
     stroem_server::cancellation::cancel_job(&state, parent_id).await?;
 

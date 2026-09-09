@@ -483,8 +483,8 @@ pub async fn fire_initial_suspended_hooks(
             )
             .await;
 
-        crate::hooks::fire_suspended_hooks(
-            state,
+        crate::settlement::hooks::fire_suspended_hooks(
+            &state.settlement(),
             workspace_config,
             &job,
             task,

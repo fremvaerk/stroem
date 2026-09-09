@@ -126,7 +126,7 @@ pub async fn emit_event(
         job_id,
     )
     .await;
-    crate::job_recovery::finalize_created_job(&state, created).await;
+    state.settlement().job_created(created).await;
 
     tracing::info!(
         "emit_event: created job {} for task '{}' in workspace '{}' (source_id='{}')",

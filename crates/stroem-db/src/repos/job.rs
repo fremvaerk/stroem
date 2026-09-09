@@ -50,6 +50,41 @@ pub struct JobRow {
     pub restart_from_step: Option<String>,
 }
 
+impl JobRow {
+    /// Minimal row for tests that only exercise pure decision logic (e.g.
+    /// settlement's `plan`). Not for use against a real database.
+    #[doc(hidden)]
+    pub fn test_default() -> Self {
+        JobRow {
+            job_id: Uuid::new_v4(),
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            mode: "distributed".to_string(),
+            input: None,
+            output: None,
+            status: "pending".to_string(),
+            source_type: "api".to_string(),
+            source_id: None,
+            worker_id: None,
+            revision: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            log_path: None,
+            parent_job_id: None,
+            parent_step_name: None,
+            timeout_secs: None,
+            retry_of_job_id: None,
+            retry_job_id: None,
+            retry_attempt: 0,
+            max_retries: None,
+            raw_input: None,
+            source_job_id: None,
+            restart_from_step: None,
+        }
+    }
+}
+
 /// Lightweight projection returned by [`JobRepo::get_old_terminal_jobs`].
 ///
 /// Contains only the fields needed to construct a `JobLogMeta` and to identify

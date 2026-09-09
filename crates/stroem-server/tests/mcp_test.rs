@@ -1755,7 +1755,7 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
     let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
 
     // Fire hooks
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     // Verify hook job was created
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;

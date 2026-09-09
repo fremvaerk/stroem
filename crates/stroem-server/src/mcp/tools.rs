@@ -535,7 +535,7 @@ impl StromMcpHandler {
             job_id,
         )
         .await;
-        crate::job_recovery::finalize_created_job(&self.state, created).await;
+        self.state.settlement().job_created(created).await;
 
         Ok(json_result(
             &serde_json::json!({ "job_id": job_id.to_string() }),

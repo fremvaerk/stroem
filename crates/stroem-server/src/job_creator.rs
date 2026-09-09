@@ -25,7 +25,7 @@ pub(crate) const MAX_TASK_DEPTH: u32 = 10;
 /// Result of job creation. `terminal_at_creation` is true when every step was
 /// already terminal once creation-time promotion/expansion/dispatch finished
 /// (e.g. all root steps skipped by `when`, or a server-dispatched root step
-/// failed) — the caller must then run `job_recovery::finalize_created_job`
+/// failed) — the caller must then run `Settlement::job_created`
 /// so hooks/metrics/log-archive fire exactly as for an orchestrator-settled job.
 ///
 /// It is also true when post-commit initialisation itself failed: promotion,
@@ -71,7 +71,7 @@ pub enum CreationMode<'a> {
 ///
 /// **Warning: drops the `terminal_at_creation` flag.** Production callers must
 /// use [`create_job_for_task_detailed`] and then call
-/// `job_recovery::finalize_created_job`, or a job that settles synchronously at
+/// `Settlement::job_created`, or a job that settles synchronously at
 /// creation never fires its hooks, metric, log archive or parent propagation.
 /// Kept for tests.
 #[allow(clippy::too_many_arguments)]
@@ -110,7 +110,7 @@ pub async fn create_job_for_task(
 
 /// Like [`create_job_for_task`] but also reports `terminal_at_creation`.
 /// HTTP/MCP/scheduler entry points use this and call
-/// `job_recovery::finalize_created_job` afterwards.
+/// `Settlement::job_created` afterwards.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_job_for_task_detailed(
     workspaces: &WorkspaceManager,
@@ -156,7 +156,7 @@ pub async fn create_job_for_task_detailed(
 /// `raw_input` are rejected exactly like Re-run.
 ///
 /// Reports `terminal_at_creation` like every other creation entry point — the
-/// caller must run `job_recovery::finalize_created_job` when it is true (a
+/// caller must run `Settlement::job_created` when it is true (a
 /// restart whose whole restart set cascades to skipped settles immediately).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_restart_job(
@@ -213,7 +213,7 @@ pub async fn create_restart_job(
 ///
 /// **Warning: drops the `terminal_at_creation` flag.** Production callers must
 /// use [`create_child_job_for_task_detailed`] and then call
-/// `job_recovery::finalize_created_job` — or, for `agent_tool` children, reject
+/// `Settlement::job_created` — or, for `agent_tool` children, reject
 /// the terminal case outright, since propagation of an agent-tool result
 /// depends on the worker having recorded the child id first. Kept for tests.
 #[allow(clippy::too_many_arguments)]

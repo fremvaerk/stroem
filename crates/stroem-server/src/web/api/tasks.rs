@@ -547,7 +547,7 @@ pub async fn execute_task(
         &state, &workspace, &ws, &name, job_id,
     )
     .await;
-    crate::job_recovery::finalize_created_job(&state, created).await;
+    state.settlement().job_created(created).await;
 
     // 7. Return job_id
     Ok(Json(ExecuteTaskResponse {

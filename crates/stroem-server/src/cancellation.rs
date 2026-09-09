@@ -124,7 +124,7 @@ pub async fn cancel_job(state: &AppState, job_id: Uuid) -> Result<CancelResult> 
     // If no running steps, we can finalize immediately
     if !has_running_steps {
         // All steps are now terminal — handle hooks, S3, parent propagation
-        if let Err(e) = crate::job_recovery::handle_job_terminal(state, job_id).await {
+        if let Err(e) = state.settlement().advance(job_id).await {
             tracing::error!(
                 "Failed to handle terminal state for cancelled job {}: {:#}",
                 job_id,
@@ -139,9 +139,13 @@ pub async fn cancel_job(state: &AppState, job_id: Uuid) -> Result<CancelResult> 
 /// Remove a job from the cancelled_jobs set. Called when a cancelled job
 /// reaches terminal state (all steps done) to prevent unbounded memory growth.
 pub fn clear_cancelled(state: &AppState, job_id: Uuid) {
-    state
-        .cancelled_jobs
-        .write()
+    clear_cancelled_in(&state.cancelled_jobs, job_id);
+}
+
+/// [`clear_cancelled`] against the bare set, for callers that hold the shared
+/// `cancelled_jobs` handle rather than the whole `AppState`.
+pub fn clear_cancelled_in(set: &std::sync::RwLock<std::collections::HashSet<Uuid>>, job_id: Uuid) {
+    set.write()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&job_id);
 }

@@ -893,7 +893,7 @@ async fn carried_task_step_keeps_output_and_creates_no_child() -> Result<()> {
     assert_eq!(
         by["sub"].output,
         Some(json!({"work": {"n": 7}})),
-        "the carried row keeps the output propagate_to_parent stamped on it"
+        "the carried row keeps the output Settlement::propagate stamped on it"
     );
     assert_eq!(by["tail"].status, "ready");
     assert!(
@@ -1503,7 +1503,7 @@ async fn restart_endpoint_redacts_carried_step_output() -> Result<()> {
 async fn restart_endpoint_terminal_at_creation_fires_hooks() -> Result<()> {
     // A restart whose whole restart set cascade-skips is terminal the moment it
     // is created. The endpoint must still run terminal handling (hooks, metrics,
-    // log archive) exactly once — that is `finalize_created_job`.
+    // log archive) exactly once — that is `Settlement::job_created`.
     let mut ws = line_workspace();
     ws.actions
         .insert("notify".to_string(), script_action("true"));
@@ -2051,7 +2051,7 @@ fn born_terminal_child_workspace() -> WorkspaceConfig {
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_from_task_step_with_born_terminal_child_settles_the_parent() -> Result<()> {
     // A child job whose only step is `when: false` is terminal at creation. The
-    // restart job's `sub` step must still be told: `reconcile_settled_children`
+    // restart job's `sub` step must still be told: `Settlement::reconcile`
     // propagates, `sub` completes, `tail` runs and the restart job settles.
     let app = build_test_app("default", born_terminal_child_workspace()).await?;
     let worker = register_worker(&app).await?;

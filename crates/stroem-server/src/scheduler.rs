@@ -444,7 +444,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                 job_id,
             )
             .await;
-            crate::job_recovery::finalize_created_job(app_state, created).await;
+            app_state.settlement().job_created(created).await;
         }
         Err(e) => {
             tracing::error!("Trigger '{}' failed to create job: {:#}", source_id, e);

@@ -626,7 +626,7 @@ async fn create_event_source_job(
         des.target_task,
     );
 
-    crate::job_recovery::finalize_created_job(state, created).await;
+    state.settlement().job_created(created).await;
 
     Ok(())
 }

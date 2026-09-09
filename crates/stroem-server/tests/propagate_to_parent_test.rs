@@ -1,5 +1,5 @@
-//! Integration tests for `propagate_to_parent` — child job completion propagating
-//! to parent jobs via the public `orchestrate_after_step` / `handle_job_terminal` API.
+//! Integration tests for `Settlement::propagate` — child job completion
+//! propagating to parent jobs via the public `step_settled` / `advance` API.
 //!
 //! Each test spins up its own isolated Postgres container so they can run fully
 //! in parallel.
@@ -13,7 +13,6 @@ use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, W
 use stroem_server::config::{
     DbConfig, LogStorageConfig, RecoveryConfig, RetentionConfig, ServerConfig,
 };
-use stroem_server::job_recovery::{handle_job_terminal, orchestrate_after_step};
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
 use stroem_server::workspace::WorkspaceManager;
@@ -385,7 +384,10 @@ async fn child_completed_propagates_to_parent() -> Result<()> {
     JobStepRepo::mark_completed(&pool, child_job_id, "do-work", Some(output)).await?;
 
     // Orchestrate the child job — should propagate to parent
-    orchestrate_after_step(&state, child_job_id, "do-work").await?;
+    state
+        .settlement()
+        .step_settled(child_job_id, "do-work")
+        .await?;
 
     // Parent step should be completed
     let parent_statuses = step_statuses(&pool, parent_job_id).await;
@@ -453,7 +455,10 @@ async fn child_failed_propagates_to_parent() -> Result<()> {
     JobStepRepo::mark_failed(&pool, child_job_id, "do-work", "exit code 1").await?;
 
     // Orchestrate the child job
-    orchestrate_after_step(&state, child_job_id, "do-work").await?;
+    state
+        .settlement()
+        .step_settled(child_job_id, "do-work")
+        .await?;
 
     // Parent step should be failed
     let parent_statuses = step_statuses(&pool, parent_job_id).await;
@@ -475,7 +480,7 @@ async fn child_failed_propagates_to_parent() -> Result<()> {
 // ─── Test 3: child_cancelled_propagates_to_parent ────────────────────────────
 
 /// When a child job is cancelled, the parent's task step must be marked
-/// cancelled via `handle_job_terminal`.
+/// cancelled via `Settlement::advance`.
 #[tokio::test]
 async fn child_cancelled_propagates_to_parent() -> Result<()> {
     let (pool, _container) = setup_db().await?;
@@ -523,8 +528,8 @@ async fn child_cancelled_propagates_to_parent() -> Result<()> {
     // Mark the child job itself as cancelled directly (simulates cancel API)
     JobRepo::cancel(&pool, child_job_id).await?;
 
-    // Fire handle_job_terminal — this propagates cancellation to parent
-    handle_job_terminal(&state, child_job_id).await?;
+    // Fire advance — this propagates cancellation to parent
+    state.settlement().advance(child_job_id).await?;
 
     // Parent step should be cancelled
     let parent_statuses = step_statuses(&pool, parent_job_id).await;
@@ -886,7 +891,7 @@ async fn deep_nesting_three_levels() -> Result<()> {
     JobStepRepo::mark_completed(&pool, c_job_id, "do-work", None).await?;
 
     // Orchestrate child job — should propagate all the way up
-    orchestrate_after_step(&state, c_job_id, "do-work").await?;
+    state.settlement().step_settled(c_job_id, "do-work").await?;
 
     // Parent step should be completed
     let p_statuses = step_statuses(&pool, p_job_id).await;
@@ -1165,7 +1170,10 @@ async fn parent_with_mixed_steps() -> Result<()> {
 
     // Complete the shell step — orchestrator should promote task-step to ready
     JobStepRepo::mark_completed(&pool, parent_job_id, "shell-step", None).await?;
-    orchestrate_after_step(&state, parent_job_id, "shell-step").await?;
+    state
+        .settlement()
+        .step_settled(parent_job_id, "shell-step")
+        .await?;
 
     let statuses = step_statuses(&pool, parent_job_id).await;
     assert_eq!(
@@ -1199,7 +1207,10 @@ async fn parent_with_mixed_steps() -> Result<()> {
 
     // Complete the child job's work
     JobStepRepo::mark_completed(&pool, child_job_id, "do-work", None).await?;
-    orchestrate_after_step(&state, child_job_id, "do-work").await?;
+    state
+        .settlement()
+        .step_settled(child_job_id, "do-work")
+        .await?;
 
     // Parent task-step should be completed
     let statuses = step_statuses(&pool, parent_job_id).await;

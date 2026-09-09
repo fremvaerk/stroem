@@ -11795,7 +11795,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
 
     // Fire hooks
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     // Verify hook job was created
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
@@ -11908,7 +11908,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
 
     // Fire hooks
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     // Verify hook job was created
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
@@ -12001,7 +12001,8 @@ async fn test_hook_not_fired_for_hook_job() -> Result<()> {
 
     // Fire hooks — should be a no-op because source_type is "hook"
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &hook_job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &hook_job, task)
+        .await;
 
     // Verify no additional hook jobs were created
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
@@ -12090,7 +12091,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_job = all_jobs
@@ -12215,7 +12216,7 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
 
     // Fire hooks
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_job = all_jobs
@@ -12360,7 +12361,7 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
 
     // on_success fires
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_job = all_jobs
@@ -12476,7 +12477,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     assert_eq!(job.status, "failed");
 
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_job = all_jobs
@@ -12601,7 +12602,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
 
     // Fire hooks → creates hook job
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_job = all_jobs
@@ -13394,7 +13395,7 @@ async fn test_task_action_in_hook() -> Result<()> {
 
     // Fire hooks
     let state = hook_test_state(pool.clone(), &workspace);
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     // A hook job should have been created with task_name = "cleanup" (not "_hook:run-cleanup")
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
@@ -19225,7 +19226,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
 
     // Fire hooks using the revision-aware state.
     let state = revision_test_state(pool.clone(), workspace.clone());
-    stroem_server::hooks::fire_hooks(&state, &workspace, &job, task).await;
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
 
     // There must now be exactly two jobs: the original and the hook job.
     let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
@@ -19774,7 +19775,7 @@ async fn setup_with_workspace(
 
 /// Like `setup_with_workspace`, but returns the `AppState` directly instead of
 /// consuming it into a `Router` — for tests that call `job_creator` /
-/// `job_recovery` functions directly rather than going through HTTP.
+/// `settlement` entries directly rather than going through HTTP.
 async fn setup_state_with_workspace(
     workspace: WorkspaceConfig,
 ) -> Result<(
@@ -20084,7 +20085,7 @@ async fn test_approval_reject_fails_job() -> Result<()> {
 /// Rejecting an approval step that still has retry budget must log the
 /// rejection BEFORE the retry line. The reject handler therefore calls
 /// `fail_or_retry` directly and appends the `[retry]` line itself, rather than
-/// going through `job_recovery::fail_step` (which logs the retry inside the
+/// going through `Settlement::step_failed` (which logs the retry inside the
 /// failure write, i.e. before anything said the step was rejected).
 #[tokio::test]
 async fn test_approval_reject_logs_rejection_before_retry() -> Result<()> {
@@ -23244,7 +23245,7 @@ async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
 
     let _worker_id = register_test_worker(&pool).await;
 
-    // Fail the step via the HTTP API — this triggers orchestrate_after_step which
+    // Fail the step via the HTTP API — this triggers Settlement::step_failed which
     // calls try_retry_job when it sees a failed top-level job with retries remaining.
     let complete_resp = router
         .clone()
@@ -23615,7 +23616,7 @@ async fn test_task_retry_child_job_no_retry() -> Result<()> {
 
     let _worker_id = register_test_worker(&pool).await;
 
-    // Fail the child job's step — orchestrate_after_step must NOT create a retry
+    // Fail the child job's step — Settlement::step_failed must NOT create a retry
     // job because child_job.parent_job_id is non-None.
     let fail_resp = router
         .clone()
@@ -24200,7 +24201,7 @@ async fn test_for_each_instances_inherit_step_default() -> Result<()> {
     Ok(())
 }
 
-/// The retry path at `job_recovery.rs:847` calls `create_job_for_task` with
+/// The retry path in `settlement::retry::create_retry_job` calls `create_job_for_task` with
 /// `source_type = "retry"`. Simulate it directly to verify the retry job
 /// carries the server default — guards the future refactor risk that the
 /// retry branch derives defaults from a different source.
@@ -25201,7 +25202,7 @@ async fn settled_agent_tool_child(
 /// Registration barrier: a terminal `agent_tool` child whose parent agent step
 /// has no `agent_state` yet must NOT be propagated. Falling through to ordinary
 /// propagation would `mark_completed` an agent step whose worker is still
-/// running it. `propagate_to_parent` must return `Ok` and leave the step alone
+/// running it. `Settlement::propagate` must return `Ok` and leave the step alone
 /// until the worker registers the child (B3).
 #[tokio::test]
 async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<()> {
@@ -25235,7 +25236,10 @@ async fn test_propagate_defers_agent_tool_child_before_registration() -> Result<
     let child_id = settled_agent_tool_child(&pool, job_id, "think", None).await?;
     let child = JobRepo::get(&pool, child_id).await?.unwrap();
 
-    stroem_server::job_recovery::propagate_to_parent(&state, &child, job_id, "think").await?;
+    state
+        .settlement()
+        .propagate(&child, job_id, "think")
+        .await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     assert_eq!(
@@ -25335,8 +25339,8 @@ async fn test_agent_save_state_replays_already_terminal_child() -> Result<()> {
 
 /// Cancelling a parent that has a live `type: task` child converges on the
 /// parent's terminal handling from two directions: the child's
-/// `handle_job_terminal` → `propagate_to_parent`, and the outer `cancel_job`
-/// frame's own `handle_job_terminal`. The exactly-once claim must let only one
+/// `Settlement::advance` → `propagate`, and the outer `cancel_job`
+/// frame's own `advance`. The exactly-once claim must let only one
 /// of them fire the parent's `on_cancel` hooks and log upload (I3).
 #[tokio::test]
 async fn test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once() -> Result<()> {
@@ -25468,16 +25472,16 @@ async fn test_cancel_cascade_fires_parent_on_cancel_hook_exactly_once() -> Resul
 /// that test passes even without the exactly-once CAS, because claiming and
 /// starting the child's script step makes it genuinely `running`, so
 /// `cancel_job(child)` takes the `has_running_steps == true` branch and never
-/// calls `handle_job_terminal(child)` itself — only ONE path ever reaches the
+/// calls `advance(child)` itself — only ONE path ever reaches the
 /// parent's terminal handling.
 ///
 /// Here the child's script step is left UNCLAIMED (no worker registered at
 /// all). `cancel_job(child)` cancels it via `cancel_pending_steps`, finds no
-/// running steps, and calls `handle_job_terminal(child)` synchronously —
-/// which `propagate_to_parent`s into the parent's terminal handling — WHILE
+/// running steps, and calls `advance(child)` synchronously —
+/// which `propagate`s into the parent's terminal handling — WHILE
 /// still inside the `for child in &child_jobs` loop of the outer
 /// `cancel_job(parent)` call. That outer frame *also* calls
-/// `handle_job_terminal(parent)` once the loop returns, because the parent's
+/// `advance(parent)` once the loop returns, because the parent's
 /// own `type: task` step was already cancelled directly by
 /// `cancel_server_managed_steps` before the loop ran (it has `worker_id IS
 /// NULL`, so it never shows up as a "running step" the outer check waits
@@ -25591,7 +25595,7 @@ async fn test_cancel_cascade_discriminates_exactly_once_claim_with_unclaimed_chi
     Ok(())
 }
 
-/// `reconcile_settled_children` must be safe to call repeatedly for the same
+/// `Settlement::reconcile` must be safe to call repeatedly for the same
 /// parent: once the settled child has been finalized (its hooks fired, the
 /// parent step marked completed), calling it again must be a no-op, not a
 /// second round of hook firing (Critical 2 in the Task 4 review).
@@ -25663,7 +25667,7 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
-    stroem_server::job_recovery::finalize_created_job(&state, created).await;
+    state.settlement().job_created(created).await;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
     assert_eq!(
@@ -25675,10 +25679,10 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         "completed"
     );
 
-    // Call reconcile_settled_children twice more, directly, simulating extra
+    // Call Settlement::reconcile twice more, directly, simulating extra
     // orchestration passes converging on the same already-settled child.
-    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
-    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    state.settlement().reconcile(created.job_id).await;
+    state.settlement().reconcile(created.job_id).await;
 
     let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
@@ -25704,7 +25708,7 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
 /// A hook job must never trigger a further hook, even when its action is
 /// `type: task` and the target task itself declares `on_success`, and even
 /// when that target task settles synchronously at creation (which now drives
-/// it through `finalize_created_job` -> `handle_job_terminal` ->
+/// it through `Settlement::job_created` -> `advance` ->
 /// `fire_hooks`). `fire_hooks`'s recursion guard checks `source_type ==
 /// "hook"` before it even looks at task-level vs. workspace-level hooks, so
 /// this must hold regardless of what hooks the target task defines
@@ -25753,7 +25757,7 @@ async fn test_hook_of_hook_does_not_recurse() -> Result<()> {
 
     // Root task: settles synchronously at creation (all steps skipped), so
     // the root job completes without needing a worker and fires the
-    // workspace-level on_success hook via `finalize_created_job`.
+    // workspace-level on_success hook via `Settlement::job_created`.
     let mut root_flow = HashMap::new();
     root_flow.insert(
         "never".to_string(),
@@ -26141,7 +26145,7 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
-    stroem_server::job_recovery::finalize_created_job(&state, created).await;
+    state.settlement().job_created(created).await;
 
     let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0).await?;
     let after_create = jobs.len();
@@ -26151,11 +26155,11 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
     );
 
     // Extra orchestration passes must not restart the chain.
-    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    state.settlement().reconcile(created.job_id).await;
     let first = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0)
         .await?
         .len();
-    stroem_server::job_recovery::reconcile_settled_children(&state, created.job_id).await;
+    state.settlement().reconcile(created.job_id).await;
     let second = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0)
         .await?
         .len();

@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use super::Settlement;
 use anyhow::Context;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -168,9 +168,9 @@ async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
 /// - Task-level hooks take priority; workspace-level hooks fire as fallback for top-level jobs only.
 /// - Each hook creates a new single-step job with `source_type = "hook"`.
 /// - Failures are logged but never affect the original job.
-#[tracing::instrument(skip(state, workspace_config, task))]
+#[tracing::instrument(skip(s, workspace_config, task))]
 pub async fn fire_hooks(
-    state: &AppState,
+    s: &Settlement,
     workspace_config: &WorkspaceConfig,
     job: &stroem_db::JobRow,
     task: &TaskDef,
@@ -203,26 +203,25 @@ pub async fn fire_hooks(
     }
 
     // Chain guard: bound indirect hook cycles that the recursion guard misses.
-    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+    if hook_chain_depth(&s.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
         tracing::warn!(
             job_id = %job.job_id,
             "hook chain depth limit ({}) reached — not firing hooks",
             MAX_HOOK_CHAIN_DEPTH
         );
-        state
-            .append_server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+        s.server_log(
+            job.job_id,
+            &format!(
+                "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
                      not firing hooks for this job"
-                ),
-            )
-            .await;
+            ),
+        )
+        .await;
         return;
     }
 
     // Build hook context
-    let ctx = match build_hook_context(&state.pool, job, task).await {
+    let ctx = match build_hook_context(&s.pool, job, task).await {
         Ok(ctx) => ctx,
         Err(e) => {
             tracing::error!(
@@ -230,12 +229,11 @@ pub async fn fire_hooks(
                 job.job_id,
                 e
             );
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!("[hooks] Failed to build hook context: {:#}", e),
-                )
-                .await;
+            s.server_log(
+                job.job_id,
+                &format!("[hooks] Failed to build hook context: {:#}", e),
+            )
+            .await;
             return;
         }
     };
@@ -244,12 +242,11 @@ pub async fn fire_hooks(
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Failed to serialize hook context: {:#}", e);
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!("[hooks] Failed to serialize hook context: {:#}", e),
-                )
-                .await;
+            s.server_log(
+                job.job_id,
+                &format!("[hooks] Failed to serialize hook context: {:#}", e),
+            )
+            .await;
             return;
         }
     };
@@ -262,12 +259,12 @@ pub async fn fire_hooks(
         "on_error"
     };
 
-    let defaults = crate::config::JobDefaults::from(state.config.as_ref());
+    let defaults = s.defaults;
     for (i, hook) in hooks.iter().enumerate() {
         let source_id = job.job_id.to_string();
 
         if let Err(e) = fire_single_hook(
-            state,
+            s,
             workspace_config,
             &job.workspace,
             hook,
@@ -285,15 +282,14 @@ pub async fn fire_hooks(
                 job.job_id,
                 e
             );
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!(
-                        "[hooks] Failed to fire hook {}[{}] for action '{}': {:#}",
-                        hook_type, i, hook.action, e
-                    ),
-                )
-                .await;
+            s.server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] Failed to fire hook {}[{}] for action '{}': {:#}",
+                    hook_type, i, hook.action, e
+                ),
+            )
+            .await;
         }
     }
 }
@@ -304,9 +300,9 @@ pub async fn fire_hooks(
 /// - Task-level `on_suspended` hooks take priority; workspace-level fallback fires for top-level jobs.
 /// - Each hook creates a new single-step job with `source_type = "hook"`.
 /// - Failures are logged but never affect the original job or step.
-#[tracing::instrument(skip(state, workspace_config, task))]
+#[tracing::instrument(skip(s, workspace_config, task))]
 pub async fn fire_suspended_hooks(
-    state: &AppState,
+    s: &Settlement,
     workspace_config: &WorkspaceConfig,
     job: &stroem_db::JobRow,
     task: &TaskDef,
@@ -333,21 +329,20 @@ pub async fn fire_suspended_hooks(
     }
 
     // Chain guard: bound indirect hook cycles that the recursion guard misses.
-    if hook_chain_depth(&state.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
+    if hook_chain_depth(&s.pool, job).await >= MAX_HOOK_CHAIN_DEPTH {
         tracing::warn!(
             job_id = %job.job_id,
             "hook chain depth limit ({}) reached — not firing on_suspended hooks",
             MAX_HOOK_CHAIN_DEPTH
         );
-        state
-            .append_server_log(
-                job.job_id,
-                &format!(
-                    "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
+        s.server_log(
+            job.job_id,
+            &format!(
+                "[hooks] hook chain depth limit ({MAX_HOOK_CHAIN_DEPTH}) reached — \
                      not firing hooks for this job"
-                ),
-            )
-            .await;
+            ),
+        )
+        .await;
         return;
     }
 
@@ -366,21 +361,20 @@ pub async fn fire_suspended_hooks(
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Failed to serialize suspended hook context: {:#}", e);
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!("[hooks] Failed to serialize on_suspended context: {:#}", e),
-                )
-                .await;
+            s.server_log(
+                job.job_id,
+                &format!("[hooks] Failed to serialize on_suspended context: {:#}", e),
+            )
+            .await;
             return;
         }
     };
 
     let source_id = job.job_id.to_string();
-    let defaults = crate::config::JobDefaults::from(state.config.as_ref());
+    let defaults = s.defaults;
     for (i, hook) in hooks.iter().enumerate() {
         if let Err(e) = fire_single_hook(
-            state,
+            s,
             workspace_config,
             &job.workspace,
             hook,
@@ -398,15 +392,14 @@ pub async fn fire_suspended_hooks(
                 step_name,
                 e
             );
-            state
-                .append_server_log(
-                    job.job_id,
-                    &format!(
-                        "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {:#}",
-                        i, hook.action, e
-                    ),
-                )
-                .await;
+            s.server_log(
+                job.job_id,
+                &format!(
+                    "[hooks] Failed to fire on_suspended hook[{}] for action '{}': {:#}",
+                    i, hook.action, e
+                ),
+            )
+            .await;
         }
     }
 }
@@ -514,7 +507,7 @@ async fn build_hook_context(
 
 #[allow(clippy::too_many_arguments)]
 async fn fire_single_hook(
-    state: &AppState,
+    s: &Settlement,
     workspace_config: &WorkspaceConfig,
     workspace: &str,
     hook: &HookDef,
@@ -523,8 +516,8 @@ async fn fire_single_hook(
     revision: Option<&str>,
     defaults: crate::config::JobDefaults,
 ) -> anyhow::Result<()> {
-    let workspaces = &state.workspaces;
-    let pool = &state.pool;
+    let workspaces = &s.workspaces;
+    let pool = &s.pool;
     // Resolve action
     let action = workspace_config
         .actions
@@ -586,7 +579,7 @@ async fn fire_single_hook(
             source_id
         );
 
-        crate::job_recovery::finalize_created_job(state, created).await;
+        Box::pin(s.job_created(created)).await;
 
         return Ok(());
     }

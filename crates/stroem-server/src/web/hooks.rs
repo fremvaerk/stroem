@@ -140,7 +140,7 @@ async fn webhook_handler(
         job_id,
     )
     .await;
-    crate::job_recovery::finalize_created_job(&state, created).await;
+    state.settlement().job_created(created).await;
 
     if is_sync {
         let mut rx = state.job_completion.subscribe(job_id).await;
