@@ -668,6 +668,46 @@ else
     fail "expected 400 for unshared foreign connection, got $XCONN_PRIV_CODE"
 fi
 
+# --- continue_when_skipped: report runs after a condition skip, follow-up cascades ---
+info "Triggering conditional-report task (continue_when_skipped)..."
+EXEC_RESP_CWS=$(acurl -X POST "$BASE_URL/api/workspaces/test/tasks/conditional-report/execute" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {}}')
+CWS_JOB_ID=$(echo "$EXEC_RESP_CWS" | jq -r '.job_id')
+if [ -z "$CWS_JOB_ID" ] || [ "$CWS_JOB_ID" = "null" ]; then
+    fail "conditional-report execute failed: $EXEC_RESP_CWS"
+fi
+pass "conditional-report job created: $CWS_JOB_ID"
+
+info "Waiting for conditional-report job to complete..."
+CWS_POLLED=0
+CWS_STATUS="pending"
+while [ "$CWS_STATUS" != "completed" ] && [ "$CWS_STATUS" != "failed" ]; do
+    sleep 2
+    CWS_POLLED=$((CWS_POLLED + 2))
+    if [ "$CWS_POLLED" -ge "$MAX_POLL" ]; then
+        acurl "$BASE_URL/api/jobs/$CWS_JOB_ID" | jq .
+        fail "conditional-report did not reach terminal state within ${MAX_POLL}s (status: $CWS_STATUS)"
+    fi
+    CWS_DETAIL=$(acurl "$BASE_URL/api/jobs/$CWS_JOB_ID")
+    CWS_STATUS=$(echo "$CWS_DETAIL" | jq -r '.status')
+    printf "."
+done
+echo ""
+if [ "$CWS_STATUS" != "completed" ]; then
+    echo "$CWS_DETAIL" | jq .
+    fail "conditional-report job failed (status: $CWS_STATUS)"
+fi
+pass "conditional-report job completed (${CWS_POLLED}s)"
+
+CWS_CHECK=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "optional-check") | "\(.status)/\(.skip_reason)"')
+CWS_REPORT=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "report") | "\(.status)/\(.skip_reason)"')
+CWS_FOLLOW=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "follow-up") | "\(.status)/\(.skip_reason)"')
+[ "$CWS_CHECK" = "skipped/condition" ] || { echo "$CWS_DETAIL" | jq .steps; fail "optional-check expected skipped/condition, got $CWS_CHECK"; }
+[ "$CWS_REPORT" = "completed/null" ] || { echo "$CWS_DETAIL" | jq .steps; fail "report expected completed/null, got $CWS_REPORT"; }
+[ "$CWS_FOLLOW" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "follow-up expected skipped/cascade, got $CWS_FOLLOW"; }
+pass "continue_when_skipped: report ran, follow-up cascaded, skip reasons recorded"
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"
