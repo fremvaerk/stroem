@@ -1,6 +1,6 @@
 # `continue_when_skipped` and Skip Reasons — Design
 
-Status: draft for review
+Status: revision 2, for user review
 Ships in: 0.16.2 (patch; carries one documented behaviour change, §2.4)
 
 ## 1. Problem
@@ -126,6 +126,14 @@ Change::Skip { step: String, reason: SkipReason }
 `Snapshot::apply` records the reason on the in-memory row, so a later pass
 of the same `run` sees it (a chain `a → b → c` all cascading in one run must
 propagate `unreachable` from `b` to `c` without a DB round trip).
+
+**Pass-boundary invariant (unchanged, now explicit).** A reason is visible
+exactly where the status it accompanies is visible: a `Skip` decided in P1
+is seen by P3 of the same pass and by P1 of the next pass, never by P1 of
+the same pass. The `tainted` predicate reads the snapshot the same way
+`all_deps_skipped` does and must not be given a private, earlier view.
+Test: a chain of three cascade skips takes three passes and the reasons
+match the statuses at every pass.
 
 ### 4.2 Sites, with their reason
 
@@ -269,6 +277,10 @@ follow the `carried_over` precedent from migration 045).
 - `stroem-db` integration: `seed_steps_tx` writes `skip_reason`;
   `mark_skipped` guard test updated for the parameter.
 - `restart_integration_test.rs`: a carried skipped step keeps its reason.
+- Writer contract: after a cascade that produces skips of every kind
+  (condition, empty, cascade, unreachable) plus a restart that carries one,
+  `SELECT count(*) FROM job_step WHERE status = 'skipped' AND skip_reason IS NULL`
+  is zero.
 
 ### 11.3 Model / validation / CLI
 
@@ -327,3 +339,12 @@ assert `optional-check` is `skipped` with `skip_reason = condition` and
   UI label; the cascade treats it exactly like `condition`.
 - **Version.** Patch (0.16.2), per the user, with the behaviour change in
   the release notes.
+
+## 14. Review Log
+
+- Revision 1 → 2 (Codex pass 1, 2026-09-09): added the pass-boundary
+  invariant to §4.1 and the writer-contract test to §11.2. The remaining
+  findings restated the current code's lack of the feature or were already
+  covered in §5, §9 and §11; three proposed sequential-loop and CLI-phase
+  tests do not apply (instances have no `depends_on`; the CLI has no
+  passes).
