@@ -1068,7 +1068,8 @@ async fn test_convergence_without_continue_on_failure() -> Result<()> {
     assert!(
         plan.changes
             .contains(&stroem_server::cascade::Change::Skip {
-                step: "c".to_string()
+                step: "c".to_string(),
+                reason: stroem_server::cascade::SkipReason::Condition
             }),
         "C should be skipped"
     );

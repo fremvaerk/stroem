@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep};
 use stroem_server::cascade::execute;
-use stroem_server::cascade::{apply, ApplyError, Change, Plan, RollupOutcome};
+use stroem_server::cascade::{apply, ApplyError, Change, Plan, RollupOutcome, SkipReason};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -147,7 +147,10 @@ async fn apply_sets_timestamps_and_statuses() -> Result<()> {
     let plan = Plan {
         changes: vec![
             Change::Promote { step: "a".into() },
-            Change::Skip { step: "b".into() },
+            Change::Skip {
+                step: "b".into(),
+                reason: SkipReason::Cascade,
+            },
             Change::Fail {
                 step: "c".into(),
                 error: "when condition error: x".into(),
