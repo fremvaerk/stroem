@@ -25,6 +25,7 @@ import { DurationInsightsCard } from "@/components/duration-insights-card";
 import { InputFieldRow } from "@/components/task/input-field-row";
 import { SECRET_SENTINEL } from "@/components/task/constants";
 import { getTask, listJobs, executeTask } from "@/lib/api";
+import { buildExecuteInput } from "@/lib/execute-input";
 import { useTitle } from "@/hooks/use-title";
 import type { TaskDetail, JobListItem, FlowStep } from "@/lib/types";
 import { formatActionName } from "@/lib/utils";
@@ -184,23 +185,7 @@ export function TaskDetailPage() {
     setSubmitError("");
     setSubmitting(true);
     try {
-      const input: Record<string, unknown> = {};
-      for (const [key, val] of Object.entries(values)) {
-        const field = task.input[key];
-        // SECRET_SENTINEL ("********") means "field unchanged from its stored default"
-        // — drop so server uses the schema default. REDACTED_SENTINEL ("••••••") means
-        // "replay from source job's raw_input" and is a different string, so it falls
-        // through unchanged below; the server interprets it (only meaningful when
-        // sourceJobId is also being sent).
-        if (field?.secret && val === SECRET_SENTINEL) {
-          continue;
-        }
-        if (field?.type === "number") {
-          input[key] = Number(val);
-        } else {
-          input[key] = val;
-        }
-      }
+      const input = buildExecuteInput(values, task.input);
       // Only forward sourceJobId when the source job actually carries raw_input.
       // For legacy sources (raw_input === null) the server would reject with 400;
       // the form already shows defaults via the legacy banner, so submit a normal run.

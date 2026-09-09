@@ -128,6 +128,7 @@ Last updated: 2026-06-03.
 
 ## Frontend
 
+- [x] **Execute form submits `""` for untouched string fields with no default** — fixed 2026-09-09: `ui/src/lib/execute-input.ts::buildExecuteInput` omits empty no-default fields (unit-tested); `guides/input-and-output.md` § "Empty fields in the UI". Original note: (`ui/src/pages/task-detail.tsx`: `defaults[key] = ""` at init, submit loop sends every key). The key is therefore *present* in `raw_input`/`input`, so `{{ input.x | default(value='...') }}` never fires (Tera `default` = undefined only) and `{{ input.x }}` renders `""`. Bit prod 2026-09-09 (`recalc-pipeline` job 685ea89f: `dataset: ""` → ML prediction asserted `Dataset '' does not exist`). Options: omit never-touched no-default fields from the payload (breaks workflows that read `{{ input.x }}` without `default`, Tera errors on undefined), or document that authors must use `{% if input.x %}` / a resolver step. Decide + document in `guides/workflow-basics.md` Tera section.
 - [x] Error boundaries added (per-page + top-level catch-all)
 - [x] `useAsyncData` stale-response guard + error state
 - [x] `useWorkerNames` singleton cache with 60s TTL
