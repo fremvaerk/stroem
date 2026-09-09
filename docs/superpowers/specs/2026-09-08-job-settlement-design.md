@@ -518,9 +518,13 @@ impl CreatedJob {
 Not `Copy`, not `Clone`. The struct is defined in `settlement/mod.rs`; the creator
 constructs it through `new` and cannot read the flag. Only `job_created` and
 `agent_child_created` read it, and both take the struct by value. `create_job_for_task` and
-`create_child_job_for_task` (the `_id`-returning wrappers "kept for tests") are deleted;
-their test callers use the `_detailed` variants and ignore the flag with `let _ =`
-explicitly, or are converted to `job_created`.
+`create_child_job_for_task` (the `_id`-returning wrappers "kept for tests") are deleted.
+As shipped, no call site discards a `CreatedJob` with `let _ =`. Test callers either bind
+the struct and pass it to `job_created` / assert on `terminal_at_creation()`, or take
+`.job_id` off the `_detailed` result and drop the rest — each test file's local
+`create_job_for_task` helper ends in `.map(|c| c.job_id)`. Production has one such site,
+`dispatch::handle_task_steps_pass`, which is covered by the `reconcile` that `advance`
+runs immediately after task dispatch.
 
 Residual hole: `create_job_for_task_detailed(..).await?.job_id` moves the id out and
 drops the struct. `#[must_use]` does not catch field access. This is documented on the
