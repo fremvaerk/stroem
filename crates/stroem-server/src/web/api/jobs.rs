@@ -635,15 +635,17 @@ pub async fn cancel_job(
         TaskPermission::Run => {}
     }
 
-    match crate::cancellation::cancel_job(&state, job_id)
+    match state
+        .settlement()
+        .cancel(job_id)
         .await
         .context("cancel job")?
     {
-        crate::cancellation::CancelResult::Cancelled => {
+        crate::settlement::CancelResult::Cancelled => {
             Ok(Json(json!({"status": "cancelled"})).into_response())
         }
-        crate::cancellation::CancelResult::NotFound => Err(AppError::not_found("Job")),
-        crate::cancellation::CancelResult::AlreadyTerminal => Err(AppError::Conflict(
+        crate::settlement::CancelResult::NotFound => Err(AppError::not_found("Job")),
+        crate::settlement::CancelResult::AlreadyTerminal => Err(AppError::Conflict(
             "Job is already in a terminal state".into(),
         )),
     }

@@ -759,12 +759,12 @@ impl StromMcpHandler {
             ));
         }
 
-        match crate::cancellation::cancel_job(&self.state, job_id).await {
-            Ok(crate::cancellation::CancelResult::Cancelled) => {
+        match self.state.settlement().cancel(job_id).await {
+            Ok(crate::settlement::CancelResult::Cancelled) => {
                 Ok(json_result(&serde_json::json!({ "status": "cancelled" })))
             }
-            Ok(crate::cancellation::CancelResult::NotFound) => Err(not_found("Job")),
-            Ok(crate::cancellation::CancelResult::AlreadyTerminal) => {
+            Ok(crate::settlement::CancelResult::NotFound) => Err(not_found("Job")),
+            Ok(crate::settlement::CancelResult::AlreadyTerminal) => {
                 Ok(json_result(&serde_json::json!({
                     "status": "already_terminal",
                     "message": "Job is already in a terminal state"

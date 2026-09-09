@@ -375,7 +375,7 @@ async fn fire_trigger(app_state: &AppState, workspaces: &WorkspaceManager, tstat
                             source_id,
                             job_id
                         );
-                        if let Err(e) = crate::cancellation::cancel_job(app_state, *job_id).await {
+                        if let Err(e) = app_state.settlement().cancel(*job_id).await {
                             tracing::warn!(
                                 "Failed to cancel job {} for trigger '{}': {:#}",
                                 job_id,

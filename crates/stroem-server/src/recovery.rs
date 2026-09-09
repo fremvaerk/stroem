@@ -211,7 +211,7 @@ async fn sweep(state: &AppState) -> Result<()> {
             .append_server_log(*job_id, "[recovery] Job timed out, cancelling")
             .await;
 
-        if let Err(e) = crate::cancellation::cancel_job(state, *job_id).await {
+        if let Err(e) = state.settlement().cancel(*job_id).await {
             tracing::error!("Failed to cancel timed-out job {}: {:#}", job_id, e);
         }
     }

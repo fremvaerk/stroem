@@ -863,7 +863,7 @@ async fn cancel_job_with_no_running_steps_does_not_publish_notify() -> Result<()
     .await?;
 
     // Cancel via the business-logic function.
-    stroem_server::cancellation::cancel_job(&state_a, job_id).await?;
+    state_a.settlement().cancel(job_id).await?;
 
     // Poll for up to 2 s — the NOTIFY must NOT arrive on peer B.
     let notify_arrived = wait_for(Duration::from_secs(2), || {

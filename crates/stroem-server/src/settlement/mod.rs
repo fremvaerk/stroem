@@ -49,6 +49,17 @@ pub struct BornTerminal {
     pub status: String,
 }
 
+/// Result of a cancel operation
+#[derive(Debug)]
+pub enum CancelResult {
+    /// Job was cancelled successfully
+    Cancelled,
+    /// Job was not found
+    NotFound,
+    /// Job is already in a terminal state
+    AlreadyTerminal,
+}
+
 impl AppState {
     /// Cheap: clones of `Arc`s and a pool handle.
     pub fn settlement(&self) -> Settlement {
@@ -573,6 +584,124 @@ impl Settlement {
         }
         Ok(())
     }
+
+    /// Cancel a job and all its child jobs recursively.
+    ///
+    /// 1. Mark the job as cancelled in the database
+    /// 2. Cancel all pending/ready steps
+    /// 3. Record running steps in `cancelled_jobs` set for worker polling
+    /// 4. Recurse into active child jobs
+    /// 5. If no running steps remain, trigger terminal handling immediately
+    ///
+    /// **Race window**: There is a small window between the DB update (step 1) and
+    /// the in-memory set insertion (step 3). A worker polling `check_cancelled`
+    /// during this window will not yet see the cancellation, but will catch it on
+    /// the next poll cycle (typically 5s). This is acceptable since the DB is the
+    /// source of truth and the in-memory set is a best-effort optimisation.
+    ///
+    /// **Restart behaviour**: The in-memory `cancelled_jobs` set is not persisted.
+    /// On server restart, any jobs that were cancelled but still had running steps
+    /// will be handled by the recovery sweeper: it detects stale workers, fails
+    /// their stuck steps, and orchestrates the job to terminal state.
+    #[tracing::instrument(skip(self))]
+    pub async fn cancel(&self, job_id: Uuid) -> Result<CancelResult> {
+        // Check if job exists first
+        if JobRepo::get(&self.pool, job_id).await?.is_none() {
+            return Ok(CancelResult::NotFound);
+        }
+
+        // Try to cancel the job (only works for pending/running)
+        let updated = JobRepo::cancel(&self.pool, job_id)
+            .await
+            .context("Failed to cancel job")?;
+
+        if !updated {
+            // Job is already terminal
+            return Ok(CancelResult::AlreadyTerminal);
+        }
+
+        // Cancel all pending/ready steps
+        let cancelled_count = JobStepRepo::cancel_pending_steps(&self.pool, job_id)
+            .await
+            .context("Failed to cancel pending steps")?;
+        tracing::info!(
+            "Cancelled {} pending/ready steps for job {}",
+            cancelled_count,
+            job_id
+        );
+
+        // Cancel server-managed running steps (for_each placeholders, type:task steps).
+        // These have no worker to signal — transition them directly to cancelled.
+        let server_managed_count = JobStepRepo::cancel_server_managed_steps(&self.pool, job_id)
+            .await
+            .context("Failed to cancel server-managed steps")?;
+        if server_managed_count > 0 {
+            tracing::info!(
+                "Cancelled {} server-managed running steps for job {}",
+                server_managed_count,
+                job_id
+            );
+        }
+
+        // Get running steps — these need active kill from the worker
+        let running_steps = JobStepRepo::get_running_steps(&self.pool, job_id)
+            .await
+            .context("Failed to get running steps")?;
+
+        let has_running_steps = !running_steps.is_empty();
+
+        if has_running_steps {
+            // Add to cancelled_jobs set so workers polling this replica detect
+            // the cancellation immediately.
+            self.cancelled_jobs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(job_id);
+            tracing::info!(
+                "Added job {} to cancelled_jobs set ({} running steps to kill)",
+                job_id,
+                running_steps.len()
+            );
+
+            // Propagate to peer replicas so workers polling any other server see
+            // the cancellation without waiting for their next sweep cycle.
+            // Best-effort: DB is the source of truth; recovery sweeper will
+            // catch stragglers if NOTIFY fails.
+            self.event_bus.publish_job_cancelled(job_id).await;
+        }
+
+        // Log cancellation
+        self.server_log(job_id, "Job cancelled by user").await;
+
+        // Recursively cancel child jobs
+        let child_jobs = JobRepo::get_child_jobs(&self.pool, job_id)
+            .await
+            .context("Failed to get child jobs")?;
+
+        for child in &child_jobs {
+            if let Err(e) = Box::pin(self.cancel(child.job_id)).await {
+                tracing::error!(
+                    "Failed to cancel child job {} of parent {}: {:#}",
+                    child.job_id,
+                    job_id,
+                    e
+                );
+            }
+        }
+
+        // Unconditional: the drain gate inside `advance` returns early while a
+        // worker still owns a step, which is exactly the old `!has_running_steps`
+        // condition, now in one place (spec §6.7).
+        if let Err(e) = self.advance(job_id).await {
+            tracing::error!(
+                "Failed to handle terminal state for cancelled job {}: {:#}",
+                job_id,
+                e
+            );
+        }
+
+        Ok(CancelResult::Cancelled)
+    }
 }
 
 fn is_terminal(status: &str) -> bool {
@@ -583,4 +712,21 @@ fn is_terminal(status: &str) -> bool {
             | Some(JobStatus::Cancelled)
             | Some(JobStatus::Skipped)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cancel_result_debug() {
+        let result = CancelResult::Cancelled;
+        assert!(format!("{:?}", result).contains("Cancelled"));
+
+        let result = CancelResult::NotFound;
+        assert!(format!("{:?}", result).contains("NotFound"));
+
+        let result = CancelResult::AlreadyTerminal;
+        assert!(format!("{:?}", result).contains("AlreadyTerminal"));
+    }
 }

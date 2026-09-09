@@ -668,12 +668,12 @@ async fn cascading_cancel_counts_parent_exactly_once() -> Result<()> {
         .sum();
 
     // Cancel the parent — this cascades synchronously through:
-    //   cancel_job(parent) → cancel_job(child) → advance(child)
+    //   cancel(parent) → cancel(child) → advance(child)
     //   → propagate(child, parent) → [parent terminal detected]
     //   → claim_terminal_handling(parent)  [attempt 1 — wins CAS]
-    //   back in cancel_job(parent): advance(parent)
+    //   back in cancel(parent): advance(parent)
     //   → claim_terminal_handling(parent)  [attempt 2 — CAS guard blocks it]
-    stroem_server::cancellation::cancel_job(&state, parent_id).await?;
+    state.settlement().cancel(parent_id).await?;
 
     let body_after = scrape(&router).await?;
     let count_after: u64 = body_after

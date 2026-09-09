@@ -183,7 +183,7 @@ async fn reconcile(state: &AppState) {
                         dup_id,
                         source_id
                     );
-                    if let Err(e) = crate::cancellation::cancel_job(state, *dup_id).await {
+                    if let Err(e) = state.settlement().cancel(*dup_id).await {
                         tracing::warn!(
                             "EventSourceManager: failed to cancel duplicate job {} for '{}': {:#}",
                             dup_id,
@@ -201,7 +201,7 @@ async fn reconcile(state: &AppState) {
                         source_id,
                         keep_job_id
                     );
-                    if let Err(e) = crate::cancellation::cancel_job(state, *keep_job_id).await {
+                    if let Err(e) = state.settlement().cancel(*keep_job_id).await {
                         tracing::warn!(
                             "EventSourceManager: failed to cancel old job {} for '{}': {:#}",
                             keep_job_id,
@@ -232,7 +232,7 @@ async fn reconcile(state: &AppState) {
                     source_id,
                     job_id
                 );
-                if let Err(e) = crate::cancellation::cancel_job(state, *job_id).await {
+                if let Err(e) = state.settlement().cancel(*job_id).await {
                     tracing::warn!(
                         "EventSourceManager: failed to cancel stale job {} for '{}': {:#}",
                         job_id,
