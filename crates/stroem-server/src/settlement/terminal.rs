@@ -157,6 +157,21 @@ pub struct TerminalPlan {
     pub hooks: HookKind,
 }
 
+/// The hook kind a job status alone implies, ignoring the retry budget.
+///
+/// This is the status-only rule the pre-`Settlement` terminal path used. It is
+/// what a caller needs when it has fallen through a retry plan whose retry job
+/// could not be created: the plan's `hooks` is `HookKind::None` there, but the
+/// failure is now final and must fire `on_error`.
+pub fn hook_kind(status: &str) -> HookKind {
+    match status.parse::<JobStatus>().ok() {
+        Some(JobStatus::Completed) => HookKind::Success,
+        Some(JobStatus::Failed) => HookKind::Error,
+        Some(JobStatus::Cancelled) => HookKind::Cancel,
+        _ => HookKind::None,
+    }
+}
+
 /// Which terminal side effects `job` gets. Pure.
 ///
 /// `hooks` is `None` on a retry plan: hooks fire only once retries are
@@ -173,12 +188,7 @@ pub fn plan(job: &JobRow) -> TerminalPlan {
     let hooks = if retry {
         HookKind::None
     } else {
-        match status {
-            Some(JobStatus::Completed) => HookKind::Success,
-            Some(JobStatus::Failed) => HookKind::Error,
-            Some(JobStatus::Cancelled) => HookKind::Cancel,
-            _ => HookKind::None,
-        }
+        hook_kind(&job.status)
     };
     TerminalPlan {
         propagate,
@@ -454,5 +464,28 @@ mod plan_tests {
     #[test]
     fn null_max_retries_never_retries() {
         assert!(!plan(&job("failed", false, 0, None)).retry);
+    }
+
+    #[test]
+    fn hook_kind_maps_terminal_statuses() {
+        assert_eq!(hook_kind("completed"), HookKind::Success);
+        assert_eq!(hook_kind("failed"), HookKind::Error);
+        assert_eq!(hook_kind("cancelled"), HookKind::Cancel);
+    }
+
+    #[test]
+    fn hook_kind_is_none_for_non_hook_statuses() {
+        assert_eq!(hook_kind("skipped"), HookKind::None);
+        assert_eq!(hook_kind("running"), HookKind::None);
+        assert_eq!(hook_kind("not-a-status"), HookKind::None);
+    }
+
+    #[test]
+    fn hook_kind_ignores_the_retry_budget_that_plan_honours() {
+        // The retry fall-through case: `plan` suppresses hooks while a retry
+        // is planned, `hook_kind` still reports the status-only kind.
+        let j = job("failed", false, 0, Some(2));
+        assert_eq!(plan(&j).hooks, HookKind::None);
+        assert_eq!(hook_kind(&j.status), HookKind::Error);
     }
 }

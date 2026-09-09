@@ -134,7 +134,20 @@ impl Settlement {
     /// missing (already logged).
     async fn resolve(&self, job: &JobRow) -> Result<Option<(Arc<WorkspaceConfig>, TaskDef)>> {
         let Some(workspace) = self.workspaces.get_config(&job.workspace).await else {
-            tracing::error!("Workspace '{}' not found", job.workspace);
+            // Two wordings, both inherited: a terminal job still drains,
+            // claims and propagates without the flow (only hooks, retry and
+            // the archive are lost), so it gets the old terminal path's
+            // milder message; a non-terminal job cannot execute at all and
+            // gets the old `orchestrate_after_step` wording.
+            if is_terminal(&job.status) {
+                tracing::warn!(
+                    "Workspace '{}' not found for terminal job {} — skipping hooks and S3 upload",
+                    job.workspace,
+                    job.job_id
+                );
+            } else {
+                tracing::error!("Workspace '{}' not found", job.workspace);
+            }
             return Ok(None);
         };
         let task = match workspace.tasks.get(&job.task_name) {
@@ -310,13 +323,23 @@ impl Settlement {
                 }
             }
         }
+        // Fall-through from a retry plan whose retry job was NOT created: the
+        // failure is final after all, so `on_error` must fire. `plan.hooks` is
+        // `HookKind::None` on a retry plan, so re-derive the kind from the
+        // status, exactly as the pre-`Settlement` terminal path did. On the
+        // non-retry path the two are equal by construction.
+        let hooks = if plan.retry {
+            terminal::hook_kind(&job.status)
+        } else {
+            plan.hooks
+        };
         // Fire hooks, notify waiters, upload to S3.
         // This intentionally runs for child jobs too (source_type == "task"):
         // - fire_hooks() already skips workspace-level hooks for non-top-level jobs
         // - task-level hooks should fire regardless of how the task was invoked
         // - S3 upload is per-job (each child has its own log file)
         // - job_completion.notify() is a no-op when no sync waiters exist
-        terminal::run_terminal_actions(self, &job, workspace, task, plan.hooks).await;
+        terminal::run_terminal_actions(self, &job, workspace, task, hooks).await;
         Ok(())
     }
 

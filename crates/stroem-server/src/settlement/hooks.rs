@@ -1,4 +1,4 @@
-use super::terminal::{plan, HookKind};
+use super::terminal::{hook_kind, HookKind};
 use super::{CreatedJob, Settlement};
 use anyhow::Context;
 use serde::Serialize;
@@ -161,17 +161,20 @@ async fn hook_chain_depth(pool: &PgPool, job: &stroem_db::JobRow) -> usize {
     depth
 }
 
-/// Fire the hooks a terminal `job` owes, deriving the kind from its own row.
+/// Fire the hooks a terminal `job` owes, deriving the kind from its status.
 ///
 /// Convenience wrapper over [`fire_hooks_of_kind`] for callers that hold a job
-/// row but no [`super::terminal::TerminalPlan`]. `advance` passes the plan's kind directly.
+/// row but no [`super::terminal::TerminalPlan`]. `advance` passes the plan's
+/// kind directly. Uses [`hook_kind`], not `plan(job).hooks`: the retry
+/// suppression is `advance`'s business, and a caller with only a row wants the
+/// status-only rule the pre-`Settlement` `fire_hooks` had.
 pub async fn fire_hooks(
     s: &Settlement,
     workspace_config: &WorkspaceConfig,
     job: &stroem_db::JobRow,
     task: &TaskDef,
 ) {
-    fire_hooks_of_kind(s, workspace_config, job, task, plan(job).hooks).await
+    fire_hooks_of_kind(s, workspace_config, job, task, hook_kind(&job.status)).await
 }
 
 /// Fire hooks for a job that has reached a terminal state, selecting the hook
