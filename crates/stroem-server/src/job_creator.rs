@@ -472,6 +472,16 @@ pub(crate) fn create_job_for_task_inner<'a>(
             raw_input_to_persist,
             lineage_source_job_id,
             restart_from_step,
+            // `max_attempts` counts total executions; the DB column counts
+            // retries only, so it's stored as `max_attempts - 1` (same
+            // convention as the step-level `max_retries` above). Validation
+            // guarantees `max_attempts >= 1`, so this subtraction never
+            // underflows. Child (`type: task`) jobs carry this too, but
+            // `terminal::plan` gates the retry decision on top-level, so
+            // they never actually retry.
+            task.retry
+                .as_ref()
+                .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
         )
         .await
         .context("Failed to create job")?;

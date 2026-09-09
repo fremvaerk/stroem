@@ -197,6 +197,7 @@ impl JobRepo {
             raw_input,
             source_job_id,
             restart_from_step,
+            None,
         )
         .await
     }
@@ -222,6 +223,7 @@ impl JobRepo {
         raw_input: Option<JsonValue>,
         source_job_id: Option<Uuid>,
         restart_from_step: Option<&str>,
+        max_retries: Option<i32>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
@@ -242,6 +244,7 @@ impl JobRepo {
             raw_input,
             source_job_id,
             restart_from_step,
+            max_retries,
         )
         .await
     }
@@ -264,14 +267,15 @@ impl JobRepo {
         raw_input: Option<JsonValue>,
         source_job_id: Option<Uuid>,
         restart_from_step: Option<&str>,
+        max_retries: Option<i32>,
     ) -> Result<Uuid>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         sqlx::query(
             r#"
-            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            INSERT INTO job (job_id, workspace, task_name, mode, input, source_type, source_id, parent_job_id, parent_step_name, timeout_secs, revision, raw_input, source_job_id, restart_from_step, max_retries)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
         )
         .bind(job_id)
@@ -288,6 +292,7 @@ impl JobRepo {
         .bind(raw_input)
         .bind(source_job_id)
         .bind(restart_from_step)
+        .bind(max_retries)
         .execute(executor)
         .await
         .context("Failed to create job")?;

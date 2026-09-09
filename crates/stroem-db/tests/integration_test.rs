@@ -2184,6 +2184,7 @@ async fn test_transaction_rollback_on_step_failure() -> Result<()> {
         None,
         None,
         None,
+        None,
     )
     .await?;
 
@@ -2223,6 +2224,7 @@ async fn test_transaction_commit_persists_job_and_steps() -> Result<()> {
         "distributed",
         None,
         "api",
+        None,
         None,
         None,
         None,

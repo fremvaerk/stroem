@@ -552,6 +552,7 @@ async fn test_transaction_commit_persists_child_job_and_steps() -> Result<()> {
         None,
         None,
         None,
+        None,
     )
     .await?;
 
@@ -598,6 +599,7 @@ async fn test_transaction_rollback_discards_child_job_and_steps() -> Result<()> 
         None,
         Some(parent_id),
         Some("spawn-step"),
+        None,
         None,
         None,
         None,

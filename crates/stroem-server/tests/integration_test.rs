@@ -23211,13 +23211,39 @@ fn task_retry_workspace(max_attempts: u32, with_error_hook: bool) -> WorkspaceCo
     workspace
 }
 
+/// Like `task_retry_workspace`, but "flaky" is a `type: task` action naming a
+/// task that does not exist, so the job's only root step fails during
+/// creation-time dispatch (`settlement::dispatch::init` -> `handle_task_steps`)
+/// rather than via a worker completion. Used by the D3 creation-time-failure
+/// retry tests.
+fn task_retry_creation_failure_workspace(max_attempts: u32) -> WorkspaceConfig {
+    use stroem_common::models::workflow::ActionDef;
+
+    let mut workspace = task_retry_workspace(max_attempts, false);
+
+    let flaky = workspace.actions["flaky"].clone();
+    workspace.actions.insert(
+        "flaky".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("does-not-exist".to_string()),
+            cmd: None,
+            script: None,
+            ..flaky
+        },
+    );
+
+    workspace
+}
+
 /// Test 1 (task-level): failing a step with task retry remaining creates a new
 /// retry job linked back to the original, which is then marked "failed".
 /// The retry job gets `source_type = "retry"`, `retry_attempt = 1`, and its
 /// step starts in "ready" state.
 #[tokio::test]
 async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
-    let workspace = task_retry_workspace(1, false);
+    // max_attempts: 2 -> job.max_retries = 1 (one retry allowed).
+    let workspace = task_retry_workspace(2, false);
     let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
 
     // Create the original job.
@@ -23236,9 +23262,10 @@ async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
     )
     .await?;
 
-    // Task-level retry requires max_retries to be set on the job row.
-    // create_job_for_task sets max_retries on steps but not on the job itself;
-    // the orchestrator reads job.max_retries to decide whether to create a retry job.
+    // D3 (spec §8.1): `max_retries` is now written at creation from
+    // `task.retry.max_attempts - 1`, so this UPDATE is redundant with what
+    // creation already wrote (Some(1)) — kept so the test still documents the
+    // job-level retry gate explicitly and is robust to fixture drift.
     sqlx::query("UPDATE job SET max_retries = 1 WHERE job_id = $1")
         .bind(job_id)
         .execute(&pool)
@@ -23296,6 +23323,185 @@ async fn test_task_retry_creates_new_job_on_failure() -> Result<()> {
         !ready_steps.is_empty(),
         "retry job must have at least one step in 'ready' status"
     );
+
+    Ok(())
+}
+
+/// D3 (spec §8.1): a task with `retry: { max_attempts: 2 }` persists
+/// `job.max_retries = 1` at creation and, when its step fails through the
+/// worker path, produces a retry job — with no raw-SQL seeding.
+#[tokio::test]
+async fn test_task_retry_is_persisted_at_creation_and_fires_on_worker_failure() -> Result<()> {
+    let workspace = task_retry_workspace(2, false);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace.clone()).await?;
+
+    // Create the original job.
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "task-retry-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+
+    // D3: max_retries is persisted at creation from task.retry — no raw SQL
+    // seeding needed.
+    let created_job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(created_job.max_retries, Some(1));
+
+    let _worker_id = register_test_worker(&pool).await;
+
+    // Fail the step via the HTTP API — this triggers Settlement::step_failed which
+    // calls create_retry_job when it sees a failed top-level job with retries remaining.
+    let complete_resp = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/step1/complete", job_id),
+            json!({"exit_code": 1, "error": "task-level retry trigger"}),
+        ))
+        .await?;
+    assert_eq!(complete_resp.status(), StatusCode::OK);
+
+    // Original job must be "failed".
+    let orig_job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(orig_job.status, "failed", "original job must be failed");
+
+    // Original job must have retry_job_id pointing to the retry job.
+    let retry_job_id = orig_job
+        .retry_job_id
+        .expect("original job must have retry_job_id set");
+
+    // The retry job must exist with correct metadata.
+    let retry_job = JobRepo::get(&pool, retry_job_id).await?.unwrap();
+    assert_eq!(
+        retry_job.source_type, "retry",
+        "retry job source_type must be 'retry'"
+    );
+    assert_eq!(
+        retry_job.retry_of_job_id,
+        Some(job_id),
+        "retry job must point back to the original job via retry_of_job_id"
+    );
+    assert_eq!(
+        retry_job.retry_attempt, 1,
+        "retry job must have retry_attempt = 1"
+    );
+    assert_eq!(
+        retry_job.max_retries,
+        Some(1),
+        "retry job must carry max_retries forward"
+    );
+
+    // The retry job must have at least one step in "ready" state.
+    let retry_steps = JobStepRepo::get_steps_for_job(&pool, retry_job_id).await?;
+    assert!(!retry_steps.is_empty(), "retry job must have steps created");
+    let ready_steps: Vec<_> = retry_steps.iter().filter(|s| s.status == "ready").collect();
+    assert!(
+        !ready_steps.is_empty(),
+        "retry job must have at least one step in 'ready' status"
+    );
+
+    Ok(())
+}
+
+/// D3: the same task whose only root step is `type: task` naming an unknown
+/// task fails AT CREATION (via `handle_task_steps` -> `fail_task_step`, so the
+/// job settles "failed" before it is ever handed back to the caller) and
+/// still gets a retry job. Before the settlement module, task retry existed
+/// only on the worker completion path.
+#[tokio::test]
+async fn test_task_retry_fires_for_a_job_that_fails_at_creation() -> Result<()> {
+    // max_attempts: 2 -> job.max_retries = 1 (one retry allowed).
+    let workspace = task_retry_creation_failure_workspace(2);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/task-retry-task/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let orig_job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(
+        orig_job.status, "failed",
+        "job that fails at creation must be failed"
+    );
+    assert_eq!(orig_job.max_retries, Some(1));
+
+    let retry_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM job WHERE retry_of_job_id = $1 AND source_type = 'retry'",
+    )
+    .bind(job_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retry_count, 1, "exactly one retry job must be created");
+
+    Ok(())
+}
+
+/// D3: with `max_attempts: 3`, a retry job that itself fails at creation is
+/// finalized through `job_created` and gets a SECOND retry (spec §6.3 4.d.ii).
+#[tokio::test]
+async fn test_retry_job_that_fails_at_creation_is_retried_again() -> Result<()> {
+    // max_attempts: 3 -> job.max_retries = 2 (two retries allowed).
+    let workspace = task_retry_creation_failure_workspace(3);
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/task-retry-task/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let job_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    let orig_job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(orig_job.status, "failed");
+    let retry1_id = orig_job
+        .retry_job_id
+        .expect("original must link to retry 1");
+
+    let retry1 = JobRepo::get(&pool, retry1_id).await?.unwrap();
+    assert_eq!(retry1.status, "failed");
+    assert_eq!(retry1.retry_attempt, 1);
+    let retry2_id = retry1.retry_job_id.expect("retry 1 must link to retry 2");
+
+    let retry2 = JobRepo::get(&pool, retry2_id).await?.unwrap();
+    assert_eq!(retry2.status, "failed");
+    assert_eq!(retry2.retry_attempt, 2);
+    assert!(
+        retry2.retry_job_id.is_none(),
+        "no fourth job: retries exhausted"
+    );
+
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM job WHERE job_id = $1 OR retry_of_job_id = $1")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(total, 3, "exactly three jobs in the retry chain");
 
     Ok(())
 }

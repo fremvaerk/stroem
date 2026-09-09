@@ -163,16 +163,13 @@ pub(super) async fn create_retry_job(
         .await
         .context("Failed to begin retry transaction")?;
 
-    sqlx::query(
-        "UPDATE job SET retry_of_job_id = $1, retry_attempt = $2, max_retries = $3 WHERE job_id = $4",
-    )
-    .bind(root_job_id)
-    .bind(failed_job.retry_attempt + 1)
-    .bind(max)
-    .bind(retry_job_id)
-    .execute(&mut *tx)
-    .await
-    .context("Failed to set retry fields on new job")?;
+    sqlx::query("UPDATE job SET retry_of_job_id = $1, retry_attempt = $2 WHERE job_id = $3")
+        .bind(root_job_id)
+        .bind(failed_job.retry_attempt + 1)
+        .bind(retry_job_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to set retry fields on new job")?;
 
     sqlx::query("UPDATE job SET retry_job_id = $1 WHERE job_id = $2")
         .bind(retry_job_id)
