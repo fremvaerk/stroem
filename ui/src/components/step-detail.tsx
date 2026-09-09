@@ -15,6 +15,7 @@ import { getStepLogs } from "@/lib/api";
 import { formatTime } from "@/lib/formatting";
 import { isTerminalJobStatus } from "@/lib/job-status";
 import type { JobStep } from "@/lib/types";
+import { skipExplanation } from "@/lib/skip-reason";
 
 interface StepDetailProps {
   jobId: string;
@@ -46,11 +47,13 @@ export function StepDetail({
   const [loadingLogs, setLoadingLogs] = useState(true);
   const hasLogsRef = useRef(false);
   const isCarriedOver = step.carried_over;
+  const isSkipped = step.status === "skipped";
 
   useEffect(() => {
     // Carried-over steps were never executed by this job — their logs and
     // artifacts belong to the source job, so there is nothing to fetch here.
-    if (isCarriedOver) {
+    // Skipped steps were never executed either — there is nothing to fetch.
+    if (isCarriedOver || isSkipped) {
       setLoadingLogs(false);
       return;
     }
@@ -96,7 +99,7 @@ export function StepDetail({
     return () => {
       cancelled = true;
     };
-  }, [jobId, step.step_name, step.status, isCarriedOver]);
+  }, [jobId, step.step_name, step.status, isCarriedOver, isSkipped]);
 
   const isStreaming = step.status === "running";
   const isSuspendedApproval =
@@ -186,6 +189,13 @@ export function StepDetail({
               ) : (
                 <>Carried over from an earlier job.</>
               )}
+            </p>
+          ) : isSkipped ? (
+            <p
+              data-testid="skipped-notice"
+              className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground"
+            >
+              {skipExplanation(step.skip_reason)}
             </p>
           ) : loadingLogs ? (
             <div className="flex items-center justify-center py-8">

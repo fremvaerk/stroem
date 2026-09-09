@@ -41,6 +41,7 @@ export interface FlowStep {
   input?: Record<string, unknown>;
   depends_on?: string[];
   continue_on_failure?: boolean;
+  continue_when_skipped?: boolean;
   when?: string;
   for_each?: string | string[] | unknown[];
   sequential?: boolean;
@@ -83,6 +84,8 @@ export interface JobListItem {
   completed_at: string | null;
 }
 
+export type SkipReason = "condition" | "empty" | "cascade" | "unreachable";
+
 export interface JobStep {
   step_name: string;
   action_name: string;
@@ -115,6 +118,7 @@ export interface JobStep {
   approval_message: string | null;
   approval_fields: Record<string, unknown> | null;
   carried_over: boolean;
+  skip_reason: SkipReason | null;
 }
 
 export interface JobDetail {
