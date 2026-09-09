@@ -26195,3 +26195,172 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
 
     Ok(())
 }
+
+// ─── Task 6 / D1: one failure policy for the parent leg of propagation ──────
+
+/// D1 (spec §6.4): a parent whose `type: task` step dispatch fails during the
+/// PARENT leg of propagation (child settles → parent step marked → parent
+/// advances → its next task step names an unknown task) still settles, fires
+/// its on_error hook and increments the completion counter exactly once.
+/// Before the settlement module the parent leg returned the dispatch error
+/// with `?`, skipping the parent's drain, claim and terminal actions forever.
+#[tokio::test]
+async fn test_parent_dispatch_failure_after_child_settles_still_runs_terminal_actions() -> Result<()>
+{
+    let mut workspace = task_action_test_workspace();
+
+    // type:task action whose target task does not exist → child creation fails
+    // during the PARENT job's own advance (not at initial job creation).
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-missing".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("missing".to_string()),
+            ..greet_action.clone()
+        },
+    );
+    // Script action used by the parent's on_error hook.
+    workspace.actions.insert(
+        "record".to_string(),
+        ActionDef {
+            script: Some("echo recorded".to_string()),
+            ..greet_action
+        },
+    );
+
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "first".to_string(),
+        FlowStep {
+            action: "run-cleanup".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step.clone()
+        },
+    );
+    flow.insert(
+        "second".to_string(),
+        FlowStep {
+            action: "run-missing".to_string(),
+            depends_on: vec!["first".to_string()],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "parent".to_string(),
+        TaskDef {
+            flow,
+            on_error: vec![HookDef {
+                action: "record".to_string(),
+                input: HashMap::new(),
+            }],
+            ..base_task
+        },
+    );
+
+    let (router, pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/parent/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let parent_id: Uuid = body_json(response).await["job_id"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+
+    // `first` must have dispatched a child job synchronously at creation.
+    let children = JobRepo::get_child_jobs(&pool, parent_id).await?;
+    assert_eq!(
+        children.len(),
+        1,
+        "the `first` task step must dispatch exactly one child job"
+    );
+    let child_id = children[0].job_id;
+
+    // Complete the child's only step through the worker API — this
+    // propagates into the parent and runs the parent's own `advance`.
+    let worker_id = register_test_worker(&pool).await;
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let claimed = body_json(response).await;
+    assert_eq!(claimed["job_id"].as_str().unwrap(), child_id.to_string());
+    assert_eq!(claimed["step_name"].as_str().unwrap(), "clean");
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/clean/complete", child_id),
+            json!({"output": {"greeting": "hi"}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Parent must have settled to failed, not stayed `running` forever.
+    let parent = JobRepo::get(&pool, parent_id).await?.unwrap();
+    assert_eq!(
+        parent.status, "failed",
+        "parent must close as failed once its own dispatch fails"
+    );
+
+    let steps: HashMap<String, _> = JobStepRepo::get_steps_for_job(&pool, parent_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(steps["first"].status, "completed");
+    assert_eq!(steps["second"].status, "failed", "{:?}", steps["second"]);
+    assert!(
+        steps["second"]
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("Task 'missing' not found"),
+        "{:?}",
+        steps["second"].error_message
+    );
+
+    let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_jobs: Vec<_> = jobs
+        .iter()
+        .filter(|j| {
+            j.source_type == "hook"
+                && j.source_id.as_deref() == Some(parent_id.to_string().as_str())
+        })
+        .collect();
+    assert_eq!(
+        hook_jobs.len(),
+        1,
+        "exactly one on_error hook job for the parent: {jobs:?}"
+    );
+    assert_eq!(hook_jobs[0].task_name, "_hook:record");
+
+    let metrics_recorded_at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT metrics_recorded_at FROM job WHERE job_id = $1")
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        metrics_recorded_at.is_some(),
+        "terminal handling claim must have been taken for the parent"
+    );
+
+    Ok(())
+}
