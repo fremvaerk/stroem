@@ -799,7 +799,7 @@ pub async fn restart_job(
 
     // Root approval steps suspended during creation, then terminal handling for
     // a restart whose set cascade-skipped and settled on the spot.
-    crate::job_creator::fire_initial_suspended_hooks(
+    crate::settlement::dispatch::fire_initial_suspended_hooks(
         &state,
         &workspace,
         &source.workspace,

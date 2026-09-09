@@ -234,7 +234,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
     crate::settlement::cascade_and_settle(&state.pool, job_id, &task, &workspace).await?;
 
     // Handle any newly-promoted type: task steps (including loop instances)
-    if let Err(e) = crate::job_creator::handle_task_steps(
+    if let Err(e) = crate::settlement::dispatch::handle_task_steps(
         &state.workspaces,
         &state.pool,
         &workspace,
@@ -265,7 +265,7 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
             .map(|s| s.step_name.as_str())
             .collect();
 
-        if let Err(e) = crate::job_creator::handle_approval_steps(
+        if let Err(e) = crate::settlement::dispatch::handle_approval_steps(
             &state.pool,
             &workspace,
             &job.workspace,
@@ -595,7 +595,7 @@ pub async fn propagate_to_parent(
             .await?;
 
             // Handle any newly-promoted task steps in the parent
-            crate::job_creator::handle_task_steps(
+            crate::settlement::dispatch::handle_task_steps(
                 &state.workspaces,
                 &state.pool,
                 &parent_ws,
@@ -620,7 +620,7 @@ pub async fn propagate_to_parent(
                     .map(|s| s.step_name.as_str())
                     .collect();
 
-                if let Err(e) = crate::job_creator::handle_approval_steps(
+                if let Err(e) = crate::settlement::dispatch::handle_approval_steps(
                     &state.pool,
                     &parent_ws,
                     &parent_job.workspace,

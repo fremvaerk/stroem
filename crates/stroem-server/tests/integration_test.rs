@@ -98,7 +98,7 @@ async fn handle_task_steps(
         .tasks
         .get(&job.task_name)
         .expect("task exists in workspace");
-    stroem_server::job_creator::handle_task_steps(
+    stroem_server::settlement::dispatch::handle_task_steps(
         &mgr,
         pool,
         workspace_config,

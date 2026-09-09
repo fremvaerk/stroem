@@ -543,7 +543,10 @@ pub async fn execute_task(
 
     // 6. Fire on_suspended hooks for any root-level approval steps that were
     //    suspended during job creation (FIX 2).
-    crate::job_creator::fire_initial_suspended_hooks(&state, &workspace, &ws, &name, job_id).await;
+    crate::settlement::dispatch::fire_initial_suspended_hooks(
+        &state, &workspace, &ws, &name, job_id,
+    )
+    .await;
     crate::job_recovery::finalize_created_job(&state, created).await;
 
     // 7. Return job_id

@@ -118,7 +118,7 @@ pub async fn emit_event(
 
     // Fire on_suspended hooks for any root-level approval steps that were
     // suspended during job creation (mirrors the scheduler pattern).
-    crate::job_creator::fire_initial_suspended_hooks(
+    crate::settlement::dispatch::fire_initial_suspended_hooks(
         &state,
         &workspace_config,
         &req.workspace,
