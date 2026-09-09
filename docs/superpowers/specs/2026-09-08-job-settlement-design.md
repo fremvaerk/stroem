@@ -1,6 +1,6 @@
 # Job Settlement — Design
 
-**Status:** Revision 3 (2026-09-08). Codex pass 2 verdict "ready with listed changes"; the two listed spots (`plan` arity in §6.3, `job_created` caller in the §6.2 table) fixed here. Binding for the implementation plan.
+**Status:** Revision 4 (2026-09-09). Revision 3 was Codex-reviewed "ready". Revision 4 amends §6.3 step 2 during implementation (Task 3): an unresolvable workspace or task no longer skips the drain gate, claim and propagation, matching the old `handle_job_terminal`; caught by `metrics_test::cascading_cancel_counts_parent_exactly_once`. Binding.
 **Date:** 2026-09-08
 **Origin:** architecture review 2026-09-07/08, candidate 2 "Job settlement", entered
 through candidate 1 (the step cascade, now on `main`).
@@ -271,11 +271,15 @@ async fn advance(&self, job_id: Uuid) -> Result<()>;
 ```
 
 1. Read the job row; missing → warn, `Ok(())`.
-2. Resolve workspace and task: `workspaces.get_config(job.workspace)`; task from
-   `config.tasks`, else `build_minimal_task_def` for `hook` and `event_source`
-   source types (moved from `job_recovery.rs`), else warn and `Ok(())`. A missing
-   workspace logs `[orchestration] workspace '…' not loaded` to the job and returns
-   `Ok(())`.
+2. Resolve workspace and task into an `Option`: `workspaces.get_config(job.workspace)`;
+   task from `config.tasks`, else `build_minimal_task_def` for `hook` and
+   `event_source` source types (moved from `job_recovery.rs`). A missing workspace
+   or task is logged (same messages as today) but does **not** return: step 3
+   requires the pair and is skipped without it; step 4 runs the drain gate, the
+   cancel-signal clear, the claim and the propagation regardless, and skips only
+   retry, hooks, notify and archive, exactly as today's `handle_job_terminal` does
+   (revision 4 amendment; `metrics_test::cascading_cancel_counts_parent_exactly_once`
+   pins it).
 3. **If the job row is non-terminal** (`pending` or `running`), run the following
    **once**. This is not a loop: today's copies run this sequence once per call and
    rely on the next step completion, approval or recovery tick to call in again; a
