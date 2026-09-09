@@ -69,7 +69,7 @@ async fn create_job_for_task(
     defaults: JobDefaults,
 ) -> Result<Uuid> {
     let mgr = WorkspaceManager::from_config(workspace_name, workspace_config.clone());
-    stroem_server::job_creator::create_job_for_task(
+    stroem_server::job_creator::create_job_for_task_detailed(
         &mgr,
         pool,
         workspace_config,
@@ -84,6 +84,7 @@ async fn create_job_for_task(
         defaults,
     )
     .await
+    .map(|c| c.job_id)
 }
 
 fn mcp_test_workspace() -> WorkspaceConfig {

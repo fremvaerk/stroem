@@ -12,6 +12,7 @@ use stroem_db::{JobRepo, JobRow, JobStepRepo, NewJobStep};
 use uuid::Uuid;
 
 use crate::config::{AgentsConfig, JobDefaults};
+use crate::settlement::CreatedJob;
 use crate::workspace::WorkspaceManager;
 use crate::workspace_set::WorkspaceSet;
 
@@ -21,24 +22,6 @@ use crate::workspace_set::WorkspaceSet;
 /// budget off the same constant — up to this many plain `type: task` levels
 /// can sit between two `hook` links in a job's ancestry.
 pub(crate) const MAX_TASK_DEPTH: u32 = 10;
-
-/// Result of job creation. `terminal_at_creation` is true when every step was
-/// already terminal once creation-time promotion/expansion/dispatch finished
-/// (e.g. all root steps skipped by `when`, or a server-dispatched root step
-/// failed) — the caller must then run `Settlement::job_created`
-/// so hooks/metrics/log-archive fire exactly as for an orchestrator-settled job.
-///
-/// It is also true when post-commit initialisation itself failed: promotion,
-/// `type: task` dispatch, `type: approval` dispatch and settlement all run
-/// inside one coordinated result, and any error there compensates the job to
-/// `failed` (job row and every non-terminal step, in one transaction) rather
-/// than returning a 500 over a committed job. A DB outage during that
-/// compensation still surfaces as an error to the caller.
-#[derive(Debug, Clone, Copy)]
-pub struct CreatedJob {
-    pub job_id: Uuid,
-    pub terminal_at_creation: bool,
-}
 
 /// How a job comes into being. Replaces the positional `source_job_id`, which
 /// used to mean both "resolve Re-run sentinels against this job" and "persist
@@ -59,7 +42,8 @@ pub enum CreationMode<'a> {
     },
 }
 
-/// Create a job and its steps for a task in a workspace.
+/// Create a job and its steps for a task in a workspace, reporting
+/// `terminal_at_creation`.
 ///
 /// Shared by the API handler (`execute_task`) and the scheduler.
 /// Pass `agents_config` to enable initial dispatch of ready `type: agent` steps
@@ -69,46 +53,6 @@ pub enum CreationMode<'a> {
 /// Sentinel values in `input` are resolved against the source job's `raw_input`,
 /// and both `raw_input` and `source_job_id` are persisted on the new job row.
 ///
-/// **Warning: drops the `terminal_at_creation` flag.** Production callers must
-/// use [`create_job_for_task_detailed`] and then call
-/// `Settlement::job_created`, or a job that settles synchronously at
-/// creation never fires its hooks, metric, log archive or parent propagation.
-/// Kept for tests.
-#[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip(pool, workspaces, workspace_config, agents_config, input))]
-pub async fn create_job_for_task(
-    workspaces: &WorkspaceManager,
-    pool: &PgPool,
-    workspace_config: &WorkspaceConfig,
-    workspace_name: &str,
-    task_name: &str,
-    input: serde_json::Value,
-    source_type: &str,
-    source_id: Option<&str>,
-    revision: Option<&str>,
-    source_job_id: Option<Uuid>,
-    agents_config: Option<&AgentsConfig>,
-    defaults: JobDefaults,
-) -> Result<Uuid> {
-    create_job_for_task_detailed(
-        workspaces,
-        pool,
-        workspace_config,
-        workspace_name,
-        task_name,
-        input,
-        source_type,
-        source_id,
-        revision,
-        source_job_id,
-        agents_config,
-        defaults,
-    )
-    .await
-    .map(|c| c.job_id)
-}
-
-/// Like [`create_job_for_task`] but also reports `terminal_at_creation`.
 /// HTTP/MCP/scheduler entry points use this and call
 /// `Settlement::job_created` afterwards.
 #[allow(clippy::too_many_arguments)]
@@ -206,51 +150,12 @@ pub async fn create_restart_job(
     .await
 }
 
-/// Create a child job with parent tracking.
+/// Create a child job with parent tracking (for `type: task` sub-jobs),
+/// reporting `terminal_at_creation` so the caller can finalize (or reject) a
+/// child that settled synchronously.
 ///
 /// Used by `handle_task_steps` to create sub-jobs that propagate back to the
 /// parent step on completion.
-///
-/// **Warning: drops the `terminal_at_creation` flag.** Production callers must
-/// use [`create_child_job_for_task_detailed`] and then call
-/// `Settlement::job_created` — or, for `agent_tool` children, reject
-/// the terminal case outright, since propagation of an agent-tool result
-/// depends on the worker having recorded the child id first. Kept for tests.
-#[allow(clippy::too_many_arguments)]
-pub async fn create_child_job_for_task(
-    workspaces: &WorkspaceManager,
-    pool: &PgPool,
-    workspace_config: &WorkspaceConfig,
-    workspace_name: &str,
-    task_name: &str,
-    input: serde_json::Value,
-    source_type: &str,
-    source_id: Option<&str>,
-    parent_job_id: Uuid,
-    parent_step_name: &str,
-    revision: Option<&str>,
-    defaults: JobDefaults,
-) -> Result<Uuid> {
-    create_child_job_for_task_detailed(
-        workspaces,
-        pool,
-        workspace_config,
-        workspace_name,
-        task_name,
-        input,
-        source_type,
-        source_id,
-        parent_job_id,
-        parent_step_name,
-        revision,
-        defaults,
-    )
-    .await
-    .map(|c| c.job_id)
-}
-
-/// Like [`create_child_job_for_task`] but also reports `terminal_at_creation`,
-/// so the caller can finalize (or reject) a child that settled synchronously.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_child_job_for_task_detailed(
     workspaces: &WorkspaceManager,
@@ -643,17 +548,11 @@ pub(crate) fn create_job_for_task_inner<'a>(
                 tx.commit()
                     .await
                     .context("commit compensation after initialisation error")?;
-                return Ok(CreatedJob {
-                    job_id,
-                    terminal_at_creation: true,
-                });
+                return Ok(CreatedJob::new(job_id, true));
             }
         };
 
-        Ok(CreatedJob {
-            job_id,
-            terminal_at_creation: settled.is_some(),
-        })
+        Ok(CreatedJob::new(job_id, settled.is_some()))
     })
 }
 

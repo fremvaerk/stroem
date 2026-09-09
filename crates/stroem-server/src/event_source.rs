@@ -548,7 +548,7 @@ async fn load_terminal_event_source_jobs(state: &AppState) -> Result<Vec<EventSo
     .context("Failed to load terminal event source jobs")
 }
 
-/// Create an event source consumer job via `create_job_for_task()`.
+/// Create an event source consumer job via `create_job_for_task_detailed()`.
 ///
 /// The job input carries event source metadata under `_event_source` so that
 /// the worker and emit endpoint can identify the source trigger and its config.

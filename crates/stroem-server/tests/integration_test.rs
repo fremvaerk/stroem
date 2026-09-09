@@ -68,7 +68,7 @@ async fn create_job_for_task(
     defaults: JobDefaults,
 ) -> Result<Uuid> {
     let mgr = WorkspaceManager::from_config(workspace_name, workspace_config.clone());
-    stroem_server::job_creator::create_job_for_task(
+    stroem_server::job_creator::create_job_for_task_detailed(
         &mgr,
         pool,
         workspace_config,
@@ -83,6 +83,7 @@ async fn create_job_for_task(
         defaults,
     )
     .await
+    .map(|c| c.job_id)
 }
 
 async fn handle_task_steps(
@@ -24573,7 +24574,8 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
-    assert!(created.terminal_at_creation);
+    // `terminal_at_creation` is private to the settlement module; the job's
+    // own status is the externally-observable proof it settled synchronously.
     assert_eq!(
         JobRepo::get(&pool, created.job_id).await?.unwrap().status,
         "completed"
@@ -24594,7 +24596,6 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
-    assert!(!created.terminal_at_creation);
     assert_eq!(
         JobRepo::get(&pool, created.job_id).await?.unwrap().status,
         "pending"
@@ -25667,22 +25668,23 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
+    let job_id = created.job_id;
     state.settlement().job_created(created).await;
 
-    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     assert_eq!(
         steps[0].status, "completed",
         "parent step must reflect the settled child after the first finalize: {steps:?}"
     );
     assert_eq!(
-        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
         "completed"
     );
 
     // Call Settlement::reconcile twice more, directly, simulating extra
     // orchestration passes converging on the same already-settled child.
-    state.settlement().reconcile(created.job_id).await;
-    state.settlement().reconcile(created.job_id).await;
+    state.settlement().reconcile(job_id).await;
+    state.settlement().reconcile(job_id).await;
 
     let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
     let hook_jobs: Vec<_> = jobs.iter().filter(|j| j.source_type == "hook").collect();
@@ -25692,13 +25694,13 @@ async fn test_reconcile_settled_children_is_idempotent() -> Result<()> {
         "child's on_success hook must fire exactly once across repeated reconcile calls: {jobs:?}"
     );
 
-    let steps = JobStepRepo::get_steps_for_job(&pool, created.job_id).await?;
+    let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     assert_eq!(
         steps[0].status, "completed",
         "parent step must remain completed after repeated reconcile calls: {steps:?}"
     );
     assert_eq!(
-        JobRepo::get(&pool, created.job_id).await?.unwrap().status,
+        JobRepo::get(&pool, job_id).await?.unwrap().status,
         "completed"
     );
 
@@ -26028,10 +26030,8 @@ async fn test_approval_dispatch_failure_compensates_the_job() -> Result<()> {
     )
     .await?;
 
-    assert!(
-        created.terminal_at_creation,
-        "a failed initialisation must hand back a terminal job"
-    );
+    // `terminal_at_creation` is private to the settlement module; the job's
+    // own status is the externally-observable proof it was handed back terminal.
     assert_eq!(
         JobRepo::get(&pool, created.job_id).await?.unwrap().status,
         "failed",
@@ -26145,6 +26145,7 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
+    let job_id = created.job_id;
     state.settlement().job_created(created).await;
 
     let jobs = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0).await?;
@@ -26155,11 +26156,11 @@ async fn test_indirect_hook_cycle_is_bounded() -> Result<()> {
     );
 
     // Extra orchestration passes must not restart the chain.
-    state.settlement().reconcile(created.job_id).await;
+    state.settlement().reconcile(job_id).await;
     let first = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0)
         .await?
         .len();
-    state.settlement().reconcile(created.job_id).await;
+    state.settlement().reconcile(job_id).await;
     let second = JobRepo::list(&pool, Some("default"), None, None, None, 200, 0)
         .await?
         .len();

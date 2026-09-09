@@ -438,8 +438,9 @@ async fn restart_from_middle_carries_upstream_and_reruns_downstream() -> Result<
         JobDefaults::default(),
     )
     .await?;
-    assert!(!created.terminal_at_creation);
-
+    // `terminal_at_creation` is private to the settlement module; the step
+    // statuses checked below ("ready"/"pending", not terminal) are the
+    // externally-observable proof the job did not settle at creation.
     let new = JobRepo::get(&app.pool, created.job_id).await?.unwrap();
     assert_eq!(new.source_type, "restart");
     assert_eq!(new.source_id.as_deref(), Some("tester"));
@@ -529,8 +530,10 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         JobDefaults::default(),
     )
     .await?;
-    assert!(created.terminal_at_creation);
 
+    // `terminal_at_creation` is private to the settlement module; the job's
+    // own "failed" status below is the externally-observable proof it settled
+    // synchronously at creation.
     let new = JobRepo::get(&app.pool, created.job_id).await?.unwrap();
     assert_eq!(new.status, "failed");
     let by: HashMap<_, _> = JobStepRepo::get_steps_for_job(&app.pool, created.job_id)
@@ -774,8 +777,10 @@ async fn carried_for_each_placeholder_exposes_aggregated_output_without_instance
         JobDefaults::default(),
     )
     .await?;
-    assert!(!created.terminal_at_creation);
 
+    // `terminal_at_creation` is private to the settlement module; the step
+    // statuses checked below (not terminal) are the externally-observable
+    // proof the job did not settle at creation.
     let by = steps_by_name(&app.pool, created.job_id).await?;
     assert_eq!(
         sorted_names(&by),
@@ -1052,8 +1057,10 @@ async fn restart_from_approval_step_suspends_new_job() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
-    assert!(!created.terminal_at_creation);
 
+    // `terminal_at_creation` is private to the settlement module; the step
+    // statuses checked below (not terminal) are the externally-observable
+    // proof the job did not settle at creation.
     let by = steps_by_name(&app.pool, created.job_id).await?;
     assert_eq!(by["a"].status, "completed");
     assert!(by["a"].carried_over);

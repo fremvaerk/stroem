@@ -10,7 +10,6 @@ pub mod retry;
 pub mod settle;
 pub mod terminal;
 
-pub use crate::job_creator::CreatedJob;
 pub use settle::{cascade_and_settle, settle_if_all_terminal, Settled};
 
 use crate::config::JobDefaults;
@@ -47,6 +46,29 @@ pub struct Settlement {
 pub struct BornTerminal {
     pub job_id: Uuid,
     pub status: String,
+}
+
+/// Result of job creation. Consume it with `Settlement::job_created` (or
+/// `agent_child_created` for agent tool children); nothing else can act on
+/// the terminal-at-creation flag.
+///
+/// Residual hole: `create_job_for_task_detailed(..).await?.job_id` moves the
+/// id out and drops the struct without finalizing it; `#[must_use]` does not
+/// catch field access. Reviewers: every creation site ends in `job_created`.
+#[must_use = "pass to Settlement::job_created or agent_child_created"]
+#[derive(Debug)]
+pub struct CreatedJob {
+    pub job_id: Uuid,
+    terminal_at_creation: bool,
+}
+
+impl CreatedJob {
+    pub(crate) fn new(job_id: Uuid, terminal_at_creation: bool) -> Self {
+        Self {
+            job_id,
+            terminal_at_creation,
+        }
+    }
 }
 
 /// Result of a cancel operation
