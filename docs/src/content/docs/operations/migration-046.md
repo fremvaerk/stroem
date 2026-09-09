@@ -33,6 +33,6 @@ behaviour ("run no matter what"), keep `continue_on_failure: true` and add
 `skip_reason` is `NULL` on rows written before the migration. The cascade treats
 `NULL` as `unreachable`, so a `continue_when_skipped` step behind such rows
 stays skipped — the same outcome as before the upgrade. The migration is
-additive and can run before or after the binaries roll out; during a mixed
-fleet an old replica writes `NULL` reasons, which the new replicas handle the
-same way.
+additive: the server applies it at startup, and an old replica in a mixed
+fleet is unaffected because every `job_step` query names its columns
+explicitly.

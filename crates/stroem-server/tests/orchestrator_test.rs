@@ -148,7 +148,6 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
 fn flow_step_cof(depends_on: Vec<&str>) -> FlowStep {
     FlowStep {
         continue_on_failure: true,
-        continue_when_skipped: false,
         ..flow_step(depends_on)
     }
 }

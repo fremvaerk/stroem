@@ -284,7 +284,7 @@ The `continue_on_failure` flag has dual semantics (similar to GitHub Actions' `c
 1. **Failure tolerance**: The step runs even if its dependencies **fail** or are **cancelled**.
 2. **Job tolerance**: If the step itself fails, its failure is considered *tolerable* — the job can still be marked `completed` as long as all non-tolerable steps succeed.
 
-`continue_on_failure` is about failures only. To run a step whose dependencies were all skipped, use `continue_when_skipped: true`; to run a step no matter what happened upstream, set both.
+`continue_on_failure` is about failures only. To run a step whose dependencies were all skipped, use `continue_when_skipped: true`; to run a step no matter what happened upstream, set both. This is a change in 0.16.2; see [Migration 046](/operations/migration-046/) if you relied on the old behaviour.
 
 ### Loops (for_each)
 

@@ -289,22 +289,27 @@ fn all_deps_skipped(snap: &Snapshot, fs: &FlowStep) -> bool {
 /// carry a failure? `None` (pre-046 rows, older replicas) counts as unreachable
 /// (spec §2.2).
 fn tainted(snap: &Snapshot, fs: &FlowStep) -> bool {
-    fs.depends_on
-        .iter()
-        .any(|d| matches!(snap.skip_reason(d), None | Some("unreachable")))
+    fs.depends_on.iter().any(|d| match snap.skip_reason(d) {
+        None => true,
+        Some(r) => r == SkipReason::Unreachable.as_str(),
+    })
 }
 
 /// Spec §2.3. Call only when `all_deps_skipped(snap, fs)`. `Some(skip)` when the
 /// step is cascade-skipped; `None` when it may fall through to the normal path.
 fn all_skipped_decision(snap: &Snapshot, fs: &FlowStep, step: &str) -> Option<Change> {
-    let tainted = tainted(snap, fs);
-    let bypass = fs.continue_when_skipped && (!tainted || fs.continue_on_failure);
+    debug_assert!(
+        all_deps_skipped(snap, fs),
+        "all_skipped_decision called with a non-skipped dependency"
+    );
+    let is_tainted = tainted(snap, fs);
+    let bypass = fs.continue_when_skipped && (!is_tainted || fs.continue_on_failure);
     if bypass {
         return None;
     }
     Some(Change::Skip {
         step: step.to_string(),
-        reason: if tainted {
+        reason: if is_tainted {
             SkipReason::Unreachable
         } else {
             SkipReason::Cascade
@@ -746,8 +751,11 @@ pub async fn apply(
                 a.promoted += names.len();
             }
             Change::Skip { .. } => {
-                // A run of consecutive skips is batched per reason, in plan order
-                // (spec §4.3); each bucket carries its own row-count guard.
+                // A run of consecutive skips is grouped into one bucket per reason
+                // (first-seen order); rows within a run may therefore be written in
+                // a different order than the plan lists them, which is safe because
+                // each is an independent guarded single-row UPDATE inside the same
+                // transaction (spec §4.3).
                 let mut buckets: Vec<(SkipReason, Vec<String>)> = Vec::new();
                 while let Some(Change::Skip { step, reason }) = changes.get(i) {
                     match buckets.iter_mut().find(|(r, _)| r == reason) {
@@ -996,7 +1004,6 @@ mod tests {
     fn fs_cof(deps: &[&str]) -> FlowStep {
         FlowStep {
             continue_on_failure: true,
-            continue_when_skipped: false,
             ..fs(deps)
         }
     }
