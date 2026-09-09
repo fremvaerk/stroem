@@ -1,13 +1,12 @@
 use super::terminal::{plan, HookKind};
-use super::Settlement;
+use super::{CreatedJob, Settlement};
 use anyhow::Context;
 use serde::Serialize;
 use sqlx::PgPool;
 use stroem_common::models::job::{ActionType, JobStatus, SourceType, StepStatus};
-use stroem_common::models::workflow::{HookDef, TaskDef, WorkspaceConfig};
+use stroem_common::models::workflow::{FlowStep, HookDef, TaskDef, WorkspaceConfig};
 use stroem_common::template::render_input_map;
-use stroem_common::validation::{compute_required_ability, compute_required_tags, derive_runner};
-use stroem_db::{JobRepo, JobStepRepo, NewJobStep};
+use stroem_db::{JobRepo, JobStepRepo};
 
 /// Context available to `on_suspended` hook templates as `hook.*`
 #[derive(Debug, Serialize)]
@@ -602,56 +601,65 @@ async fn fire_single_hook(
 
     // Create the hook job (single-step, always distributed)
     let task_name = format!("_hook:{}", hook.action);
-    let job_id = JobRepo::create(
-        pool,
+
+    let flow_step = FlowStep {
+        action: hook.action.clone(),
+        name: None,
+        description: None,
+        depends_on: vec![],
+        input: std::collections::HashMap::new(),
+        continue_on_failure: false,
+        timeout: None,
+        when: None,
+        for_each: None,
+        sequential: false,
+        retry: None,
+        inline_action: None,
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin hook job transaction")?;
+
+    let job_id = JobRepo::create_with_parent_tx(
+        &mut *tx,
         workspace,
         &task_name,
         "distributed",
         Some(rendered_input.clone()),
         "hook",
         Some(source_id),
+        None,
+        None,
+        None,
         revision,
         None, // raw_input: hook jobs don't persist raw_input (no re-run use case)
+        None,
+        None,
+        None, // max_retries: hook jobs have no task-level retry
     )
     .await
     .context("Failed to create hook job")?;
 
-    // Create single step
-    let action_spec = serde_json::to_value(action).ok();
-    let required_ability = compute_required_ability(action);
-    let required_tags = compute_required_tags(action);
-    let runner = derive_runner(action);
-
-    let step = NewJobStep {
+    let step = crate::job_creator::build_step(
         job_id,
-        step_name: "hook".to_string(),
-        action_name: hook.action.clone(),
-        action_type: action.action_type.clone(),
-        action_image: action.image.clone(),
-        action_spec,
-        input: Some(rendered_input),
-        status: StepStatus::Ready.to_string(),
-        required_ability,
-        required_tags,
-        runner,
-        timeout_secs: None,
-        when_condition: None,
-        for_each_expr: None,
-        loop_source: None,
-        loop_index: None,
-        loop_total: None,
-        loop_item: None,
-        max_retries: None,
-        retry_backoff_secs: None,
-        retry_strategy: None,
-        retry_jitter: false,
-        action_workspace: None,
-        action_revision: None,
-    };
+        "hook",
+        hook.action.clone(),
+        &flow_step,
+        action,
+        Some(rendered_input),
+        StepStatus::Ready,
+        defaults,
+        None,
+        None,
+    );
 
-    JobStepRepo::create_steps(pool, &[step])
+    JobStepRepo::create_steps_tx(&mut *tx, &[step])
         .await
         .context("Failed to create hook job step")?;
+
+    tx.commit().await.context("Failed to commit hook job")?;
 
     tracing::info!(
         "Fired hook job {} for action '{}' (source: {})",
@@ -659,6 +667,8 @@ async fn fire_single_hook(
         hook.action,
         source_id
     );
+
+    Box::pin(s.job_created(CreatedJob::new(job_id, false))).await;
 
     Ok(())
 }

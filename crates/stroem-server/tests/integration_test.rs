@@ -11702,6 +11702,163 @@ fn hook_test_state(pool: PgPool, workspace: &WorkspaceConfig) -> AppState {
     AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
 }
 
+/// Like [`hook_test_state`] but with a configurable `default_step_timeout`,
+/// for asserting that hook job steps inherit the server default (D4).
+fn hook_test_state_with_default_step_timeout(
+    pool: PgPool,
+    workspace: &WorkspaceConfig,
+    default_step_timeout: Option<stroem_common::duration::HumanDuration>,
+) -> AppState {
+    let temp_dir = std::env::temp_dir().join(format!("stroem-hook-test-{}", Uuid::new_v4()));
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig {
+            url: "postgres://test".to_string(),
+        },
+        log_storage: LogStorageConfig {
+            local_dir: temp_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::new(),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test".to_string(),
+        auth: None,
+        recovery: stroem_server::config::RecoveryConfig {
+            heartbeat_timeout_secs: 120,
+            sweep_interval_secs: 60,
+            unmatched_step_timeout_secs: 30,
+        },
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout,
+        default_job_timeout: None,
+    };
+    let mgr = WorkspaceManager::from_config("default", workspace.clone());
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    AppState::new(pool, mgr, config, log_storage, HashMap::new(), None)
+}
+
+/// D4 (spec §8.2): a single-action hook job's step carries the action's retry
+/// config and the server default step timeout, like every other step.
+/// Before, `fire_single_hook` hand-built the row with those fields `None`.
+#[tokio::test]
+async fn test_hook_job_step_gets_action_retry_and_default_timeout() -> Result<()> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let mut workspace = hook_test_workspace();
+    // Give the hook action (`notify`) a retry config.
+    workspace.actions.get_mut("notify").unwrap().retry =
+        Some(stroem_common::models::workflow::RetryConfig {
+            max_attempts: 3,
+            delay: stroem_common::duration::HumanDuration(1),
+            backoff: stroem_common::models::workflow::BackoffStrategy::Fixed,
+            jitter: false,
+        });
+
+    let mut flow = HashMap::new();
+    flow.insert(
+        "step1".to_string(),
+        FlowStep {
+            action: "deploy".to_string(),
+            name: None,
+            description: None,
+            depends_on: vec![],
+            input: HashMap::new(),
+            continue_on_failure: false,
+            timeout: None,
+            when: None,
+            for_each: None,
+            sequential: false,
+            retry: None,
+            inline_action: None,
+        },
+    );
+    workspace.tasks.insert(
+        "deploy-task".to_string(),
+        TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+
+            on_success: vec![HookDef {
+                action: "notify".to_string(),
+                input: HashMap::new(),
+            }],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        },
+    );
+
+    let job_id = create_job_for_task(
+        &pool,
+        &workspace,
+        "default",
+        "deploy-task",
+        json!({}),
+        "api",
+        None,
+        None,
+        None,
+        None, // source_job_id
+        JobDefaults::default(),
+    )
+    .await?;
+
+    let task = workspace.tasks.get("deploy-task").unwrap();
+
+    let worker_id = register_test_worker(&pool).await;
+    JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"result": "ok"}))).await?;
+
+    after_step(&pool, job_id, task).await?;
+
+    let job = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(job.status, "completed");
+
+    let state = hook_test_state_with_default_step_timeout(
+        pool.clone(),
+        &workspace,
+        Some(stroem_common::duration::HumanDuration(30)),
+    );
+    stroem_server::settlement::hooks::fire_hooks(&state.settlement(), &workspace, &job, task).await;
+
+    let all_jobs = JobRepo::list(&pool, Some("default"), None, None, None, 100, 0).await?;
+    let hook_job = all_jobs
+        .iter()
+        .find(|j| j.source_type == "hook")
+        .expect("Hook job not found");
+    assert_eq!(hook_job.task_name, "_hook:notify");
+
+    let hook_steps = JobStepRepo::get_steps_for_job(&pool, hook_job.job_id).await?;
+    assert_eq!(hook_steps.len(), 1);
+    let step = &hook_steps[0];
+    assert_eq!(step.step_name, "hook");
+    assert_eq!(step.max_retries, Some(2));
+    assert_eq!(step.retry_backoff_secs, Some(1));
+    assert_eq!(step.timeout_secs, Some(30));
+    assert_eq!(step.status, "ready");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_hook_fires_on_job_success() -> Result<()> {
     let container = Postgres::default().start().await?;

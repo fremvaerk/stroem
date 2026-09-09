@@ -394,61 +394,18 @@ pub(crate) fn create_job_for_task_inner<'a>(
                 StepStatus::Pending
             };
 
-            let action_spec = serde_json::to_value(action).ok();
-            let required_ability = compute_required_ability(action);
-            let required_tags = compute_required_tags(action);
-            let runner = derive_runner(action);
-            let retry = resolve_step_retry_config(flow_step, action);
-
-            new_steps.push(NewJobStep {
+            new_steps.push(build_step(
                 job_id,
-                step_name: step_name.clone(),
+                step_name,
                 action_name,
-                action_type: action.action_type.clone(),
-                action_image: action.image.clone(),
-                action_spec,
-                input: Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
-                status: status.to_string(), // NewJobStep.status is String for DB compatibility
-                required_ability,
-                required_tags,
-                runner,
-                timeout_secs: flow_step
-                    .timeout
-                    .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32"))
-                    .or(defaults.step_timeout_secs),
-                when_condition: flow_step.when.clone(),
-                for_each_expr: flow_step.for_each.as_ref().map(|v| {
-                    // Store human-readable form: raw string for templates, compact JSON for arrays
-                    match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    }
-                }),
-                loop_source: None,
-                loop_index: None,
-                loop_total: None,
-                loop_item: None,
-                // `max_attempts` counts total executions; the DB column counts
-                // retries only, so it's stored as `max_attempts - 1`. Validation
-                // guarantees `max_attempts >= 1`, so this subtraction never
-                // underflows.
-                max_retries: retry
-                    .as_ref()
-                    .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
-                retry_backoff_secs: retry
-                    .as_ref()
-                    .map(|r| i32::try_from(r.delay.as_secs()).expect("retry delay fits i32")),
-                retry_strategy: retry.as_ref().map(|r| {
-                    if r.backoff == BackoffStrategy::Exponential {
-                        "exponential".to_string()
-                    } else {
-                        "fixed".to_string()
-                    }
-                }),
-                retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
+                flow_step,
+                action,
+                Some(serde_json::to_value(&flow_step.input).unwrap_or_default()),
+                status,
+                defaults,
                 action_workspace,
                 action_revision,
-            });
+            ));
         }
 
         // Create job and steps atomically in a transaction
@@ -564,6 +521,78 @@ pub(crate) fn create_job_for_task_inner<'a>(
 
         Ok(CreatedJob::new(job_id, settled.is_some()))
     })
+}
+
+/// The one place a `NewJobStep` is built from a flow step and its resolved
+/// action. Used by job creation and by hook-job creation (spec §8.2).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_step(
+    job_id: Uuid,
+    step_name: &str,
+    action_name: String,
+    flow_step: &FlowStep,
+    action: &ActionDef,
+    input: Option<serde_json::Value>,
+    status: StepStatus,
+    defaults: JobDefaults,
+    action_workspace: Option<String>,
+    action_revision: Option<String>,
+) -> NewJobStep {
+    let action_spec = serde_json::to_value(action).ok();
+    let required_ability = compute_required_ability(action);
+    let required_tags = compute_required_tags(action);
+    let runner = derive_runner(action);
+    let retry = resolve_step_retry_config(flow_step, action);
+
+    NewJobStep {
+        job_id,
+        step_name: step_name.to_string(),
+        action_name,
+        action_type: action.action_type.clone(),
+        action_image: action.image.clone(),
+        action_spec,
+        input,
+        status: status.to_string(), // NewJobStep.status is String for DB compatibility
+        required_ability,
+        required_tags,
+        runner,
+        timeout_secs: flow_step
+            .timeout
+            .map(|d| i32::try_from(d.as_secs()).expect("timeout validated to fit i32"))
+            .or(defaults.step_timeout_secs),
+        when_condition: flow_step.when.clone(),
+        for_each_expr: flow_step.for_each.as_ref().map(|v| {
+            // Store human-readable form: raw string for templates, compact JSON for arrays
+            match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }
+        }),
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        // `max_attempts` counts total executions; the DB column counts
+        // retries only, so it's stored as `max_attempts - 1`. Validation
+        // guarantees `max_attempts >= 1`, so this subtraction never
+        // underflows.
+        max_retries: retry
+            .as_ref()
+            .map(|r| i32::try_from(r.max_attempts - 1).expect("max_attempts fits i32")),
+        retry_backoff_secs: retry
+            .as_ref()
+            .map(|r| i32::try_from(r.delay.as_secs()).expect("retry delay fits i32")),
+        retry_strategy: retry.as_ref().map(|r| {
+            if r.backoff == BackoffStrategy::Exponential {
+                "exponential".to_string()
+            } else {
+                "fixed".to_string()
+            }
+        }),
+        retry_jitter: retry.as_ref().is_some_and(|r| r.jitter),
+        action_workspace,
+        action_revision,
+    }
 }
 
 /// Build a template render context from a job and its steps.
