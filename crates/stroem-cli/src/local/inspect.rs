@@ -71,6 +71,9 @@ pub fn cmd_inspect(config: &WorkspaceConfig, task_name: &str) -> Result<()> {
             if step.continue_on_failure {
                 extras.push("continue_on_failure".to_string());
             }
+            if step.continue_when_skipped {
+                extras.push("continue_when_skipped".to_string());
+            }
 
             let extras_str = if extras.is_empty() {
                 String::new()
@@ -125,6 +128,7 @@ mod tests {
             depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -333,6 +337,33 @@ mod tests {
         let mut flow = HashMap::new();
         let mut step = make_step("act", vec![]);
         step.continue_on_failure = true;
+        flow.insert("step1".to_string(), step);
+
+        let task = TaskDef {
+            name: None,
+            description: None,
+            mode: "distributed".to_string(),
+            folder: None,
+            input: HashMap::new(),
+            flow,
+            timeout: None,
+            retry: None,
+            on_success: vec![],
+            on_error: vec![],
+            on_suspended: vec![],
+            on_cancel: vec![],
+        };
+        config.tasks.insert("deploy".to_string(), task);
+
+        assert!(cmd_inspect(&config, "deploy").is_ok());
+    }
+
+    #[test]
+    fn inspect_step_with_continue_when_skipped() {
+        let mut config = WorkspaceConfig::new();
+        let mut flow = HashMap::new();
+        let mut step = make_step("act", vec![]);
+        step.continue_when_skipped = true;
         flow.insert("step1".to_string(), step);
 
         let task = TaskDef {

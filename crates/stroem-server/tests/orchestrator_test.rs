@@ -134,6 +134,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         depends_on: depends_on.into_iter().map(str::to_string).collect(),
         input: HashMap::new(),
         continue_on_failure: false,
+        continue_when_skipped: false,
         timeout: None,
         when: None,
         for_each: None,
@@ -147,6 +148,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
 fn flow_step_cof(depends_on: Vec<&str>) -> FlowStep {
     FlowStep {
         continue_on_failure: true,
+        continue_when_skipped: false,
         ..flow_step(depends_on)
     }
 }
@@ -1634,6 +1636,7 @@ async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeho
         "b".to_string(),
         FlowStep {
             continue_on_failure: true,
+            continue_when_skipped: false,
             ..flow_step_for_each(vec!["a"], expr)
         },
     );

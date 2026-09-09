@@ -394,6 +394,7 @@ fn flow_step(depends_on: Vec<&str>) -> FlowStep {
         depends_on: depends_on.into_iter().map(str::to_string).collect(),
         input: HashMap::new(),
         continue_on_failure: false,
+        continue_when_skipped: false,
         timeout: None,
         when: None,
         for_each: None,

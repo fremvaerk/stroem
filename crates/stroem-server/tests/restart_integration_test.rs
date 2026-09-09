@@ -89,6 +89,7 @@ fn flow_step(action: &str, depends_on: &[&str], input: HashMap<String, JsonValue
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
         input,
         continue_on_failure: false,
+        continue_when_skipped: false,
         timeout: None,
         when: None,
         for_each: None,

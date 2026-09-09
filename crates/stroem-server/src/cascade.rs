@@ -904,6 +904,7 @@ mod tests {
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -915,6 +916,7 @@ mod tests {
     fn fs_cof(deps: &[&str]) -> FlowStep {
         FlowStep {
             continue_on_failure: true,
+            continue_when_skipped: false,
             ..fs(deps)
         }
     }
@@ -1383,6 +1385,7 @@ mod tests {
             "x",
             FlowStep {
                 continue_on_failure: true,
+                continue_when_skipped: false,
                 ..fs_seq(&[])
             },
         )]);

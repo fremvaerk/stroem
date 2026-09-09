@@ -272,6 +272,7 @@ pub(super) async fn build_minimal_task_def(s: &Settlement, job_id: Uuid) -> Resu
                 depends_on: vec![],
                 input: HashMap::new(),
                 continue_on_failure: false,
+                continue_when_skipped: false,
                 timeout: None,
                 when: None,
                 for_each: None,
