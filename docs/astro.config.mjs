@@ -71,6 +71,10 @@ export default defineConfig({
             { label: "Metrics", slug: "operations/metrics" },
             { label: "Recovery", slug: "operations/recovery" },
             { label: "Startup Scripts", slug: "operations/startup-scripts" },
+            {
+              label: "Migration 046 — Skip Reasons",
+              slug: "operations/migration-046",
+            },
           ],
         },
         {

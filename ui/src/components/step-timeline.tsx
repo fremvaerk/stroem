@@ -17,6 +17,7 @@ import { restartJob } from "@/lib/api";
 import type { RestartPlanResponse } from "@/lib/api";
 import { statusIcons } from "@/lib/status-icons";
 import type { JobStep, StepDurationStats } from "@/lib/types";
+import { skipBadgeLabel } from "@/lib/skip-reason";
 import { cn, formatActionName } from "@/lib/utils";
 
 /** Shared props threaded from the job page down to every restartable row. */
@@ -151,9 +152,12 @@ function StepRow({
                 awaiting approval
               </span>
             )}
-            {step.when_condition && step.status === "skipped" && (
-              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
-                condition
+            {step.status === "skipped" && skipBadgeLabel(step.skip_reason, !!step.when_condition) && (
+              <span
+                data-testid={`step-skip-${step.step_name}`}
+                className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+              >
+                {skipBadgeLabel(step.skip_reason, !!step.when_condition)}
               </span>
             )}
             {step.when_condition && step.status !== "skipped" && (
@@ -350,11 +354,15 @@ function LoopGroup({
                 {failedCount > 0 && ` (${failedCount} failed)`}
               </span>
             )}
-            {placeholder.when_condition && placeholder.status === "skipped" && (
-              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
-                condition
-              </span>
-            )}
+            {placeholder.status === "skipped" &&
+              skipBadgeLabel(placeholder.skip_reason, !!placeholder.when_condition) && (
+                <span
+                  data-testid={`step-skip-${placeholder.step_name}`}
+                  className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                >
+                  {skipBadgeLabel(placeholder.skip_reason, !!placeholder.when_condition)}
+                </span>
+              )}
             {placeholder.when_condition && placeholder.status !== "skipped" && (
               <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
                 when

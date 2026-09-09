@@ -42,6 +42,7 @@ function makeStep(overrides: Partial<JobStep> = {}): JobStep {
     approval_message: null,
     approval_fields: null,
     carried_over: false,
+    skip_reason: null,
     ...overrides,
   };
 }
@@ -144,5 +145,14 @@ describe("StepDetail restart button", () => {
     expect(
       screen.queryByRole("button", { name: /restart from here/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("StepDetail skipped steps", () => {
+  it("explains why the step was skipped instead of showing logs", async () => {
+    renderDetail(makeStep({ status: "skipped", skip_reason: "unreachable" }));
+    const notice = await screen.findByTestId("skipped-notice");
+    expect(notice.textContent).toContain("upstream step failed");
+    expect(getStepLogs).not.toHaveBeenCalled();
   });
 });

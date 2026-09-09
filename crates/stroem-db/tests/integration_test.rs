@@ -5452,6 +5452,7 @@ async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<(
         &[
             plain_step(job_id, "a", "ready"),
             plain_step(job_id, "b", "pending"),
+            plain_step(job_id, "c", "pending"),
         ],
     )
     .await?;
@@ -5466,12 +5467,21 @@ async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<(
                 status: "completed".into(),
                 output: Some(json!({"k": 1})),
                 error_message: None,
+                skip_reason: None,
             },
             Seed {
                 step_name: "b".into(),
                 status: "failed".into(),
                 output: None,
                 error_message: Some("old boom".into()),
+                skip_reason: None,
+            },
+            Seed {
+                step_name: "c".into(),
+                status: "skipped".into(),
+                output: None,
+                error_message: None,
+                skip_reason: Some("condition".into()),
             },
         ],
     )
@@ -5500,6 +5510,8 @@ async fn test_seed_steps_tx_overwrites_status_output_and_flags_row() -> Result<(
     assert_eq!(by["b"].status, "failed");
     assert_eq!(by["b"].error_message.as_deref(), Some("old boom"));
     assert!(by["b"].carried_over);
+    assert_eq!(by["c"].status, "skipped");
+    assert_eq!(by["c"].skip_reason.as_deref(), Some("condition"));
     Ok(())
 }
 
@@ -5528,6 +5540,7 @@ async fn test_seed_steps_tx_unknown_step_aborts() -> Result<()> {
             status: "completed".into(),
             output: None,
             error_message: None,
+            skip_reason: None,
         }],
     )
     .await

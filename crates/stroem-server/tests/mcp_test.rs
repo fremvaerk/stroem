@@ -215,6 +215,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: hello_input_vals,
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -268,6 +269,7 @@ fn mcp_test_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -783,6 +785,10 @@ async fn test_mcp_execute_and_check_status() -> Result<()> {
         .as_array()
         .expect("steps should be array");
     assert!(!steps.is_empty(), "job should have at least one step");
+    assert!(
+        steps[0].get("skip_reason").is_some(),
+        "skip_reason must be present on every step (null while pending): {steps:?}"
+    );
 
     Ok(())
 }

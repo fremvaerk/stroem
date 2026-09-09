@@ -196,7 +196,7 @@ async fn test_mark_skipped_sets_status_and_completed_at() -> Result<()> {
     let job_id = make_job(&pool, "skip-test").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "pending")]).await?;
 
-    JobStepRepo::mark_skipped(&pool, job_id, "step1").await?;
+    JobStepRepo::mark_skipped(&pool, job_id, "step1", "unreachable").await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     assert_eq!(steps.len(), 1);
@@ -208,6 +208,7 @@ async fn test_mark_skipped_sets_status_and_completed_at() -> Result<()> {
         step.error_message.is_none(),
         "skipped step must not have an error_message"
     );
+    assert_eq!(step.skip_reason.as_deref(), Some("unreachable"));
 
     Ok(())
 }
@@ -222,11 +223,15 @@ async fn test_mark_skipped_on_ready_step() -> Result<()> {
     let job_id = make_job(&pool, "skip-ready").await?;
     JobStepRepo::create_steps(&pool, &[make_step(job_id, "step1", "ready")]).await?;
 
-    JobStepRepo::mark_skipped(&pool, job_id, "step1").await?;
+    JobStepRepo::mark_skipped(&pool, job_id, "step1", "unreachable").await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     // Step stays ready — mark_skipped only transitions from pending
     assert_eq!(steps[0].status, "ready");
+    assert!(
+        steps[0].skip_reason.is_none(),
+        "guard must not write a reason either"
+    );
 
     Ok(())
 }
@@ -246,7 +251,7 @@ async fn test_mark_skipped_does_not_overwrite_completed_step() -> Result<()> {
         assert_eq!(steps[0].status, "completed");
     }
 
-    JobStepRepo::mark_skipped(&pool, job_id, "step1").await?;
+    JobStepRepo::mark_skipped(&pool, job_id, "step1", "unreachable").await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     // Step stays completed — mark_skipped only transitions from pending
@@ -263,7 +268,7 @@ async fn test_mark_skipped_on_nonexistent_step_is_noop() -> Result<()> {
 
     let job_id = make_job(&pool, "skip-noop").await?;
 
-    let result = JobStepRepo::mark_skipped(&pool, job_id, "ghost-step").await;
+    let result = JobStepRepo::mark_skipped(&pool, job_id, "ghost-step", "unreachable").await;
     assert!(
         result.is_ok(),
         "mark_skipped on missing step must not error"
@@ -272,6 +277,45 @@ async fn test_mark_skipped_on_nonexistent_step_is_noop() -> Result<()> {
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     assert!(steps.is_empty());
 
+    Ok(())
+}
+
+/// `skip_steps_tx` writes the reason on every row it skips and only on
+/// pending rows.
+#[tokio::test]
+async fn test_skip_steps_tx_writes_reason_on_pending_rows_only() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+    let job_id = make_job(&pool, "skip-reason").await?;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            make_step(job_id, "a", "pending"),
+            make_step(job_id, "b", "pending"),
+            make_step(job_id, "c", "ready"),
+        ],
+    )
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    let n = JobStepRepo::skip_steps_tx(
+        &mut *tx,
+        job_id,
+        &["a".to_string(), "b".to_string(), "c".to_string()],
+        "cascade",
+    )
+    .await?;
+    tx.commit().await?;
+    assert_eq!(n, 2, "only the two pending rows are skipped");
+
+    let by: std::collections::HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(by["a"].skip_reason.as_deref(), Some("cascade"));
+    assert_eq!(by["b"].skip_reason.as_deref(), Some("cascade"));
+    assert_eq!(by["c"].status, "ready");
+    assert!(by["c"].skip_reason.is_none());
     Ok(())
 }
 
@@ -512,7 +556,7 @@ async fn test_step_transition_pending_to_skipped() -> Result<()> {
     }
 
     // Orchestrator decides to skip step2.
-    JobStepRepo::mark_skipped(&pool, job_id, "step2").await?;
+    JobStepRepo::mark_skipped(&pool, job_id, "step2", "unreachable").await?;
 
     let all = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let s2 = all.iter().find(|s| s.step_name == "step2").unwrap();
@@ -662,7 +706,7 @@ async fn test_all_steps_terminal_with_mixed_terminal_states() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step2", "boom").await?;
     assert!(!JobStepRepo::all_steps_terminal(&pool, job_id).await?);
 
-    JobStepRepo::mark_skipped(&pool, job_id, "step3").await?;
+    JobStepRepo::mark_skipped(&pool, job_id, "step3", "unreachable").await?;
     // Now all three terminal statuses are represented.
     assert!(
         JobStepRepo::all_steps_terminal(&pool, job_id).await?,
@@ -688,7 +732,7 @@ async fn test_get_failed_step_names_filters_correctly() -> Result<()> {
 
     JobStepRepo::mark_failed(&pool, job_id, "step1", "err").await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    JobStepRepo::mark_skipped(&pool, job_id, "step3").await?;
+    JobStepRepo::mark_skipped(&pool, job_id, "step3", "unreachable").await?;
 
     let mut failed = JobStepRepo::get_failed_step_names(&pool, job_id).await?;
     failed.sort();

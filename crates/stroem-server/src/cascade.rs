@@ -18,7 +18,7 @@ pub enum Change {
     /// pending → ready
     Promote { step: String },
     /// pending → skipped
-    Skip { step: String },
+    Skip { step: String, reason: SkipReason },
     /// pending → failed (when-evaluation or for_each-expression error)
     Fail { step: String, error: String },
     /// Placeholder pending → running; insert instance rows; job pending → running.
@@ -33,6 +33,32 @@ pub enum Change {
         placeholder: String,
         outcome: RollupOutcome,
     },
+}
+
+/// Why a step was skipped (spec 2026-09-09 §2.2). Persisted verbatim as
+/// `job_step.skip_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The step's own `when` rendered falsy.
+    Condition,
+    /// The step's `for_each` produced zero items.
+    Empty,
+    /// All dependencies skipped, none of them unreachable.
+    Cascade,
+    /// A dependency failed or was cancelled without `continue_on_failure`, or a
+    /// dependency was itself unreachable (propagation).
+    Unreachable,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::Condition => "condition",
+            SkipReason::Empty => "empty",
+            SkipReason::Cascade => "cascade",
+            SkipReason::Unreachable => "unreachable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +165,12 @@ impl Snapshot {
         self.index.get(name).map(|&i| self.rows[i].status.as_str())
     }
 
+    fn skip_reason(&self, name: &str) -> Option<&str> {
+        self.index
+            .get(name)
+            .and_then(|&i| self.rows[i].skip_reason.as_deref())
+    }
+
     fn get_mut(&mut self, name: &str) -> Option<&mut JobStepRow> {
         let i = *self.index.get(name)?;
         Some(&mut self.rows[i])
@@ -152,9 +184,10 @@ impl Snapshot {
                     r.status = READY.to_string();
                 }
             }
-            Change::Skip { step } => {
+            Change::Skip { step, reason } => {
                 if let Some(r) = self.get_mut(step) {
                     r.status = SKIPPED.to_string();
+                    r.skip_reason = Some(reason.as_str().to_string());
                 }
             }
             Change::Fail { step, error } => {
@@ -252,6 +285,38 @@ fn all_deps_skipped(snap: &Snapshot, fs: &FlowStep) -> bool {
             .all(|d| snap.status(d) == Some(SKIPPED))
 }
 
+/// Only meaningful when `all_deps_skipped` holds: does any skipped dependency
+/// carry a failure? `None` (pre-046 rows, older replicas) counts as unreachable
+/// (spec §2.2).
+fn tainted(snap: &Snapshot, fs: &FlowStep) -> bool {
+    fs.depends_on.iter().any(|d| match snap.skip_reason(d) {
+        None => true,
+        Some(r) => r == SkipReason::Unreachable.as_str(),
+    })
+}
+
+/// Spec §2.3. Call only when `all_deps_skipped(snap, fs)`. `Some(skip)` when the
+/// step is cascade-skipped; `None` when it may fall through to the normal path.
+fn all_skipped_decision(snap: &Snapshot, fs: &FlowStep, step: &str) -> Option<Change> {
+    debug_assert!(
+        all_deps_skipped(snap, fs),
+        "all_skipped_decision called with a non-skipped dependency"
+    );
+    let is_tainted = tainted(snap, fs);
+    let bypass = fs.continue_when_skipped && (!is_tainted || fs.continue_on_failure);
+    if bypass {
+        return None;
+    }
+    Some(Change::Skip {
+        step: step.to_string(),
+        reason: if is_tainted {
+            SkipReason::Unreachable
+        } else {
+            SkipReason::Cascade
+        },
+    })
+}
+
 fn any_dep_failed_or_cancelled(snap: &Snapshot, fs: &FlowStep) -> bool {
     fs.depends_on
         .iter()
@@ -297,6 +362,7 @@ fn phase_rollup(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
                     for i in pending {
                         out.push(Change::Skip {
                             step: i.step_name.clone(),
+                            reason: SkipReason::Unreachable,
                         });
                     }
                     // Nothing else for this placeholder this phase: the rollup
@@ -364,11 +430,11 @@ fn phase_promote(snap: &Snapshot, task: &TaskDef, ctx: Option<&Value>) -> Vec<Ch
         let Some(fs) = task.flow.get(&r.step_name) else {
             continue;
         };
-        if all_deps_skipped(snap, fs) && !fs.continue_on_failure {
-            out.push(Change::Skip {
-                step: r.step_name.clone(),
-            });
-            continue;
+        if all_deps_skipped(snap, fs) {
+            if let Some(skip) = all_skipped_decision(snap, fs, &r.step_name) {
+                out.push(skip);
+                continue;
+            }
         }
         if !deps_satisfied(snap, fs) {
             continue;
@@ -384,6 +450,7 @@ fn phase_promote(snap: &Snapshot, task: &TaskDef, ctx: Option<&Value>) -> Vec<Ch
                 }),
                 Ok(false) => out.push(Change::Skip {
                     step: r.step_name.clone(),
+                    reason: SkipReason::Condition,
                 }),
                 Err(e) => out.push(Change::Fail {
                     step: r.step_name.clone(),
@@ -409,6 +476,7 @@ fn phase_skip_unreachable(snap: &Snapshot, task: &TaskDef) -> Vec<Change> {
         if !fs.continue_on_failure && any_dep_failed_or_cancelled(snap, fs) {
             out.push(Change::Skip {
                 step: r.step_name.clone(),
+                reason: SkipReason::Unreachable,
             });
         }
     }
@@ -445,15 +513,16 @@ fn phase_placeholders(
             if any_dep_failed_or_cancelled(snap, fs) && !fs.continue_on_failure {
                 out.push(Change::Skip {
                     step: r.step_name.clone(),
+                    reason: SkipReason::Unreachable,
                 });
             }
             continue;
         }
-        if all_deps_skipped(snap, fs) && !fs.continue_on_failure {
-            out.push(Change::Skip {
-                step: r.step_name.clone(),
-            });
-            continue;
+        if all_deps_skipped(snap, fs) {
+            if let Some(skip) = all_skipped_decision(snap, fs, &r.step_name) {
+                out.push(skip);
+                continue;
+            }
         }
         if let Some(w) = &r.when_condition {
             match stroem_common::template::evaluate_condition(w, ctx) {
@@ -461,6 +530,7 @@ fn phase_placeholders(
                 Ok(false) => {
                     out.push(Change::Skip {
                         step: r.step_name.clone(),
+                        reason: SkipReason::Condition,
                     });
                     continue;
                 }
@@ -487,6 +557,7 @@ fn phase_placeholders(
         if items.is_empty() {
             out.push(Change::Skip {
                 step: r.step_name.clone(),
+                reason: SkipReason::Empty,
             });
             continue;
         }
@@ -680,14 +751,25 @@ pub async fn apply(
                 a.promoted += names.len();
             }
             Change::Skip { .. } => {
-                let mut names = Vec::new();
-                while let Some(Change::Skip { step }) = changes.get(i) {
-                    names.push(step.clone());
+                // A run of consecutive skips is grouped into one bucket per reason
+                // (first-seen order); rows within a run may therefore be written in
+                // a different order than the plan lists them, which is safe because
+                // each is an independent guarded single-row UPDATE inside the same
+                // transaction (spec §4.3).
+                let mut buckets: Vec<(SkipReason, Vec<String>)> = Vec::new();
+                while let Some(Change::Skip { step, reason }) = changes.get(i) {
+                    match buckets.iter_mut().find(|(r, _)| r == reason) {
+                        Some((_, names)) => names.push(step.clone()),
+                        None => buckets.push((*reason, vec![step.clone()])),
+                    }
                     i += 1;
                 }
-                let n = JobStepRepo::skip_steps_tx(&mut **tx, job_id, &names).await?;
-                expect_rows(n, names.len(), &names.join(","))?;
-                a.skipped += names.len();
+                for (reason, names) in buckets {
+                    let n = JobStepRepo::skip_steps_tx(&mut **tx, job_id, &names, reason.as_str())
+                        .await?;
+                    expect_rows(n, names.len(), &names.join(","))?;
+                    a.skipped += names.len();
+                }
             }
             Change::Fail { step, error } => {
                 let n = JobStepRepo::fail_pending_step_tx(&mut **tx, job_id, step, error).await?;
@@ -873,6 +955,12 @@ mod tests {
             ..row(name, status)
         }
     }
+    fn row_skipped(name: &str, reason: &str) -> JobStepRow {
+        JobStepRow {
+            skip_reason: Some(reason.to_string()),
+            ..row(name, "skipped")
+        }
+    }
     fn row_out(name: &str, output: Value) -> JobStepRow {
         JobStepRow {
             output: Some(output),
@@ -904,6 +992,7 @@ mod tests {
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -914,6 +1003,19 @@ mod tests {
     }
     fn fs_cof(deps: &[&str]) -> FlowStep {
         FlowStep {
+            continue_on_failure: true,
+            ..fs(deps)
+        }
+    }
+    fn fs_cws(deps: &[&str]) -> FlowStep {
+        FlowStep {
+            continue_when_skipped: true,
+            ..fs(deps)
+        }
+    }
+    fn fs_cws_cof(deps: &[&str]) -> FlowStep {
+        FlowStep {
+            continue_when_skipped: true,
             continue_on_failure: true,
             ..fs(deps)
         }
@@ -961,12 +1063,26 @@ mod tests {
             .collect()
     }
 
+    /// Every `Skip` in plan order as `(step, reason)`.
+    fn skips(plan: &Plan) -> Vec<(String, &'static str)> {
+        plan.changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::Skip { step, reason } => Some((step.clone(), reason.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+    fn s(step: &str, reason: &'static str) -> (String, &'static str) {
+        (step.to_string(), reason)
+    }
+
     fn names(plan: &Plan) -> Vec<String> {
         plan.changes
             .iter()
             .map(|c| match c {
                 Change::Promote { step } => format!("promote:{step}"),
-                Change::Skip { step } => format!("skip:{step}"),
+                Change::Skip { step, .. } => format!("skip:{step}"),
                 Change::Fail { step, .. } => format!("fail:{step}"),
                 Change::Expand {
                     placeholder,
@@ -1383,6 +1499,7 @@ mod tests {
             "x",
             FlowStep {
                 continue_on_failure: true,
+                continue_when_skipped: false,
                 ..fs_seq(&[])
             },
         )]);
@@ -1939,5 +2056,221 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["x"], 1);
         assert_eq!(items[1]["x"], 2);
+    }
+
+    // ── continue_when_skipped + skip reasons (spec 2026-09-09) ──
+
+    #[test]
+    fn cws_all_deps_skipped_by_condition_promotes() {
+        let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
+        let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["promote:b"]);
+    }
+
+    #[test]
+    fn cws_all_deps_skipped_by_empty_loop_promotes() {
+        let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
+        let rows = vec![row_skipped("a", "empty"), row("b", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["promote:b"]);
+    }
+
+    #[test]
+    fn cws_with_falsy_own_when_skips_as_condition() {
+        let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
+        let rows = vec![
+            row_skipped("a", "condition"),
+            row_when("b", "pending", "false"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("b", "condition")]);
+    }
+
+    #[test]
+    fn cof_alone_no_longer_bypasses_all_deps_skipped() {
+        // Spec §2.4: continue_on_failure is failure-only.
+        let t = task(vec![("a", fs(&[])), ("b", fs_cof(&["a"]))]);
+        let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("b", "cascade")]);
+    }
+
+    #[test]
+    fn cws_with_unreachable_dep_is_skipped_unreachable() {
+        let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
+        let rows = vec![row_skipped("a", "unreachable"), row("b", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("b", "unreachable")]);
+    }
+
+    #[test]
+    fn cws_with_mixed_condition_and_unreachable_deps_is_skipped_unreachable() {
+        // "any tainted dependency" (spec §2.2): one benign branch must not launder a failure.
+        let t = task(vec![
+            ("a", fs(&[])),
+            ("b", fs(&[])),
+            ("c", fs_cws(&["a", "b"])),
+        ]);
+        let rows = vec![
+            row_skipped("a", "condition"),
+            row_skipped("b", "unreachable"),
+            row("c", "pending"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("c", "unreachable")]);
+    }
+
+    #[test]
+    fn cws_and_cof_with_unreachable_dep_promotes() {
+        let t = task(vec![("a", fs(&[])), ("b", fs_cws_cof(&["a"]))]);
+        let rows = vec![row_skipped("a", "unreachable"), row("b", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["promote:b"]);
+    }
+
+    #[test]
+    fn null_reason_counts_as_unreachable() {
+        // Pre-migration / older-replica rows (spec §2.2).
+        let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
+        let rows = vec![row("a", "skipped"), row("b", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("b", "unreachable")]);
+    }
+
+    #[test]
+    fn unreachable_propagates_through_a_chain_in_one_run() {
+        // a failed → b (no cof) → c (cws): b unreachable (R3), c unreachable (R1, tainted).
+        let t = task(vec![
+            ("a", fs(&[])),
+            ("b", fs(&["a"])),
+            ("c", fs_cws(&["b"])),
+        ]);
+        let rows = vec![row("a", "failed"), row("b", "pending"), row("c", "pending")];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("b", "unreachable"), s("c", "unreachable")]);
+    }
+
+    #[test]
+    fn condition_skip_becomes_cascade_downstream_and_cws_runs() {
+        // x completed → a (when false) → b → c (cws): a condition, b cascade, c promoted.
+        let t = task(vec![
+            ("x", fs(&[])),
+            ("a", fs(&["x"])),
+            ("b", fs(&["a"])),
+            ("c", fs_cws(&["b"])),
+        ]);
+        let rows = vec![
+            row("x", "completed"),
+            row_when("a", "pending", "false"),
+            row("b", "pending"),
+            row("c", "pending"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(skips(&plan), [s("a", "condition"), s("b", "cascade")]);
+        assert!(
+            names(&plan).contains(&"promote:c".to_string()),
+            "{:?}",
+            names(&plan)
+        );
+    }
+
+    #[test]
+    fn three_pass_chain_reasons_match_statuses() {
+        // Spec §4.1 pass-boundary invariant: each link is decided one pass later
+        // than its predecessor and the reason travels with the status.
+        let t = task(vec![
+            ("x", fs(&[])),
+            ("a", fs(&["x"])),
+            ("b", fs(&["a"])),
+            ("c", fs(&["b"])),
+        ]);
+        let rows = vec![
+            row("x", "completed"),
+            row_when("a", "pending", "false"),
+            row("b", "pending"),
+            row("c", "pending"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(
+            skips(&plan),
+            [s("a", "condition"), s("b", "cascade"), s("c", "cascade")]
+        );
+        let mut snap = Snapshot::new(rows.clone());
+        for c in &plan.changes {
+            snap.apply(c);
+        }
+        assert_eq!(snap.skip_reason("a"), Some("condition"));
+        assert_eq!(snap.skip_reason("b"), Some("cascade"));
+        assert_eq!(snap.skip_reason("c"), Some("cascade"));
+    }
+
+    #[test]
+    fn mixed_completed_and_unreachable_skipped_deps_still_promote() {
+        // The reason only matters when EVERY dep is skipped (spec §2.3).
+        let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
+        let rows = vec![
+            row("a", "completed"),
+            row_skipped("b", "unreachable"),
+            row("c", "pending"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        assert_eq!(names(&plan), ["promote:c"]);
+    }
+
+    #[test]
+    fn reason_on_r3_unreachable_and_r5_sequential_stop() {
+        let t = task(vec![("a", fs(&[])), ("b", fs(&["a"])), ("x", fs_seq(&[]))]);
+        let rows = vec![
+            row("a", "failed"),
+            row("b", "pending"),
+            placeholder("x", "running", "[1,2,3]"),
+            instance("x", 0, "failed", None),
+            instance("x", 1, "pending", None),
+            instance("x", 2, "pending", None),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let sk = skips(&plan);
+        assert!(sk.contains(&s("b", "unreachable")), "{sk:?}");
+        assert!(sk.contains(&s("x[1]", "unreachable")), "{sk:?}");
+        assert!(sk.contains(&s("x[2]", "unreachable")), "{sk:?}");
+    }
+
+    #[test]
+    fn reason_on_r4_placeholder_condition_empty_unreachable_and_cascade() {
+        let t = task(vec![
+            ("root", fs(&[])),
+            ("dead", fs(&[])),
+            ("gone", fs(&[])),
+            ("p_when", fs(&["root"])),
+            ("p_empty", fs(&["root"])),
+            ("p_unreach", fs(&["dead"])),
+            ("p_cascade", fs(&["gone"])),
+            ("p_cws", fs_cws(&["gone"])),
+        ]);
+        let rows = vec![
+            row("root", "completed"),
+            row("dead", "failed"),
+            row_skipped("gone", "condition"),
+            JobStepRow {
+                when_condition: Some("false".to_string()),
+                ..placeholder("p_when", "pending", "[1]")
+            },
+            placeholder("p_empty", "pending", "[]"),
+            placeholder("p_unreach", "pending", "[1]"),
+            placeholder("p_cascade", "pending", "[1]"),
+            placeholder("p_cws", "pending", "[1]"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let sk = skips(&plan);
+        assert!(sk.contains(&s("p_when", "condition")), "{sk:?}");
+        assert!(sk.contains(&s("p_empty", "empty")), "{sk:?}");
+        assert!(sk.contains(&s("p_unreach", "unreachable")), "{sk:?}");
+        assert!(sk.contains(&s("p_cascade", "cascade")), "{sk:?}");
+        assert!(
+            names(&plan).contains(&"expand:p_cws:1".to_string()),
+            "cws placeholder expands after a condition skip: {:?}",
+            names(&plan)
+        );
     }
 }

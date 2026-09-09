@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { StepTimeline } from "../step-timeline";
-import type { JobStep, StepDurationStats } from "@/lib/types";
+import type { JobStep, SkipReason, StepDurationStats } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Factories
@@ -36,6 +36,7 @@ function makeStep(overrides: Partial<JobStep> = {}): JobStep {
     approval_message: null,
     approval_fields: null,
     carried_over: false,
+    skip_reason: null,
     ...overrides,
   };
 }
@@ -342,5 +343,36 @@ describe("StepTimeline", () => {
     expect(
       screen.getAllByRole("button", { name: /restart from here/i }),
     ).toHaveLength(1);
+  });
+
+  describe("skip reason badge", () => {
+    const cases: Array<[SkipReason, string]> = [
+      ["condition", "condition"],
+      ["empty", "empty loop"],
+      ["cascade", "upstream skipped"],
+      ["unreachable", "upstream failed"],
+    ];
+    it.each(cases)("shows '%s' as '%s'", (reason, label) => {
+      renderTimeline([makeStep({ status: "skipped", skip_reason: reason })]);
+      expect(screen.getByTestId("step-skip-build")).toHaveTextContent(label);
+    });
+
+    it("falls back to 'condition' for a reasonless row with a when", () => {
+      renderTimeline([
+        makeStep({ status: "skipped", skip_reason: null, when_condition: "{{ x }}" }),
+      ]);
+      expect(screen.getByTestId("step-skip-build")).toHaveTextContent("condition");
+    });
+
+    it("shows no badge for a reasonless row without a when", () => {
+      renderTimeline([makeStep({ status: "skipped", skip_reason: null })]);
+      expect(screen.queryByTestId("step-skip-build")).not.toBeInTheDocument();
+    });
+
+    it("keeps the blue 'when' badge on a non-skipped conditional step", () => {
+      renderTimeline([makeStep({ status: "completed", when_condition: "{{ x }}" })]);
+      expect(screen.getByText("when")).toBeInTheDocument();
+      expect(screen.queryByTestId("step-skip-build")).not.toBeInTheDocument();
+    });
   });
 });

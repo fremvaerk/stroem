@@ -265,6 +265,15 @@ fn validate_workflow_config_inner(
                 ));
             }
 
+            // Warn if continue_when_skipped without depends_on
+            if step.continue_when_skipped && step.depends_on.is_empty() {
+                warnings.push(format!(
+                    "Task '{}' step '{}' has continue_when_skipped: true but no depends_on — the flag has no effect",
+                    task_name,
+                    step_name
+                ));
+            }
+
             // Validate step timeout (cap is shared with ServerConfig.default_step_timeout)
             if let Some(ref timeout) = step.timeout {
                 if timeout.as_secs() > MAX_STEP_TIMEOUT_SECS {
@@ -6141,6 +6150,59 @@ tasks:
                 .iter()
                 .any(|w| w.contains("sequential") && w.contains("no for_each")),
             "Expected warning about sequential without for_each, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_continue_when_skipped_without_depends_on_warns() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        continue_when_skipped: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("continue_when_skipped") && w.contains("no depends_on")),
+            "Expected warning about continue_when_skipped without depends_on, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_continue_when_skipped_with_depends_on_does_not_warn() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      first:
+        action: process
+      step:
+        action: process
+        depends_on: [first]
+        continue_when_skipped: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.contains("continue_when_skipped")),
+            "unexpected warning: {:?}",
             warnings
         );
     }

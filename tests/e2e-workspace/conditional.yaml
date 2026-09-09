@@ -1,0 +1,25 @@
+actions:
+  say:
+    type: script
+    runner: local
+    language: shell
+    script: echo "ran"
+
+tasks:
+  conditional-report:
+    mode: distributed
+    input:
+      run_check:
+        type: boolean
+        default: false
+    flow:
+      optional-check:
+        action: say
+        when: "{{ input.run_check }}"
+      report:
+        action: say
+        depends_on: [optional-check]
+        continue_when_skipped: true
+      follow-up:
+        action: say
+        depends_on: [optional-check]

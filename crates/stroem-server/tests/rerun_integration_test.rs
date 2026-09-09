@@ -166,6 +166,7 @@ fn build_rerun_workspace() -> WorkspaceConfig {
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,

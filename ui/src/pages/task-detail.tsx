@@ -431,6 +431,8 @@ export function TaskDetailPage() {
                     {step.when && (
                       <> &middot; when: <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{step.when}</code></>
                     )}
+                    {step.continue_on_failure && <> &middot; continue on failure</>}
+                    {step.continue_when_skipped && <> &middot; continue when skipped</>}
                     {step.for_each !== undefined && (
                       <> &middot; for each: <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{
                         typeof step.for_each === "string"

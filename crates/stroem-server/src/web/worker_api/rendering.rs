@@ -504,6 +504,7 @@ mod tests {
             depends_on: vec![],
             input,
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,

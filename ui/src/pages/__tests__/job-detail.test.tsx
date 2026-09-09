@@ -59,6 +59,7 @@ function step(overrides: Partial<JobStep> = {}): JobStep {
     approval_message: null,
     approval_fields: null,
     carried_over: false,
+    skip_reason: null,
     ...overrides,
   };
 }

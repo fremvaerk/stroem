@@ -89,6 +89,7 @@ fn flow_step(action: &str, depends_on: &[&str], input: HashMap<String, JsonValue
         depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
         input,
         continue_on_failure: false,
+        continue_when_skipped: false,
         timeout: None,
         when: None,
         for_each: None,
@@ -541,6 +542,11 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         .collect();
     assert_eq!(by["c"].status, "skipped");
     assert!(!by["c"].carried_over);
+    // Spec §5: a carried skipped row keeps its reason; the freshly cascaded
+    // `c` is unreachable because its only dependency `b` was unreachable.
+    assert!(by["b"].carried_over);
+    assert_eq!(by["b"].skip_reason.as_deref(), Some("unreachable"));
+    assert_eq!(by["c"].skip_reason.as_deref(), Some("unreachable"));
     Ok(())
 }
 
@@ -1299,6 +1305,7 @@ async fn seed_failure_rolls_back_the_whole_restart_job() -> Result<()> {
         status: "completed".to_string(),
         output: None,
         error_message: None,
+        skip_reason: None,
     });
 
     let before = JobRepo::list(&app.pool, Some("default"), None, None, None, 100, 0)

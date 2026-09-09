@@ -184,6 +184,7 @@ mod tests {
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             input: HashMap::new(),
             continue_on_failure,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,

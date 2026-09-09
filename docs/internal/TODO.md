@@ -1552,3 +1552,13 @@ Feature: `workspaces.<name>.triggers: false` in the server config loads a worksp
 - [ ] No runtime toggle: changing `triggers` requires a config edit + restart (the scheduler/event-source hot-reload re-reads workspace YAML, not the server config). An admin API/UI toggle persisted in the DB would be the next step if operators need it live.
 - [ ] Trigger list API/UI (`/api/workspaces/{ws}/triggers`, task-detail trigger cards) does not yet annotate individual triggers as "suppressed on this server" — only the workspace row carries `triggers_enabled`.
 - [ ] E2E (`tests/e2e.sh`) does not cover the flag; unit coverage on each consumer plus the router-level integration test `test_workspace_triggers_disabled_reported_and_webhook_hidden` was judged sufficient for v1.
+
+## continue_when_skipped + Skip Reasons (2026-09-09)
+
+- [ ] Expose `skip_reason` in the Tera template context (`{{ step.skip_reason }}`) so a `when` can branch on why an upstream step was skipped.
+- [ ] `stroem run` (CLI) aborts on the first untolerated failure instead of skipping dependents as `unreachable`; pre-existing divergence from the server, now documented.
+- [ ] `hook.failed_steps` has no skipped-steps counterpart; add `hook.skipped_steps` with reasons if a hook ever needs it.
+- [ ] CLI `stroem run`: after an EMPTY `for_each`, a dependent's `when` is evaluated before the all-deps-skipped check (the empty-loop branch in `crates/stroem-cli/src/local/run.rs` does not call `cascade_skip`), so an invalid `when` there aborts the run where the server would cascade-skip. Pre-existing ordering; align with the server and add a regression case.
+- [ ] Restart carries a legacy `NULL` `skip_reason` verbatim into the new job (spec §5), so "every new skipped row has a reason" has a carry-over exception; NULL stays tainted. Document the exception next to the writer-contract test or normalise on carry-over.
+- [ ] Cascade test gaps: `continue_when_skipped` placeholder behind an `unreachable`/`NULL`-skipped dep with and without `continue_on_failure`; restart carrying `condition`/`NULL` reasons into a flagged dependent; writer-contract test that includes a restart; a step with mixed `skipped` + `pending` deps; a `depends_on` entry with no row.
+- [ ] `three_pass_chain_reasons_match_statuses` asserts only the final plan/snapshot; it does not pin per-pass visibility. Expose pass boundaries (e.g. a `run` variant that records per-pass changes) and assert them.

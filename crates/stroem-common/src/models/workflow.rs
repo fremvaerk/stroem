@@ -396,6 +396,12 @@ pub struct FlowStep {
     pub input: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub continue_on_failure: bool,
+    /// When true, the step is not cascade-skipped when all of its dependencies
+    /// were skipped by choice (`when` false, empty `for_each`). A dependency
+    /// skipped because an upstream step failed still skips this step unless
+    /// `continue_on_failure` is also set. See spec 2026-09-09 §2.3.
+    #[serde(default)]
+    pub continue_when_skipped: bool,
     /// Step-level timeout: kill this step after the specified duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<HumanDuration>,
@@ -458,6 +464,8 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 #[serde(default)]
                 continue_on_failure: bool,
                 #[serde(default)]
+                continue_when_skipped: bool,
+                #[serde(default)]
                 timeout: Option<HumanDuration>,
                 #[serde(default)]
                 when: Option<String>,
@@ -478,6 +486,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 depends_on: ref_step.depends_on,
                 input: ref_step.input,
                 continue_on_failure: ref_step.continue_on_failure,
+                continue_when_skipped: ref_step.continue_when_skipped,
                 timeout: ref_step.timeout,
                 when: ref_step.when,
                 for_each: ref_step.for_each,
@@ -493,6 +502,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 "depends_on",
                 "input",
                 "continue_on_failure",
+                "continue_when_skipped",
                 "timeout",
                 "when",
                 "for_each",
@@ -570,6 +580,11 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
                 .unwrap_or(false);
 
+            let continue_when_skipped: bool = step_map
+                .get(serde_yaml::Value::String("continue_when_skipped".into()))
+                .map(|v| serde_yaml::from_value(v.clone()).unwrap_or(false))
+                .unwrap_or(false);
+
             let name: Option<String> = step_map
                 .get(serde_yaml::Value::String("name".into()))
                 .and_then(|v| serde_yaml::from_value(v.clone()).ok());
@@ -612,6 +627,7 @@ impl<'de> serde::Deserialize<'de> for FlowStep {
                 depends_on,
                 input,
                 continue_on_failure,
+                continue_when_skipped,
                 timeout,
                 when,
                 for_each,
@@ -1654,6 +1670,56 @@ tasks:
         let task = config.tasks.get("test").unwrap();
         let step = task.flow.get("step1").unwrap();
         assert!(step.continue_on_failure);
+    }
+
+    #[test]
+    fn test_continue_when_skipped_defaults_false() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: action1
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let step = config.tasks["test"].flow.get("step1").unwrap();
+        assert!(!step.continue_when_skipped);
+    }
+
+    #[test]
+    fn test_continue_when_skipped_true_on_reference_step() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        action: action1
+        depends_on: [step0]
+        continue_when_skipped: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let step = config.tasks["test"].flow.get("step1").unwrap();
+        assert!(step.continue_when_skipped);
+        assert!(!step.continue_on_failure, "flags are independent");
+    }
+
+    #[test]
+    fn test_continue_when_skipped_true_on_inline_step() {
+        let yaml = r#"
+tasks:
+  test:
+    flow:
+      step1:
+        type: script
+        script: echo hi
+        depends_on: [step0]
+        continue_when_skipped: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let step = config.tasks["test"].flow.get("step1").unwrap();
+        assert!(step.continue_when_skipped);
+        // The key must have been routed to the step, not the hoisted action.
+        assert!(config.actions.values().all(|a| a.action_type == "script"));
     }
 
     #[test]
@@ -4236,6 +4302,7 @@ retry:
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -4305,6 +4372,7 @@ retry:
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
@@ -4363,6 +4431,7 @@ retry:
             depends_on: vec![],
             input: HashMap::new(),
             continue_on_failure: false,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,

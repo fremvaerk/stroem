@@ -100,6 +100,7 @@ pub fn compute_restart_set(
                 status: src.status.clone(),
                 output: src.output.clone(),
                 error_message: src.error_message.clone(),
+                skip_reason: src.skip_reason.clone(),
             }
         } else {
             Seed {
@@ -107,6 +108,7 @@ pub fn compute_restart_set(
                 status: StepStatus::Cancelled.as_ref().to_string(),
                 output: None,
                 error_message: Some(CARRIED_CANCELLED_MSG.to_string()),
+                skip_reason: None,
             }
         };
         if seed.status == StepStatus::Failed.as_ref() {
@@ -145,6 +147,7 @@ mod tests {
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             input: Default::default(),
             continue_on_failure: cof,
+            continue_when_skipped: false,
             timeout: None,
             when: None,
             for_each: None,
