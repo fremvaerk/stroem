@@ -1310,13 +1310,14 @@ async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
     Ok(())
 }
 
-// ─── Test 25: All-deps-skipped + continue_on_failure → step runs ──────────────
+// ─── Test 25: All-deps-skipped + continue_on_failure alone → cascade-skip ─────
 
-/// Root → A(when:false, skipped) → B(cof:true). B should be promoted, not
-/// cascade-skipped. continue_on_failure explicitly opts in to running regardless
-/// of dep outcomes, so the all-deps-skipped cascade does not apply.
+/// Root → A(when:false, skipped) → B(cof:true). Spec 2026-09-09 §2.4:
+/// continue_on_failure is failure-only, so B is cascade-skipped with reason
+/// `cascade`; opting in to run after a skipped branch needs
+/// continue_when_skipped (see test_continue_when_skipped_runs_after_condition_skip).
 #[tokio::test]
-async fn test_all_deps_skipped_with_cof_promotes_step() -> Result<()> {
+async fn test_all_deps_skipped_with_cof_alone_is_cascade_skipped() -> Result<()> {
     let (pool, _container) = setup_db().await?;
 
     let mut flow = HashMap::new();
@@ -1338,16 +1339,25 @@ async fn test_all_deps_skipped_with_cof_promotes_step() -> Result<()> {
 
     let ws = WorkspaceConfig::new();
 
-    // Root completes → A skipped by condition, B should be promoted (not cascade-skipped)
+    // Root completes → A skipped by condition, B is cascade-skipped (cof alone
+    // does not bypass the all-deps-skipped rule).
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
     stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["a"], "skipped", "A must be skipped (when: false)");
     assert_eq!(
-        statuses["b"], "ready",
-        "B must be promoted: cof:true prevents cascade-skip even when all deps are skipped"
+        statuses["b"], "skipped",
+        "B must be cascade-skipped: cof:true alone does not bypass the all-deps-skipped rule"
     );
+
+    let rows: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(rows["a"].skip_reason.as_deref(), Some("condition"));
+    assert_eq!(rows["b"].skip_reason.as_deref(), Some("cascade"));
 
     Ok(())
 }
