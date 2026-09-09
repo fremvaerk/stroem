@@ -138,7 +138,7 @@ impl Settlement {
     /// flow) but NOT terminal handling: a terminal job whose workspace is no
     /// longer loaded still drains, takes its claim, counts, and propagates to
     /// its parent — only hooks, retry and the archive are skipped, exactly as
-    /// `job_recovery::handle_job_terminal` did. Dropping the claim there would
+    /// the pre-`Settlement` terminal path did. Dropping the claim there would
     /// strand the parent step forever, since no later path re-observes it.
     ///
     /// Public so tests can drive a job from an arbitrary row state;
@@ -233,7 +233,7 @@ impl Settlement {
         }
         // Hooks, retry and the archive need the flow definition. The claim,
         // the metric and the parent propagation above do not, and must still
-        // run for a job whose workspace is gone (`handle_job_terminal`'s
+        // run for a job whose workspace is gone (the old terminal path's
         // "skipping hooks and S3 upload" branch). `resolve` already logged.
         let Some((workspace, task)) = resolved.as_ref() else {
             return Ok(());
