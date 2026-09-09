@@ -61,6 +61,11 @@ JobRepo::mark_running(pool, job_id, worker_id).await?;
 JobRepo::mark_completed(pool, job_id, output).await?;
 JobRepo::mark_failed(pool, job_id).await?;
 JobRepo::set_log_path(pool, job_id, log_path).await?;
+
+// Predicated settlement write: moves a pending/running job to `status`,
+// returns false (and writes nothing) if the row is already terminal —
+// e.g. an explicit cancellation must never be overwritten.
+JobRepo::settle(pool, job_id, status, output).await?;
 ```
 
 #### `JobStepRepo`

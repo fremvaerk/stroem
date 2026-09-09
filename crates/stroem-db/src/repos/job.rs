@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::models::job::JobStatus;
 use uuid::Uuid;
 
 /// Maximum `type: task` nesting depth, mirroring `job_creator::MAX_TASK_DEPTH`.
@@ -516,6 +517,33 @@ impl JobRepo {
         .context("Failed to mark job as completed")?;
 
         Ok(())
+    }
+
+    /// Predicated settlement write (spec §7): moves a `pending`/`running` job
+    /// to `status` and returns whether the row was written. A `false` means
+    /// the row was already terminal — typically an explicit cancellation —
+    /// and must not be overwritten. `output` is `COALESCE`d so `failed` and
+    /// `cancelled` (which pass `None`) never clear an existing output.
+    pub async fn settle(
+        pool: &PgPool,
+        job_id: Uuid,
+        status: JobStatus,
+        output: Option<JsonValue>,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE job
+            SET status = $2, output = COALESCE($3, output), completed_at = NOW()
+            WHERE job_id = $1 AND status IN ('pending', 'running')
+            "#,
+        )
+        .bind(job_id)
+        .bind(status.as_ref())
+        .bind(output)
+        .execute(pool)
+        .await
+        .context("Failed to settle job")?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Mark job as failed

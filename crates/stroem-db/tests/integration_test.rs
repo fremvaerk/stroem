@@ -3,6 +3,7 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use stroem_common::models::job::JobStatus;
 use stroem_db::{
     run_migrations, JobRepo, JobStepRepo, NewJobStep, RefreshTokenRepo, Seed, TaskStateRepo,
     UserAuthLinkRepo, UserRepo, WorkerRepo, WorkspaceStateRepo,
@@ -2375,6 +2376,81 @@ async fn test_cancel_job_running() -> Result<()> {
         .expect("Job should exist");
     assert_eq!(job.status, "cancelled");
     assert!(job.completed_at.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn settle_writes_once_and_never_overwrites_a_terminal_row() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let worker_id = Uuid::new_v4();
+    WorkerRepo::register(
+        &pool,
+        worker_id,
+        "settle-worker",
+        &["script".to_string()],
+        &[],
+        false,
+        None,
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "settle-test",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // pending -> running -> completed with output
+    JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
+    let wrote = JobRepo::settle(
+        &pool,
+        job_id,
+        JobStatus::Completed,
+        Some(serde_json::json!({"k": 1})),
+    )
+    .await?;
+    assert!(wrote);
+    let j = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(j.status, "completed");
+    assert_eq!(j.output, Some(serde_json::json!({"k": 1})));
+    let first_completed_at = j.completed_at.unwrap();
+
+    // a second settle is a no-op
+    let wrote_again = JobRepo::settle(&pool, job_id, JobStatus::Failed, None).await?;
+    assert!(!wrote_again);
+    let j = JobRepo::get(&pool, job_id).await?.unwrap();
+    assert_eq!(j.status, "completed");
+    assert_eq!(j.completed_at.unwrap(), first_completed_at);
+
+    // cancelled rows are never overwritten (spec §7 regression)
+    let job2 = JobRepo::create(
+        &pool,
+        "default",
+        "settle-test-2",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert!(JobRepo::cancel(&pool, job2).await?);
+    let wrote2 = JobRepo::settle(&pool, job2, JobStatus::Completed, None).await?;
+    assert!(!wrote2);
+    assert_eq!(
+        JobRepo::get(&pool, job2).await?.unwrap().status,
+        "cancelled"
+    );
 
     Ok(())
 }

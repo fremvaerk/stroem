@@ -602,7 +602,7 @@ impl Settlement {
         job_id: Uuid,
         output: Option<serde_json::Value>,
     ) -> Result<()> {
-        JobRepo::mark_completed(&self.pool, job_id, output)
+        JobRepo::settle(&self.pool, job_id, JobStatus::Completed, output)
             .await
             .context("mark job completed")?;
         // The completion WRITE is the worker's contract and its failure must

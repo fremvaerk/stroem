@@ -116,33 +116,24 @@ pub async fn settle_if_all_terminal(
         return Ok(None);
     };
 
-    // Never overwrite an explicit cancellation. (Task 6 replaces this re-read
-    // with the predicated `JobRepo::settle` write.)
-    if let Some(j) = JobRepo::get(pool, job_id).await? {
-        if j.status == JobStatus::Cancelled.as_ref() {
-            tracing::info!(
-                "Job {} is already cancelled, skipping status update",
-                job_id
-            );
-            return Ok(Some(JobStatus::Cancelled));
-        }
+    let wrote = JobRepo::settle(pool, job_id, settled.status.clone(), settled.output.clone())
+        .await
+        .context("Failed to settle job")?;
+    if !wrote {
+        let current = JobRepo::get(pool, job_id).await?.map(|j| j.status);
+        tracing::info!(job_id = %job_id, ?current, "job already terminal, settlement not written");
+        return Ok(current.and_then(|s| s.parse::<JobStatus>().ok()));
     }
 
     match settled.status {
         JobStatus::Failed => {
             tracing::info!("Job {} failed (one or more steps failed)", job_id);
-            JobRepo::mark_failed(pool, job_id)
-                .await
-                .context("Failed to mark job as failed")?;
         }
         JobStatus::Cancelled => {
             tracing::info!(
                 "Job {} cancelled (a step was cancelled, no untolerated failure)",
                 job_id
             );
-            JobRepo::mark_cancelled(pool, job_id)
-                .await
-                .context("Failed to mark job as cancelled")?;
         }
         _ => {
             let failed_count = steps
@@ -158,9 +149,6 @@ pub async fn settle_if_all_terminal(
             } else {
                 tracing::info!("Job {} completed successfully", job_id);
             }
-            JobRepo::mark_completed(pool, job_id, settled.output.clone())
-                .await
-                .context("Failed to mark job as completed")?;
         }
     }
     Ok(Some(settled.status))
