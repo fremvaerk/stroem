@@ -1300,6 +1300,7 @@ async fn seed_failure_rolls_back_the_whole_restart_job() -> Result<()> {
         status: "completed".to_string(),
         output: None,
         error_message: None,
+        skip_reason: None,
     });
 
     let before = JobRepo::list(&app.pool, Some("default"), None, None, None, 100, 0)

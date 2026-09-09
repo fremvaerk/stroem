@@ -685,7 +685,8 @@ pub async fn apply(
                     names.push(step.clone());
                     i += 1;
                 }
-                let n = JobStepRepo::skip_steps_tx(&mut **tx, job_id, &names).await?;
+                let n =
+                    JobStepRepo::skip_steps_tx(&mut **tx, job_id, &names, "unreachable").await?;
                 expect_rows(n, names.len(), &names.join(","))?;
                 a.skipped += names.len();
             }

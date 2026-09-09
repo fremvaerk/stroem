@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use stroem_common::models::job::StepStatus;
 use uuid::Uuid;
 
-const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over";
+const STEP_COLUMNS: &str = "job_id, step_name, action_name, action_type, action_image, action_spec, input, output, status, worker_id, started_at, completed_at, error_message, required_ability, required_tags, runner, timeout_secs, when_condition, for_each_expr, loop_source, loop_index, loop_total, loop_item, agent_state, suspended_at, retry_attempt, max_retries, retry_backoff_secs, retry_strategy, retry_jitter, retry_history, retry_at, action_workspace, action_revision, carried_over, skip_reason";
 
 /// Job step row from database
 #[derive(Debug, Clone, Default, sqlx::FromRow)]
@@ -58,6 +58,10 @@ pub struct JobStepRow {
     /// source job via [`JobStepRepo::seed_steps_tx`] rather than executed
     /// in this job. See [`Seed`] and spec 2026-09-07 §5.
     pub carried_over: bool,
+    /// Why the step is `skipped` (spec 2026-09-09 §2.2): `condition` | `empty` |
+    /// `cascade` | `unreachable`. `None` before migration 046 or on rows an older
+    /// replica wrote; the cascade treats `None` as `unreachable`.
+    pub skip_reason: Option<String>,
 }
 
 impl JobStepRow {
@@ -101,6 +105,7 @@ impl JobStepRow {
             action_workspace: None,
             action_revision: None,
             carried_over: false,
+            skip_reason: None,
         }
     }
 }
@@ -217,6 +222,7 @@ pub struct Seed {
     pub status: String,
     pub output: Option<JsonValue>,
     pub error_message: Option<String>,
+    pub skip_reason: Option<String>,
 }
 
 /// Repository for job step operations
@@ -369,16 +375,22 @@ impl JobStepRepo {
     }
 
     /// Cascade primitive: pending → skipped for every named step. Returns rows affected.
-    pub async fn skip_steps_tx<'e, E>(executor: E, job_id: Uuid, names: &[String]) -> Result<u64>
+    pub async fn skip_steps_tx<'e, E>(
+        executor: E,
+        job_id: Uuid,
+        names: &[String],
+        reason: &str,
+    ) -> Result<u64>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
         let r = sqlx::query(
-            "UPDATE job_step SET status = 'skipped', completed_at = NOW() \
+            "UPDATE job_step SET status = 'skipped', skip_reason = $3, completed_at = NOW() \
              WHERE job_id = $1 AND step_name = ANY($2) AND status = 'pending'",
         )
         .bind(job_id)
         .bind(names)
+        .bind(reason)
         .execute(executor)
         .await
         .context("skip_steps_tx")?;
@@ -487,7 +499,7 @@ impl JobStepRepo {
             let result = sqlx::query(
                 r#"
                 UPDATE job_step
-                SET status = $3, output = $4, error_message = $5,
+                SET status = $3, output = $4, error_message = $5, skip_reason = $6,
                     completed_at = NOW(), carried_over = TRUE,
                     ready_at = NULL, retry_at = NULL, started_at = NULL, worker_id = NULL,
                     agent_state = NULL, suspended_at = NULL
@@ -499,6 +511,7 @@ impl JobStepRepo {
             .bind(&seed.status)
             .bind(&seed.output)
             .bind(&seed.error_message)
+            .bind(&seed.skip_reason)
             .execute(&mut *tx)
             .await
             .with_context(|| format!("seed step '{}'", seed.step_name))?;
@@ -910,16 +923,22 @@ impl JobStepRepo {
     /// The `AND status = 'pending'` guard prevents overwriting a step that has
     /// already transitioned to `running`, `completed`, or `failed` due to a
     /// concurrent process.
-    pub async fn mark_skipped(pool: &PgPool, job_id: Uuid, step_name: &str) -> Result<()> {
+    pub async fn mark_skipped(
+        pool: &PgPool,
+        job_id: Uuid,
+        step_name: &str,
+        reason: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE job_step
-            SET status = 'skipped', completed_at = NOW()
+            SET status = 'skipped', skip_reason = $3, completed_at = NOW()
             WHERE job_id = $1 AND step_name = $2 AND status = 'pending'
             "#,
         )
         .bind(job_id)
         .bind(step_name)
+        .bind(reason)
         .execute(pool)
         .await
         .context("Failed to mark step as skipped")?;
