@@ -110,6 +110,7 @@ Last updated: 2026-06-03.
 - [x] Missing test: `ensure_up_to_date` 304 path with missing revision directory → already covered by `test_current_revision_returns_none_when_dir_missing`
 - [x] Missing test: all old revisions in-use with `max_retained=0` → `test_cleanup_all_old_revisions_in_use`
 - [x] Pre-existing `clippy::result_large_err` failures under clippy 1.98 (`-D warnings`): `oauth/token.rs:438`, `oauth/token.rs:617`, `web/api/middleware.rs:61` — `Err(axum Response)` ≥128 bytes; annotated `#[allow(clippy::result_large_err)]` (boxing would churn every caller) for v0.15.27
+- [ ] `CreatedJob` residual hole (settlement branch, 2026-09-09): `create_job_for_task_detailed(..).await?.job_id` moves the id out and drops the struct without finalizing it — `#[must_use]` on `CreatedJob` does not catch field access, only dropping the whole value. Consider returning the id only from `job_created` (and `agent_child_created`) instead of exposing `job_id` as a public field, so a caller physically cannot get an id without also finalizing.
 
 ## Performance
 

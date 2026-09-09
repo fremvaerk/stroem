@@ -1,6 +1,6 @@
 # Job Settlement — Design
 
-**Status:** Revision 4 (2026-09-09). Revision 3 was Codex-reviewed "ready". Revision 4 amends §6.3 step 2 during implementation (Task 3): an unresolvable workspace or task no longer skips the drain gate, claim and propagation, matching the old `handle_job_terminal`; caught by `metrics_test::cascading_cancel_counts_parent_exactly_once`. Binding.
+**Status:** Revision 5 (2026-09-09). Revision 3 was Codex-reviewed "ready". Revision 4 amends §6.3 step 2 during implementation (Task 3): an unresolvable workspace or task no longer skips the drain gate, claim and propagation, matching the old `handle_job_terminal`; caught by `metrics_test::cascading_cancel_counts_parent_exactly_once`. Revision 5 amends two findings from implementation (Tasks 6 and 10): §6.2's `step_failed` entry has six production call sites, not seven — the approval REJECT handler calls `JobStepRepo::fail_or_retry` inline and then `step_settled` directly, never `step_failed`; §6.4's D1 fix is narrower than "any task-dispatch failure" — the pre-fix `?` abort fired only on errors that escape `handle_task_steps` entirely (a missing `action_spec`/`task` field, a DB error), not on ordinary dispatch failures like an unknown task name, which `handle_task_steps_pass` already caught via `fail_task_step`. Binding.
 **Date:** 2026-09-08
 **Origin:** architecture review 2026-09-07/08, candidate 2 "Job settlement", entered
 through candidate 1 (the step cascade, now on `main`).
@@ -214,8 +214,9 @@ impl Settlement {
     pub async fn step_settled(&self, job_id: Uuid, step_name: &str) -> Result<()>;
 
     /// Fail-or-retry the step, then `step_settled` when the outcome is `Failed`.
-    /// Replaces the `fail_step` + `orchestrate_after_step` pair at the seven
-    /// failure sites. `RetryScheduled` and `NotApplied` do not advance.
+    /// Replaces the `fail_step` + `orchestrate_after_step` pair at six of the
+    /// seven failure sites (the approval REJECT handler is the seventh; see
+    /// the table below). `RetryScheduled` and `NotApplied` do not advance.
     pub async fn step_failed(&self, job_id: Uuid, step_name: &str, error: &str,
         expected: &[StepStatus]) -> Result<FailOutcome>;
 
@@ -248,7 +249,7 @@ Callers after the switch:
 | entry | replaces | call sites |
 |---|---|---|
 | `step_settled` | `orchestrate_after_step` | worker `complete_step` (success path), approve; recovery phases where the outcome is not a failure write |
-| `step_failed` | `fail_step` + `orchestrate_after_step` | worker `complete_step` (failure), claim-time render failure, four recovery phases, approval reject |
+| `step_failed` | `fail_step` + `orchestrate_after_step` | worker `complete_step` (failure), claim-time render failure, four recovery phases — six call sites. The approval REJECT handler is a seventh site that does **not** go through `step_failed`: it calls `JobStepRepo::fail_or_retry` inline (so the `[approval] … rejected` log line precedes any `[retry]` line and the 409-conflict branch survives) and then `step_settled` directly when the outcome is `Failed`. |
 | `job_created` | `finalize_created_job` | `web/api/tasks.rs` (execute, including re-run via `source_job_id`), `web/api/jobs.rs` (restart), `web/hooks.rs`, `web/worker_api/event_source.rs`, `mcp/tools.rs`, `scheduler.rs`, `event_source.rs`, `settlement/hooks.rs`, and `advance` itself for the retry job (§6.3 step 4.d.ii) |
 | `agent_child_created` | `reconcile_settled_children` + inline check | `web/worker_api/jobs.rs::agent_task_tool` |
 | `agent_children_registered` | inline loop over `propagate_to_parent` | `agent_save_state`, `agent_suspend_step` |
@@ -338,6 +339,11 @@ Inside step 3, a task-dispatch or approval-dispatch error is logged, written to 
 job's log, and does not abort. Today the parent leg of `propagate_to_parent` returns the
 task-dispatch error with `?`, which skips the parent's drain, claim and terminal
 actions; since the claim would then never be taken by anyone, those actions are lost.
+This `?` abort fired only on errors that ESCAPE `handle_task_steps` entirely (a step row
+missing its `action_spec` or `task` field, or a DB error) — ordinary dispatch failures
+such as an unknown task name were already caught inside `handle_task_steps_pass` via
+`fail_task_step` and never propagated as `Err`, so D1's scope is narrower than "any
+task-dispatch failure."
 Regression test: a parent whose `type: task` step dispatch fails (unknown task name)
 still settles, fires its `on_error` hook and increments the completion counter once.
 

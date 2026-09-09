@@ -66,6 +66,11 @@ JobRepo::set_log_path(pool, job_id, log_path).await?;
 // returns false (and writes nothing) if the row is already terminal —
 // e.g. an explicit cancellation must never be overwritten.
 JobRepo::settle(pool, job_id, status, output).await?;
+
+// create_with_parent / create_with_parent_tx / create_with_parent_tx_id all
+// take a trailing `max_retries: Option<i32>`: task.retry.max_attempts - 1,
+// written at creation for every creation mode so task-level retry can be
+// decided on any terminal path, not just worker completion.
 ```
 
 #### `JobStepRepo`
