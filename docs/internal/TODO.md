@@ -151,6 +151,9 @@ Last updated: 2026-06-03.
 - [x] No sourcemap in production builds
 - [x] `vite.config.ts` suppresses proxy errors silently
 - [x] Job duration insights: show average/p50/p95 duration for a task and per-step, estimated time remaining on running jobs and individual steps, and a duration history chart on the job detail page (with per-step breakdown) — `GET /api/workspaces/{ws}/tasks/{name}/stats` returns aggregates + per-step breakdown + recent durations; UI shows a `<DurationInsightsCard>` on Task Detail (sparkline + p50/p95 chips + per-step table), an ETA / overrun pill on running jobs in Job Detail, and `p50: Xs` badges on each step in `<StepTimeline>`. ETA algorithm lives in `ui/src/lib/eta.ts`.
+- [x] Workspace navigation (2026-09-09): `/workspaces/:workspace` page (tasks + triggers + refresh), Tasks page Merged / By-workspace switch, shared `<TaskTree>`, breadcrumbs link only to real routes, `*` Not Found page; workspace names link to the workspace page everywhere.
+- [ ] Jobs page: workspace filter (API already supports `?workspace=`); make the per-row workspace badge link to `/jobs?workspace=` once it exists. Deliberately left out of the 2026-09-09 navigation change.
+- [ ] Sidebar active-state: `/workspaces/:ws/tasks/:name` highlights *Workspaces* (prefix match). Acceptable under the workspace-as-level model; revisit if a task-centric entry point is added.
 
 ## CLI: `stroem run` (local task execution, 2026-03-25)
 

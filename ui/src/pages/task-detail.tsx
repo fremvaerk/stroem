@@ -227,7 +227,7 @@ export function TaskDetailPage() {
       <div className="py-20 text-center">
         <p className="text-sm text-destructive">{error || "Task not found"}</p>
         <Button variant="link" asChild className="mt-2">
-          <Link to="/tasks">Back to tasks</Link>
+          <Link to={`/workspaces/${encodeURIComponent(workspace ?? "")}`}>Back to workspace</Link>
         </Button>
       </div>
     );
@@ -247,7 +247,10 @@ export function TaskDetailPage() {
       )}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" asChild>
-          <Link to="/tasks">
+          <Link
+            to={`/workspaces/${encodeURIComponent(workspace ?? "")}`}
+            aria-label="Back to workspace"
+          >
             <ArrowLeft className="h-4 w-4" />
           </Link>
         </Button>
