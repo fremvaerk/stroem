@@ -576,3 +576,97 @@ async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
     assert_eq!(step_statuses(&pool, job_id).await["join"], "ready");
     Ok(())
 }
+
+/// Spec §4.3: consecutive skips are batched per reason and every row gets the
+/// reason the plan named for it.
+#[tokio::test]
+async fn apply_writes_skip_reason_per_bucket() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[
+            step(job_id, "a", "pending"),
+            step(job_id, "b", "pending"),
+            step(job_id, "c", "pending"),
+            step(job_id, "d", "pending"),
+        ],
+    )
+    .await?;
+    let plan = Plan {
+        changes: vec![
+            Change::Skip {
+                step: "a".into(),
+                reason: SkipReason::Cascade,
+            },
+            Change::Skip {
+                step: "b".into(),
+                reason: SkipReason::Cascade,
+            },
+            Change::Skip {
+                step: "c".into(),
+                reason: SkipReason::Unreachable,
+            },
+            Change::Skip {
+                step: "d".into(),
+                reason: SkipReason::Condition,
+            },
+        ],
+    };
+    let mut tx = pool.begin().await?;
+    let applied = apply(&mut tx, job_id, &plan).await.unwrap();
+    tx.commit().await?;
+    assert_eq!(applied.skipped, 4);
+
+    let by: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(by["a"].skip_reason.as_deref(), Some("cascade"));
+    assert_eq!(by["b"].skip_reason.as_deref(), Some("cascade"));
+    assert_eq!(by["c"].skip_reason.as_deref(), Some("unreachable"));
+    assert_eq!(by["d"].skip_reason.as_deref(), Some("condition"));
+    Ok(())
+}
+
+/// A stale row in the SECOND bucket is still a guard miss, and the first
+/// bucket's write is rolled back with it.
+#[tokio::test]
+async fn apply_skip_guard_miss_in_later_bucket_rolls_back_earlier_bucket() -> Result<()> {
+    let (pool, _c) = setup_db().await?;
+    let job_id = create_job(&pool).await;
+    JobStepRepo::create_steps(
+        &pool,
+        &[step(job_id, "a", "pending"), step(job_id, "b", "ready")],
+    )
+    .await?;
+    let plan = Plan {
+        changes: vec![
+            Change::Skip {
+                step: "a".into(),
+                reason: SkipReason::Cascade,
+            },
+            Change::Skip {
+                step: "b".into(),
+                reason: SkipReason::Unreachable,
+            },
+        ],
+    };
+    let mut tx = pool.begin().await?;
+    let err = apply(&mut tx, job_id, &plan).await.unwrap_err();
+    assert!(
+        matches!(err, ApplyError::GuardMiss { ref step } if step == "b"),
+        "{err}"
+    );
+    tx.rollback().await?;
+
+    let by: HashMap<_, _> = JobStepRepo::get_steps_for_job(&pool, job_id)
+        .await?
+        .into_iter()
+        .map(|s| (s.step_name.clone(), s))
+        .collect();
+    assert_eq!(by["a"].status, "pending");
+    assert!(by["a"].skip_reason.is_none());
+    Ok(())
+}
