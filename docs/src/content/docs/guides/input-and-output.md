@@ -26,7 +26,7 @@ input:
 
 The optional `name` field provides a human-readable label for the input field in the web UI. When not set, the YAML key (e.g. `user_name`) is used as the label.
 
-The optional `description` field is displayed in the web UI as placeholder text and helper text below the input field.
+The optional `description` field is displayed in the web UI as helper text below the input field. The placeholder inside an empty input shows the field key (or "Select …" for option fields), never the description.
 
 ### Supported types
 
