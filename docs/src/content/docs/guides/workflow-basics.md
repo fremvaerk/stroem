@@ -326,6 +326,7 @@ The web UI provides an interactive graph view for step dependencies:
 
 - **Job Detail page**: Toggle between "Timeline" and "Graph" views. The graph shows each step as a node with live status (color-coded borders, animated edges for running steps). Click a node to view step details.
 - **Task Detail page**: Tasks with more than one step display a dependency graph above the step list.
+- **Fullscreen**: The expand button in the graph's top-right corner opens the same graph in a viewport-sized overlay with a wider zoom range, useful for large workflows. Selecting a node in the overlay also selects it on the page, so the step timeline is already focused when you close the overlay (collapse button or `Esc`).
 
 ### Organizing tasks with folders
 

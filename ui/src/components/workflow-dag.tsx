@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ReactFlow,
   Controls,
@@ -9,7 +9,9 @@ import {
   Position,
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
-import { Circle, Play, Flag, Repeat } from "lucide-react";
+import { Circle, Play, Flag, Repeat, Maximize2, Minimize2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn, formatActionName } from "@/lib/utils";
 import { statusIconsSmall } from "@/lib/status-icons";
 import type { JobStep, FlowStep } from "@/lib/types";
@@ -396,6 +398,8 @@ export function WorkflowDag({
   }, [layoutNodes, selectedStep]);
   const edges = layoutEdges;
 
+  const [expanded, setExpanded] = useState(false);
+
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
       // Ignore clicks on sentinel nodes
@@ -406,23 +410,86 @@ export function WorkflowDag({
   );
 
   return (
-    <div className="h-80 w-full rounded-lg border bg-background">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        onNodeClick={onNodeClick}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        proOptions={{ hideAttribution: true }}
-        minZoom={0.3}
-        maxZoom={2}
-      >
-        <Controls showInteractive={false} />
-      </ReactFlow>
-    </div>
+    <>
+      <div className="relative h-80 w-full rounded-lg border bg-background">
+        <DagCanvas
+          nodes={nodes}
+          edges={edges}
+          onNodeClick={onNodeClick}
+          maxZoom={2}
+        />
+        <Button
+          variant="outline"
+          size="icon"
+          className="absolute right-2 top-2 z-10 h-7 w-7"
+          onClick={() => setExpanded(true)}
+          aria-label="Expand graph"
+          title="Expand graph"
+        >
+          <Maximize2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <Dialog open={expanded} onOpenChange={setExpanded}>
+        <DialogContent
+          className="flex h-[92vh] w-[96vw] max-w-none flex-col gap-0 p-0 sm:max-w-none [&>button:last-child]:hidden"
+          aria-describedby={undefined}
+        >
+          <DialogTitle className="sr-only">Workflow graph</DialogTitle>
+          <div className="relative min-h-0 w-full flex-1">
+            {expanded && (
+              <DagCanvas
+                nodes={nodes}
+                edges={edges}
+                onNodeClick={onNodeClick}
+                maxZoom={3}
+              />
+            )}
+            <Button
+              variant="outline"
+              size="icon"
+              className="absolute right-2 top-2 z-10 h-7 w-7"
+              onClick={() => setExpanded(false)}
+              aria-label="Exit fullscreen"
+              title="Exit fullscreen (Esc)"
+            >
+              <Minimize2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+interface DagCanvasProps {
+  nodes: Node[];
+  edges: Edge[];
+  onNodeClick: (event: React.MouseEvent, node: Node) => void;
+  maxZoom: number;
+}
+
+/**
+ * One React Flow instance over the already-laid-out nodes. Rendered twice by
+ * WorkflowDag (inline and in the fullscreen dialog); dagre runs only once
+ * upstream, so the second instance costs nothing beyond the DOM.
+ */
+function DagCanvas({ nodes, edges, onNodeClick, maxZoom }: DagCanvasProps) {
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      nodeTypes={nodeTypes}
+      onNodeClick={onNodeClick}
+      fitView
+      fitViewOptions={{ padding: 0.2 }}
+      nodesDraggable={false}
+      nodesConnectable={false}
+      elementsSelectable={false}
+      proOptions={{ hideAttribution: true }}
+      minZoom={0.3}
+      maxZoom={maxZoom}
+    >
+      <Controls showInteractive={false} />
+    </ReactFlow>
   );
 }
