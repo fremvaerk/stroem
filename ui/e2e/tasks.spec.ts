@@ -127,8 +127,8 @@ test.describe("Tasks", () => {
     await page.getByRole("option", { name: "staging" }).click();
     await page.keyboard.press("Escape");
 
-    // Placeholder text from the field description is restored
-    await expect(trigger).toContainText(/target environments/i);
+    // Placeholder falls back to "Select <label>" (fb26a0d: descriptions are helper text only)
+    await expect(trigger).toContainText(/select environments/i);
   });
 
   test("multi-select: allow_custom lets users add a value outside options", async ({
