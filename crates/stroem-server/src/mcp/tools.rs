@@ -578,6 +578,7 @@ impl StromMcpHandler {
                     "started_at": step.started_at,
                     "completed_at": step.completed_at,
                     "error_message": step.error_message,
+                    "skip_reason": step.skip_reason,
                 })
             })
             .collect();
