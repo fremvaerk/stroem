@@ -116,9 +116,9 @@ pub async fn settle_if_all_terminal(
         return Ok(None);
     };
 
-    let wrote = JobRepo::settle(pool, job_id, settled.status.clone(), settled.output.clone())
-        .await
-        .context("Failed to settle job")?;
+    // `JobRepo::settle` already applies its own "Failed to settle job" context.
+    let wrote =
+        JobRepo::settle(pool, job_id, settled.status.clone(), settled.output.clone()).await?;
     if !wrote {
         let current = JobRepo::get(pool, job_id).await?.map(|j| j.status);
         tracing::info!(job_id = %job_id, ?current, "job already terminal, settlement not written");

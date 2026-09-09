@@ -3,12 +3,9 @@ use uuid::Uuid;
 
 /// Remove a job from the cancelled_jobs set. Called when a cancelled job
 /// reaches terminal state (all steps done) to prevent unbounded memory growth.
-pub fn clear_cancelled(state: &AppState, job_id: Uuid) {
-    clear_cancelled_in(&state.cancelled_jobs, job_id);
-}
-
-/// [`clear_cancelled`] against the bare set, for callers that hold the shared
-/// `cancelled_jobs` handle rather than the whole `AppState`.
+///
+/// Takes the bare set rather than the whole `AppState`: the only caller is
+/// `Settlement::advance`, which holds the shared `cancelled_jobs` handle.
 pub fn clear_cancelled_in(set: &std::sync::RwLock<std::collections::HashSet<Uuid>>, job_id: Uuid) {
     set.write()
         .unwrap_or_else(|e| e.into_inner())
@@ -100,7 +97,7 @@ mod tests {
         state.cancelled_jobs.write().unwrap().insert(job_id);
         assert!(is_cancelled(&state, job_id));
 
-        clear_cancelled(&state, job_id);
+        clear_cancelled_in(&state.cancelled_jobs, job_id);
         assert!(!is_cancelled(&state, job_id));
     }
 
@@ -109,7 +106,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let state = test_state(temp_dir.path());
         // Should not panic
-        clear_cancelled(&state, Uuid::new_v4());
+        clear_cancelled_in(&state.cancelled_jobs, Uuid::new_v4());
     }
 
     #[tokio::test]
@@ -125,7 +122,7 @@ mod tests {
         assert!(is_cancelled(&state, job1));
         assert!(is_cancelled(&state, job2));
 
-        clear_cancelled(&state, job1);
+        clear_cancelled_in(&state.cancelled_jobs, job1);
         assert!(!is_cancelled(&state, job1));
         assert!(is_cancelled(&state, job2));
     }
@@ -139,9 +136,9 @@ mod tests {
         state.cancelled_jobs.write().unwrap().insert(job_id);
 
         // First call removes the entry
-        clear_cancelled(&state, job_id);
+        clear_cancelled_in(&state.cancelled_jobs, job_id);
         // Second call on an already-absent entry must not panic
-        clear_cancelled(&state, job_id);
+        clear_cancelled_in(&state.cancelled_jobs, job_id);
 
         assert!(!is_cancelled(&state, job_id));
     }
@@ -206,7 +203,7 @@ mod tests {
         );
 
         // Remove and confirm absence
-        clear_cancelled(&state, job_id);
+        clear_cancelled_in(&state.cancelled_jobs, job_id);
         assert!(
             !is_cancelled(&state, job_id),
             "job should not be cancelled after clear"

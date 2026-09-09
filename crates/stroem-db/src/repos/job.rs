@@ -605,27 +605,6 @@ impl JobRepo {
         Ok(())
     }
 
-    /// Set retry tracking fields on a new retry job.
-    pub async fn set_retry_fields(
-        pool: &PgPool,
-        job_id: Uuid,
-        retry_of_job_id: Uuid,
-        retry_attempt: i32,
-        max_retries: i32,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE job SET retry_of_job_id = $1, retry_attempt = $2, max_retries = $3 WHERE job_id = $4",
-        )
-        .bind(retry_of_job_id)
-        .bind(retry_attempt)
-        .bind(max_retries)
-        .bind(job_id)
-        .execute(pool)
-        .await
-        .context("Failed to set retry fields")?;
-        Ok(())
-    }
-
     /// Count jobs with optional workspace/status/source_type/search filters (mirrors `list()`)
     pub async fn count(
         pool: &PgPool,
