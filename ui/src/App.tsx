@@ -11,6 +11,8 @@ import { TaskDetailPage } from "@/pages/task-detail";
 import { JobsPage } from "@/pages/jobs";
 import { JobDetailPage } from "@/pages/job-detail";
 import { WorkspacesPage } from "@/pages/workspaces";
+import { WorkspaceDetailPage } from "@/pages/workspace-detail";
+import { NotFoundPage } from "@/pages/not-found";
 import { WorkersPage } from "@/pages/workers";
 import { WorkerDetailPage } from "@/pages/worker-detail";
 import { UsersPage } from "@/pages/users";
@@ -36,6 +38,7 @@ export default function App() {
               <Route element={<AppLayout />}>
                 <Route index element={<ErrorBoundary><DashboardPage /></ErrorBoundary>} />
                 <Route path="workspaces" element={<ErrorBoundary><WorkspacesPage /></ErrorBoundary>} />
+                <Route path="workspaces/:workspace" element={<ErrorBoundary><WorkspaceDetailPage /></ErrorBoundary>} />
                 <Route path="tasks" element={<ErrorBoundary><TasksPage /></ErrorBoundary>} />
                 <Route
                   path="workspaces/:workspace/tasks/:name"
@@ -49,6 +52,7 @@ export default function App() {
                 <Route path="users" element={<ErrorBoundary><UsersPage /></ErrorBoundary>} />
                 <Route path="users/:id" element={<ErrorBoundary><UserDetailPage /></ErrorBoundary>} />
                 <Route path="settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
+                <Route path="*" element={<NotFoundPage />} />
               </Route>
             </Route>
           </Routes>

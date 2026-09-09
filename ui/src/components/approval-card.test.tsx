@@ -93,3 +93,47 @@ describe("ApprovalCard (approval gate)", () => {
     expect(trigger).not.toHaveAttribute("aria-haspopup", "listbox");
   });
 });
+
+describe("ApprovalCard placeholders", () => {
+  it("does not repeat the field description as the input placeholder", () => {
+    render(
+      <ApprovalCard
+        jobId="job-1"
+        step={makeStep({
+          reason: {
+            type: "string",
+            description: "Why this deployment is safe to ship",
+          },
+        })}
+        onAction={() => {}}
+      />,
+    );
+    const input = screen.getByLabelText("reason") as HTMLInputElement;
+    expect(input.placeholder).toBe("reason");
+    // The description still appears once, as helper text under the field.
+    expect(
+      screen.getAllByText("Why this deployment is safe to ship"),
+    ).toHaveLength(1);
+  });
+
+  it("uses a 'Select …' placeholder for option fields instead of the description", () => {
+    render(
+      <ApprovalCard
+        jobId="job-1"
+        step={makeStep({
+          env: {
+            type: "string",
+            name: "Environment",
+            description: "Target environment for the rollout",
+            options: ["staging", "prod"],
+          },
+        })}
+        onAction={() => {}}
+      />,
+    );
+    expect(screen.getByText("Select environment")).toBeTruthy();
+    expect(
+      screen.getAllByText("Target environment for the rollout"),
+    ).toHaveLength(1);
+  });
+});

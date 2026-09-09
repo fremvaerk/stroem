@@ -231,7 +231,7 @@ function ApprovalGateCard({ jobId, step, onAction }: ApprovalCardProps) {
                       onChange={(v) =>
                         setApprovalInput((prev) => ({ ...prev, [key]: v }))
                       }
-                      placeholder={field.description ?? key}
+                      placeholder={`Select ${label.toLowerCase()}`}
                       required={field.required}
                       description={field.description}
                       allowCustom={field.allow_custom}
@@ -248,7 +248,7 @@ function ApprovalGateCard({ jobId, step, onAction }: ApprovalCardProps) {
                     onChange={(v) =>
                       setApprovalInput((prev) => ({ ...prev, [key]: v }))
                     }
-                    placeholder={field.description ?? key}
+                    placeholder={`Select ${label.toLowerCase()}`}
                     required={field.required}
                     description={field.description}
                   />
@@ -309,7 +309,7 @@ function ApprovalGateCard({ jobId, step, onAction }: ApprovalCardProps) {
                           [key]: e.target.value,
                         }))
                       }
-                      placeholder={field.description ?? key}
+                      placeholder={key}
                     />
                     {field.description && (
                       <p className="text-xs text-muted-foreground">
@@ -339,7 +339,7 @@ function ApprovalGateCard({ jobId, step, onAction }: ApprovalCardProps) {
                         [key]: e.target.value,
                       }))
                     }
-                    placeholder={field.description ?? key}
+                    placeholder={key}
                   />
                   {field.description && (
                     <p className="text-xs text-muted-foreground">

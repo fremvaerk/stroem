@@ -496,8 +496,11 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - Integration tests: `crates/stroem-server/tests/ha_test.rs` (leader uniqueness, failover, NOTIFY roundtrip per channel, oversize fallback, self-filter).
 
 ### React UI
-- Pages: Login, Dashboard, Tasks, Task Detail, Jobs, Job Detail, Settings
+- Pages: Login, Dashboard, Workspaces, Workspace Detail (`/workspaces/:workspace`), Tasks, Task Detail, Jobs, Job Detail, Workers, Users, Settings, plus a `*` Not Found page.
 - Auth-aware, SPA with react-router, embedded via rust-embed
+- **Workspace is a navigation level**: every workspace name in the UI links to `/workspaces/<name>` (Workspaces list, Tasks page badges/group rows, job header). Task Detail's back arrow goes to the workspace page. Breadcrumbs come from the pure `lib/breadcrumbs.ts::buildBreadcrumbs`, which drops the `tasks` segment of `/workspaces/:ws/tasks/:name` so every crumb links to a real route — keep it in sync when adding nested routes.
+- **Task tree**: `components/task-tree.tsx` (`<TaskTree>`) renders the collapsible folder tree used by both the Tasks page and the workspace page; row building lives in the React-free `lib/task-tree.ts::buildRows` (unit-tested). Folder expansion keys are workspace-qualified (`ws::path`) only in grouped mode; workspace groups are open by default (inverted `collapsed` set). localStorage keys: `stroem_tasks_view` (`merged`|`workspace`), `stroem_tasks_expanded_folders`, `stroem_tasks_collapsed_workspaces`. The Merged/By-workspace toggle only renders when tasks span >1 workspace.
+- Vitest: `vitest.setup.ts` installs an in-memory `localStorage` because Node 22+'s experimental global shadows jsdom's and is `undefined` without `--localstorage-file`.
 - `ui/src/lib/api.ts` — token management. `ui/src/hooks/use-job-logs.ts` — WebSocket logs.
 
 ### Release Pipeline

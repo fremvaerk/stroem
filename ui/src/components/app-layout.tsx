@@ -14,37 +14,11 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { AppSidebar } from "./app-sidebar";
-
-const routeLabels: Record<string, string> = {
-  "/": "Dashboard",
-  "/tasks": "Tasks",
-  "/jobs": "Jobs",
-  "/settings": "Settings",
-};
-
-function useBreadcrumbs() {
-  const { pathname } = useLocation();
-  const segments = pathname.split("/").filter(Boolean);
-
-  if (segments.length === 0) {
-    return [{ label: "Dashboard", href: "/", isLast: true }];
-  }
-
-  const crumbs: { label: string; href: string; isLast: boolean }[] = [];
-  let path = "";
-
-  for (let i = 0; i < segments.length; i++) {
-    path += `/${segments[i]}`;
-    const isLast = i === segments.length - 1;
-    const label = routeLabels[path] || decodeURIComponent(segments[i]);
-    crumbs.push({ label, href: path, isLast });
-  }
-
-  return crumbs;
-}
+import { buildBreadcrumbs } from "@/lib/breadcrumbs";
 
 export function AppLayout() {
-  const crumbs = useBreadcrumbs();
+  const { pathname } = useLocation();
+  const crumbs = buildBreadcrumbs(pathname);
 
   return (
     <SidebarProvider>

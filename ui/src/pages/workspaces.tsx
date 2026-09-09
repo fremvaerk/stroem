@@ -91,7 +91,7 @@ export function WorkspacesPage() {
                     <TableCell>
                       <div className="flex flex-col gap-1">
                         <Link
-                          to={`/tasks`}
+                          to={`/workspaces/${encodeURIComponent(ws.name)}`}
                           className="font-medium hover:underline"
                         >
                           {ws.name}

@@ -253,7 +253,7 @@ export function JobDetailPage() {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight">
               <Link
-                to="/workspaces"
+                to={`/workspaces/${encodeURIComponent(job.workspace)}`}
                 className="text-muted-foreground hover:text-foreground hover:underline"
               >
                 {job.workspace}

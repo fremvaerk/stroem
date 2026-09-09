@@ -77,6 +77,15 @@ This is a server-side setting, so it does not travel with the repository. To tur
 
 The workspace list (`GET /api/workspaces`, the UI Workspaces page, and `stroem-api workspaces`) reports `triggers_enabled: false` for such workspaces; the triggers themselves remain listed so you can see what would fire elsewhere.
 
+## Browsing workspaces in the UI
+
+The web UI treats a workspace as a navigation level of its own:
+
+- **Workspaces** (`/workspaces`) lists every configured workspace with its task, action and trigger counts, revision, and any load error or warning. Each name links to the workspace page.
+- **Workspace page** (`/workspaces/<name>`) shows that workspace only: header with revision and counts, a **Refresh** button, the task tree (folders collapsible), and the workspace's triggers with their schedule and next run. A workspace that failed to load still gets a page with its error, so a shared link never lands on an empty screen.
+- **Tasks** (`/tasks`) is the cross-workspace list. When more than one workspace is loaded, a **Merged / By workspace** switch appears next to the search box. *Merged* shows one folder tree with a Workspace column; *By workspace* nests each workspace's folders under a collapsible workspace row. The choice, collapsed workspaces and open folders are remembered in the browser.
+- Breadcrumbs on a task page read `Workspaces / <workspace> / <task>`, and the workspace name shown on a job page links to its workspace.
+
 ## API routes
 
 Each workspace is independent — tasks, actions, and scripts are scoped to their workspace. Tasks are accessed via workspace-scoped API routes:

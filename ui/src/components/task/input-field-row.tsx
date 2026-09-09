@@ -46,7 +46,7 @@ export function InputFieldRow({
         options={connectionOptions}
         value={String(value ?? "")}
         onChange={onChange}
-        placeholder={field.description || `Select ${displayLabel.toLowerCase()}`}
+        placeholder={`Select ${displayLabel.toLowerCase()}`}
         required={field.required}
         description={field.description || `Connection type: ${field.type}`}
       />
@@ -65,9 +65,7 @@ export function InputFieldRow({
           options={field.options}
           value={arrayValue}
           onChange={onChange}
-          placeholder={
-            field.description || `Select ${displayLabel.toLowerCase()}`
-          }
+          placeholder={`Select ${displayLabel.toLowerCase()}`}
           required={field.required}
           description={field.description}
           allowCustom={field.allow_custom}
@@ -81,7 +79,7 @@ export function InputFieldRow({
         options={field.options}
         value={String(value ?? "")}
         onChange={onChange}
-        placeholder={field.description || `Select ${displayLabel.toLowerCase()}`}
+        placeholder={`Select ${displayLabel.toLowerCase()}`}
         required={field.required}
         description={field.description}
         allowCustom={field.allow_custom}
@@ -104,7 +102,7 @@ export function InputFieldRow({
           type="password"
           value={String(value ?? "")}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={field.description || fieldKey}
+          placeholder={fieldKey}
           required={field.required && !field.default}
         />
         {isReplayPrefill && (
@@ -152,7 +150,7 @@ export function InputFieldRow({
           rows={4}
           value={String(value ?? "")}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={field.description || fieldKey}
+          placeholder={fieldKey}
           required={field.required}
         />
         {field.description && (
@@ -275,7 +273,7 @@ export function InputFieldRow({
         type={field.type === "number" ? "number" : "text"}
         value={String(value ?? "")}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={field.description || fieldKey}
+        placeholder={fieldKey}
         required={field.required}
       />
       {field.description && (
