@@ -128,25 +128,35 @@ export function TaskTree({
         {rows.map((row) => {
           if (row.kind === "workspace") {
             const isOpen = searching || !collapsedWorkspaces.has(row.workspace);
+            const toggleWorkspace = () =>
+              setCollapsedWorkspaces((prev) => toggled(prev, row.workspace));
             return (
               <TableRow
                 key={`ws:${row.workspace}`}
                 className="cursor-pointer bg-muted/30 hover:bg-muted/50"
-                onClick={() =>
-                  setCollapsedWorkspaces((prev) => toggled(prev, row.workspace))
-                }
-                aria-expanded={isOpen}
+                onClick={toggleWorkspace}
               >
                 <TableCell colSpan={columns}>
                   <div className="flex items-center gap-1.5">
-                    <ChevronRight
-                      className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
-                    />
-                    {isOpen ? (
-                      <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    ) : (
-                      <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    )}
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-expanded={isOpen}
+                      aria-label={`${isOpen ? "Collapse" : "Expand"} workspace ${row.workspace}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleWorkspace();
+                      }}
+                    >
+                      <ChevronRight
+                        className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
+                      />
+                      {isOpen ? (
+                        <FolderOpen className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      ) : (
+                        <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      )}
+                    </button>
                     <Link
                       to={workspaceHref(row.workspace)}
                       className="font-mono text-sm font-semibold hover:underline"
@@ -166,23 +176,35 @@ export function TaskTree({
           if (row.kind === "folder") {
             const { node, depth } = row;
             const isOpen = searching || expanded.has(node.key);
+            const toggleFolder = () =>
+              setExpanded((prev) => toggled(prev, node.key));
             return (
               <TableRow
                 key={`folder:${node.key}`}
                 className="cursor-pointer hover:bg-muted/50"
-                onClick={() => setExpanded((prev) => toggled(prev, node.key))}
-                aria-expanded={isOpen}
+                onClick={toggleFolder}
               >
                 <TableCell colSpan={columns}>
                   <div
                     className="flex items-center gap-1.5"
                     style={{ paddingLeft: `${depth * INDENT_REM}rem` }}
                   >
-                    <ChevronRight
-                      className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
-                    />
-                    <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <span className="font-medium">{node.name}</span>
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-expanded={isOpen}
+                      aria-label={`${isOpen ? "Collapse" : "Expand"} folder ${node.fullPath}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleFolder();
+                      }}
+                    >
+                      <ChevronRight
+                        className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
+                      />
+                      <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <span className="font-medium">{node.name}</span>
+                    </button>
                     <Badge variant="secondary" className="ml-1 text-xs">
                       {countTasks(node)}
                     </Badge>

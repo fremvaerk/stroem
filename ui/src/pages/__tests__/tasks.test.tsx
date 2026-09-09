@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import type { TaskListItem } from "@/lib/types";
 
@@ -118,9 +118,32 @@ describe("TasksPage layout toggle", () => {
     });
     expect(screen.getByText("deploy")).toBeInTheDocument();
     expect(screen.queryByText("b")).toBeNull();
-    const folderRow = screen.getByText("etl").closest("tr")!;
-    expect(within(folderRow).getByText("etl")).toBeInTheDocument();
-    expect(folderRow).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("button", { name: /collapse folder etl/i }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("folders and workspace groups toggle from the keyboard", async () => {
+    localStorage.setItem("stroem_tasks_view", "workspace");
+    mockList.mockResolvedValue([task("a", "default", "etl"), task("b", "iso")]);
+    renderPage();
+    const folderButton = await screen.findByRole("button", {
+      name: /expand folder etl/i,
+    });
+    expect(screen.queryByText("a")).toBeNull();
+    folderButton.focus();
+    fireEvent.click(folderButton); // native buttons fire click on Enter/Space
+    expect(screen.getByText("a")).toBeInTheDocument();
+    // toggling via the button must not double-toggle through the row handler
+    expect(
+      JSON.parse(localStorage.getItem("stroem_tasks_expanded_folders")!),
+    ).toEqual(["default::etl"]);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /collapse workspace default/i }),
+    );
+    expect(screen.queryByText("a")).toBeNull();
+    expect(screen.queryByText("etl")).toBeNull();
   });
 
   it("shows the API error", async () => {
