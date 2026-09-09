@@ -60,6 +60,51 @@ pub struct JobStepRow {
     pub carried_over: bool,
 }
 
+impl JobStepRow {
+    /// Minimal row for tests that only exercise pure decision logic (e.g.
+    /// settlement's `decide`). Not for use against a real database.
+    #[doc(hidden)]
+    pub fn test_default(job_id: Uuid, step_name: &str) -> Self {
+        JobStepRow {
+            job_id,
+            step_name: step_name.to_string(),
+            action_name: "noop".to_string(),
+            action_type: "script".to_string(),
+            action_image: None,
+            action_spec: None,
+            input: None,
+            output: None,
+            status: "pending".to_string(),
+            worker_id: None,
+            started_at: None,
+            completed_at: None,
+            error_message: None,
+            required_ability: String::new(),
+            required_tags: JsonValue::Null,
+            runner: String::new(),
+            timeout_secs: None,
+            when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
+            agent_state: None,
+            suspended_at: None,
+            retry_attempt: 0,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            retry_history: JsonValue::Null,
+            retry_at: None,
+            action_workspace: None,
+            action_revision: None,
+            carried_over: false,
+        }
+    }
+}
+
 /// New job step for creation
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NewJobStep {

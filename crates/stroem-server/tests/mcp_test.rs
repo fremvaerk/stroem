@@ -33,6 +33,22 @@ const AUTH_REFRESH_SECRET: &str = "mcp-test-refresh-secret-key-long-enough";
 const AUTH_USER_EMAIL: &str = "mcp-admin@test.com";
 const AUTH_USER_PASSWORD: &str = "mcp-test-password-123";
 
+// ─── Test helpers ───────────────────────────────────────────────────────
+
+/// Pool-only stand-in for the orchestrator call: a minimal workspace holding
+/// just this task, since the cascade requires a config for rendering.
+fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
+    let mut ws = WorkspaceConfig::default();
+    ws.tasks.insert("test-task".to_string(), task.clone());
+    ws
+}
+
+async fn after_step(pool: &PgPool, job_id: Uuid, task: &TaskDef) -> anyhow::Result<()> {
+    stroem_server::settlement::cascade_and_settle(pool, job_id, task, &workspace_with(task))
+        .await
+        .map(|_| ())
+}
+
 // ─── Minimal workspace for MCP tests ────────────────────────────────────────
 
 // Thin wrapper preserving the pre-Task-4 call shape (Task 4 added a leading
@@ -1690,9 +1706,9 @@ async fn test_mcp_created_jobs_fire_hooks() -> Result<()> {
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"result": "ok"}))).await?;
 
-    // Run orchestrator to complete the job
+    // Run the cascade to complete the job
     let task = workspace.tasks.get("with-hook").unwrap();
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     // Verify job is completed
     let job = JobRepo::get(&pool, job_id).await?.unwrap();

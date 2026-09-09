@@ -12,7 +12,6 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, WorkerRepo};
-use stroem_server::orchestrator::on_step_completed;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
@@ -110,6 +109,20 @@ fn make_task(flow: HashMap<String, FlowStep>) -> TaskDef {
         on_suspended: vec![],
         on_cancel: vec![],
     }
+}
+
+/// Pool-only stand-in for the orchestrator call: a minimal workspace holding
+/// just this task, since the cascade requires a config for rendering.
+fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
+    let mut ws = WorkspaceConfig::default();
+    ws.tasks.insert("test-task".to_string(), task.clone());
+    ws
+}
+
+async fn after_step(pool: &PgPool, job_id: Uuid, task: &TaskDef) -> anyhow::Result<()> {
+    stroem_server::settlement::cascade_and_settle(pool, job_id, task, &workspace_with(task))
+        .await
+        .map(|_| ())
 }
 
 /// Build a `FlowStep` with no dependencies and `continue_on_failure = false`.
@@ -213,7 +226,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 
     // Complete A → B should become ready
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -228,7 +241,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 
     // Complete B → C should become ready
     JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
-    on_step_completed(&pool, job_id, "b", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -238,7 +251,7 @@ async fn test_linear_dag_step_promotion() -> Result<()> {
 
     // Complete C → job should complete
     JobStepRepo::mark_completed(&pool, job_id, "c", None).await?;
-    on_step_completed(&pool, job_id, "c", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -272,7 +285,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 
     // Complete A — C must still be pending because B is not done
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -282,7 +295,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 
     // Complete B — now C must be promoted
     JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
-    on_step_completed(&pool, job_id, "b", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -292,7 +305,7 @@ async fn test_parallel_dag_fan_in() -> Result<()> {
 
     // Complete C → job complete
     JobStepRepo::mark_completed(&pool, job_id, "c", None).await?;
-    on_step_completed(&pool, job_id, "c", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -323,7 +336,7 @@ async fn test_failed_step_skips_dependents() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "exit code 1").await?;
-    on_step_completed(&pool, job_id, "a", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped", "B must be skipped when A fails");
@@ -360,7 +373,7 @@ async fn test_continue_on_failure_promotes_dependent() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "non-fatal error").await?;
-    on_step_completed(&pool, job_id, "a", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -392,7 +405,7 @@ async fn test_all_steps_completed_job_completes() -> Result<()> {
 
     let output = json!({"result": 42});
     JobStepRepo::mark_completed(&pool, job_id, "only", Some(output.clone())).await?;
-    on_step_completed(&pool, job_id, "only", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -426,7 +439,7 @@ async fn test_mix_completed_and_failed_job_fails() -> Result<()> {
 
     // Complete the ok step
     JobStepRepo::mark_completed(&pool, job_id, "ok", None).await?;
-    on_step_completed(&pool, job_id, "ok", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Job is still running (bad step is outstanding)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -435,7 +448,7 @@ async fn test_mix_completed_and_failed_job_fails() -> Result<()> {
     // Fail the bad step
     JobStepRepo::mark_running(&pool, job_id, "bad", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "bad", "unexpected error").await?;
-    on_step_completed(&pool, job_id, "bad", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Now all steps are terminal and bad failed without continue_on_failure
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -473,7 +486,7 @@ async fn test_cascading_skip_multi_level() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "root failure").await?;
-    on_step_completed(&pool, job_id, "a", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped");
@@ -503,7 +516,7 @@ async fn test_all_tolerable_failures_job_completes() -> Result<()> {
 
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "a", "tolerable error").await?;
-    on_step_completed(&pool, job_id, "a", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(
@@ -543,7 +556,7 @@ async fn test_diamond_dag_join_waits_for_both_branches() -> Result<()> {
 
     // Complete root — left and right promoted, join still pending
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["left"], "ready");
@@ -552,21 +565,21 @@ async fn test_diamond_dag_join_waits_for_both_branches() -> Result<()> {
 
     // Complete left — join still needs right
     JobStepRepo::mark_completed(&pool, job_id, "left", None).await?;
-    on_step_completed(&pool, job_id, "left", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["join"], "pending");
 
     // Complete right — join is now ready
     JobStepRepo::mark_completed(&pool, job_id, "right", None).await?;
-    on_step_completed(&pool, job_id, "right", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["join"], "ready");
 
     // Complete join → job complete
     JobStepRepo::mark_completed(&pool, job_id, "join", None).await?;
-    on_step_completed(&pool, job_id, "join", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -603,7 +616,7 @@ async fn test_conditional_step_promoted_when_condition_true() -> Result<()> {
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"proceed": true}))).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -643,7 +656,7 @@ async fn test_conditional_step_skipped_when_condition_false() -> Result<()> {
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"proceed": false}))).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -694,7 +707,7 @@ async fn test_conditional_skip_cascades_to_downstream() -> Result<()> {
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"go": false}))).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped", "B must be skipped by condition");
@@ -741,7 +754,7 @@ async fn test_all_conditional_steps_false_job_completes() -> Result<()> {
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped", "B must be skipped (when: false)");
@@ -801,7 +814,7 @@ async fn test_skipped_dep_treated_as_satisfied_with_truthy_when() -> Result<()> 
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"deploy": false}))).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -850,7 +863,7 @@ async fn test_sibling_when_branches_truthy_and_falsy_evaluated_together() -> Res
 
     // A completes with truthy "deploy" output
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"deploy": "yes"}))).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -905,7 +918,7 @@ async fn test_when_condition_error_marks_step_failed() -> Result<()> {
 
     // A completes — the render context will not contain `nonexistent`
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"ok": true}))).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -976,7 +989,7 @@ async fn test_all_deps_skipped_cascade_skip() -> Result<()> {
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped", "B must be skipped (when: false)");
@@ -1071,7 +1084,7 @@ async fn test_convergence_without_continue_on_failure() -> Result<()> {
 
     // B completes → D should be promoted (B completed + C skipped = deps met)
     JobStepRepo::mark_completed(&pool, job_id, "b", None).await?;
-    on_step_completed(&pool, job_id, "b", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -1112,7 +1125,7 @@ async fn test_multi_step_branch_cascade_skip() -> Result<()> {
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped", "B skipped by when:false");
@@ -1169,7 +1182,7 @@ async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
 
     // Root completes → A skipped by condition, B promoted
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["a"], "skipped");
@@ -1178,7 +1191,7 @@ async fn test_mixed_skipped_and_failed_dep_runs_with_cof() -> Result<()> {
     // B fails → C should still run (cof:true accepts skipped A + failed B)
     JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "b", "boom").await?;
-    on_step_completed(&pool, job_id, "b", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -1224,7 +1237,7 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
 
     // Root completes → A promoted, B skipped
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["a"], "ready");
@@ -1233,7 +1246,7 @@ async fn test_single_completed_plus_single_skipped_convergence() -> Result<()> {
     // A completes → C should be promoted (A completed + B skipped = deps met)
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -1275,7 +1288,7 @@ async fn test_cancelled_dep_blocks_without_cof() -> Result<()> {
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
     JobStepRepo::mark_running(&pool, job_id, "b", worker_id).await?;
     JobStepRepo::mark_cancelled(&pool, job_id, "b").await?;
-    on_step_completed(&pool, job_id, "b", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -1316,7 +1329,7 @@ async fn test_all_deps_skipped_with_cof_promotes_step() -> Result<()> {
 
     // Root completes → A skipped by condition, B should be promoted (not cascade-skipped)
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["a"], "skipped", "A must be skipped (when: false)");
@@ -1362,7 +1375,7 @@ async fn test_truthy_when_overridden_by_all_deps_skipped_cascade() -> Result<()>
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["a"], "skipped", "A must be skipped (when: false)");
@@ -1415,7 +1428,7 @@ async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<(
 
     // Root completes → A promoted, B and C skipped
     JobStepRepo::mark_completed(&pool, job_id, "root", None).await?;
-    on_step_completed(&pool, job_id, "root", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["a"], "ready", "A must be promoted");
@@ -1429,7 +1442,7 @@ async fn test_three_dep_fan_in_one_completed_two_skipped_converges() -> Result<(
     // A completes → D should be promoted (A completed + B skipped + C skipped)
     JobStepRepo::mark_running(&pool, job_id, "a", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "a", None).await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -1492,7 +1505,7 @@ async fn test_failed_upstream_skips_for_each_placeholder_and_fails_job() -> Resu
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_failed(&pool, job_id, "sources", "exit 1").await?;
-    on_step_completed(&pool, job_id, "sources", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["publish"], "skipped");
@@ -1541,7 +1554,7 @@ async fn test_for_each_placeholder_skip_cascades_to_downstream_step() -> Result<
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(statuses["b"], "skipped");
@@ -1589,7 +1602,7 @@ async fn test_failed_dep_skips_for_each_placeholder_directly_downstream() -> Res
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
@@ -1638,7 +1651,7 @@ async fn test_failed_dep_with_continue_on_failure_does_not_skip_for_each_placeho
     let ws = WorkspaceConfig::new();
 
     JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
-    on_step_completed(&pool, job_id, "a", &task, Some(&ws)).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &ws).await?;
 
     let statuses = step_statuses(&pool, job_id).await;
     assert_ne!(
@@ -1676,7 +1689,7 @@ async fn test_settle_cancelled_step_without_failure_marks_job_cancelled() -> Res
     .await?;
     JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"x": 1}))).await?;
 
-    let settled = stroem_server::orchestrator::settle_if_all_terminal(&pool, job_id, &task).await?;
+    let settled = stroem_server::settlement::settle_if_all_terminal(&pool, job_id, &task).await?;
     assert_eq!(
         settled,
         Some(stroem_common::models::job::JobStatus::Cancelled)
@@ -1705,7 +1718,7 @@ async fn test_settle_tolerated_failure_completes_with_aggregated_output() -> Res
     JobStepRepo::mark_failed(&pool, job_id, "a", "boom").await?;
     JobStepRepo::mark_completed(&pool, job_id, "b", Some(json!({"out": "b"}))).await?;
 
-    let settled = stroem_server::orchestrator::settle_if_all_terminal(&pool, job_id, &task).await?;
+    let settled = stroem_server::settlement::settle_if_all_terminal(&pool, job_id, &task).await?;
     assert_eq!(
         settled,
         Some(stroem_common::models::job::JobStatus::Completed)
@@ -1724,7 +1737,7 @@ async fn test_settle_returns_none_while_a_step_is_live() -> Result<()> {
     let task = make_task(flow);
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(&pool, &[step(job_id, "a", "ready")]).await?;
-    let settled = stroem_server::orchestrator::settle_if_all_terminal(&pool, job_id, &task).await?;
+    let settled = stroem_server::settlement::settle_if_all_terminal(&pool, job_id, &task).await?;
     assert_eq!(settled, None);
     assert_eq!(
         JobRepo::get(&pool, job_id).await?.unwrap().status,
@@ -1755,7 +1768,8 @@ async fn test_self_healing_rollup_on_unrelated_cascade() -> Result<()> {
         ("x".to_string(), flow_step(vec![])),
         ("other".to_string(), flow_step(vec![])),
     ]));
-    on_step_completed(&pool, job_id, "other", &task, Some(&WorkspaceConfig::new())).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &WorkspaceConfig::new())
+        .await?;
     let statuses = step_statuses(&pool, job_id).await;
     assert_eq!(
         statuses["x"], "completed",
@@ -1784,7 +1798,13 @@ async fn test_rollup_never_overwrites_failed_or_cancelled_placeholder() -> Resul
         )
         .await?;
         let task = make_task(HashMap::from([("x".to_string(), flow_step(vec![]))]));
-        on_step_completed(&pool, job_id, "x[0]", &task, Some(&WorkspaceConfig::new())).await?;
+        stroem_server::settlement::cascade_and_settle(
+            &pool,
+            job_id,
+            &task,
+            &WorkspaceConfig::new(),
+        )
+        .await?;
         assert_eq!(
             step_statuses(&pool, job_id).await["x"],
             terminal,
@@ -1813,7 +1833,8 @@ async fn test_sequential_failure_skips_later_pending_instances() -> Result<()> {
     )
     .await?;
     let task = make_task(HashMap::from([("x".to_string(), flow_step_seq(vec![]))]));
-    on_step_completed(&pool, job_id, "x[1]", &task, Some(&WorkspaceConfig::new())).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &WorkspaceConfig::new())
+        .await?;
     let s = step_statuses(&pool, job_id).await;
     assert_eq!(s["x[2]"], "skipped");
     assert_eq!(s["x"], "failed");
@@ -1874,8 +1895,8 @@ async fn test_parent_and_child_cascades_run_concurrently() -> Result<()> {
     let ws = WorkspaceConfig::new();
     let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         tokio::join!(
-            on_step_completed(&pool, parent, "spawn", &ptask, Some(&ws)),
-            on_step_completed(&pool, child, "c1", &ctask, Some(&ws)),
+            stroem_server::settlement::cascade_and_settle(&pool, parent, &ptask, &ws),
+            stroem_server::settlement::cascade_and_settle(&pool, child, &ctask, &ws),
         )
     })
     .await
@@ -1914,7 +1935,8 @@ async fn test_adopts_partially_expanded_placeholder() -> Result<()> {
     )
     .await?;
     let task = make_task(HashMap::from([("x".to_string(), flow_step(vec![]))]));
-    on_step_completed(&pool, job_id, "x[1]", &task, Some(&WorkspaceConfig::new())).await?;
+    stroem_server::settlement::cascade_and_settle(&pool, job_id, &task, &WorkspaceConfig::new())
+        .await?;
     let s = step_statuses(&pool, job_id).await;
     assert_eq!(s["x"], "completed");
     assert_eq!(

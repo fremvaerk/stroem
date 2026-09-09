@@ -626,8 +626,8 @@ fn create_job_for_task_inner<'a>(
                 .await
                 .context("dispatch initial approval steps")?;
 
-            // Shared settlement — identical rules to the orchestrator path.
-            let settled = crate::orchestrator::settle_if_all_terminal(pool, job_id, task)
+            // Shared settlement — identical rules to the cascade_and_settle path.
+            let settled = crate::settlement::settle_if_all_terminal(pool, job_id, task)
                 .await
                 .context("settle job at creation")?;
             if let Some(ref status) = settled {
@@ -1235,14 +1235,8 @@ async fn orchestrate_after_server_step_failure(
     task: &stroem_common::models::workflow::TaskDef,
     workspace_config: &WorkspaceConfig,
 ) {
-    if let Err(e) = crate::orchestrator::on_step_completed(
-        pool,
-        job_id,
-        step_name,
-        task,
-        Some(workspace_config),
-    )
-    .await
+    if let Err(e) =
+        crate::settlement::cascade_and_settle(pool, job_id, task, workspace_config).await
     {
         tracing::error!(
             "Failed to orchestrate after server-side step '{}' failure in job {}: {:#}",

@@ -20,7 +20,6 @@ use stroem_server::config::{
     ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_storage::LogStorage;
-use stroem_server::orchestrator;
 use stroem_server::state::AppState;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
@@ -32,6 +31,20 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 // ─── Test helpers ───────────────────────────────────────────────────────
+
+/// Pool-only stand-in for the orchestrator call: a minimal workspace holding
+/// just this task, since the cascade requires a config for rendering.
+fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
+    let mut ws = WorkspaceConfig::default();
+    ws.tasks.insert("test-task".to_string(), task.clone());
+    ws
+}
+
+async fn after_step(pool: &PgPool, job_id: Uuid, task: &TaskDef) -> anyhow::Result<()> {
+    stroem_server::settlement::cascade_and_settle(pool, job_id, task, &workspace_with(task))
+        .await
+        .map(|_| ())
+}
 
 // Task 4 threaded a leading `&WorkspaceManager` through job creation to support
 // cross-workspace action resolution. These thin wrappers preserve the historic
@@ -3663,7 +3676,7 @@ async fn test_orchestrator_with_failure_db() -> Result<()> {
     JobStepRepo::create_steps(&pool, &steps).await?;
 
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -3843,7 +3856,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     // Complete step1
     JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step2 = job_steps.iter().find(|s| s.step_name == "step2").unwrap();
@@ -3851,7 +3864,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     // Complete step2
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let step3 = job_steps.iter().find(|s| s.step_name == "step3").unwrap();
@@ -3859,7 +3872,7 @@ async fn test_orchestrator_linear_flow_db() -> Result<()> {
 
     // Complete step3
     JobStepRepo::mark_completed(&pool, job_id, "step3", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step3", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -7306,11 +7319,11 @@ async fn test_job_output_from_terminal_step() -> Result<()> {
 
     // Complete step1 with output
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Complete step2 (terminal) with output
     JobStepRepo::mark_completed(&pool, job_id, "step2", Some(json!({"y": 2}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -7450,11 +7463,11 @@ async fn test_job_output_null_when_terminal_has_no_output() -> Result<()> {
 
     // Complete step1 with output
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Complete step2 (terminal) with NO output
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -7638,15 +7651,15 @@ async fn test_job_output_multiple_terminal_steps() -> Result<()> {
 
     // Complete step1
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"x": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Complete step2 (terminal) with output
     JobStepRepo::mark_completed(&pool, job_id, "step2", Some(json!({"a": 1}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Complete step3 (terminal) with output
     JobStepRepo::mark_completed(&pool, job_id, "step3", Some(json!({"b": 2}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step3", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -7969,7 +7982,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
     // Complete first step successfully
     JobStepRepo::mark_running(&pool, job_id, "step-ok", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step-ok", Some(json!({"result": "ok"}))).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step-ok", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Verify step-fail was promoted to ready
     let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -7982,7 +7995,7 @@ async fn test_fail_in_chain_stops_job() -> Result<()> {
     // Fail the second step
     JobStepRepo::mark_running(&pool, job_id, "step-fail", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step-fail", "Exit code: 1\nStderr: boom").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step-fail", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Check final state
     let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -8136,7 +8149,7 @@ async fn test_step_failure_skips_dependents() -> Result<()> {
     // Fail step1
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // step2 should be skipped
     let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -8282,7 +8295,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     // Fail step1
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // step2 should be promoted to ready (continue_on_failure = true)
     let mid_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -8292,7 +8305,7 @@ async fn test_continue_on_failure_promotes_after_fail() -> Result<()> {
     // Complete step2 successfully
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Job should be failed (step1 failed)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8435,7 +8448,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
     // Fail step1 (tolerable)
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Job should still be running (step2 not done yet)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8444,7 +8457,7 @@ async fn test_continue_on_failure_step_fails_job_succeeds() -> Result<()> {
     // Complete step2 successfully
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Job should be completed (step1's failure is tolerable)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8587,12 +8600,12 @@ async fn test_mixed_tolerable_and_intolerable_failures() -> Result<()> {
     // Fail step1 (tolerable)
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Fail step2 (intolerable)
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step2", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step2", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Job should be failed (step2's failure is intolerable)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -8776,7 +8789,7 @@ async fn test_cascading_skip() -> Result<()> {
     // Fail step1
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "Command failed").await?;
-    orchestrator::on_step_completed(&pool, job_id, "step1", &task, None).await?;
+    after_step(&pool, job_id, &task).await?;
 
     // Both step2 and step3 should be skipped (cascading)
     let final_steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
@@ -11774,7 +11787,7 @@ async fn test_hook_fires_on_job_success() -> Result<()> {
     JobStepRepo::mark_completed(&pool, job_id, "step1", Some(json!({"result": "ok"}))).await?;
 
     // Run orchestrator to mark job as completed
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     // Verify job is completed
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -11889,7 +11902,7 @@ async fn test_hook_fires_on_job_failure() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step1", "exit code 1").await?;
 
     // Orchestrator marks job as failed
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
 
@@ -12073,7 +12086,7 @@ async fn test_hook_input_contains_context() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     let state = hook_test_state(pool.clone(), &workspace);
@@ -12189,12 +12202,12 @@ async fn test_hook_error_message_all_failures() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "build error").await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     // Fail step2
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step2", "test failure").await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     // Job should be failed (step2.continue_on_failure=false)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -12334,12 +12347,12 @@ async fn test_hook_on_success_with_tolerable_failures() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", "deploy crashed").await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     // step2 succeeds
     JobStepRepo::mark_running(&pool, job_id, "step2", worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step2", None).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step2", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     // Job should be "completed" (all failures tolerable)
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
@@ -12457,7 +12470,7 @@ async fn test_hook_multiline_error_message() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", python_traceback).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -12581,7 +12594,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, job_id, "step1", python_error).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -12668,14 +12681,7 @@ async fn test_hook_job_completes_through_orchestrator() -> Result<()> {
     };
 
     // Orchestrator should mark the hook job as completed
-    stroem_server::orchestrator::on_step_completed(
-        &pool,
-        hook_job_id,
-        "hook",
-        &hook_task_def,
-        None,
-    )
-    .await?;
+    after_step(&pool, hook_job_id, &hook_task_def).await?;
 
     let hook_job_after = JobRepo::get(&pool, hook_job_id).await?.unwrap();
     assert_eq!(
@@ -13031,7 +13037,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
 
     // Run orchestrator to promote cleanup step
     let task = workspace.tasks.get("deploy").unwrap();
-    orchestrator::on_step_completed(&pool, parent_job_id, "build", task, None).await?;
+    after_step(&pool, parent_job_id, task).await?;
 
     // Now handle_task_steps should dispatch the cleanup step
     handle_task_steps(
@@ -13074,9 +13080,9 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
     )
     .await?;
 
-    // Run orchestrator for the child job
+    // Run the cascade for the child job
     let child_task = workspace.tasks.get("cleanup").unwrap();
-    orchestrator::on_step_completed(&pool, child_job.job_id, "clean", child_task, None).await?;
+    after_step(&pool, child_job.job_id, child_task).await?;
 
     // Child job should now be completed
     let child_after = JobRepo::get(&pool, child_job.job_id).await?.unwrap();
@@ -13087,7 +13093,7 @@ async fn test_task_action_child_completion_updates_parent() -> Result<()> {
         .await?;
 
     // Run orchestrator for the parent job
-    orchestrator::on_step_completed(&pool, parent_job_id, "cleanup", task, None).await?;
+    after_step(&pool, parent_job_id, task).await?;
 
     // Parent job should now be completed
     let parent_after = JobRepo::get(&pool, parent_job_id).await?.unwrap();
@@ -13381,7 +13387,7 @@ async fn test_task_action_in_hook() -> Result<()> {
     JobStepRepo::mark_failed(&pool, job_id, "step1", "something broke").await?;
 
     // Orchestrate → job fails
-    orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "failed");
@@ -13598,9 +13604,9 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
     JobRepo::mark_running_if_pending(&pool, child_job.job_id, worker_id).await?;
     JobStepRepo::mark_failed(&pool, child_job.job_id, "crash", "child crashed").await?;
 
-    // Run orchestrator for child → child job fails
+    // Run the cascade for child → child job fails
     let child_task = workspace.tasks.get("failing-task").unwrap();
-    orchestrator::on_step_completed(&pool, child_job.job_id, "crash", child_task, None).await?;
+    after_step(&pool, child_job.job_id, child_task).await?;
 
     let child_after = JobRepo::get(&pool, child_job.job_id).await?.unwrap();
     assert_eq!(child_after.status, "failed");
@@ -13611,7 +13617,7 @@ async fn test_task_action_child_failure_fails_parent_step() -> Result<()> {
 
     // Run orchestrator for parent → parent job fails
     let parent_task = workspace.tasks.get("parent-of-fail").unwrap();
-    orchestrator::on_step_completed(&pool, parent_job_id, "run", parent_task, None).await?;
+    after_step(&pool, parent_job_id, parent_task).await?;
 
     let parent_after = JobRepo::get(&pool, parent_job_id).await?.unwrap();
     assert_eq!(parent_after.status, "failed");
@@ -13973,15 +13979,8 @@ async fn test_recovery_propagates_to_parent() -> Result<()> {
     // Complete build step
     JobStepRepo::mark_completed(&pool, parent_job_id, "build", Some(json!({"ok": true}))).await?;
 
-    // Orchestrate to promote run-cleanup task step
-    orchestrator::on_step_completed(
-        &pool,
-        parent_job_id,
-        "build",
-        workspace.tasks.get("deploy").unwrap(),
-        None,
-    )
-    .await?;
+    // Run the cascade to promote run-cleanup task step
+    after_step(&pool, parent_job_id, workspace.tasks.get("deploy").unwrap()).await?;
 
     // Handle task steps (creates child job)
     handle_task_steps(
@@ -19219,7 +19218,7 @@ async fn test_hook_job_inherits_revision() -> Result<()> {
     JobStepRepo::mark_running(&pool, job_id, "step1", worker_id).await?;
     JobRepo::mark_running_if_pending(&pool, job_id, worker_id).await?;
     JobStepRepo::mark_completed(&pool, job_id, "step1", None).await?;
-    stroem_server::orchestrator::on_step_completed(&pool, job_id, "step1", task, None).await?;
+    after_step(&pool, job_id, task).await?;
 
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     assert_eq!(job.status, "completed");
@@ -21902,7 +21901,7 @@ async fn test_step_retry_window_never_skips_dependents() -> Result<()> {
         ))
         .await?;
     assert_eq!(complete.status(), StatusCode::OK);
-    orchestrator::on_step_completed(&pool, job_id, "sibling", &task_with_dep, None).await?;
+    after_step(&pool, job_id, &task_with_dep).await?;
 
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
     let by = |n: &str| {
@@ -22137,7 +22136,7 @@ async fn test_step_retry_window_closed_under_concurrent_cascade() -> Result<()> 
     await_retry_gate_blocked(&pool).await?;
 
     // (d) cascade on the sibling while the failure is in flight
-    orchestrator::on_step_completed(&pool, job_id, "sibling", &task_with_dep, None).await?;
+    after_step(&pool, job_id, &task_with_dep).await?;
 
     // (e) let the failure transaction finish
     sqlx::query("SELECT pg_advisory_unlock(4242, 1)")

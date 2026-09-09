@@ -1,6 +1,5 @@
 use crate::job_completion::JobCompletionEvent;
 use crate::log_storage::JobLogMeta;
-use crate::orchestrator;
 use crate::state::AppState;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -230,10 +229,9 @@ pub async fn orchestrate_after_step(state: &AppState, job_id: Uuid, step_name: &
         }
     };
 
-    // Run orchestrator: promote steps, skip unreachable, expand/resolve
+    // Run the cascade: promote steps, skip unreachable, expand/resolve
     // for_each placeholders (inside the cascade), check terminal.
-    orchestrator::on_step_completed(&state.pool, job_id, step_name, &task, Some(&workspace))
-        .await?;
+    crate::settlement::cascade_and_settle(&state.pool, job_id, &task, &workspace).await?;
 
     // Handle any newly-promoted type: task steps (including loop instances)
     if let Err(e) = crate::job_creator::handle_task_steps(
@@ -587,13 +585,12 @@ pub async fn propagate_to_parent(
                 }
             };
 
-            // Run orchestrator for parent job (includes for_each rollup/expansion)
-            orchestrator::on_step_completed(
+            // Run the cascade for parent job (includes for_each rollup/expansion)
+            crate::settlement::cascade_and_settle(
                 &state.pool,
                 parent_job_id,
-                parent_step,
                 &parent_task,
-                Some(&parent_ws),
+                &parent_ws,
             )
             .await?;
 

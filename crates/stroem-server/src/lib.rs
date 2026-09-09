@@ -19,10 +19,10 @@ pub mod metrics;
 #[cfg(feature = "mcp")]
 pub mod oauth;
 pub mod oidc;
-pub mod orchestrator;
 pub mod recovery;
 pub mod restart;
 pub mod scheduler;
+pub mod settlement;
 pub mod state;
 pub mod state_storage;
 pub mod tarball_cache;
