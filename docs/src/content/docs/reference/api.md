@@ -314,11 +314,14 @@ Returns job metadata and all steps with statuses.
       "worker_id": "w1w2w3w4-...",
       "started_at": "2025-02-10T12:00:01Z",
       "completed_at": "2025-02-10T12:00:02Z",
-      "error_message": null
+      "error_message": null,
+      "skip_reason": null
     }
   ]
 }
 ```
+
+`skip_reason` is `null` unless `status` is `skipped`; then one of `condition`, `empty`, `cascade`, `unreachable` (see the [Conditionals guide](/guides/conditionals/#skip-reasons)).
 
 **Step statuses:** `pending`, `ready`, `running`, `completed`, `failed`, `skipped`, `cancelled`
 

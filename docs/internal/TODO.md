@@ -1551,3 +1551,9 @@ Feature: `workspaces.<name>.triggers: false` in the server config loads a worksp
 - [ ] No runtime toggle: changing `triggers` requires a config edit + restart (the scheduler/event-source hot-reload re-reads workspace YAML, not the server config). An admin API/UI toggle persisted in the DB would be the next step if operators need it live.
 - [ ] Trigger list API/UI (`/api/workspaces/{ws}/triggers`, task-detail trigger cards) does not yet annotate individual triggers as "suppressed on this server" — only the workspace row carries `triggers_enabled`.
 - [ ] E2E (`tests/e2e.sh`) does not cover the flag; unit coverage on each consumer plus the router-level integration test `test_workspace_triggers_disabled_reported_and_webhook_hidden` was judged sufficient for v1.
+
+## continue_when_skipped + Skip Reasons (2026-09-09)
+
+- [ ] Expose `skip_reason` in the Tera template context (`{{ step.skip_reason }}`) so a `when` can branch on why an upstream step was skipped.
+- [ ] `stroem run` (CLI) aborts on the first untolerated failure instead of skipping dependents as `unreachable`; pre-existing divergence from the server, now documented.
+- [ ] `hook.failed_steps` has no skipped-steps counterpart; add `hook.skipped_steps` with reasons if a hook ever needs it.

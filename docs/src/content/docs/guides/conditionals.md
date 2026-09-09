@@ -126,7 +126,57 @@ tasks:
         # Proceeds whether both ran, or one was skipped
 ```
 
-**How it works**: Skipped dependencies count as satisfied. A convergence step runs as long as at least one of its dependencies completed. If ALL dependencies are skipped (which would mean no branch was taken), the step is also skipped (mid-branch cascade).
+**How it works**: Skipped dependencies count as satisfied. A convergence step runs as long as at least one of its dependencies completed. If **all** dependencies are skipped, the step is skipped too (mid-branch cascade) — unless it sets `continue_when_skipped: true`, see below.
+
+## Running After a Skipped Branch
+
+Sometimes a step should run even when the only step it depends on was skipped — a report after an optional check, or a merge after an if/else where both arms may be off. Set `continue_when_skipped: true` on that step:
+
+```yaml
+tasks:
+  optional-check:
+    input:
+      run_check: { type: boolean, default: false }
+    flow:
+      check:
+        action: run-check
+        when: "{{ input.run_check }}"
+
+      report:
+        action: write-report
+        depends_on: [check]
+        continue_when_skipped: true
+        # Runs whether check completed or was skipped by its condition.
+        # {{ check.output }} is null when check was skipped.
+```
+
+The flag covers skips **by choice** only: a `when` that rendered false, an empty `for_each`, or a chain of such skips. If a dependency was skipped because an upstream step **failed** or was cancelled, the step is still skipped. To run after failures as well, set `continue_on_failure: true` too:
+
+```yaml
+      cleanup:
+        action: remove-temp-files
+        depends_on: [last-step]
+        continue_when_skipped: true
+        continue_on_failure: true
+        # Runs no matter what happened upstream.
+```
+
+`continue_on_failure` on its own lets a step run when a **direct** dependency failed; it does not lift the all-dependencies-skipped rule.
+
+The step's own `when` is still evaluated: `continue_when_skipped` decides whether the step is considered at all, `when` decides whether it runs.
+
+## Skip Reasons
+
+Every skipped step records why it was skipped. The job detail page shows it as a badge and the API returns it as `skip_reason` on the step:
+
+| Reason | Meaning |
+|---|---|
+| `condition` | the step's own `when` rendered falsy |
+| `empty` | the step's `for_each` produced no items |
+| `cascade` | every dependency was skipped, all of them by choice |
+| `unreachable` | a dependency failed or was cancelled, or a dependency was itself unreachable |
+
+`unreachable` travels down a chain: if `a` fails, `b` is unreachable and so is anything that depends only on `b`. That is what stops a `continue_when_skipped` step from running after a failure.
 
 ## Root Step Conditions
 
@@ -145,10 +195,8 @@ tasks:
       main:
         action: do-work
         depends_on: [setup]
-        # If setup is skipped and main has no other deps,
-        # main is also cascade-skipped (all deps skipped).
-        # To make main always run, remove the dependency
-        # or add a non-conditional dep.
+        # If setup is skipped and main has no other deps, main is also
+        # cascade-skipped. Add `continue_when_skipped: true` to run it anyway.
 ```
 
 ## Error Handling
@@ -356,4 +404,4 @@ This workflow:
 2. When verify runs, branches into fast or slow path based on input
 3. Converges at finish — one branch completed, one skipped → finish runs automatically
 
-**When do you still need `continue_on_failure`?** Only when you want a step to run even if its dependency **failed** (error, crash). Skipped dependencies from `when` conditions are handled automatically.
+**When do you still need `continue_on_failure`?** Only when you want a step to run even if its dependency **failed** (error, crash). Skipped dependencies from `when` conditions are handled automatically as long as at least one dependency completes; if all of them are skipped, add [`continue_when_skipped`](#running-after-a-skipped-branch) instead.

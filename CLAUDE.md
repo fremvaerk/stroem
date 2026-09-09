@@ -215,6 +215,7 @@ Post-042 (`042_worker_exclusive.sql`): two routing axes with affinity semantics 
 - Callers: `settlement::cascade_and_settle` (worker completion, approval, recovery, propagation — everything that reaches `Settlement::advance`) and `settlement::dispatch::init` (creation-time). Both call `execute` then continue as before. `check_loop_completion`, `expand_for_each_steps`, `promote_ready_steps`, `skip_unreachable_steps` no longer exist.
 - `execute` commits before returning; settlement, task/approval dispatch and propagation run after it, outside any transaction. Never wrap `execute` in a larger transaction.
 - Guards: `Promote`/`Skip`/`Fail` require `pending`; `Expand`/`Adopt` require the placeholder `pending`; `Rollup` requires `running` (so a cancelled or timed-out placeholder is never overwritten). The R7 job-row `UPDATE` may match zero rows. A `Fail` for a placeholder is guarded where the old code was not.
+- `Change::Skip { step, reason: SkipReason }` — the reason (`condition` | `empty` | `cascade` | `unreachable`) is applied to the in-memory snapshot row so later passes see it, and `apply` batches a run of skips per reason (one `skip_steps_tx` per bucket, each guarded). Spec `docs/superpowers/specs/2026-09-09-continue-when-skipped-design.md`.
 - `run` renders templates (which may call the `vals` subprocess); that is why it runs before the apply transaction opens.
 - Known, unchanged from before the cascade: two cascades on one job can race (lost work, `job_step.rs` TODO history); a same-status `output`/`error_message` rewrite between snapshot and apply is not detected; `try_retry_job`'s transaction (job row then steps) inverts the cascade's order (steps then job row). All three are closed by `docs/superpowers/specs/2026-09-08-cascade-concurrency-hardening-design.md`.
 - New context variables in `build_step_render_context` must be inserted BEFORE completed-step outputs (a step named `job` shadows `job`).
@@ -271,7 +272,8 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 ### Conditional Flow Steps (`when`)
 - `FlowStep.when: Option<String>` — Tera expression evaluated at step promotion time
 - Truthy if non-empty and, after trim and lowercase, not "false", "0", "null" or "none".
-- All-deps-skipped rule: if ALL deps are skipped, step is cascade-skipped
+- All-deps-skipped rule: if ALL deps are skipped the step is cascade-skipped, unless `continue_when_skipped: true` AND no dep is `tainted` (skipped `unreachable` or with a NULL `skip_reason`); a tainted step still runs when it also has `continue_on_failure`. Formula: `bypass = cws && (!tainted || cof)` (`cascade.rs::all_skipped_decision`). `continue_on_failure` alone is failure-only since 0.16.2 (it used to bypass this rule). Mixed deps (≥1 completed) always promote, whatever the reasons.
+- Skip reasons: `job_step.skip_reason` (migration 046) — `condition` (own `when` false), `empty` (zero `for_each` items), `cascade` (all deps skipped by choice), `unreachable` (R3/R4/R5 failure skips, and any all-skipped step with a tainted dep). Every writer of `status='skipped'` (`skip_steps_tx`, `mark_skipped`, `seed_steps_tx`) takes the reason. The CLI local runner mirrors the flag but never produces `unreachable` (it aborts on failure).
 - Skipped steps have `{ "output": null }` in render context for downstream `when` expressions
 - Condition evaluation errors → step fails (not silently skipped)
 - Evaluated in cascade phase P1 (see Step Cascade).
