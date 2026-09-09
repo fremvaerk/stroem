@@ -24574,8 +24574,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
-    // `terminal_at_creation` is private to the settlement module; the job's
-    // own status is the externally-observable proof it settled synchronously.
+    assert!(created.terminal_at_creation());
     assert_eq!(
         JobRepo::get(&pool, created.job_id).await?.unwrap().status,
         "completed"
@@ -24596,6 +24595,7 @@ async fn test_create_job_detailed_reports_terminal_at_creation() -> Result<()> {
         JobDefaults::default(),
     )
     .await?;
+    assert!(!created.terminal_at_creation());
     assert_eq!(
         JobRepo::get(&pool, created.job_id).await?.unwrap().status,
         "pending"
@@ -26030,8 +26030,10 @@ async fn test_approval_dispatch_failure_compensates_the_job() -> Result<()> {
     )
     .await?;
 
-    // `terminal_at_creation` is private to the settlement module; the job's
-    // own status is the externally-observable proof it was handed back terminal.
+    assert!(
+        created.terminal_at_creation(),
+        "a failed initialisation must hand back a terminal job"
+    );
     assert_eq!(
         JobRepo::get(&pool, created.job_id).await?.unwrap().status,
         "failed",

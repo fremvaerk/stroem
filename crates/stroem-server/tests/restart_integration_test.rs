@@ -530,10 +530,8 @@ async fn restart_set_entirely_skipped_settles_failed_at_creation() -> Result<()>
         JobDefaults::default(),
     )
     .await?;
+    assert!(created.terminal_at_creation());
 
-    // `terminal_at_creation` is private to the settlement module; the job's
-    // own "failed" status below is the externally-observable proof it settled
-    // synchronously at creation.
     let new = JobRepo::get(&app.pool, created.job_id).await?.unwrap();
     assert_eq!(new.status, "failed");
     let by: HashMap<_, _> = JobStepRepo::get_steps_for_job(&app.pool, created.job_id)

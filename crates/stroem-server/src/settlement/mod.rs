@@ -69,6 +69,13 @@ impl CreatedJob {
             terminal_at_creation,
         }
     }
+
+    /// Read-only. Nothing outside the settlement module can act on this
+    /// flag; it is exposed only so tests can assert what creation reported.
+    #[doc(hidden)]
+    pub fn terminal_at_creation(&self) -> bool {
+        self.terminal_at_creation
+    }
 }
 
 /// Result of a cancel operation
