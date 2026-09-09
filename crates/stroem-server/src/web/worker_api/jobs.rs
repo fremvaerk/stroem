@@ -1144,12 +1144,11 @@ pub async fn agent_suspend_step(
     Json(req): Json<SuspendStepRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Save agent state
-    let agent_state = into_exposed(req.agent_state);
     stroem_db::JobStepRepo::update_agent_state(
         &state.pool,
         job_id,
         &step_name,
-        agent_state.clone(),
+        into_exposed(req.agent_state),
     )
     .await
     .context("save agent state")?;
@@ -1211,12 +1210,11 @@ pub async fn agent_save_state(
     Path((job_id, step_name)): Path<(Uuid, String)>,
     Json(req): Json<SaveAgentStateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let agent_state = into_exposed(req.agent_state);
     stroem_db::JobStepRepo::update_agent_state(
         &state.pool,
         job_id,
         &step_name,
-        agent_state.clone(),
+        into_exposed(req.agent_state),
     )
     .await
     .context("save agent state")?;

@@ -207,7 +207,7 @@ pub(super) async fn run_terminal_actions(
             if let Some(original_job_id) = source_id
                 .split('/')
                 .next()
-                .and_then(|s| Uuid::parse_str(s).ok())
+                .and_then(|id| Uuid::parse_str(id).ok())
             {
                 let error_msg = get_hook_error_summary(&s.pool, job).await;
                 s.server_log(
