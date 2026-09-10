@@ -77,8 +77,10 @@ choice (`condition`, `empty`) becomes `cascade` downstream.
 
 `NULL` (rows written before the migration, or by an older replica in a mixed
 fleet) is treated as `unreachable` by the cascade. That reproduces the
-pre-change behaviour for such rows: a `continue_when_skipped` step behind
-them stays skipped.
+pre-change behaviour for such rows: even when the skipped dependency carries
+`continue_when_skipped`, its NULL reason counts as tainted, so the dependent
+still needs its own `continue_on_failure` to run — otherwise it stays
+skipped.
 
 ### 2.3 The all-deps-skipped rule, restated (revision 3 placement)
 
