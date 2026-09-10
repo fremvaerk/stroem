@@ -668,7 +668,8 @@ else
     fail "expected 400 for unshared foreign connection, got $XCONN_PRIV_CODE"
 fi
 
-# --- continue_when_skipped: report runs after a condition skip, follow-up cascades ---
+# --- continue_when_skipped (on the skipped step, since 0.16.3): a dependent of a
+# --- flagged skip runs; a dependent of an unflagged skip cascades ---
 info "Triggering conditional-report task (continue_when_skipped)..."
 EXEC_RESP_CWS=$(acurl -X POST "$BASE_URL/api/workspaces/test/tasks/conditional-report/execute" \
     -H "Content-Type: application/json" \
@@ -703,10 +704,12 @@ pass "conditional-report job completed (${CWS_POLLED}s)"
 CWS_CHECK=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "optional-check") | "\(.status)/\(.skip_reason)"')
 CWS_REPORT=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "report") | "\(.status)/\(.skip_reason)"')
 CWS_FOLLOW=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "follow-up") | "\(.status)/\(.skip_reason)"')
+CWS_PLAIN=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "plain-check") | "\(.status)/\(.skip_reason)"')
 [ "$CWS_CHECK" = "skipped/condition" ] || { echo "$CWS_DETAIL" | jq .steps; fail "optional-check expected skipped/condition, got $CWS_CHECK"; }
+[ "$CWS_PLAIN" = "skipped/condition" ] || { echo "$CWS_DETAIL" | jq .steps; fail "plain-check expected skipped/condition, got $CWS_PLAIN"; }
 [ "$CWS_REPORT" = "completed/null" ] || { echo "$CWS_DETAIL" | jq .steps; fail "report expected completed/null, got $CWS_REPORT"; }
 [ "$CWS_FOLLOW" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "follow-up expected skipped/cascade, got $CWS_FOLLOW"; }
-pass "continue_when_skipped: report ran, follow-up cascaded, skip reasons recorded"
+pass "continue_when_skipped: dependent of a flagged skip ran, dependent of an unflagged skip cascaded"
 
 # --- Summary ---
 echo ""

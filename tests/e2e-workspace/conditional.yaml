@@ -13,13 +13,20 @@ tasks:
         type: boolean
         default: false
     flow:
+      # Skipped by its own condition AND flagged: steps depending only on it
+      # still run (the flag lives on the skipped step, since 0.16.3).
       optional-check:
         action: say
         when: "{{ input.run_check }}"
+        continue_when_skipped: true
       report:
         action: say
         depends_on: [optional-check]
-        continue_when_skipped: true
+
+      # Skipped by the same condition but NOT flagged: its dependents cascade.
+      plain-check:
+        action: say
+        when: "{{ input.run_check }}"
       follow-up:
         action: say
-        depends_on: [optional-check]
+        depends_on: [plain-check]
