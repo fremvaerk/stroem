@@ -1,7 +1,23 @@
 # `continue_when_skipped` and Skip Reasons — Design
 
-Status: revision 2, for user review
-Ships in: 0.16.2 (patch; carries one documented behaviour change, §2.4)
+Status: revision 3, shipped (0.16.2 shipped revision 2's placement; 0.16.3
+flips it — see "Revision 3" note below)
+Ships in: 0.16.2 (patch; carries one documented behaviour change, §2.4);
+placement flip ships in 0.16.3
+
+## Revision 3 (2026-09-10)
+
+`continue_when_skipped` moved from the dependent to the dependency: a step now
+opts its OWN skip into being tolerated by whatever depends on it, rather than
+a dependent opting into tolerating its dependencies' skips. The author wanted
+the flag on the skippable step itself, mirroring how `continue_on_failure`
+already has a self-tolerance reading — "if I fail, that failure is tolerable"
+(job settlement) sits alongside its dependent-side failure-tolerance meaning.
+Putting `continue_when_skipped` on the step that may be skipped gives it the
+same self-tolerance reading: "if I get skipped, that's fine for whatever
+depends on me." §2.1 and §2.3 below are amended in place to describe the
+0.16.3 placement; the rest of this document (skip reasons, §2.4, §2.5, §4) is
+unaffected by the flip.
 
 ## 1. Problem
 
@@ -34,10 +50,13 @@ behaviour `continue_on_failure` exists to opt into explicitly.
 
 ### 2.1 New flow-step flag `continue_when_skipped: bool` (default `false`)
 
-When `true`, the step is not cascade-skipped when all of its dependencies
-are skipped for a benign reason. Skipped dependencies already count as
-satisfied, so the step is promoted and its own `when` is evaluated as usual;
-skipped dependencies render as `{ "output": null }` in the template context,
+**(Revision 3 placement.)** The flag is set on the step that may itself be
+skipped, not on the dependent. When `true`, this step's own skip does not
+force cascade-skip on a step that depends on it — provided every OTHER
+skipped dependency of that dependent also carries the flag on its own
+definition. Skipped dependencies already count as satisfied, so the
+dependent step is promoted and its own `when` is evaluated as usual; skipped
+dependencies render as `{ "output": null }` in the template context,
 unchanged.
 
 ### 2.2 Skip reasons are recorded
@@ -61,14 +80,16 @@ fleet) is treated as `unreachable` by the cascade. That reproduces the
 pre-change behaviour for such rows: a `continue_when_skipped` step behind
 them stays skipped.
 
-### 2.3 The all-deps-skipped rule, restated
+### 2.3 The all-deps-skipped rule, restated (revision 3 placement)
 
 For a pending step `S` with non-empty `depends_on`, when every dependency is
 `skipped`:
 
 ```
-tainted  = any dependency has skip_reason ∈ {unreachable, NULL}
-bypass   = S.continue_when_skipped && (!tainted || S.continue_on_failure)
+all_deps_cws = every dependency D has D.continue_when_skipped == true
+               (read from D's own flow definition, not from S)
+tainted      = any dependency has skip_reason ∈ {unreachable, NULL}
+bypass       = all_deps_cws && (!tainted || S.continue_on_failure)
 
 if !bypass:
     Skip S with reason = unreachable if tainted else cascade
@@ -76,10 +97,13 @@ else:
     fall through to the normal path (deps satisfied → evaluate `when` → promote / skip:condition)
 ```
 
-Read as: `continue_when_skipped` covers skips by choice; `continue_on_failure`
-covers failure; a step that must run no matter what sets both. Mixed
-dependencies (at least one `completed`) are promoted exactly as today,
-whatever the reasons on the skipped ones. That rule is not touched.
+Read as: a dependency's own `continue_when_skipped` covers its skip being
+tolerated by choice; the dependent's own `continue_on_failure` covers the
+tainted (failure-adjacent) case. A dependent that must run no matter what
+needs its dependency to carry `continue_when_skipped` AND needs its own
+`continue_on_failure` set. Mixed dependencies (at least one `completed`) are
+promoted exactly as today, whatever the reasons on the skipped ones. That
+rule is not touched.
 
 ### 2.4 `continue_on_failure` becomes failure-only
 

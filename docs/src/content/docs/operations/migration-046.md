@@ -24,15 +24,19 @@ one). Steps with at least one dependency that always runs are not affected.
 
 ## The fix
 
-Add `continue_when_skipped: true` to the affected step. To keep the exact old
-behaviour ("run no matter what"), keep `continue_on_failure: true` and add
-`continue_when_skipped: true` next to it.
+Add `continue_when_skipped: true` to the DEPENDENCY that can be skipped (the
+step with the `when`). To keep the exact old behaviour ("run no matter
+what"), also keep `continue_on_failure: true` on the dependent.
+
+0.16.3 moved the flag from the dependent to the skipped step; 0.16.2
+placement on the dependent has no effect from 0.16.3.
 
 ## The column
 
 `skip_reason` is `NULL` on rows written before the migration. The cascade treats
-`NULL` as `unreachable`, so a `continue_when_skipped` step behind such rows
-stays skipped — the same outcome as before the upgrade. The migration is
+`NULL` as `unreachable`, so a step depending on a `continue_when_skipped`
+dependency behind such rows stays skipped — the same outcome as before the
+upgrade. The migration is
 additive: the server applies it at startup, and an old replica in a mixed
 fleet is unaffected because every `job_step` query names its columns
 explicitly.

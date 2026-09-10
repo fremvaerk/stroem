@@ -263,7 +263,7 @@ To opt one task out of the global default — i.e., to make it genuinely unbound
 
 By default, when a step fails, all downstream steps that depend on it are automatically **skipped**. The job is marked as `failed` once all steps reach a terminal state.
 
-Note: **skipped** dependencies (from conditional `when` expressions) are treated differently from **failed** dependencies. A step with a skipped dependency proceeds normally as long as at least one dependency completed; if every dependency was skipped, the step is skipped too unless it sets `continue_when_skipped: true`. See the [Conditionals guide](/guides/conditionals/) for branching patterns and skip reasons.
+Note: **skipped** dependencies (from conditional `when` expressions) are treated differently from **failed** dependencies. A step with a skipped dependency proceeds normally as long as at least one dependency completed; if every dependency was skipped, the step is skipped too unless the skipped dependencies set `continue_when_skipped: true` on themselves. See the [Conditionals guide](/guides/conditionals/) for branching patterns and skip reasons.
 
 If you want a step to run even when its dependency fails (e.g., cleanup steps, notifications), use `continue_on_failure: true`:
 
@@ -284,7 +284,7 @@ The `continue_on_failure` flag has dual semantics (similar to GitHub Actions' `c
 1. **Failure tolerance**: The step runs even if its dependencies **fail** or are **cancelled**.
 2. **Job tolerance**: If the step itself fails, its failure is considered *tolerable* — the job can still be marked `completed` as long as all non-tolerable steps succeed.
 
-`continue_on_failure` is about failures only. To run a step whose dependencies were all skipped, use `continue_when_skipped: true`; to run a step no matter what happened upstream, set both. This is a change in 0.16.2; see [Migration 046](/operations/migration-046/) if you relied on the old behaviour.
+`continue_on_failure` is about failures only, and it lives on the dependent. To run a step whose dependencies were all skipped, set `continue_when_skipped: true` on those dependencies instead; to run a step no matter what happened upstream, combine `continue_on_failure` on the dependent with `continue_when_skipped` on its dependency. This is a change in 0.16.2 (and the flag's placement moved again in 0.16.3); see [Migration 046](/operations/migration-046/) if you relied on the old behaviour.
 
 ### Loops (for_each)
 
