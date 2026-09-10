@@ -52,7 +52,7 @@ When generating Strøm workflow YAML, these constraints are enforced at parse ti
 - \`for_each\`: Tera template string (renders to JSON array) or literal array. Max 10,000 items.
 - \`sequential: true\`: run loop instances one at a time (default: parallel).
 - Inside loop instances: \`each.item\` = current element, \`each.index\` = zero-based index.
-- \`continue_when_skipped: true\` lets a step run when all its dependencies were skipped by a \`when\` or empty \`for_each\`; \`continue_on_failure\` covers failed dependencies only (since 0.16.2) — set both to run regardless.
+- \`continue_when_skipped: true\` is set on a step that may be **skipped** (by a \`when\` or an empty \`for_each\`): steps depending only on it are then not cascade-skipped. Since 0.16.3 it is read from the skipped dependency, not from the dependent; every skipped dependency must carry it. If the dependency was skipped because something upstream **failed**, the dependent additionally needs its own \`continue_on_failure\`.
 
 **Triggers:**
 - \`type: scheduler\` — \`cron\` must be a valid 5-field or 6-field cron expression.

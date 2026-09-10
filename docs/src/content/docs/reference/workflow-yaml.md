@@ -404,7 +404,7 @@ Each entry in a task's `flow` map defines a step. Steps can reference a named ac
 | `depends_on` | list | `[]` | Steps that must complete before this one starts |
 | `input` | map | `{}` | Input values passed to the action. Values support Tera templates |
 | `continue_on_failure` | bool | `false` | Run even if a direct dependency fails or is cancelled; mark own failure as tolerable |
-| `continue_when_skipped` | bool | `false` | Run even if every dependency was skipped by a `when` or empty `for_each`. Does not cover dependencies skipped because of an upstream failure — combine with `continue_on_failure` for that |
+| `continue_when_skipped` | bool | `false` | Set on a step that may be skipped by a `when` or empty `for_each`: steps depending only on it still run instead of being cascade-skipped. Read from the skipped dependency, not from the dependent (since 0.16.3). Does not cover skips caused by an upstream failure — the dependent needs `continue_on_failure` for that |
 | `timeout` | duration | — | Step execution timeout. Max `24h` (86400s) |
 | `when` | string | — | Tera condition. Falsy values: empty string, `"false"`, `"0"`, `"null"`, `"none"` (case-insensitive) |
 | `for_each` | string or list | — | Tera expression or literal JSON array. Creates one instance per item |
@@ -441,7 +441,7 @@ flow:
 
 Steps without `depends_on` start immediately. Failed dependencies cause downstream steps to be skipped unless `continue_on_failure: true`.
 
-Skipped dependencies (from `when` conditions or empty loops) are treated as satisfied — downstream steps still run as long as at least one dependency completed. A step whose dependencies were **all** skipped is skipped too, unless it sets `continue_when_skipped: true`. Every skipped step records a `skip_reason` (`condition`, `empty`, `cascade`, `unreachable`); see the [Conditionals guide](/guides/conditionals/#skip-reasons).
+Skipped dependencies (from `when` conditions or empty loops) are treated as satisfied — downstream steps still run as long as at least one dependency completed. A step whose dependencies were **all** skipped is skipped too, unless every one of those skipped dependencies sets `continue_when_skipped: true` (the flag lives on the step that gets skipped, not on the dependent; since 0.16.3). Every skipped step records a `skip_reason` (`condition`, `empty`, `cascade`, `unreachable`); see the [Conditionals guide](/guides/conditionals/#skip-reasons).
 
 ### Conditional steps (`when`)
 
