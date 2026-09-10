@@ -168,6 +168,16 @@ fn flow_step_when(depends_on: Vec<&str>, when_expr: &str) -> FlowStep {
     }
 }
 
+/// Build a `FlowStep` with both a `when` condition expression and
+/// `continue_when_skipped = true` — used for a step that may be
+/// condition-skipped and wants its own skip tolerated by its dependents.
+fn flow_step_when_cws(depends_on: Vec<&str>, when_expr: &str) -> FlowStep {
+    FlowStep {
+        continue_when_skipped: true,
+        ..flow_step_when(depends_on, when_expr)
+    }
+}
+
 /// Build a `NewJobStep` with a `when_condition` set.
 fn step_when(job_id: Uuid, name: &str, status: &str, when_expr: &str) -> NewJobStep {
     NewJobStep {
@@ -1980,9 +1990,9 @@ async fn test_continue_when_skipped_runs_after_condition_skip() -> Result<()> {
     flow.insert("a".to_string(), flow_step(vec![]));
     flow.insert(
         "b".to_string(),
-        flow_step_when(vec!["a"], "{{ a.output.go }}"),
+        flow_step_when_cws(vec!["a"], "{{ a.output.go }}"),
     );
-    flow.insert("c".to_string(), flow_step_cws(vec!["b"]));
+    flow.insert("c".to_string(), flow_step(vec!["b"]));
     let task = make_task(flow);
 
     let job_id = create_job(&pool).await;
@@ -2029,8 +2039,8 @@ async fn test_continue_when_skipped_does_not_run_after_upstream_failure() -> Res
 
     let mut flow = HashMap::new();
     flow.insert("a".to_string(), flow_step(vec![]));
-    flow.insert("b".to_string(), flow_step(vec!["a"]));
-    flow.insert("c".to_string(), flow_step_cws(vec!["b"]));
+    flow.insert("b".to_string(), flow_step_cws(vec!["a"]));
+    flow.insert("c".to_string(), flow_step(vec!["b"]));
     let task = make_task(flow);
 
     let job_id = create_job(&pool).await;

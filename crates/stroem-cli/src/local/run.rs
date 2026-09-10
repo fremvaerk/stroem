@@ -177,11 +177,18 @@ async fn run_dag(
                 }
             }
 
-            // Check all-deps-skipped cascade (spec 2026-09-09 §2.5: the CLI
-            // never produces `unreachable`, so the flag alone decides)
+            // Check all-deps-skipped cascade (spec 2026-09-09 §2.5, revision 3:
+            // the CLI never produces `unreachable`, so the flag alone decides —
+            // read from each skipped dependency's own definition, not from
+            // this step)
             if !step.depends_on.is_empty()
-                && !step.continue_when_skipped
                 && step.depends_on.iter().all(|d| skipped.contains(d))
+                && !step.depends_on.iter().all(|d| {
+                    task.flow
+                        .get(d)
+                        .map(|f| f.continue_when_skipped)
+                        .unwrap_or(false)
+                })
             {
                 eprintln!(
                     "--- Step: {} [SKIPPED] (all dependencies skipped) ---",
@@ -568,16 +575,23 @@ fn cascade_skip(
     loop {
         let mut newly_skipped = Vec::new();
         for (name, step) in flow {
-            if completed.contains(name) {
-                continue;
-            }
-            if step.depends_on.is_empty() || step.continue_when_skipped {
+            if completed.contains(name) || step.depends_on.is_empty() {
                 continue;
             }
             // All deps must be in completed, and all must be skipped
             let all_deps_completed = step.depends_on.iter().all(|d| completed.contains(d));
             let all_deps_skipped = step.depends_on.iter().all(|d| skipped.contains(d));
-            if all_deps_completed && all_deps_skipped {
+            if !all_deps_completed || !all_deps_skipped {
+                continue;
+            }
+            // spec 2026-09-09 §2.5 (revision 3): the flag is read from each
+            // skipped dependency's own definition, not from this step.
+            let all_deps_cws = step.depends_on.iter().all(|d| {
+                flow.get(d)
+                    .map(|f| f.continue_when_skipped)
+                    .unwrap_or(false)
+            });
+            if !all_deps_cws {
                 newly_skipped.push(name.clone());
             }
         }
@@ -976,11 +990,13 @@ mod tests {
 
     #[test]
     fn test_cascade_skip_respects_continue_when_skipped() {
+        // The flag lives on the skipped dependency ("a"), not on the
+        // dependent ("b") — spec 2026-09-09 revision 3.
         let mut flow = HashMap::new();
-        flow.insert("a".to_string(), make_step("act", vec![]));
-        let mut b = make_step("act", vec!["a"]);
-        b.continue_when_skipped = true;
-        flow.insert("b".to_string(), b);
+        let mut a = make_step("act", vec![]);
+        a.continue_when_skipped = true;
+        flow.insert("a".to_string(), a);
+        flow.insert("b".to_string(), make_step("act", vec!["a"]));
         flow.insert("c".to_string(), make_step("act", vec!["b"]));
 
         let mut completed = HashSet::new();
@@ -1120,6 +1136,11 @@ tasks:
 
     #[tokio::test]
     async fn test_run_continue_when_skipped_runs_after_false_condition() {
+        // The flag lives on the skipped dependency, not the dependent (spec
+        // 2026-09-09 revision 3), and applies uniformly to everything that
+        // depends on it. `check_cws` opts its own skip into being tolerated
+        // (so `report` runs); the plain `check` does not (so `follow`
+        // cascade-skips).
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("test.yaml"),
@@ -1134,10 +1155,13 @@ tasks:
       check:
         action: greet
         when: "false"
+      check_cws:
+        action: greet
+        when: "false"
+        continue_when_skipped: true
       report:
         action: greet
-        depends_on: [check]
-        continue_when_skipped: true
+        depends_on: [check_cws]
       follow:
         action: greet
         depends_on: [check]
@@ -1154,7 +1178,10 @@ tasks:
             .await
             .unwrap();
         assert_eq!(summary.completed, 1, "report ran");
-        assert_eq!(summary.skipped, 2, "check (condition) and follow (cascade)");
+        assert_eq!(
+            summary.skipped, 3,
+            "check, check_cws (condition) and follow (cascade)"
+        );
         assert_eq!(summary.failed, 0);
     }
 

@@ -265,10 +265,18 @@ fn validate_workflow_config_inner(
                 ));
             }
 
-            // Warn if continue_when_skipped without depends_on
-            if step.continue_when_skipped && step.depends_on.is_empty() {
+            // Warn if continue_when_skipped on a step nothing depends on: the
+            // flag is read from a dependency's own definition (by the steps
+            // that depend on it), so it has no effect unless some other step
+            // in the flow lists this one in its depends_on.
+            if step.continue_when_skipped
+                && !task
+                    .flow
+                    .values()
+                    .any(|other| other.depends_on.iter().any(|d| d == step_name))
+            {
                 warnings.push(format!(
-                    "Task '{}' step '{}' has continue_when_skipped: true but no depends_on — the flag has no effect",
+                    "Task '{}' step '{}' has continue_when_skipped: true but no step depends on it — the flag has no effect",
                     task_name,
                     step_name
                 ));
@@ -6155,7 +6163,7 @@ tasks:
     }
 
     #[test]
-    fn test_continue_when_skipped_without_depends_on_warns() {
+    fn test_continue_when_skipped_without_dependents_warns() {
         let yaml = r#"
 actions:
   process:
@@ -6173,14 +6181,16 @@ tasks:
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("continue_when_skipped") && w.contains("no depends_on")),
-            "Expected warning about continue_when_skipped without depends_on, got: {:?}",
+                .any(|w| w.contains("continue_when_skipped") && w.contains("no step depends on it")),
+            "Expected warning about continue_when_skipped without dependents, got: {:?}",
             warnings
         );
     }
 
     #[test]
-    fn test_continue_when_skipped_with_depends_on_does_not_warn() {
+    fn test_continue_when_skipped_with_depends_on_still_warns_without_dependents() {
+        // The flag on `step` is read by whatever depends on `step`, not by what
+        // `step` itself depends on — having its own depends_on doesn't help.
         let yaml = r#"
 actions:
   process:
@@ -6195,6 +6205,34 @@ tasks:
         action: process
         depends_on: [first]
         continue_when_skipped: true
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("continue_when_skipped") && w.contains("no step depends on it")),
+            "Expected warning about continue_when_skipped without dependents, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_continue_when_skipped_with_dependent_does_not_warn() {
+        let yaml = r#"
+actions:
+  process:
+    type: script
+    script: echo hello
+tasks:
+  main:
+    flow:
+      step:
+        action: process
+        continue_when_skipped: true
+      after:
+        action: process
+        depends_on: [step]
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let warnings = validate_workflow_config(&config).unwrap();
