@@ -26998,3 +26998,209 @@ async fn test_parent_dispatch_error_escapes_but_approvals_still_dispatch() -> Re
 
     Ok(())
 }
+
+// ─── Agent prompt render failure fails the step with the REAL cause ───
+//
+// Regression (2026-09-11): `claim_job` caught a `prompt`/`system_prompt` render
+// error, logged it at `warn`, and passed `None` to the worker. The worker then
+// failed the step with "Agent step has no rendered prompt" — the actual cause
+// never reached the job log. (A failing `system_prompt` was worse: the worker
+// has no guard for it, so the agent ran WITHOUT its system prompt.)
+//
+// This test pins the WIRING, not the helper: it fails if `claim_job` goes back
+// to swallowing the error, which the unit tests on `render_agent_prompts`
+// alone cannot detect.
+#[tokio::test]
+async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-abc123"),
+        None,
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "think".to_string(),
+        action_name: "assistant".to_string(),
+        action_type: "agent".to_string(),
+        action_image: None,
+        // `nonexistent_var` is not in any render context, so Tera errors.
+        action_spec: Some(json!({
+            "type": "agent",
+            "provider": "anthropic",
+            "prompt": "summarise {{ nonexistent_var }}"
+        })),
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "agent".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-agent", "capabilities": ["agent"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["agent"]}),
+        ))
+        .await?;
+
+    // The claim must be rejected outright, not answered with a promptless step.
+    assert_eq!(
+        response.status(),
+        422,
+        "an unrenderable agent prompt must fail the claim"
+    );
+    let body = body_json(response).await;
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("nonexistent_var"),
+        "claim error must name the unresolvable variable, got: {err}"
+    );
+
+    // …and the persisted step error must carry the real cause, not the
+    // worker's downstream "Agent step has no rendered prompt".
+    let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = rows.iter().find(|s| s.step_name == "think").unwrap();
+    assert_eq!(step.status, "failed");
+    let stored = step.error_message.clone().unwrap_or_default();
+    assert!(
+        stored.contains("nonexistent_var"),
+        "persisted error must name the unresolvable variable, got: {stored}"
+    );
+    assert!(
+        !stored.contains("has no rendered prompt"),
+        "persisted error must be the real cause, not the downstream symptom: {stored}"
+    );
+
+    Ok(())
+}
+
+// ─── An agent step inside a for_each can reference {{ each.item }} ───
+//
+// `build_step_render_context` never injects `each`; two of its callers
+// (`settlement::dispatch`) patch it in afterwards and the agent path at
+// `claim_job` did not. So an agent step inside a `for_each` could not use
+// `{{ each.item }}` in its prompt: the render failed, and the error was
+// swallowed into `None`. Now that a render failure fails the step, closing
+// this gap is required — otherwise making the failure loud would break loops
+// that legitimately reference the loop variable.
+#[tokio::test]
+async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-abc123"),
+        None,
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "think[0]".to_string(),
+        action_name: "assistant".to_string(),
+        action_type: "agent".to_string(),
+        action_image: None,
+        action_spec: Some(json!({
+            "type": "agent",
+            "provider": "anthropic",
+            "prompt": "summarise {{ each.item }}",
+            "system_prompt": "item {{ each.index }} of {{ each.total }}"
+        })),
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "agent".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: Some("think".to_string()),
+        loop_index: Some(0),
+        loop_total: Some(3),
+        loop_item: Some(json!("alpha")),
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-loop-agent", "capabilities": ["agent"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["agent"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        200,
+        "a loop-instance agent step using {{ each.item }} must claim successfully"
+    );
+    let body = body_json(response).await;
+    assert_eq!(body["agent_prompt"].as_str().unwrap(), "summarise alpha");
+    assert_eq!(body["agent_system_prompt"].as_str().unwrap(), "item 0 of 3");
+
+    Ok(())
+}

@@ -736,38 +736,40 @@ pub async fn claim_job(
         let provider_name = action_def.as_ref().and_then(|a| a.provider.clone());
 
         // Reuse the full steps list fetched earlier — avoids a second DB round-trip.
-        let render_ctx = if let Some(ref workspace) = ws_config {
+        let mut render_ctx = if let Some(ref workspace) = ws_config {
             crate::job_creator::build_step_render_context(&job, &all_steps_for_job, workspace)
         } else {
             serde_json::json!({})
         };
 
-        // Render prompt and system_prompt templates
-        let prompt = action_def
-            .as_ref()
-            .and_then(|a| a.prompt.as_deref())
-            .and_then(
-                |tmpl| match stroem_common::template::render_template(tmpl, &render_ctx) {
-                    Ok(rendered) => Some(rendered),
-                    Err(e) => {
-                        tracing::warn!("Failed to render agent prompt template: {:#}", e);
-                        None
-                    }
-                },
-            );
+        // `build_step_render_context` does not inject `each`; `settlement::dispatch`
+        // patches it in after the call and this path did not, so an agent step
+        // inside a `for_each` could not reference the loop variable. Mirror the
+        // same injection here. Consolidating all of this behind one owner is the
+        // subject of docs/superpowers/specs/2026-09-11-render-context-owner-design.md.
+        if let (Some(ref loop_item), Some(loop_index)) = (&step.loop_item, step.loop_index) {
+            if let Some(ctx_obj) = render_ctx.as_object_mut() {
+                ctx_obj.insert(
+                    "each".to_string(),
+                    json!({
+                        "item": loop_item,
+                        "index": loop_index,
+                        "total": step.loop_total,
+                    }),
+                );
+            }
+        }
 
-        let system = action_def
-            .as_ref()
-            .and_then(|a| a.system_prompt.as_deref())
-            .and_then(
-                |tmpl| match stroem_common::template::render_template(tmpl, &render_ctx) {
-                    Ok(rendered) => Some(rendered),
-                    Err(e) => {
-                        tracing::warn!("Failed to render agent system_prompt template: {:#}", e);
-                        None
-                    }
-                },
-            );
+        // Render prompt and system_prompt templates. A render failure is an
+        // author error: fail the step with the real cause instead of swallowing
+        // it into `None` (see `render_agent_prompts`).
+        let (prompt, system) = match render_agent_prompts(action_def.as_ref(), &render_ctx) {
+            Ok(pair) => pair,
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
+            }
+        };
 
         // MCP servers: only send servers referenced by the step's tools
         let mcp = if let (Some(ref action), Some(ref ws)) = (&action_def, &ws_config) {
@@ -1254,6 +1256,38 @@ fn format_ha_mirror_failure_message(failed_segments: usize, last_error: Option<&
     )
 }
 
+/// Render an agent step's `prompt` and `system_prompt` templates.
+///
+/// A render failure is an author error (an unresolvable variable, a malformed
+/// expression) and is returned as `Err` so the caller can fail the step with the
+/// real cause. It must never be swallowed into `None`: the worker cannot tell
+/// "the template failed" from "no prompt was configured", so a failed `prompt`
+/// surfaces as the misleading "Agent step has no rendered prompt", and a failed
+/// `system_prompt` is not checked at all — the agent would run without one.
+fn render_agent_prompts(
+    action: Option<&stroem_common::models::workflow::ActionDef>,
+    ctx: &serde_json::Value,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let Some(action) = action else {
+        return Ok((None, None));
+    };
+    let render = |tmpl: &str, field: &str| -> anyhow::Result<String> {
+        stroem_common::template::render_template(tmpl, ctx)
+            .with_context(|| format!("Failed to render agent {field} template"))
+    };
+    let prompt = action
+        .prompt
+        .as_deref()
+        .map(|t| render(t, "prompt"))
+        .transpose()?;
+    let system = action
+        .system_prompt
+        .as_deref()
+        .map(|t| render(t, "system_prompt"))
+        .transpose()?;
+    Ok((prompt, system))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1734,5 +1768,65 @@ mod tests {
         let msg = format_ha_mirror_failure_message(1, Some(&s));
         // Must not panic, and the message must contain the truncation marker.
         assert!(msg.contains("(truncated)"));
+    }
+
+    // ── Agent prompt rendering ────────────────────────────────────────
+    //
+    // Regression (2026-09-11): a `prompt` / `system_prompt` template that failed
+    // to render was caught in `claim_job`, logged at `warn`, and turned into
+    // `None`. Two bad outcomes followed, neither of which reached the job log the
+    // user actually reads:
+    //   * `prompt`        → the worker failed the step with the misleading
+    //                       "Agent step has no rendered prompt"
+    //                       (`agent_executor.rs`), hiding the real cause.
+    //   * `system_prompt` → no guard at all on the worker, so the agent silently
+    //                       ran WITHOUT its system prompt.
+    // A render failure is an author error and must surface as one.
+
+    fn agent_action(yaml: &str) -> stroem_common::models::workflow::ActionDef {
+        serde_yaml::from_str(yaml).expect("valid action yaml")
+    }
+
+    #[test]
+    fn test_agent_prompt_render_failure_is_an_error() {
+        let action = agent_action("type: agent\nprompt: \"run {{ each.item }}\"\n");
+        let err = render_agent_prompts(Some(&action), &serde_json::json!({}))
+            .expect_err("an unresolvable prompt template must be an error, not None");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("each"),
+            "error must name the unresolvable variable, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_agent_system_prompt_render_failure_is_an_error() {
+        let action =
+            agent_action("type: agent\nprompt: hi\nsystem_prompt: \"be {{ missing_var }}\"\n");
+        let err = render_agent_prompts(Some(&action), &serde_json::json!({}))
+            .expect_err("an unresolvable system_prompt template must be an error, not None");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing_var"),
+            "error must name the unresolvable variable, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_agent_prompts_render_against_context() {
+        let action = agent_action(
+            "type: agent\nprompt: \"run {{ each.item }}\"\nsystem_prompt: \"rev {{ job.revision }}\"\n",
+        );
+        let ctx =
+            serde_json::json!({ "each": { "item": "alpha" }, "job": { "revision": "abc123" } });
+        let (prompt, system) = render_agent_prompts(Some(&action), &ctx).expect("renders");
+        assert_eq!(prompt.as_deref(), Some("run alpha"));
+        assert_eq!(system.as_deref(), Some("rev abc123"));
+    }
+
+    #[test]
+    fn test_agent_prompts_absent_action_is_not_an_error() {
+        let (prompt, system) = render_agent_prompts(None, &serde_json::json!({})).expect("ok");
+        assert!(prompt.is_none() && system.is_none());
     }
 }

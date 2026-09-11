@@ -353,6 +353,19 @@ Both `prompt` and `system_prompt` are Tera templates. They're rendered at step e
 | `input.*` | Job-level input |
 | `<step_name>.output.*` | Output from completed upstream steps |
 | `secret.*` | Workspace secrets |
+| `job.revision` | Workspace revision pinned on the job at creation |
+| `each.item` / `each.index` / `each.total` | Loop variables, when the agent step is an instance of a [`for_each` loop](/guides/loops/) |
+
+:::caution[A template that cannot be rendered fails the step]
+If `prompt` or `system_prompt` references a variable that does not resolve, the
+step fails at claim time with the underlying Tera error (for example
+`Variable 'nonexistent' not found`), and that message is recorded on the step.
+
+Earlier versions swallowed the render error: a failing `prompt` surfaced as the
+misleading `Agent step has no rendered prompt`, and a failing `system_prompt`
+was ignored entirely — the agent ran **without** its system prompt. Both now
+report the real cause.
+:::
 
 **Example with templating:**
 
