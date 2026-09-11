@@ -100,7 +100,7 @@ tasks:
         action: renew-ssl
         depends_on: [check-expiry]
         # Only run if no previous state, or less than 30 days remain
-        when: "not state or state.days_remaining < 30"
+        when: "{{ not state or state.days_remaining < 30 }}"
         input:
           domain: "{{ input.domain }}"
 
@@ -241,7 +241,7 @@ tasks:
       - name: renew
         action: renew-ssl
         depends_on: [check]
-        when: "not state or state.days_remaining < 30"
+        when: "{{ not state or state.days_remaining < 30 }}"
 ```
 
 ### Incremental processing with cursors

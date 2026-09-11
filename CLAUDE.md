@@ -297,7 +297,7 @@ Everything a job owes after one of its steps moves (or a job was created, or can
 - DB: `task_state` table tracks snapshots (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, created_at)
 - State resolved at **claim time** (not job creation) — enables intra-job state propagation for sequential steps
 - Worker API: `GET /worker/state/{ws}/{task}` (download), `POST /worker/state/{ws}/{task}/{job_id}` (upload)
-- Tera templates: `{{ state.key }}` and `when: "not state or state.days_remaining < 30"`
+- Tera templates: `{{ state.key }}` and `when: "{{ not state or state.days_remaining < 30 }}"` — a `when` expression MUST be wrapped in `{{ }}`; `evaluate_condition` (`template.rs:338`) renders the string and tests truthiness, so a bare expression renders to itself and is ALWAYS true (a silent no-op)
 - Config: optional `state_storage` section (prefix, max_snapshots, optional archive override). Defaults to log archive backend.
 - Retention: `max_snapshots` per task (default 5), pruned on upload
 - Runners: Shell (env vars), Docker (bind mounts `/state:ro` + `/state-out:rw`), Kube (emptyDir volumes)
