@@ -67,6 +67,14 @@ async fn fail_task_step(
     task: &stroem_common::models::workflow::TaskDef,
     workspace_config: &WorkspaceConfig,
 ) -> Result<()> {
+    // Two of the callers pass a Tera render error (task-step input, approval
+    // message), and Tera quotes the offending value — so a template touching
+    // `{{ secret.* }}` embeds the secret. Scrub here, the single choke point
+    // both reach, before the message is logged or persisted to
+    // `job_step.error_message` / `retry_history`.
+    let secret_values = crate::workspace_set::collect_config_secret_values(workspace_config);
+    let err = &crate::workspace_set::redact_secrets_in_str(err, &secret_values)[..];
+
     tracing::error!("{}", err);
     JobStepRepo::mark_failed(pool, job_id, step_name, err).await?;
     orchestrate_after_server_step_failure(pool, job_id, step_name, task, workspace_config).await;

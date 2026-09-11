@@ -27204,3 +27204,115 @@ async fn test_claim_renders_each_item_in_agent_prompt_for_loop_instance() -> Res
 
     Ok(())
 }
+
+// ─── Claim-time render errors must not leak secret values ───
+//
+// Security regression (2026-09-11): Tera embeds the offending value in filter
+// error messages — `{{ secret.X | round }}` yields
+//   Filter `round` was called on an incorrect value: got "<the secret>" …
+// `claim_job` formats that chain with `format!("{:#}", e)` and hands it to
+// `fail_claimed_step`, which appends it to the job log, persists it to
+// `job_step.error_message` AND `retry_history`, and returns it in the 422 body.
+// `redact_response` masks `error_message` on read but not `retry_history`, and
+// neither the job log nor the worker response is redacted at all. Scrub at the
+// source so the value never reaches the database.
+#[tokio::test]
+async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+
+    // `db.internal.prod` is a literal secret value in the test workspace
+    // (secrets.db.host), so it is one of the collected redaction values.
+    const SECRET_VALUE: &str = "db.internal.prod";
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-abc123"),
+        None,
+    )
+    .await?;
+
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "leaky".to_string(),
+        action_name: "greet".to_string(),
+        action_type: "script".to_string(),
+        action_image: None,
+        // `round` on a string is a filter type error; Tera puts the value in it.
+        action_spec: Some(json!({"script": "echo {{ secret.db.host | round }}"})),
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let response = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "worker-leak", "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let worker_id = body_json(response).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(
+        response.status(),
+        422,
+        "the render error must fail the step"
+    );
+    let body = body_json(response).await;
+    let err = body["error"].as_str().unwrap_or_default();
+
+    assert!(
+        !err.contains(SECRET_VALUE),
+        "422 response leaked the secret value: {err}"
+    );
+    assert!(
+        err.contains("round"),
+        "the error must still say what went wrong: {err}"
+    );
+
+    // The persisted step error must be scrubbed too — this is what
+    // `GET /api/jobs/{id}` and the job log surface.
+    let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let step = rows.iter().find(|s| s.step_name == "leaky").unwrap();
+    let stored = step.error_message.clone().unwrap_or_default();
+    assert!(
+        !stored.contains(SECRET_VALUE),
+        "persisted error_message leaked the secret value: {stored}"
+    );
+
+    Ok(())
+}

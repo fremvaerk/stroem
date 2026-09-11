@@ -116,3 +116,11 @@ Any backend supported by vals works:
 ### API redaction
 
 Secret values are automatically redacted from API responses. When you view a job via `GET /api/jobs/:id`, any field (job input/output, step input/output) that contains a known secret value will have it replaced with `••••••`. Substring matches are also redacted. Additionally, unresolved `ref+` references are redacted to avoid leaking secret-manager paths.
+
+Step `error_message` and `retry_history` are redacted the same way. This matters
+because a template error can quote the value that caused it — for example
+`{{ secret.db_host | round }}` fails with ``Filter `round` was called on an
+incorrect value: got "…"``, embedding the secret in the message. Errors raised
+while rendering a step at claim time are scrubbed **before** they are written,
+so the value is never stored in the database or sent to the worker, and the
+error still names the filter and field that failed.

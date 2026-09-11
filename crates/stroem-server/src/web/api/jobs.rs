@@ -481,7 +481,7 @@ pub async fn get_job(
     Ok(Json(response))
 }
 
-const REDACTED: &str = "••••••";
+use crate::workspace_set::{redact_secrets_in_str, REDACTED};
 
 /// Replace secret values and `ref+` references in a JSON tree with REDACTED.
 fn redact_json(value: &mut serde_json::Value, secret_values: &[String]) {
@@ -491,11 +491,7 @@ fn redact_json(value: &mut serde_json::Value, secret_values: &[String]) {
                 *s = REDACTED.to_string();
                 return;
             }
-            for secret in secret_values {
-                if s.contains(secret.as_str()) {
-                    *s = s.replace(secret.as_str(), REDACTED);
-                }
-            }
+            *s = redact_secrets_in_str(s, secret_values);
         }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
@@ -531,6 +527,11 @@ fn redact_response(response: &mut JobDetailResponse, secret_values: &[String]) {
         }
         if let Some(error_message) = step.get_mut("error_message") {
             redact_json(error_message, secret_values);
+        }
+        // Every previous attempt's error, including claim-time render errors
+        // that quote a secret value.
+        if let Some(retry_history) = step.get_mut("retry_history") {
+            redact_json(retry_history, secret_values);
         }
     }
 }
@@ -1295,6 +1296,34 @@ mod tests {
         assert_eq!(value["key"], json!(REDACTED));
     }
 
+    fn job_detail_fixture() -> JobDetailResponse {
+        JobDetailResponse {
+            job_id: Uuid::nil(),
+            workspace: "default".to_string(),
+            task_name: "test".to_string(),
+            mode: "normal".to_string(),
+            input: None,
+            raw_input: None,
+            output: None,
+            status: "failed".to_string(),
+            source_type: "api".to_string(),
+            source_id: None,
+            source_job_id: None,
+            restart_from_step: None,
+            parent_job_id: None,
+            revision: None,
+            worker_id: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            completed_at: None,
+            steps: vec![],
+            retry_of_job_id: None,
+            retry_job_id: None,
+            retry_attempt: 0,
+            max_retries: None,
+        }
+    }
+
     #[test]
     fn test_redact_response() {
         let secrets = vec!["my-secret-token".to_string()];
@@ -1339,6 +1368,30 @@ mod tests {
             response.steps[0]["error_message"],
             json!(format!("failed to connect: {REDACTED} rejected"))
         );
+    }
+
+    /// Security regression (2026-09-11): `retry_history` carries the error from
+    /// every previous attempt, including claim-time render errors that quote a
+    /// secret value. `redact_response` masked `error_message` but not
+    /// `retry_history`, so `GET /api/jobs/{id}` returned it unredacted.
+    #[test]
+    fn test_redact_response_redacts_retry_history() {
+        let secrets = vec!["my-secret-token".to_string()];
+        let mut response = job_detail_fixture();
+        response.steps = vec![json!({
+            "step_name": "deploy",
+            "retry_history": [
+                {"attempt": 1, "error": "boom: my-secret-token rejected"},
+                {"attempt": 2, "error": "still my-secret-token"}
+            ]
+        })];
+        redact_response(&mut response, &secrets);
+        let history = &response.steps[0]["retry_history"];
+        assert_eq!(
+            history[0]["error"],
+            json!(format!("boom: {REDACTED} rejected"))
+        );
+        assert_eq!(history[1]["error"], json!(format!("still {REDACTED}")));
     }
 
     #[test]

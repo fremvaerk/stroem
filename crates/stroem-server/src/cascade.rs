@@ -694,6 +694,24 @@ pub fn run(
         }
         changes.extend(pass);
     }
+    // Scrub secret values out of every failure message before the plan leaves
+    // this function. `build_step_render_context` puts the workspace secrets
+    // into the `when` / `for_each` context, and Tera quotes the offending value
+    // in filter and type errors — so an author error touching `{{ secret.* }}`
+    // would otherwise be persisted verbatim to `job_step.error_message` and
+    // `retry_history`. Only the failure path pays for this.
+    if let Some(cfg) = workspace_config {
+        if changes.iter().any(|c| matches!(c, Change::Fail { .. })) {
+            let secret_values = crate::workspace_set::collect_config_secret_values(cfg);
+            if !secret_values.is_empty() {
+                for change in changes.iter_mut() {
+                    if let Change::Fail { error, .. } = change {
+                        *error = crate::workspace_set::redact_secrets_in_str(error, &secret_values);
+                    }
+                }
+            }
+        }
+    }
     Ok(Plan { changes })
 }
 
@@ -1235,6 +1253,40 @@ mod tests {
             _ => None,
         });
         assert!(err.unwrap().starts_with("when condition error: "));
+    }
+
+    /// Security regression (2026-09-11): `build_step_render_context` puts the
+    /// workspace secrets into the `when` context, and Tera quotes the offending
+    /// value in filter/type errors. The resulting `Change::Fail` error is
+    /// persisted to `job_step.error_message` and `retry_history`, so it must be
+    /// scrubbed before it leaves `run`.
+    #[test]
+    fn when_condition_error_does_not_leak_secret_values() {
+        let t = task(vec![("a", fs(&[])), ("e", fs(&["a"]))]);
+        let mut w = ws();
+        w.secrets
+            .insert("db".to_string(), json!({"host": "db.internal.prod"}));
+        let rows = vec![
+            row("a", "completed"),
+            row_when("e", "pending", "{{ secret.db.host | round }}"),
+        ];
+        let plan = run(&t, &job(None), &rows, Some(&w)).unwrap();
+        let err = plan
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                Change::Fail { step, error } if step == "e" => Some(error.clone()),
+                _ => None,
+            })
+            .expect("step e must fail");
+        assert!(
+            !err.contains("db.internal.prod"),
+            "when condition error leaked a secret value: {err}"
+        );
+        assert!(
+            err.contains("round"),
+            "the error must still name the failing filter: {err}"
+        );
     }
 
     #[test]

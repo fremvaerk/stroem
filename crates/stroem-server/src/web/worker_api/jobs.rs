@@ -367,7 +367,17 @@ async fn fail_claimed_step(
     job_id: Uuid,
     step_name: &str,
     error_msg: &str,
+    ws_set: &crate::workspace_set::WorkspaceSet<'_>,
 ) -> Response {
+    // Tera quotes the offending value in filter/type errors, so a render error
+    // touching `{{ secret.* }}` embeds the secret verbatim. Scrub it here, at
+    // the single choke point every claim-time render failure passes through:
+    // everything below persists or returns this string (job log,
+    // `job_step.error_message`, `retry_history`, the 422 body), and only
+    // `error_message` is masked again on read.
+    let secret_values = crate::workspace_set::collect_redaction_values(ws_set);
+    let error_msg = &crate::workspace_set::redact_secrets_in_str(error_msg, &secret_values)[..];
+
     tracing::error!(
         job_id = %job_id,
         step_name = %step_name,
@@ -638,7 +648,9 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("Failed to render step input template: {:#}", e);
-                return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
+                return Ok(
+                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
+                );
             }
         };
 
@@ -646,7 +658,9 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("{:#}", e);
-                return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
+                return Ok(
+                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
+                );
             }
         }
     } else {
@@ -683,7 +697,9 @@ pub async fn claim_job(
         Ok(spec) => spec,
         Err(e) => {
             let msg = format!("{:#}", e);
-            return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
+            return Ok(
+                fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
+            );
         }
     };
 
@@ -701,7 +717,9 @@ pub async fn claim_job(
         Ok(img) => img,
         Err(e) => {
             let msg = format!("{:#}", e);
-            return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
+            return Ok(
+                fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
+            );
         }
     };
 
@@ -767,7 +785,9 @@ pub async fn claim_job(
             Ok(pair) => pair,
             Err(e) => {
                 let msg = format!("{:#}", e);
-                return Ok(fail_claimed_step(&state, step.job_id, &step.step_name, &msg).await);
+                return Ok(
+                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
+                );
             }
         };
 

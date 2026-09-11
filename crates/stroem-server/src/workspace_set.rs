@@ -94,6 +94,44 @@ impl WorkspaceLookup for WorkspaceSet<'_> {
 /// Every string that must be masked in job-detail responses: all workspaces'
 /// `secrets` values plus the values of connection properties whose type marks
 /// them `secret: true`. Strings of 3 chars or fewer are dropped (existing rule).
+/// Secret value strings declared by a single workspace config.
+///
+/// The cascade and settlement render against one `WorkspaceConfig` and put its
+/// `secrets` into the template context, but they are pure / transaction-scoped
+/// and cannot build a [`WorkspaceSet`], so they scrub against this narrower set
+/// rather than [`collect_redaction_values`].
+pub fn collect_config_secret_values(cfg: &WorkspaceConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in cfg.secrets.values() {
+        collect_strings(value, &mut out);
+    }
+    out
+}
+
+/// Mask used wherever a secret value is scrubbed out of user-visible text.
+pub const REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
+/// Replace every occurrence of a known secret value in `s` with [`REDACTED`].
+///
+/// Used for free text that can embed a secret without any JSON structure to
+/// key off — notably Tera error messages, which quote the offending value
+/// (`Filter `round` was called on an incorrect value: got `"<secret>"``). Those
+/// messages are persisted to `job_step.error_message` and `retry_history`,
+/// appended to the job log, and returned to the worker, so they must be
+/// scrubbed at the point of failure rather than only on read.
+pub fn redact_secrets_in_str(s: &str, secret_values: &[String]) -> String {
+    let mut out = s.to_string();
+    for secret in secret_values {
+        if secret.is_empty() {
+            continue;
+        }
+        if out.contains(secret.as_str()) {
+            out = out.replace(secret.as_str(), REDACTED);
+        }
+    }
+    out
+}
+
 pub fn collect_redaction_values(set: &WorkspaceSet) -> Vec<String> {
     let mut out = Vec::new();
     for (ws_name, cfg) in set.iter_configs() {
@@ -218,6 +256,30 @@ mod tests {
         let set = WorkspaceSet::load(&mgr, "A", None).await;
         assert!(matches!(set.get("broken"), Lookup::Unavailable));
         assert!(matches!(set.get("nonexistent"), Lookup::Unknown));
+    }
+
+    #[test]
+    fn redact_secrets_in_str_replaces_every_occurrence() {
+        let secrets = vec!["s3cr3t".to_string()];
+        let out = redact_secrets_in_str("got `s3cr3t` and again s3cr3t", &secrets);
+        assert_eq!(out, format!("got `{REDACTED}` and again {REDACTED}"));
+    }
+
+    #[test]
+    fn redact_secrets_in_str_leaves_unrelated_text_alone() {
+        let secrets = vec!["s3cr3t".to_string()];
+        let msg = "Filter `round` was called on an incorrect value";
+        assert_eq!(redact_secrets_in_str(msg, &secrets), msg);
+    }
+
+    /// An empty secret value must be skipped: `str::replace` with an empty
+    /// pattern inserts the replacement between EVERY character, which would
+    /// destroy the message (and hide the real error) rather than redact it.
+    #[test]
+    fn redact_secrets_in_str_ignores_empty_secret_values() {
+        let secrets = vec![String::new(), "s3cr3t".to_string()];
+        let out = redact_secrets_in_str("a s3cr3t b", &secrets);
+        assert_eq!(out, format!("a {REDACTED} b"));
     }
 
     #[test]
