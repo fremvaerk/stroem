@@ -111,6 +111,15 @@ tasks:
           domain: "{{ state.domain | default(value='example.com') }}"
 ```
 
+:::caution[Not yet available in `when:` — lands in 0.16.4]
+Today `state` and `global_state` are only visible to a step's `input:` mapping
+and to the action body (`script`, `cmd`, `env`, `args`, `manifest`). A `when:`
+condition is evaluated before the snapshot is resolved, so `{{ state.x }}` there
+is always undefined and `not state` is always true — this example currently runs
+the step on every pass. 0.16.4 resolves the snapshot for every template field
+(see `docs/superpowers/specs/2026-09-11-render-context-owner-design.md`).
+:::
+
 If no previous state exists, the `state` object is not present in the template context — use `not state` to guard operations.
 
 ## Runner behavior
