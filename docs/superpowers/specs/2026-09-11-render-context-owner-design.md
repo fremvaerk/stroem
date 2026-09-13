@@ -1,6 +1,6 @@
 # One Owner for the Step Render Context — Design
 
-Status: revision 8, proposed
+Status: revision 9, proposed
 Ships in: 0.16.4 (patch; additive migration 047; documented behaviour changes, §6)
 
 Addresses candidate 4 of the 11 September 2026 architecture review, which ranked
@@ -8,6 +8,16 @@ it the top recommendation. Line numbers cite `main` at `9916985` (spec-only
 commits since `fba4e87`; code lines unchanged).
 
 ## Revision history
+
+**Revision 9 (2026-09-13).** Revision 8's review closed three of four
+findings and left one, exact: a `json` column is not enough on its own,
+because sqlx 0.8.6 encodes `serde_json::Value` as a **JSONB parameter** on
+the wire regardless of the target column's type
+(`sqlx-postgres-0.8.6/src/types/json.rs:17`), so the NUL escape would be
+rejected at bind time before the column is reached. The write path binds
+the serialized sidecar as text and casts in SQL (`$N::json`); reads into
+`Value` are unaffected (§3.4). A round-trip test with a NUL escape pins it
+(§5).
 
 **Revision 8 (2026-09-13).** Revision 7's review found the scope cut clean —
 no citation stale, nothing remaining that depends on the storage design —
@@ -340,7 +350,17 @@ may be NULL with `has_json` true (unparseable sidecar; or a row written
 before 047 or by a pre-047 replica), which rendering treats as "no parsed
 state".
 
-`insert_and_prune` (both repos) gains `state_json: Option<serde_json::Value>`.
+`insert_and_prune` (both repos) gains `state_json: Option<serde_json::Value>`
+and **binds it as text with an SQL cast** — `serde_json::to_string(&v)` bound
+as `Option<String>`, and `$N::json` in the `INSERT` — not as a `Value`. sqlx
+0.8.6 encodes `serde_json::Value` through `Json<T>`, whose parameter type is
+JSONB (`sqlx-postgres-0.8.6/src/types/json.rs:17`) and is sent at statement
+preparation whatever the column is; a NUL escape would be rejected at bind
+time, and the upload's compensation would then delete the blob it had just
+stored (`state.rs:439`). Text-plus-cast makes Postgres parse it as `json`,
+which accepts the escape. Reading the column back into
+`Option<serde_json::Value>` is unaffected: the decode path accepts both
+`json` and `jsonb` and hands the bytes to `serde_json::from_slice`.
 `TaskStateRow` / `WorkspaceStateRow` gain the field, and **all six** readers
 project it: `get_latest`, `get`, `list` in `task_state.rs:29`, `:46`, `:153`
 and `workspace_state.rs:25`, `:41`, `:146`.
@@ -542,7 +562,10 @@ named `input`.
 
 **Persistence tests.** Each of the four upload sites writes `state_json`
 equal to what `extract_state_json` returns for the same bytes, and NULL when
-the flag is false (integration, one per site). Each of the six readers
+the flag is false (integration, one per site). **A sidecar containing a NUL
+escape** (`{"cursor":"a\u0000b"}`) round-trips through `insert_and_prune`
+and `get_latest` unchanged — this is the test that fails if anyone binds the
+value as `serde_json::Value` again. Each of the six readers
 returns the column. `latest_snapshots`: no rows; a row without JSON; a row
 with JSON; a lookup error yields `None` without failing. `claim_job` with a
 row lacking the column renders from the archive and does not write back.
