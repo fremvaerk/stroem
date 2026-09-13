@@ -21,8 +21,14 @@ tarball in the archive. The pairing is not stable.
 `{prefix}__global__/{ws}/{job_id}.tar.gz`, `:57-62`). The blob is stored
 before the row is inserted (`state.rs:404` then `:423`). A job whose
 sequential steps each write state produces N rows that all name the same
-blob, which holds only the last upload. Under "A stores; B stores and
-commits; A commits", the latest row is A and the blob is B.
+blob, which holds only the last upload. The schedule that makes row and blob
+disagree: A stores under K and pauses **before** `pool.begin()`
+(`state.rs:404` → `:413`); B stores under K, begins, inserts, commits; A
+begins — `created_at` is transaction-start `NOW()` (`028_task_state.sql:9`),
+so A's is later than B's — inserts, commits. `get_latest` orders by
+`created_at, id` (`task_state.rs:33`): A is latest, K holds B. (If A had
+begun its transaction before B, B would be latest and the pair would agree;
+the pause must fall between store and begin.)
 
 **(ii) The worker does not download what the claim named.** The claim
 response carries `state_storage_key` (`jobs.rs:533-606`), but the worker
@@ -42,6 +48,15 @@ deletes the blob the newer, retained row points at. Data loss today. Any
 re-keying must also handle the transition: legacy rows sharing a key survive
 until all but one are pruned, and the last prune of a shared key must not
 delete it while a sibling remains.
+
+**(iii-b) A failed upload's compensation deletes a shared blob.** The
+handler stores the blob first, then deletes it if beginning the transaction,
+inserting, or committing fails (`state.rs:416`, `:439`, `:453`; the API path
+likewise). With (i), the deleted key is K, still referenced by every retained
+row of the same job — they are left with no blob. This branch is independent
+of pruning, so a surviving-reference check on prune does not cover it; the
+compensation must either apply the same check or, once keys are per snapshot,
+only ever delete the blob it just created.
 
 **(iv) Extractor semantics are order-dependent and disagree with the
 worker.** `extract_state_json` returns the *first* `state.json` at any depth
@@ -80,10 +95,18 @@ before migration 047, or by a pre-047 replica during rollout, have no
    whether `has_json` is trusted or derived; state the compatibility
    consequence for existing flagged nested-only snapshots (`state.rs:293`).
 5. **Backfill of `state_json`** for rows written before 047 or by pre-047
-   replicas — safe only after (1) and (2), because then no writer targets a
-   legacy key and a prune cannot remove a blob a row still needs. Leader-
-   gated, idempotent, and it must cope with rows inserted by a still-running
-   old replica after its pass.
+   replicas. (1) and (2) are necessary but **not sufficient**: a still-running
+   pre-hardening replica keeps overwriting per-job keys before its transaction
+   (`state.rs:403`) and deleting them on failure (iii-b), and nothing in new
+   replicas can constrain it — a backfill that reads K while such a replica
+   is mid-upload persists the wrong sidecar. The backfill is therefore safe
+   only once **no pre-hardening replica is running**, which is a fleet-state
+   condition, not a code-path one. Options to design: an explicit post-rollout
+   admin command; or a leader-gated task that refuses to run while any
+   registered replica reports a pre-hardening version. It must also cope with
+   rows inserted by such a replica before it was retired (no `state_json`),
+   and with rows whose sidecar does not parse (leave NULL, do not retry
+   forever).
 
 ## 3. Constraints
 

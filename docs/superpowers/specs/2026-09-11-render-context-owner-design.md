@@ -1,6 +1,6 @@
 # One Owner for the Step Render Context — Design
 
-Status: revision 7, proposed
+Status: revision 8, proposed
 Ships in: 0.16.4 (patch; additive migration 047; documented behaviour changes, §6)
 
 Addresses candidate 4 of the 11 September 2026 architecture review, which ranked
@@ -8,6 +8,18 @@ it the top recommendation. Line numbers cite `main` at `9916985` (spec-only
 commits since `fba4e87`; code lines unchanged).
 
 ## Revision history
+
+**Revision 8 (2026-09-13).** Revision 7's review found the scope cut clean —
+no citation stale, nothing remaining that depends on the storage design —
+and one defect local to this document: PostgreSQL `jsonb` rejects `\u0000`
+inside strings, while the extractor's `serde_json::from_str` (`state.rs:218`)
+accepts it, so a sidecar containing a NUL escape — accepted by every upload
+today — would fail the `INSERT` and trigger the upload's blob-deletion
+compensation (`state.rs:437`). The column is `json`, not `jsonb`: PostgreSQL's
+`json` type stores the text verbatim and accepts `\u0000`, and nothing here
+uses `jsonb` operators — the value is only ever read whole (§3.4). The §4.6
+race narratives are stated with the transaction ordering that actually
+produces them, and the failed-upload compensation branch is added as (vi).
 
 **Revision 7 (2026-09-13). Scope cut.** Revisions 4–6 each fixed the previous
 review's race by pulling one more piece of task-state *storage* into this
@@ -306,8 +318,11 @@ extractor and the worker protocol are **unchanged** — see §4.6 for what that
 inherits.
 
 **Migration 047.** `task_state` and `workspace_state` gain
-`state_json JSONB NULL`, written at every upload from bytes already in
-memory, using the **existing** `extract_state_json` (`state.rs:196-222`)
+`state_json JSON NULL` — `json`, not `jsonb`: `jsonb` rejects `\u0000` in
+strings, `serde_json` accepts it (`state.rs:218`), and a sidecar with a NUL
+escape is a valid upload today; `json` stores the text verbatim, and the
+column is only ever read whole, never queried by key. Written at every upload
+from bytes already in memory, using the **existing** `extract_state_json` (`state.rs:196-222`)
 gated on the uploader's flag exactly as the claim path gates it today
 (`jobs.rs:539`):
 
@@ -467,11 +482,14 @@ same job.** Key = `{prefix}{ws}/{task}/{job_id}.tar.gz`
 row is inserted (`state.rs:404` → `:423`). Sequential steps of one job that
 each write state produce N rows sharing one blob. *Effect of this design:*
 the persisted `json` on each row is the sidecar of *that* upload, while the
-shared blob holds the *last* one. Under the interleaving "A stores, B
-stores and commits, A commits", the latest row is A with A's `json` while
-the blob is B's — today claim-time rendering reads the blob and so renders
-B. With the column, rendering reads A. Whether that is visible to the worker
-is (ii).
+shared blob holds the *last* one. The schedule that makes them disagree:
+A stores its blob under K and pauses **before** `pool.begin()`
+(`state.rs:404` → `:413`); B stores under K, begins, inserts, commits; A
+begins — its `created_at` is transaction-start `NOW()`
+(`028_task_state.sql:9`), later than B's — inserts, commits. `get_latest`
+orders by `created_at, id` (`task_state.rs:33`), so A is latest with A's
+`json`, and K holds B. Today claim-time rendering reads K and so renders B;
+with the column it renders A. Whether that is visible to the worker is (ii).
 
 **(ii) The worker does not download the snapshot the claim named.** It
 checks `state_storage_key` is present, then requests `(workspace, task)`
@@ -498,6 +516,13 @@ fixes nor changes these; it makes the computed value durable.
 **(v) Rows without the column** (§3.4) cannot be backfilled safely while (i)
 holds, because a backfill could persist a later upload's sidecar into an
 earlier row.
+
+**(vi) A failed upload's compensation deletes a blob a retained row still
+references.** The handler stores the blob first, then deletes it if
+beginning the transaction, inserting, or committing fails (`state.rs:416`,
+`:439`, `:453`). With (i), that blob is K, shared with the retained rows of
+the same job: a retained row is left with no blob at all. Independent of
+pruning, so a surviving-reference check on prune does not cover it.
 
 ## 5. Testing
 
