@@ -1,53 +1,50 @@
 # One Owner for the Step Render Context — Design
 
-Status: revision 6, proposed
+Status: revision 7, proposed
 Ships in: 0.16.4 (patch; additive migration 047; documented behaviour changes, §6)
 
 Addresses candidate 4 of the 11 September 2026 architecture review, which ranked
-it the top recommendation. Line numbers cite `main` at `c019d7e` (spec-only
+it the top recommendation. Line numbers cite `main` at `9916985` (spec-only
 commits since `fba4e87`; code lines unchanged).
 
 ## Revision history
 
-**Revision 6 (2026-09-13).** Revision 5's review raised five findings. The
-first changed scope: persisting the sidecar makes the per-job storage-key race
-*worse*, not merely inherited — today the overwrite race renders and mounts
-the same (later) bytes, but with the column the latest row would render
-upload A while the worker downloads upload B. So the change that introduces
-the column now also **keys new uploads by snapshot id** (§3.4). That makes
-each row/blob pair immutable, fixes a latent data-loss bug in pruning
-(`insert_and_prune` returns pruned rows' keys for blob deletion —
-`task_state.rs:127-141` — so pruning an older same-job row deleted the blob
-the newer row still pointed at), and makes a backfill of legacy rows safe,
-which is reinstated as a leader-gated background task rather than a
-claim-time side effect (§3.4). The extractor is root-only and gated on
-`has_json`, matching how both uploaders compute that flag, so nested-only
-sidecars stay invisible as today (§3.4). The collision table is restated with
-the key-presence condition that decides regression vs additive (§6).
-`pool.rs:18`.
+**Revision 7 (2026-09-13). Scope cut.** Revisions 4–6 each fixed the previous
+review's race by pulling one more piece of task-state *storage* into this
+design — per-job keys, pruning, backfill, re-keying, extractor semantics —
+and each review found the next race one layer down. Revision 6's review
+found six more, all in storage, and one is decisive: the worker does not
+download the snapshot the claim names; it sends `(workspace, task)` and the
+server picks latest again (`poller.rs:368`, `client.rs:619`, `state.rs:329`).
+"Template and mount can disagree" is in the worker protocol — the
+architecture review's red-band defect #2 — and closing it needs a wire
+change, the very constraint this candidate was ranked first for not having.
 
-**Revision 5 (2026-09-13)** dropped a claim-time backfill (per-job keys made
-it unsafe), corrected "move state to the DB" to "persist a copy of the
-sidecar", enumerated the six row readers, and qualified rollout by how
-`sqlx::migrate!` behaves.
+Decision: **decouple.** This design persists the sidecar and builds the one
+context; it changes no storage key, no extractor, no pruning, and adds no
+backfill. Every storage race it inherits is enumerated with its interleaving
+in §4.6 and owned by a second design,
+`2026-09-13-task-state-storage-hardening-design.md`. Revision 6's re-keying
+and backfill move there. Also: `task-state.md:103`; the creator's parameter
+is `task_name` (`job_creator.rs:200`); `job_creator.rs:792-997`.
 
-**Revision 4 (2026-09-12)** replaced per-advance archive fetches with a
-persisted sidecar (migration 047) after the review showed `has_json` is an
-uploader flag and reading `state` means downloading, gunzipping and walking
-the whole tarball (`extract_state_json`, `state.rs:196-222`); and split
+**Revision 6 (2026-09-13)** keyed uploads by snapshot id and added a
+leader-gated backfill; both now belong to the storage design.
+**Revision 5 (2026-09-13)** corrected "move state to the DB" to "persist a
+copy of the sidecar" and dropped a claim-time backfill (per-job keys made it
+unsafe). **Revision 4 (2026-09-12)** replaced per-advance archive fetches
+with a persisted sidecar (migration 047) after the review showed `has_json`
+is an uploader flag and reading `state` means downloading, gunzipping and
+walking the tarball (`extract_state_json`, `state.rs:196-222`); and split
 `ContextInputs` into a per-entry `JobContext` and per-render arguments.
-
-**Revision 3 (2026-09-12)** withdrew revision 2's "two families": the cascade
-can have state, because `execute` already does DB reads before calling the
-pure `run` (`cascade.rs:890` precedes `pool.begin()` at `:895`). It also
-showed the documented `when: "{{ not state or … }}"` guard never worked and
-that `441a6ca` did not fix it.
-
-**Revision 2 (2026-09-11)** corrected revision 1's premise that undefined
-variables render empty (they error: `template.rs:82-84`,
-`test_render_missing_variable:936`) and its promise of `each` in `when:`
-(§4.2). Two defects found during review shipped separately: `1c31db8` and
-`b21036b`.
+**Revision 3 (2026-09-12)** withdrew "two families": the cascade can have
+state, because `execute` already does DB reads before calling the pure `run`
+(`cascade.rs:890` precedes `pool.begin()` at `:895`); and showed the
+documented `when: "{{ not state or … }}"` guard never worked and `441a6ca`
+did not fix it. **Revision 2 (2026-09-11)** corrected revision 1's premise
+that undefined variables render empty (they error: `template.rs:82-84`,
+`test_render_missing_variable:936`) and its promise of `each` in `when:`.
+Two defects found during review shipped separately: `1c31db8` and `b21036b`.
 
 ## 1. Problem
 
@@ -99,7 +96,7 @@ include. Not a divergence.
    state parameter at all.
 3. `{{ state.x }}` in a `when:` is always undefined, so the documented expiry
    guard `when: "{{ not state or state.days_remaining < 30 }}"`
-   (`task-state.md:88`) runs the step on every pass. The feature the guide
+   (`task-state.md:103`) runs the step on every pass. The feature the guide
    describes does not exist.
 4. `{{ state.x }}` in a flow step's `input:` works for a worker step (S1) and
    fails for a `type: task` step (S6). Same YAML field, different call path.
@@ -147,15 +144,16 @@ example by calling `evaluate_condition` with a hand-built context containing
 variables; the two real axes (`which input`, `whose secrets`) are data the
 module is given. Snapshot resolution for rendering has one implementation,
 needs only a pool, and is called from every entry that renders. Adding a
-variable is a one-line change in one place. Snapshot rows and blobs are
-immutable pairs.
+variable is a one-line change in one place.
 
-**Non-goals.** The CLI builder (candidate 3). Hook and event-source
-constructors (`settlement/hooks.rs:551`, `event_source.rs:356`). Per-instance
-`when` (§4.2). The cross-workspace agent gap (§7). Connection secrets reached
-via `{{ input.* }}` at cascade time (TODO.md, residual of `b21036b`).
-Reserved-name validation (§7). Moving state *files* anywhere: the tarball and
-the worker's `/state` mount are untouched.
+**Non-goals.** Task-state storage: keys, pruning, the worker download
+protocol, extractor policy, backfill of legacy rows — all owned by
+`2026-09-13-task-state-storage-hardening-design.md` (§4.6). The CLI builder
+(candidate 3). Hook and event-source constructors (`settlement/hooks.rs:551`,
+`event_source.rs:356`). Per-instance `when` (§4.2). The cross-workspace agent
+gap (§7). Connection secrets reached via `{{ input.* }}` at cascade time
+(TODO.md, residual of `b21036b`). Reserved-name validation (§7). Moving state
+*files* anywhere: the tarball and the worker's `/state` mount are untouched.
 
 ## 3. Design
 
@@ -217,8 +215,8 @@ working rows (`snap.rows`) so phase B sees phase A's changes exactly as today.
 pub struct Snapshots { pub task: Option<Snapshot>, pub global: Option<Snapshot> }
 pub struct Snapshot {
     pub id: Uuid,                        // the row
-    pub storage_key: String,             // ClaimResponse; worker download
-    pub has_json: bool,                  // the tarball carries a root state.json
+    pub storage_key: String,             // ClaimResponse
+    pub has_json: bool,                  // uploader's flag: the tarball carries a sidecar
     pub json: Option<serde_json::Value>, // the persisted copy, if any
 }
 ```
@@ -296,89 +294,61 @@ Identical in all six scopes.
 8. `state` / `global_state`: **presence semantics** — inserted when
    `Snapshot.json` is `Some`, omitted otherwise (§4.1).
 
-### 3.4 Snapshots: keys, the sidecar copy, resolution
+### 3.4 The sidecar copy, and resolution
 
 **What moves and what does not.** A snapshot is a tarball in the archive —
-the files a step wrote to `/state-out`, plus a root `state.json` sidecar when
-it emitted `STATE:` lines. That tarball stays where it is; the worker still
-downloads it by `storage_key` and mounts it at `/state`; nothing on that path
-changes. Migration 047 adds a **copy** of the parsed sidecar to the
-snapshot's row so the server can render `{{ state.x }}` without the archive.
-
-**Keys become per snapshot.** Today a key is
-`{prefix}{ws}/{task}/{job_id}.tar.gz` (`state_storage.rs:42-49`; global
-`:57-62`), and `insert_and_prune` generates the row id after the blob is
-stored (`state.rs:404` then `:423`; `task_state.rs:110`). Two uploads from one
-job — sequential steps each writing state — overwrite the same blob and
-insert two rows pointing at it. Two consequences today: pruning the older row
-returns its key for deletion (`task_state.rs:127-141`) and the handler
-deletes the blob the **newer** row still references; and an interleaving
-where A stores, B stores and commits, A commits leaves the latest row (A)
-pointing at B's bytes. With a persisted sidecar that second case would render
-A and mount B — a new, permanent disagreement.
-
-So: each upload site generates `id = Uuid::new_v4()` **before** storing, keys
-the blob `{prefix}{ws}/{task}/{id}.tar.gz` (global: `{prefix}__global__/{ws}/{id}.tar.gz`),
-and passes `Some(id)` to `insert_and_prune`, whose `snapshot_id` parameter
-already exists for this. Four sites: `state.rs:109`/`:128`, `:404`/`:423`,
-`state_upload.rs:398`/`:511`, `:605`/`:719`. Legacy rows keep the key they
-have (it is stored per row; reads and downloads are unaffected). Post-047,
-no code path writes a per-job key, so a legacy blob is never overwritten
-again. Not user-visible; the `test_state_storage_key_*` tests change.
+the files a step wrote to `/state-out`, plus a `state.json` sidecar when it
+emitted `STATE:` lines. That tarball stays where it is; the worker still
+downloads and mounts it at `/state`; nothing on that path changes. Migration
+047 adds a **copy** of the parsed sidecar to the snapshot's row so the server
+can render `{{ state.x }}` without the archive. Storage keys, pruning, the
+extractor and the worker protocol are **unchanged** — see §4.6 for what that
+inherits.
 
 **Migration 047.** `task_state` and `workspace_state` gain
-`state_json JSONB NULL`, written at every upload from bytes already in memory:
+`state_json JSONB NULL`, written at every upload from bytes already in
+memory, using the **existing** `extract_state_json` (`state.rs:196-222`)
+gated on the uploader's flag exactly as the claim path gates it today
+(`jobs.rs:539`):
 
 | Site | Bytes | `state_json` |
 |---|---|---|
-| worker task upload, `state.rs:~423` | `body` | `has_json.then(‖ extract_root_state_json(&body)).flatten()` |
+| worker task upload, `state.rs:~423` | `body` | `if query.has_json { extract_state_json(&body) } else { None }` |
 | worker global upload, `state.rs:~128` | `body` | same |
 | API task upload, `state_upload.rs:511` | `repacked` | same, with the flag from `:117` |
 | API global upload, `state_upload.rs:719` | `repacked` | same |
 
-**One extractor, root-only, gated on `has_json`.** Both uploaders compute
-`has_json` from the presence of a **root** `state.json` (`poller.rs:620`,
-`state_upload.rs:117`), and today's claim path extracts only when that flag
-is set (`jobs.rs:539`). The existing `extract_state_json` (`state.rs:196-222`)
-matches the first `state.json` at **any** depth in tar order, and the API
-path sorts entries lexicographically (`state_upload.rs:208`) so
-`a/state.json` precedes the root one. `extract_root_state_json` matches only
-the root entry. Net: a nested-only sidecar stays invisible (flag false, as
-today); a tarball with both now yields the root one (previously the nested
-one) — the single behaviour change, §6. `has_json` keeps its meaning;
-`state_json` may be NULL with `has_json` true (unparseable sidecar, or a
-legacy row not yet backfilled), which rendering treats as "no parsed state".
+So the persisted value is byte-for-byte what today's claim-time extraction
+would compute for that tarball — same extractor, same gate — moved from
+every claim to once per upload. `has_json` keeps its meaning. `state_json`
+may be NULL with `has_json` true (unparseable sidecar; or a row written
+before 047 or by a pre-047 replica), which rendering treats as "no parsed
+state".
 
 `insert_and_prune` (both repos) gains `state_json: Option<serde_json::Value>`.
 `TaskStateRow` / `WorkspaceStateRow` gain the field, and **all six** readers
 project it: `get_latest`, `get`, `list` in `task_state.rs:29`, `:46`, `:153`
 and `workspace_state.rs:25`, `:41`, `:146`.
 
-**Legacy rows — backfilled in the background.** Rows with `has_json = true
-AND state_json IS NULL` predate 047 (a post-047 upload with an unparseable
-sidecar also matches; the backfill re-derives `None` for it and leaves it —
-harmless and idempotent). A leader-gated background task, run once after
-startup in the pattern of `recovery.rs:44` (`state.leader.is_leader()`),
-walks them oldest-first: retrieve by the row's own key, `extract_root_state_json`,
-`UPDATE … SET state_json = $2 WHERE id = $1 AND state_json IS NULL`. Each
-replica that becomes leader re-scans; the predicate empties after the first
-pass. Safe because post-047 nothing writes a per-job key. Residual, confined
-to the rolling-update window: a pre-047 replica still running can overwrite
-a legacy key between the backfill's read and write, so an older, non-latest
-row may carry its newer same-job sibling's JSON; it is never read as latest
-and disappears when superseded. `claim_job` keeps today's archive fallback
-for rows the backfill has not reached, for rendering only, never writing
-back. This bounds the cascade-time gap for legacy snapshots by the backfill
-pass, not by anything a task does or fails to do.
+**Rows without the column.** Written before 047, or by a pre-047 replica
+during the rolling update, or with an unparseable sidecar. At claim time
+they render exactly as today: archive fetch + extract when `has_json`
+(`jobs.rs:533-606`), for rendering only, never written back. At cascade
+time they contribute no `state` until a later upload writes a row with the
+column. No backfill in this design: a backfill is only safe once no writer
+can overwrite a per-job key, which is the storage design's first change
+(§4.6). Cost of the gap: nothing that worked before — `when:` never saw
+state — plus one trap, release-noted: a newly written state-dependent
+`when:` on a task whose only snapshots predate 047 sees no `state` until
+that task uploads again.
 
 **Rollout.** The column is additive and nullable: a running pre-047 replica
 ignores it and keeps serving claims with the archive fallback. A pre-047
 replica that *restarts* after 047 is applied fails startup — `sqlx::migrate!`
 runs with defaults (`pool.rs:18`) and rejects an applied version missing
-from the binary — which is how every migration in this repository has
-behaved (046 shipped in 0.16.2 the same way). The Helm `RollingUpdate` with
-`maxUnavailable: 0` and the PDB are what make that safe; release-noted, not
-new.
+from the binary — as every migration in this repository has behaved (046
+shipped in 0.16.2 the same way). The Helm `RollingUpdate` with
+`maxUnavailable: 0` and the PDB are what make that safe; release-noted.
 
 **Resolution — pool only.**
 
@@ -391,8 +361,7 @@ Two indexed point queries (`TaskStateRepo::get_latest`,
 `WorkspaceStateRepo::get_latest`). No archive access. A lookup error is
 logged at `warn` and yields `None` for that snapshot. A row is returned
 whole, so `storage_key` and `has_json` reach `ClaimResponse` regardless of
-`json`, and the worker keeps downloading after any server-side JSON problem
-— as `jobs.rs:539-556` behaves today.
+`json` — as `jobs.rs:539-556` behaves today.
 
 **Entries.** Every entry that renders resolves once, at its start, and
 threads `&Snapshots` down. `cascade::execute`, `run`, `handle_task_steps`,
@@ -402,8 +371,8 @@ threads `&Snapshots` down. `cascade::execute`, `run`, `handle_task_steps`,
 | Entry | Resolves | Threads to |
 |---|---|---|
 | `Settlement::advance` (non-terminal branch, `mod.rs:214`) | once | `cascade_and_settle` → `execute` → `run`; `handle_task_steps` → `fail_task_step` → `orchestrate_after_server_step_failure` → `cascade_and_settle`; `handle_approval_steps` |
-| `dispatch::init` (`dispatch.rs:537`) | once — gains `task_name: &str` from the creator's `task_ref` (one call site, `job_creator.rs:486`) | `execute`, `handle_task_steps`, `handle_approval_steps` |
-| `claim_job` | once, replacing `jobs.rs:533-606`, keeping the archive fallback | S1–S4 |
+| `dispatch::init` (`dispatch.rs:537`) | once — gains `task_name: &str`, which the creator already holds (`job_creator.rs:200`; one call site, `:486`) | `execute`, `handle_task_steps`, `handle_approval_steps` |
+| `claim_job` | once, replacing `jobs.rs:533-606`, keeping the archive fallback for rows without the column | S1–S4 |
 
 `Settlement` gains no field: the render path needs no `StateStorage`.
 
@@ -415,17 +384,16 @@ claim-time semantics extended one hop. Within an entry: guard-miss retries in
 nested advances reached through `reconcile` → child `advance` → `propagate`
 → parent `advance` (`mod.rs:447`, `propagate.rs:150`) each sample
 independently, so an outer entry can finish on an older sample than an inner
-one took. Rows are append-only, each now with its own blob, and `get_latest`
-orders by `created_at, id`, so "older" means "the previous snapshot", and a
-row's `json` and its blob are always the same upload. Not a guarantee of
-latest-at-render; stated so nobody relies on one.
+one took. Rows are append-only and `get_latest` orders by `created_at, id`,
+so "older" means "the previous row". Not a guarantee of latest-at-render, and
+not a guarantee that the rendered `json` and the worker's mount are the same
+upload — that is §4.6 (ii) and (iii), inherited.
 
 **Cost.** Two point queries per entry for every job. Observed via a new
 histogram `stroem_snapshot_resolve_seconds{entry}` (settlement is outside
 the RED middleware, which covers `/api` only — `web/mod.rs:95`), documented
 in `operations/metrics.md`. A "task references `state`" pre-check is the
-fallback if it shows. The backfill is bounded by `max_snapshots` × tasks
-(default 5), sequential, leader-only, once.
+fallback if it shows.
 
 ### 3.5 Call-site changes
 
@@ -435,7 +403,7 @@ positional parameters to two, S3 from eight to two; the
 `dispatch.rs:126,297` and `jobs.rs:758` call `build` and delete their
 post-hoc `each` patching (`dispatch.rs:128`, `:299`, `jobs.rs:773`).
 `build_step_render_context` is deleted with its unit tests at
-`job_creator.rs:792-995`, which migrate to the new module; `job_context`
+`job_creator.rs:792-997`, which migrate to the new module; `job_context`
 moves there. The three secret scrubs from `b21036b` (`jobs.rs:378`,
 `cascade.rs:703`, `dispatch.rs:75`) act on error strings after rendering and
 are untouched.
@@ -446,13 +414,12 @@ are untouched.
 
 `state` is inserted only when `Snapshot.json` is `Some`. `not state` is
 therefore true when **no parsed sidecar is available**: no snapshot; a
-snapshot whose tarball has no root `state.json`; a sidecar that did not
-parse; or a legacy row the backfill has not reached, at cascade time. It is
-*not* a test for "no snapshot was ever written" — a task that stores files
-but never emits `STATE:` always takes that branch, which is the correct
-reading of "no structured state". With that meaning the guide's expiry guard
-works — measured against `evaluate_condition` with the context `build`
-produces:
+snapshot uploaded without `has_json`; a sidecar that did not parse; or, at
+cascade time, a row without the column (§3.4). It is *not* a test for "no
+snapshot was ever written" — a task that stores files but never emits
+`STATE:` always takes that branch, which is the correct reading of "no
+structured state". With that meaning the guide's expiry guard works —
+measured against `evaluate_condition` with the context `build` produces:
 
 | sidecar | `{{ not state or state.days_remaining < 30 }}` |
 |---|---|
@@ -471,8 +438,7 @@ Per-instance conditions need their own design.
 
 ### 4.3 One context, not two families
 
-No availability axis exists, so nothing enforces one. The diagnostic revision
-2 promised is retired.
+No availability axis exists, so nothing enforces one.
 
 ### 4.4 Placement
 
@@ -488,6 +454,50 @@ connection-secret residual is unchanged. `state_json` holds whatever the step
 wrote to `state.json` — job output, already visible through `/state` on the
 worker and through `{{ state.* }}` at claim time; the column adds no exposure
 the tarball did not already have.
+
+### 4.6 Known, inherited, not fixed here
+
+Task-state storage has consistency defects that predate this design. Each is
+stated with its interleaving so the boundary is exact. All are owned by
+`2026-09-13-task-state-storage-hardening-design.md`.
+
+**(i) Per-job keys; the same blob is overwritten by later uploads from the
+same job.** Key = `{prefix}{ws}/{task}/{job_id}.tar.gz`
+(`state_storage.rs:42-49`; global `:57-62`); the blob is stored before the
+row is inserted (`state.rs:404` → `:423`). Sequential steps of one job that
+each write state produce N rows sharing one blob. *Effect of this design:*
+the persisted `json` on each row is the sidecar of *that* upload, while the
+shared blob holds the *last* one. Under the interleaving "A stores, B
+stores and commits, A commits", the latest row is A with A's `json` while
+the blob is B's — today claim-time rendering reads the blob and so renders
+B. With the column, rendering reads A. Whether that is visible to the worker
+is (ii).
+
+**(ii) The worker does not download the snapshot the claim named.** It
+checks `state_storage_key` is present, then requests `(workspace, task)`
+(`poller.rs:368`, `client.rs:619`) and the server selects latest again
+(`state.rs:329`). Any upload between claim and download changes what is
+mounted. This is the review's red-band defect "template and mount can
+disagree", and it means the rendered `json` and the mounted files are not
+guaranteed to be the same upload with or without this design. Fixing it is a
+wire change (download by the claim-supplied key).
+
+**(iii) Pruning deletes a shared blob.** `insert_and_prune` returns pruned
+rows' keys (`task_state.rs:127-141`) and the handler deletes each
+(`state.rs:459`). With (i), pruning an older same-job row deletes the blob
+the newer row still points at. Data loss today, independent of this design.
+
+**(iv) Extractor semantics.** `extract_state_json` returns the *first*
+`state.json` at any depth in tar order (`state.rs:215`); the API path sorts
+entries lexicographically (`state_upload.rs:208`) so `a/state.json` precedes
+a root one; duplicate roots take the first, whereas the worker's
+`Archive::unpack` (`poller.rs:55`) lets the last overwrite. This design
+persists exactly what claim-time extraction computes today, so it neither
+fixes nor changes these; it makes the computed value durable.
+
+**(v) Rows without the column** (§3.4) cannot be backfilled safely while (i)
+holds, because a backfill could persist a later upload's sidecar into an
+earlier row.
 
 ## 5. Testing
 
@@ -505,17 +515,12 @@ present when empty; `state` omitted when `json` is `None`.
 `Some({})` and `Some(nonempty)` — the last asserting the mapping beats a step
 named `input`.
 
-**Key and persistence tests.** Each of the four upload sites stores under a
-snapshot-id key, passes that id to `insert_and_prune`, and writes
-`state_json` (integration, one per site). Two uploads from one job produce
-two rows with two distinct blobs, and pruning the older deletes only the
-older blob. `extract_root_state_json` takes the root entry over a nested one
-and ignores a nested-only one. Each of the six readers returns the column.
-`latest_snapshots`: no rows; a row without JSON; a row with JSON; a lookup
-error yields `None` without failing. Backfill: fills a `has_json` row with
-NULL `state_json` from its blob, is idempotent on re-run, skips
-`has_json = false`, and runs only on the leader. `claim_job` with an
-unbackfilled legacy row renders from the archive and does not write back.
+**Persistence tests.** Each of the four upload sites writes `state_json`
+equal to what `extract_state_json` returns for the same bytes, and NULL when
+the flag is false (integration, one per site). Each of the six readers
+returns the column. `latest_snapshots`: no rows; a row without JSON; a row
+with JSON; a lookup error yields `None` without failing. `claim_job` with a
+row lacking the column renders from the archive and does not write back.
 
 **Wiring tests — one per entry, the lesson of `441a6ca`.** A snapshot value
 must reach the rendered field on the production path from each entry:
@@ -527,7 +532,7 @@ after a `type: task` dispatch failure). Each verified by reverting the wiring
 and observing the failure. `integration_test.rs:3000` stays.
 
 **Existing coverage.** The 53 `rendering.rs` tests migrate; net count falls as
-triplets collapse.
+triplets collapse. `state.rs:293`'s nested-extraction test is untouched.
 
 ## 6. Behaviour changes
 
@@ -543,9 +548,8 @@ Not all additive.
 | `{% if secret is defined %}`, no workspace secrets | S1, S4–S6 | false | true |
 | loop-instance entries at claim | S1–S3 | present | absent¹ |
 | approval `{{ input.foo }}` with no step mapping | S6 | job input | job input (unchanged, now specified) |
-| tarball with both root and nested `state.json` | uploads, claim | first in tar order (nested) | root |
-| two uploads from one job | storage | second overwrites first; pruning the older row deletes the shared blob | two blobs; pruning deletes only its own |
-| legacy snapshot, cascade time, before the backfill reaches it | S5, S6 | — | no `state` |
+| row without the column, cascade time | S5, S6 | — | no `state` until the task uploads again |
+| same-job overwrite race (§4.6 i), claim-time render | S1–S4 | blob's (last) sidecar | latest row's own sidecar |
 
 **Collisions** — a step whose sanitized name equals a framework key.
 
@@ -579,6 +583,10 @@ but they are observable through `{{ __tera_context }}` (tera 1.20.1
 
 ## 7. Follow-ons
 
+- **Task-state storage hardening** —
+  `2026-09-13-task-state-storage-hardening-design.md`: per-snapshot keys,
+  download by claim-supplied key, prune with a surviving-reference check,
+  extractor policy, and then a safe backfill of rows without the column.
 - **Reserved step names** (`input`, `secret`, `state`, `global_state`, `job`,
   `each`): reject at validation; retires the collision table as a class.
   Belongs with candidate 2 — validation is not wired into server load today.
@@ -599,16 +607,15 @@ in 0.16.2. Restart behaviour of pre-047 replicas is the standard one (§3.4).
 **Two point queries per entry**, for every job whether or not it uses state.
 Measured by the new histogram; a pre-check is the fallback.
 
-**Backfill on first leader boot.** Bounded by `max_snapshots` × tasks,
-sequential, one archive fetch per legacy row, leader-only. On a large
-deployment this is minutes of background I/O once; it does not block startup
-or claims.
+**Inherited storage races become durable** (§4.6 i). The same-job overwrite
+race already exists at the worker boundary (ii); this design adds one more
+place its effect can be seen, and records it rather than hides it. The
+storage design closes the class.
 
 **Collision regressions.** Rare names, all framework keys, surfaced by
 `collisions()`, listed in the release note, closable at validation.
 
 **Merge surface.** `rendering.rs`, `job_creator.rs`, `worker_api/{jobs,
-state}.rs`, `web/api/state_upload.rs`, `state_storage.rs`, `cascade.rs`,
+state}.rs`, `web/api/state_upload.rs`, `cascade.rs`,
 `settlement/{mod,settle,dispatch}.rs`, both state repos, migration 047,
-`metrics.rs`, a new backfill task under `main.rs`. Land as one change; rebase
-rather than merge.
+`metrics.rs`. Land as one change; rebase rather than merge.
