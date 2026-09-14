@@ -5,20 +5,14 @@ use stroem_common::template::{
 };
 use stroem_db::JobStepRow;
 
-/// Context needed for rendering step input and action specs.
-pub struct RenderContext<'a> {
+/// What `prepare_step_action_input` needs: the flow-step lookup and the
+/// owner-workspace provenance for defaults + connection resolution. Template
+/// variables are NOT here — `crate::render_context::build` owns those.
+pub struct PrepareContext<'a> {
     pub workspace: &'a WorkspaceConfig,
     pub task_name: &'a str,
     pub step: &'a JobStepRow,
     pub job_input: Option<&'a serde_json::Value>,
-    /// Completed steps as (step_name, output) pairs
-    pub completed_steps: &'a [(String, Option<serde_json::Value>)],
-    /// Structured state from the previous task state snapshot (state.json contents).
-    /// Available in Tera templates as `{{ state.some_key }}`.
-    pub state_json: Option<&'a serde_json::Value>,
-    /// Structured global state from the workspace-scoped snapshot (state.json contents).
-    /// Available in Tera templates as `{{ global_state.some_key }}`.
-    pub global_state_json: Option<&'a serde_json::Value>,
     /// Owner workspace config for cross-workspace steps. When set, the action
     /// definition + connection-typed inputs are resolved against this workspace
     /// (the action body's owner) instead of the caller `workspace`. `None` ⇒
@@ -28,9 +22,6 @@ pub struct RenderContext<'a> {
     pub action_workspace_name: Option<&'a str>,
     /// Snapshot of all workspace configs for cross-workspace connection resolution.
     pub lookup: &'a dyn stroem_common::template::WorkspaceLookup,
-    /// Workspace revision pinned on the job at creation (git SHA or folder hash).
-    /// Available in Tera templates as `{{ job.revision }}`.
-    pub job_revision: Option<&'a str>,
 }
 
 /// Result of rendering: rendered input, rendered action_spec, rendered image.
@@ -44,92 +35,35 @@ pub struct RenderResult {
 ///
 /// Returns the raw stored input if the workspace/task/step cannot be found,
 /// or if the flow step has no template input configured.
-pub fn render_step_input(ctx: &RenderContext) -> Result<Option<serde_json::Value>> {
-    let task = match ctx.workspace.tasks.get(ctx.task_name) {
+pub fn render_step_input(
+    ctx: &crate::render_context::RenderContext,
+    prep: &PrepareContext,
+) -> Result<Option<serde_json::Value>> {
+    let task = match prep.workspace.tasks.get(prep.task_name) {
         Some(t) => t,
-        None => return Ok(ctx.step.input.clone()),
+        None => return Ok(prep.step.input.clone()),
     };
     // For loop instance steps (e.g. "process[0]"), fall back to looking up by loop_source
-    let flow_step = match task.flow.get(&ctx.step.step_name) {
+    let flow_step = match task.flow.get(&prep.step.step_name) {
         Some(fs) => fs,
-        None => match ctx
+        None => match prep
             .step
             .loop_source
             .as_ref()
             .and_then(|src| task.flow.get(src))
         {
             Some(fs) => fs,
-            None => return Ok(ctx.step.input.clone()),
+            None => return Ok(prep.step.input.clone()),
         },
     };
 
     if flow_step.input.is_empty() {
-        return Ok(ctx.step.input.clone());
+        return Ok(prep.step.input.clone());
     }
 
-    // Build template context: { "input": job.input, "secret": ..., "step_name": { "output": ... }, ... }
-    let mut context = serde_json::Map::new();
-    if let Some(job_input) = ctx.job_input {
-        context.insert("input".to_string(), job_input.clone());
-    }
-
-    if !ctx.workspace.secrets.is_empty() {
-        if let Ok(secrets_value) = serde_json::to_value(&ctx.workspace.secrets) {
-            context.insert("secret".to_string(), secrets_value);
-        }
-    }
-
-    // Inject the previous task state into the template context so step inputs
-    // can reference `{{ state.some_key }}`.
-    if let Some(state_json) = ctx.state_json {
-        context.insert("state".to_string(), state_json.clone());
-    }
-
-    // Inject the previous global workspace state into the template context so
-    // step inputs can reference `{{ global_state.some_key }}`.
-    if let Some(global_state_json) = ctx.global_state_json {
-        context.insert("global_state".to_string(), global_state_json.clone());
-    }
-
-    // Job metadata: always present so `{{ job.revision }}` never hits a
-    // Tera undefined-variable error (revision is null for pre-migration jobs).
-    // Inserted BEFORE step outputs so a step literally named `job` shadows it
-    // (backward compatibility for workflows predating job metadata).
-    context.insert("job".to_string(), job_context(ctx.job_revision));
-
-    // Add completed step outputs to context.
-    // Step names are sanitized (hyphens → underscores) so Tera can resolve
-    // dotted paths like {{ step_name.output.key }}.
-    for (step_name, output) in ctx.completed_steps {
-        let mut step_ctx = serde_json::Map::new();
-        if let Some(output) = output {
-            step_ctx.insert("output".to_string(), output.clone());
-        }
-        let safe_name = step_name.replace('-', "_");
-        context.insert(safe_name, serde_json::Value::Object(step_ctx));
-    }
-
-    // Inject `each` variable for loop instance steps
-    if let (Some(ref loop_item), Some(loop_index)) = (&ctx.step.loop_item, ctx.step.loop_index) {
-        context.insert(
-            "each".to_string(),
-            serde_json::json!({
-                "item": loop_item,
-                "index": loop_index,
-                "total": ctx.step.loop_total,
-            }),
-        );
-    }
-
-    let context_value = serde_json::Value::Object(context);
-    let rendered = render_input_map(&flow_step.input, &context_value)
+    let rendered = render_input_map(&flow_step.input, ctx.as_value())
         .context("Failed to render step input template")?;
     Ok(Some(rendered))
-}
-
-/// Build the `job` template variable: `{{ job.revision }}` etc.
-pub(crate) fn job_context(revision: Option<&str>) -> serde_json::Value {
-    serde_json::json!({ "revision": revision })
 }
 
 /// Merge action-level input defaults and prepare final input.
@@ -139,7 +73,7 @@ pub(crate) fn job_context(revision: Option<&str>) -> serde_json::Value {
 /// no action is found or if the action has no input schema.
 pub fn prepare_step_action_input(
     rendered_input: Option<serde_json::Value>,
-    ctx: &RenderContext,
+    ctx: &PrepareContext,
 ) -> Result<Option<serde_json::Value>> {
     let task = match ctx.workspace.tasks.get(ctx.task_name) {
         Some(t) => t,
@@ -207,18 +141,9 @@ pub fn prepare_step_action_input(
 ///
 /// Returns `None` if `action_spec` is `None`. Returns the spec unchanged if
 /// it is not a JSON object.
-#[allow(clippy::too_many_arguments)]
 pub fn render_action_spec(
     action_spec: Option<&serde_json::Value>,
-    rendered_input: Option<&serde_json::Value>,
-    secrets: &serde_json::Value,
-    completed_steps: &[(String, Option<serde_json::Value>)],
-    loop_item: Option<&serde_json::Value>,
-    loop_index: Option<i32>,
-    loop_total: Option<i32>,
-    state_json: Option<&serde_json::Value>,
-    global_state_json: Option<&serde_json::Value>,
-    job_revision: Option<&str>,
+    ctx: &crate::render_context::RenderContext,
 ) -> Result<Option<serde_json::Value>> {
     let original_spec = match action_spec {
         Some(s) => s,
@@ -230,44 +155,7 @@ pub fn render_action_spec(
         None => return Ok(Some(original_spec.clone())),
     };
 
-    // Build context with rendered input + secrets + completed step outputs
-    let mut spec_ctx = serde_json::Map::new();
-    if let Some(input_val) = rendered_input {
-        spec_ctx.insert("input".to_string(), input_val.clone());
-    }
-    spec_ctx.insert("secret".to_string(), secrets.clone());
-    // Task + global workspace state so `{{ state.* }}` and `{{ global_state.* }}`
-    // resolve in action bodies (script, cmd, env, source, args, manifest).
-    if let Some(state_val) = state_json {
-        spec_ctx.insert("state".to_string(), state_val.clone());
-    }
-    if let Some(global_state_val) = global_state_json {
-        spec_ctx.insert("global_state".to_string(), global_state_val.clone());
-    }
-    // Before step outputs: a step named `job` shadows the job metadata.
-    spec_ctx.insert("job".to_string(), job_context(job_revision));
-    for (step_name, output) in completed_steps {
-        let mut step_ctx = serde_json::Map::new();
-        if let Some(output) = output {
-            step_ctx.insert("output".to_string(), output.clone());
-        }
-        let safe_name = step_name.replace('-', "_");
-        spec_ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
-    }
-
-    // Inject `each` variable for for_each loop instance steps
-    if let (Some(item), Some(index)) = (loop_item, loop_index) {
-        spec_ctx.insert(
-            "each".to_string(),
-            serde_json::json!({
-                "item": item,
-                "index": index,
-                "total": loop_total,
-            }),
-        );
-    }
-
-    let spec_context = serde_json::Value::Object(spec_ctx);
+    let spec_context = ctx.as_value();
 
     // Render env values if present
     if let Some(env_val) = spec_obj.get("env") {
@@ -277,7 +165,7 @@ pub fn render_action_spec(
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                 .collect();
             let rendered_env =
-                render_env_map(&env_map, &spec_context).context("Failed to render env template")?;
+                render_env_map(&env_map, spec_context).context("Failed to render env template")?;
             let rendered_env_value: serde_json::Map<String, serde_json::Value> = rendered_env
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::Value::String(v)))
@@ -293,7 +181,7 @@ pub fn render_action_spec(
     if let Some(cmd_val) = spec_obj.get("cmd") {
         if let Some(cmd_str) = cmd_val.as_str() {
             let cmd_opt = Some(cmd_str.to_string());
-            if let Some(rendered_cmd) = render_string_opt(&cmd_opt, &spec_context)
+            if let Some(rendered_cmd) = render_string_opt(&cmd_opt, spec_context)
                 .context("Failed to render cmd template")?
             {
                 spec_obj.insert("cmd".to_string(), serde_json::Value::String(rendered_cmd));
@@ -305,7 +193,7 @@ pub fn render_action_spec(
     if let Some(script_val) = spec_obj.get("script") {
         if let Some(script_str) = script_val.as_str() {
             let script_opt = Some(script_str.to_string());
-            if let Some(rendered_script) = render_string_opt(&script_opt, &spec_context)
+            if let Some(rendered_script) = render_string_opt(&script_opt, spec_context)
                 .context("Failed to render script template")?
             {
                 spec_obj.insert(
@@ -320,7 +208,7 @@ pub fn render_action_spec(
     if let Some(source_val) = spec_obj.get("source") {
         if let Some(source_str) = source_val.as_str() {
             let source_opt = Some(source_str.to_string());
-            if let Some(rendered_source) = render_string_opt(&source_opt, &spec_context)
+            if let Some(rendered_source) = render_string_opt(&source_opt, spec_context)
                 .context("Failed to render source template")?
             {
                 spec_obj.insert(
@@ -333,14 +221,14 @@ pub fn render_action_spec(
 
     // Render manifest string values (e.g. serviceAccountName from input)
     if let Some(manifest_val) = spec_obj.get("manifest") {
-        let rendered_manifest = render_json_strings(manifest_val, &spec_context)
+        let rendered_manifest = render_json_strings(manifest_val, spec_context)
             .context("Failed to render manifest template")?;
         spec_obj.insert("manifest".to_string(), rendered_manifest);
     }
 
     // Render args array elements (e.g. ["{{ input.target }}", "--region", "{{ input.region }}"])
     if let Some(args_val) = spec_obj.get("args") {
-        let rendered_args = render_json_strings(args_val, &spec_context)
+        let rendered_args = render_json_strings(args_val, spec_context)
             .context("Failed to render args templates")?;
         spec_obj.insert("args".to_string(), rendered_args);
     }
@@ -351,16 +239,9 @@ pub fn render_action_spec(
 /// Render image template (e.g. `{{ input.image_tag }}`).
 ///
 /// Returns the image unchanged if it contains no template syntax.
-#[allow(clippy::too_many_arguments)]
 pub fn render_image(
     image: Option<&str>,
-    rendered_input: Option<&serde_json::Value>,
-    secrets: &serde_json::Value,
-    completed_steps: &[(String, Option<serde_json::Value>)],
-    loop_item: Option<&serde_json::Value>,
-    loop_index: Option<i32>,
-    loop_total: Option<i32>,
-    job_revision: Option<&str>,
+    ctx: &crate::render_context::RenderContext,
 ) -> Result<Option<String>> {
     let image_str = match image {
         Some(s) => s,
@@ -370,38 +251,8 @@ pub fn render_image(
         return Ok(Some(image_str.to_string()));
     }
 
-    let mut spec_ctx = serde_json::Map::new();
-    if let Some(input_val) = rendered_input {
-        spec_ctx.insert("input".to_string(), input_val.clone());
-    }
-    spec_ctx.insert("secret".to_string(), secrets.clone());
-    // Before step outputs: a step named `job` shadows the job metadata.
-    spec_ctx.insert("job".to_string(), job_context(job_revision));
-    for (step_name, output) in completed_steps {
-        let mut step_ctx = serde_json::Map::new();
-        if let Some(output) = output {
-            step_ctx.insert("output".to_string(), output.clone());
-        }
-        let safe_name = step_name.replace('-', "_");
-        spec_ctx.insert(safe_name, serde_json::Value::Object(step_ctx));
-    }
-
-    // Inject `each` variable for for_each loop instance steps
-    if let (Some(item), Some(index)) = (loop_item, loop_index) {
-        spec_ctx.insert(
-            "each".to_string(),
-            serde_json::json!({
-                "item": item,
-                "index": index,
-                "total": loop_total,
-            }),
-        );
-    }
-
-    let spec_context = serde_json::Value::Object(spec_ctx);
-
     let img_opt = Some(image_str.to_string());
-    render_string_opt(&img_opt, &spec_context).context("Failed to render image template")
+    render_string_opt(&img_opt, ctx.as_value()).context("Failed to render image template")
 }
 
 /// Merge missing fields from job-level input into step input for fields declared
@@ -529,6 +380,87 @@ mod tests {
         }
     }
 
+    /// A completed step row carrying `output` — what the context builder
+    /// projects into the `{{ step_name.output }}` entry.
+    fn completed_row(step_name: &str, output: serde_json::Value) -> JobStepRow {
+        let mut row = make_step_row(step_name, None);
+        row.status = "completed".to_string();
+        row.output = Some(output);
+        row
+    }
+
+    /// A workspace carrying only these secrets — the action-body scope reads
+    /// `{{ secret.* }}` from the owner workspace.
+    fn ws_with_secrets(secrets: &serde_json::Value) -> WorkspaceConfig {
+        let mut ws = WorkspaceConfig::default();
+        if let Some(obj) = secrets.as_object() {
+            ws.secrets = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+        ws
+    }
+
+    /// A loop-instance step row: what gives the context its `each` variable.
+    fn loop_step_row(
+        loop_item: Option<serde_json::Value>,
+        loop_index: Option<i32>,
+        loop_total: Option<i32>,
+    ) -> JobStepRow {
+        let mut row = make_step_row("step1", None);
+        row.loop_item = loop_item;
+        row.loop_index = loop_index;
+        row.loop_total = loop_total;
+        row
+    }
+
+    /// Build a real render context for the S1–S3 tests.
+    #[allow(clippy::too_many_arguments)]
+    fn tctx(
+        job_input: Option<serde_json::Value>,
+        caller: &WorkspaceConfig,
+        owner: &WorkspaceConfig,
+        rows: &[JobStepRow],
+        state: Option<serde_json::Value>,
+        global: Option<serde_json::Value>,
+        revision: Option<&str>,
+        step: &JobStepRow,
+        scope_of: fn(Option<&serde_json::Value>) -> crate::render_context::Scope<'_>,
+        prepared: Option<serde_json::Value>,
+    ) -> crate::render_context::RenderContext {
+        use crate::render_context::{build, views, JobContext, LoopSlot, Snapshot, Snapshots};
+        let mk = |j: Option<serde_json::Value>| {
+            j.map(|json| Snapshot {
+                id: uuid::Uuid::nil(),
+                storage_key: "k".into(),
+                has_json: true,
+                json: Some(json),
+            })
+        };
+        let snapshots = Snapshots {
+            task: mk(state),
+            global: mk(global),
+        };
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: job_input.as_ref(),
+            caller_secrets: &caller.secrets,
+            owner_secrets: &owner.secrets,
+            snapshots: &snapshots,
+            job_revision: revision,
+        };
+        build(
+            &job,
+            &views(rows),
+            LoopSlot::of(step),
+            scope_of(prepared.as_ref()),
+        )
+    }
+    fn step_input_scope(_: Option<&serde_json::Value>) -> crate::render_context::Scope<'_> {
+        crate::render_context::Scope::StepInput
+    }
+    fn action_body_scope(p: Option<&serde_json::Value>) -> crate::render_context::Scope<'_> {
+        crate::render_context::Scope::ActionBody { prepared_input: p }
+    }
+
     // -------------------------------------------------------------------------
     // render_step_input
     // -------------------------------------------------------------------------
@@ -537,24 +469,32 @@ mod tests {
     fn test_render_step_input_task_not_found_returns_step_input() {
         let workspace = WorkspaceConfig::default();
         let step = make_step_row("step1", Some(json!({"key": "value"})));
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "nonexistent-task",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
+        let ctx = tctx(
+            None,
+            &workspace,
+            &workspace,
+            &[],
+            None,
+            None,
+            None,
+            &step,
+            step_input_scope,
+            None,
+        );
 
-        let result = render_step_input(&ctx).unwrap();
+        let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"key": "value"})));
     }
 
@@ -582,24 +522,32 @@ mod tests {
         workspace.tasks.insert("my-task".to_string(), task);
 
         let step = make_step_row("missing-step", Some(json!({"original": true})));
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
+        let ctx = tctx(
+            None,
+            &workspace,
+            &workspace,
+            &[],
+            None,
+            None,
+            None,
+            &step,
+            step_input_scope,
+            None,
+        );
 
-        let result = render_step_input(&ctx).unwrap();
+        let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"original": true})));
     }
 
@@ -629,24 +577,32 @@ mod tests {
         workspace.tasks.insert("my-task".to_string(), task);
 
         let step = make_step_row("step1", Some(json!({"stored": "value"})));
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
+        let ctx = tctx(
+            None,
+            &workspace,
+            &workspace,
+            &[],
+            None,
+            None,
+            None,
+            &step,
+            step_input_scope,
+            None,
+        );
 
-        let result = render_step_input(&ctx).unwrap();
+        let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"stored": "value"})));
     }
 
@@ -674,24 +630,32 @@ mod tests {
 
         let step = make_step_row("step1", None);
         let job_input = json!({"name": "World"});
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: Some(&job_input),
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
+        let ctx = tctx(
+            Some(job_input.clone()),
+            &workspace,
+            &workspace,
+            &[],
+            None,
+            None,
+            None,
+            &step,
+            step_input_scope,
+            None,
+        );
 
-        let result = render_step_input(&ctx).unwrap();
+        let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"greeting": "Hello World"})));
     }
 
@@ -719,127 +683,34 @@ mod tests {
         workspace.tasks.insert("my-task".to_string(), task);
 
         let step = make_step_row("step1", None);
-        let completed_steps = vec![(
-            "step-a".to_string(),
-            Some(json!({"result": "computed-value"})),
-        )];
-        let ctx = RenderContext {
+        let rows = vec![completed_row("step-a", json!({"result": "computed-value"}))];
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: None,
-            completed_steps: &completed_steps,
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
+        let ctx = tctx(
+            None,
+            &workspace,
+            &workspace,
+            &rows,
+            None,
+            None,
+            None,
+            &step,
+            step_input_scope,
+            None,
+        );
 
-        let result = render_step_input(&ctx).unwrap();
+        let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"value": "computed-value"})));
-    }
-
-    #[test]
-    fn test_render_step_input_sanitizes_hyphens_to_underscores() {
-        // Step names with hyphens must be accessed via underscores in templates.
-        let flow_input =
-            HashMap::from([("out".to_string(), json!("{{ say_hello.output.message }}"))]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow
-            .insert("step2".to_string(), make_flow_step("my-action", flow_input));
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-
-        let step = make_step_row("step2", None);
-        // Completed step name has a hyphen — sanitized to underscore in context.
-        let completed_steps = vec![(
-            "say-hello".to_string(),
-            Some(json!({"message": "hi there"})),
-        )];
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &completed_steps,
-            state_json: None,
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap();
-        assert_eq!(result, Some(json!({"out": "hi there"})));
-    }
-
-    #[test]
-    fn test_render_step_input_includes_secrets_in_context() {
-        let flow_input = HashMap::from([("token".to_string(), json!("{{ secret.API_TOKEN }}"))]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow
-            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-        workspace
-            .secrets
-            .insert("API_TOKEN".to_string(), json!("secret-value-123"));
-
-        let step = make_step_row("step1", None);
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap();
-        assert_eq!(result, Some(json!({"token": "secret-value-123"})));
     }
 
     // -------------------------------------------------------------------------
@@ -849,17 +720,22 @@ mod tests {
     #[test]
     fn test_render_action_spec_none_returns_none() {
         let secrets = json!({});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             None,
-            None,
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                None,
+            ),
         )
         .unwrap();
         assert!(result.is_none());
@@ -869,17 +745,22 @@ mod tests {
     fn test_render_action_spec_non_object_returns_unchanged() {
         let spec = json!("just a string");
         let secrets = json!({});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            None,
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                None,
+            ),
         )
         .unwrap();
         assert_eq!(result, Some(json!("just a string")));
@@ -891,17 +772,22 @@ mod tests {
         let rendered_input = json!({"key": "world"});
         let secrets = json!({});
 
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&rendered_input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -915,17 +801,22 @@ mod tests {
         let rendered_input = json!({"message": "hello"});
         let secrets = json!({});
 
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&rendered_input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -939,17 +830,22 @@ mod tests {
         let rendered_input = json!({"greeting": "hi"});
         let secrets = json!({});
 
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&rendered_input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -969,17 +865,22 @@ mod tests {
         let rendered_input = json!({"sa_name": "my-service-account"});
         let secrets = json!({});
 
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&rendered_input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -997,22 +898,46 @@ mod tests {
     #[test]
     fn test_render_image_none_returns_none() {
         let secrets = json!({});
-        let result = render_image(None, None, &secrets, &[], None, None, None, None).unwrap();
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
+        let result = render_image(
+            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                None,
+            ),
+        )
+        .unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_render_image_no_template_syntax_returns_unchanged() {
         let secrets = json!({});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_image(
             Some("my-registry/my-image:latest"),
-            None,
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                None,
+            ),
         )
         .unwrap();
         assert_eq!(result, Some("my-registry/my-image:latest".to_string()));
@@ -1022,15 +947,22 @@ mod tests {
     fn test_render_image_renders_input_tag_template() {
         let rendered_input = json!({"tag": "v1.2.3"});
         let secrets = json!({});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_image(
             Some("my-registry/app:{{ input.tag }}"),
-            Some(&rendered_input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap();
         assert_eq!(result, Some("my-registry/app:v1.2.3".to_string()));
@@ -1040,15 +972,22 @@ mod tests {
     fn test_render_image_renders_secret_registry_template() {
         let rendered_input = json!({});
         let secrets = json!({"registry": "private.registry.io"});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_image(
             Some("{{ secret.registry }}/app:latest"),
-            Some(&rendered_input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap();
         assert_eq!(result, Some("private.registry.io/app:latest".to_string()));
@@ -1061,22 +1000,27 @@ mod tests {
         });
         let rendered_input = json!({});
         let secrets = json!({});
-        let completed_steps = vec![(
-            "classify".to_string(),
-            Some(json!({"category": "bug", "confidence": 0.95})),
+        let rows = vec![completed_row(
+            "classify",
+            json!({"category": "bug", "confidence": 0.95}),
         )];
 
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&rendered_input),
-            &secrets,
-            &completed_steps,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &rows,
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(rendered_input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1091,48 +1035,29 @@ mod tests {
     fn test_render_action_spec_env_references_upstream_step_output() {
         let spec = json!({"env": {"CATEGORY": "{{ classify.output.category }}"}});
         let secrets = json!({});
-        let completed_steps = vec![("classify".to_string(), Some(json!({"category": "feature"})))];
+        let rows = vec![completed_row("classify", json!({"category": "feature"}))];
 
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            None,
-            &secrets,
-            &completed_steps,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &rows,
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                None,
+            ),
         )
         .unwrap()
         .unwrap();
 
         assert_eq!(result["env"]["CATEGORY"], "feature");
-    }
-
-    #[test]
-    fn test_render_action_spec_sanitizes_step_name_hyphens() {
-        let spec = json!({"script": "echo {{ my_step.output.value }}"});
-        let secrets = json!({});
-        let completed_steps = vec![("my-step".to_string(), Some(json!({"value": "hello"})))];
-
-        let result = render_action_spec(
-            Some(&spec),
-            None,
-            &secrets,
-            &completed_steps,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(result["script"], "echo hello");
     }
 
     #[test]
@@ -1144,17 +1069,22 @@ mod tests {
         });
         let input = serde_json::json!({"target": "prod", "region": "us-east-1"});
         let secrets = serde_json::json!({});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1173,21 +1103,26 @@ mod tests {
         });
         let input = serde_json::json!({});
         let secrets = serde_json::json!({});
-        let completed = vec![(
-            "build".to_string(),
-            Some(serde_json::json!({"artifact": "app-v2.tar.gz"})),
+        let rows = vec![completed_row(
+            "build",
+            serde_json::json!({"artifact": "app-v2.tar.gz"}),
         )];
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&input),
-            &secrets,
-            &completed,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &rows,
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1204,17 +1139,22 @@ mod tests {
         });
         let input = serde_json::json!({});
         let secrets = serde_json::json!({"api_token": "xyz123"});
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&input),
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1233,21 +1173,23 @@ mod tests {
         let input = serde_json::json!({});
         let secrets = serde_json::json!({});
         // Step name has hyphen — should be sanitized to underscore in context
-        let completed = vec![(
-            "my-step".to_string(),
-            Some(serde_json::json!({"val": "foo"})),
-        )];
+        let rows = vec![completed_row("my-step", serde_json::json!({"val": "foo"}))];
+        let ws = ws_with_secrets(&secrets);
+        let step = make_step_row("step1", None);
         let result = render_action_spec(
             Some(&spec),
-            Some(&input),
-            &secrets,
-            &completed,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &rows,
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1264,25 +1206,21 @@ mod tests {
         let workspace = WorkspaceConfig::default();
         let step = make_step_row("step1", None);
         let job_input = json!({"name": "Alice"});
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "nonexistent",
             step: &step,
             job_input: Some(&job_input),
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
-        let result = prepare_step_action_input(rendered_input.clone(), &ctx).unwrap();
+        let result = prepare_step_action_input(rendered_input.clone(), &prep).unwrap();
         assert_eq!(result, rendered_input);
     }
 
@@ -1310,25 +1248,21 @@ mod tests {
         workspace.tasks.insert("my-task".to_string(), task);
 
         let step = make_step_row("step1", None);
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
         let rendered_input = Some(json!({"foo": "bar"}));
 
-        let result = prepare_step_action_input(rendered_input.clone(), &ctx).unwrap();
+        let result = prepare_step_action_input(rendered_input.clone(), &prep).unwrap();
         assert_eq!(result, rendered_input);
     }
 
@@ -1370,26 +1304,22 @@ mod tests {
         let step = make_step_row("step1", None);
         // job_input has "extra" which should be merged for action schema fields
         let job_input = json!({"sql": "SELECT 1", "extra": "from-job"});
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: Some(&job_input),
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
         // rendered_input only contains "sql"
         let rendered_input = Some(json!({"sql": "SELECT 1"}));
 
-        let result = prepare_step_action_input(rendered_input, &ctx)
+        let result = prepare_step_action_input(rendered_input, &prep)
             .unwrap()
             .unwrap();
 
@@ -1457,23 +1387,19 @@ mod tests {
             vec![],
         );
         let step = make_step_row("s", None);
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &caller,
             task_name: "t",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: Some(&owner),
             action_workspace_name: Some("B"),
             lookup: &set,
-            job_revision: None,
         };
         // Rendered input mirrors the caller flow-step input.
         let rendered_input = Some(json!({"conn": "prod"}));
 
-        let result = prepare_step_action_input(rendered_input, &ctx)
+        let result = prepare_step_action_input(rendered_input, &prep)
             .unwrap()
             .unwrap();
 
@@ -1497,21 +1423,17 @@ mod tests {
             vec![("B".to_string(), Arc::new(owner_unshared.clone()))],
             vec![],
         );
-        let ctx_unshared = RenderContext {
+        let prep_unshared = PrepareContext {
             workspace: &caller,
             task_name: "t",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: Some(&owner_unshared),
             action_workspace_name: Some("B"),
             lookup: &set_unshared,
-            job_revision: None,
         };
         let err =
-            prepare_step_action_input(Some(json!({"conn": "prod"})), &ctx_unshared).unwrap_err();
+            prepare_step_action_input(Some(json!({"conn": "prod"})), &prep_unshared).unwrap_err();
         assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
     }
 
@@ -1583,26 +1505,22 @@ mod tests {
             vec![],
         );
         let step = make_step_row("s", None);
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &caller,
             task_name: "t",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: Some(&owner),
             action_workspace_name: Some("B"),
             lookup: &set,
-            job_revision: None,
         };
 
         // Caller-supplied bare `prod` (unshared in B) → rejected.
-        let err = prepare_step_action_input(Some(json!({"conn": "prod"})), &ctx).unwrap_err();
+        let err = prepare_step_action_input(Some(json!({"conn": "prod"})), &prep).unwrap_err();
         assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
 
         // Caller-supplied bare `open` (shared in B) → resolves in B.
-        let out = prepare_step_action_input(Some(json!({"conn": "open"})), &ctx)
+        let out = prepare_step_action_input(Some(json!({"conn": "open"})), &prep)
             .unwrap()
             .unwrap();
         assert_eq!(out["conn"]["host"], "db.open.internal");
@@ -1664,25 +1582,21 @@ mod tests {
         workspace.tasks.insert("t".to_string(), task);
 
         let step = make_step_row("s", None);
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "t",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None, // LOCAL step
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
         let rendered_input = Some(json!({"conn": "prod"}));
 
-        let result = prepare_step_action_input(rendered_input, &ctx)
+        let result = prepare_step_action_input(rendered_input, &prep)
             .unwrap()
             .unwrap();
 
@@ -1830,17 +1744,22 @@ mod tests {
         let input = serde_json::json!({});
         let secrets = serde_json::json!({});
         let loop_item = serde_json::json!("my-item");
+        let ws = ws_with_secrets(&secrets);
+        let step = loop_step_row(Some(loop_item.clone()), Some(2), Some(5));
         let result = render_action_spec(
             Some(&spec),
-            Some(&input),
-            &secrets,
-            &[],
-            Some(&loop_item),
-            Some(2),
-            Some(5),
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1863,17 +1782,22 @@ mod tests {
         let input = serde_json::json!({});
         let secrets = serde_json::json!({});
         let loop_item = serde_json::json!("batch-42");
+        let ws = ws_with_secrets(&secrets);
+        let step = loop_step_row(Some(loop_item.clone()), Some(3), Some(10));
         let result = render_action_spec(
             Some(&spec),
-            Some(&input),
-            &secrets,
-            &[],
-            Some(&loop_item),
-            Some(3),
-            Some(10),
-            None,
-            None,
-            None,
+            &tctx(
+                None,
+                &ws,
+                &ws,
+                &[],
+                None,
+                None,
+                None,
+                &step,
+                action_body_scope,
+                Some(input.clone()),
+            ),
         )
         .unwrap()
         .unwrap();
@@ -1886,258 +1810,9 @@ mod tests {
     // state_json injection
     // -------------------------------------------------------------------------
 
-    #[test]
-    fn test_render_step_input_with_state_json() {
-        // Flow step input template references {{ state.cursor }}
-        let flow_input = HashMap::from([
-            ("cursor".to_string(), json!("{{ state.cursor }}")),
-            ("count".to_string(), json!("{{ state.count }}")),
-        ]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow.insert(
-            "consume".to_string(),
-            make_flow_step("my-action", flow_input),
-        );
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-
-        let step = make_step_row("consume", None);
-        let state_json = json!({"cursor": "abc123", "count": 42});
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &[],
-            state_json: Some(&state_json),
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap().unwrap();
-        // Tera renders numbers as strings in template context
-        assert_eq!(result["cursor"], "abc123");
-    }
-
-    #[test]
-    fn test_render_step_input_state_json_none_does_not_inject() {
-        // When state_json is None, "state" key is absent; a step NOT referencing
-        // state should still render normally.
-        let flow_input = HashMap::from([("greeting".to_string(), json!("Hello {{ input.name }}"))]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow
-            .insert("greet".to_string(), make_flow_step("my-action", flow_input));
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-
-        let step = make_step_row("greet", None);
-        let job_input = json!({"name": "World"});
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: Some(&job_input),
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap().unwrap();
-        assert_eq!(result["greeting"], "Hello World");
-    }
-
     // -------------------------------------------------------------------------
     // global_state_json injection
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_render_step_input_with_global_state_json() {
-        // Flow step input template references {{ global_state.last_cursor }}
-        let flow_input = HashMap::from([(
-            "cursor".to_string(),
-            json!("{{ global_state.last_cursor }}"),
-        )]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow
-            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-
-        let step = make_step_row("step1", None);
-        let global_state_json = json!({"last_cursor": "xyz789"});
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: Some(&global_state_json),
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap().unwrap();
-        assert_eq!(result["cursor"], "xyz789");
-    }
-
-    #[test]
-    fn test_render_step_input_global_state_json_none_does_not_inject() {
-        // When global_state_json is None, "global_state" key is absent;
-        // a step not referencing it should still render normally.
-        let flow_input = HashMap::from([("greeting".to_string(), json!("Hello {{ input.name }}"))]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow
-            .insert("greet".to_string(), make_flow_step("my-action", flow_input));
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-
-        let step = make_step_row("greet", None);
-        let job_input = json!({"name": "World"});
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: Some(&job_input),
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap().unwrap();
-        assert_eq!(result["greeting"], "Hello World");
-    }
-
-    #[test]
-    fn test_render_step_input_global_state_and_task_state_both_available() {
-        // Both state and global_state are injected simultaneously
-        let flow_input = HashMap::from([
-            ("task_cursor".to_string(), json!("{{ state.cursor }}")),
-            (
-                "global_cursor".to_string(),
-                json!("{{ global_state.cursor }}"),
-            ),
-        ]);
-        let mut task = TaskDef {
-            name: None,
-            description: None,
-            mode: "distributed".to_string(),
-            folder: None,
-            input: HashMap::new(),
-            flow: HashMap::new(),
-            timeout: None,
-            retry: None,
-            on_success: vec![],
-            on_error: vec![],
-            on_suspended: vec![],
-            on_cancel: vec![],
-        };
-        task.flow
-            .insert("step1".to_string(), make_flow_step("my-action", flow_input));
-        let mut workspace = WorkspaceConfig::default();
-        workspace.tasks.insert("my-task".to_string(), task);
-
-        let step = make_step_row("step1", None);
-        let state_json = json!({"cursor": "task-cursor-val"});
-        let global_state_json = json!({"cursor": "global-cursor-val"});
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &[],
-            state_json: Some(&state_json),
-            global_state_json: Some(&global_state_json),
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: None,
-        };
-
-        let result = render_step_input(&ctx).unwrap().unwrap();
-        assert_eq!(result["task_cursor"], "task-cursor-val");
-        assert_eq!(result["global_cursor"], "global-cursor-val");
-    }
 
     // -------------------------------------------------------------------------
     // job.revision in template contexts
@@ -2166,168 +1841,38 @@ mod tests {
     }
 
     #[test]
-    fn test_render_step_input_exposes_job_revision() {
-        let flow_input = HashMap::from([("rev".to_string(), json!("{{ job.revision }}"))]);
-        let workspace = make_workspace_with_step(flow_input);
-        let step = make_step_row("step1", None);
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: Some("abc123def"),
-        };
-
-        let result = render_step_input(&ctx).unwrap();
-        assert_eq!(result, Some(json!({"rev": "abc123def"})));
-    }
-
-    #[test]
     fn test_render_step_input_job_revision_none_renders_empty() {
         // Jobs created before revisions existed have NULL revision — the
         // template must still render (empty string), not error.
         let flow_input = HashMap::from([("rev".to_string(), json!("{{ job.revision }}"))]);
         let workspace = make_workspace_with_step(flow_input);
         let step = make_step_row("step1", None);
-        let ctx = RenderContext {
+        let prep = PrepareContext {
             workspace: &workspace,
             task_name: "my-task",
             step: &step,
             job_input: None,
-            completed_steps: &[],
-            state_json: None,
-            global_state_json: None,
             action_workspace: None,
             action_workspace_name: None,
             lookup: &stroem_common::template::SingleWorkspace {
                 name: "default",
                 config: &workspace,
             },
-            job_revision: None,
         };
+        let ctx = tctx(
+            None,
+            &workspace,
+            &workspace,
+            &[],
+            None,
+            None,
+            None,
+            &step,
+            step_input_scope,
+            None,
+        );
 
-        let result = render_step_input(&ctx).unwrap();
+        let result = render_step_input(&ctx, &prep).unwrap();
         assert_eq!(result, Some(json!({"rev": ""})));
-    }
-
-    #[test]
-    fn test_render_action_spec_exposes_job_revision() {
-        let spec = json!({"script": "echo building {{ job.revision }}"});
-        let secrets = json!({});
-        let result = render_action_spec(
-            Some(&spec),
-            None,
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("abc123def"),
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(result["script"], "echo building abc123def");
-    }
-
-    #[test]
-    fn test_render_image_exposes_job_revision() {
-        let secrets = json!({});
-        let result = render_image(
-            Some("my-registry/app:{{ job.revision }}"),
-            None,
-            &secrets,
-            &[],
-            None,
-            None,
-            None,
-            Some("abc123def"),
-        )
-        .unwrap();
-
-        assert_eq!(result, Some("my-registry/app:abc123def".to_string()));
-    }
-
-    // A completed step literally named `job` must keep its output in the
-    // context — the step shadows the job metadata (backward compatibility).
-
-    #[test]
-    fn test_render_step_input_step_named_job_shadows_job_metadata() {
-        let flow_input = HashMap::from([("value".to_string(), json!("{{ job.output.result }}"))]);
-        let workspace = make_workspace_with_step(flow_input);
-        let step = make_step_row("step1", None);
-        let completed_steps = vec![("job".to_string(), Some(json!({"result": "step-wins"})))];
-        let ctx = RenderContext {
-            workspace: &workspace,
-            task_name: "my-task",
-            step: &step,
-            job_input: None,
-            completed_steps: &completed_steps,
-            state_json: None,
-            global_state_json: None,
-            action_workspace: None,
-            action_workspace_name: None,
-            lookup: &stroem_common::template::SingleWorkspace {
-                name: "default",
-                config: &workspace,
-            },
-            job_revision: Some("abc123def"),
-        };
-
-        let result = render_step_input(&ctx).unwrap();
-        assert_eq!(result, Some(json!({"value": "step-wins"})));
-    }
-
-    #[test]
-    fn test_render_action_spec_step_named_job_shadows_job_metadata() {
-        let spec = json!({"script": "echo {{ job.output.result }}"});
-        let secrets = json!({});
-        let completed_steps = vec![("job".to_string(), Some(json!({"result": "step-wins"})))];
-        let result = render_action_spec(
-            Some(&spec),
-            None,
-            &secrets,
-            &completed_steps,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("abc123def"),
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(result["script"], "echo step-wins");
-    }
-
-    #[test]
-    fn test_render_image_step_named_job_shadows_job_metadata() {
-        let secrets = json!({});
-        let completed_steps = vec![("job".to_string(), Some(json!({"tag": "step-wins"})))];
-        let result = render_image(
-            Some("registry/app:{{ job.output.tag }}"),
-            None,
-            &secrets,
-            &completed_steps,
-            None,
-            None,
-            None,
-            Some("abc123def"),
-        )
-        .unwrap();
-
-        assert_eq!(result, Some("registry/app:step-wins".to_string()));
     }
 }

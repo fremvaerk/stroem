@@ -613,7 +613,7 @@ pub fn build_step_render_context(
     // (backward compatibility for workflows predating job metadata).
     ctx.insert(
         "job".to_string(),
-        crate::web::worker_api::rendering::job_context(job.revision.as_deref()),
+        crate::render_context::job_context(job.revision.as_deref()),
     );
     for s in steps {
         // Skip loop instance steps — only the placeholder's aggregated output

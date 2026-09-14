@@ -2671,7 +2671,7 @@ async fn test_cross_workspace_claim_returns_owner_workspace_and_revision() -> Re
 // ─── Test 1a3: LOCAL dotted library action resolves connection at claim ──
 //
 // Regression: `claim_job` used to pass `owner_config.as_deref()` (== Some(caller)
-// for a LOCAL step) as `RenderContext.action_workspace`. That made
+// for a LOCAL step) as `PrepareContext.action_workspace`. That made
 // `prepare_step_action_input` strip a dotted library action name to its bare form
 // (`common.pg-query` → `pg-query`), miss the action, and return the raw step input
 // WITHOUT connection resolution — the worker then received the raw connection NAME
@@ -27702,5 +27702,167 @@ async fn test_api_global_state_upload_persists_state_json() -> Result<()> {
         .unwrap();
     assert!(row.has_json);
     assert_eq!(row.state_json, Some(sidecar));
+    Ok(())
+}
+
+// ─── Wiring: a snapshot value reaches every claim-time field (spec §5) ───
+//
+// The lesson of 441a6ca: a builder tested in isolation cannot see what the
+// caller failed to pass. These drive the production claim path.
+async fn seed_task_state(pool: &PgPool, sidecar: serde_json::Value) -> Result<()> {
+    let seed_job = JobRepo::create(
+        pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    TaskStateRepo::insert(
+        pool,
+        "default",
+        "hello-world",
+        seed_job,
+        "k/seed.tar.gz",
+        5,
+        true,
+        Some(&sidecar),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+    seed_task_state(&pool, json!({"tag": "v9", "topic": "cats"})).await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-1"),
+        None,
+    )
+    .await?;
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "img".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "script".to_string(),
+            action_image: Some("registry/app:{{ state.tag }}".to_string()),
+            action_spec: Some(json!({"script": "echo {{ state.tag }}"})),
+            input: None,
+            status: "ready".to_string(),
+            required_ability: "script".to_string(),
+            required_tags: vec![],
+            runner: "local".to_string(),
+            timeout_secs: None,
+            when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
+        },
+        NewJobStep {
+            job_id,
+            step_name: "think".to_string(),
+            action_name: "assistant".to_string(),
+            action_type: "agent".to_string(),
+            action_image: None,
+            action_spec: Some(json!({
+                "type": "agent", "provider": "anthropic",
+                "prompt": "summarise {{ state.topic }}",
+                "system_prompt": "rev {{ job.revision }}"
+            })),
+            input: None,
+            status: "ready".to_string(),
+            required_ability: "agent".to_string(),
+            required_tags: vec![],
+            runner: "local".to_string(),
+            timeout_secs: None,
+            when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
+        },
+    ];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let register = |name: &str, cap: &str| {
+        worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": name, "capabilities": [cap]}),
+        )
+    };
+    let r = router
+        .clone()
+        .oneshot(register("w-script", "script"))
+        .await?;
+    let script_worker = body_json(r).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = router.clone().oneshot(register("w-agent", "agent")).await?;
+    let agent_worker = body_json(r).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": script_worker, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(r.status(), 200);
+    let b = body_json(r).await;
+    assert_eq!(
+        b["action_image"], "registry/app:v9",
+        "state.x must reach image:"
+    );
+    assert_eq!(b["action_spec"]["script"], "echo v9");
+
+    let r = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": agent_worker, "capabilities": ["agent"]}),
+        ))
+        .await?;
+    assert_eq!(r.status(), 200);
+    let b = body_json(r).await;
+    assert_eq!(
+        b["agent_prompt"], "summarise cats",
+        "state.x must reach agent prompt"
+    );
+    assert_eq!(b["agent_system_prompt"], "rev rev-1");
     Ok(())
 }

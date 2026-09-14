@@ -11,9 +11,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use stroem_common::models::job::StepStatus;
 use stroem_common::secret::{into_exposed, Secret};
-use stroem_db::{JobRepo, JobStepRepo, TaskStateRepo, WorkerRepo, WorkspaceStateRepo};
+use stroem_db::{JobRepo, JobStepRepo, WorkerRepo};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -516,94 +515,38 @@ pub async fn claim_job(
         state.get_workspace(&owner_ws_name).await
     };
 
-    // Fetch all steps once — reused for both completed-step template context and agent rendering.
+    // Fetch all steps once — reused for both the template context and agent rendering.
     let all_steps_for_job = JobStepRepo::get_steps_for_job(&state.pool, step.job_id)
         .await
         .unwrap_or_default();
 
-    let completed_steps: Vec<(String, Option<serde_json::Value>)> = all_steps_for_job
-        .iter()
-        .filter(|s| s.status == StepStatus::Completed.as_ref())
-        .map(|s| (s.step_name.clone(), s.output.clone()))
-        .collect();
-
-    // ── Task state snapshot lookup ─────────────────────────────────────────
-    // Resolve the latest snapshot so the worker knows to download it and so
-    // the Tera render context can expose `{{ state.* }}` variables.
-    let (state_storage_key, state_has_json, state_json_value) =
-        if let Some(ref storage) = state.state_storage {
-            match TaskStateRepo::get_latest(&state.pool, &job.workspace, &job.task_name).await {
-                Ok(Some(snapshot)) => {
-                    // If the snapshot carries a structured JSON sidecar, retrieve and
-                    // parse it now so it can be injected into the Tera context.
-                    let json_value = if snapshot.has_json {
-                        match storage.retrieve(&snapshot.storage_key).await {
-                            Ok(Some(data)) => super::state::extract_state_json(&data),
-                            Ok(None) => None,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to retrieve state snapshot for Tera context: {:#}",
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    (
-                        Some(snapshot.storage_key),
-                        Some(snapshot.has_json),
-                        json_value,
-                    )
-                }
-                Ok(None) => (None, None, None),
-                Err(e) => {
-                    tracing::warn!("Failed to look up task state snapshot: {:#}", e);
-                    (None, None, None)
+    // ── Snapshot resolution (spec §3.4) ─────────────────────────────────────
+    // Pool-only. The archive is consulted ONLY for a row that predates
+    // migration 047 (has_json without a persisted sidecar), for rendering,
+    // and never written back — see spec §4.6 for why a backfill is unsafe.
+    let mut snapshots =
+        crate::render_context::latest_snapshots(&state.pool, &job.workspace, &job.task_name).await;
+    if let Some(ref storage) = state.state_storage {
+        for snap in [snapshots.task.as_mut(), snapshots.global.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            if snap.has_json && snap.json.is_none() {
+                match storage.retrieve(&snap.storage_key).await {
+                    Ok(Some(data)) => snap.json = super::state::extract_state_json(&data),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(
+                        "Failed to retrieve legacy state snapshot for Tera context: {:#}",
+                        e
+                    ),
                 }
             }
-        } else {
-            (None, None, None)
-        };
-
-    // ── Global workspace state snapshot lookup ────────────────────────────────
-    // Resolve the latest global snapshot so the worker knows to download it and
-    // so the Tera render context can expose `{{ global_state.* }}` variables.
-    let (global_state_storage_key, global_state_has_json, global_state_json_value) =
-        if let Some(ref storage) = state.state_storage {
-            match WorkspaceStateRepo::get_latest(&state.pool, &job.workspace).await {
-                Ok(Some(snapshot)) => {
-                    let json_value = if snapshot.has_json {
-                        match storage.retrieve(&snapshot.storage_key).await {
-                            Ok(Some(data)) => super::state::extract_state_json(&data),
-                            Ok(None) => None,
-                            Err(e) => {
-                                tracing::warn!(
-                                "Failed to retrieve global state snapshot for Tera context: {:#}",
-                                e
-                            );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    (
-                        Some(snapshot.storage_key),
-                        Some(snapshot.has_json),
-                        json_value,
-                    )
-                }
-                Ok(None) => (None, None, None),
-                Err(e) => {
-                    tracing::warn!("Failed to look up global workspace state: {:#}", e);
-                    (None, None, None)
-                }
-            }
-        } else {
-            (None, None, None)
-        };
+        }
+    }
+    let state_storage_key = snapshots.task.as_ref().map(|s| s.storage_key.clone());
+    let state_has_json = snapshots.task.as_ref().map(|s| s.has_json);
+    let global_state_storage_key = snapshots.global.as_ref().map(|s| s.storage_key.clone());
+    let global_state_has_json = snapshots.global.as_ref().map(|s| s.has_json);
 
     // Snapshot of every workspace config: cross-workspace connection references
     // in this step's input resolve against it (gated by `shared`).
@@ -614,16 +557,33 @@ pub async fn claim_job(
     )
     .await;
 
+    // One JobContext per claim; one build per scope (spec §3.2).
+    let empty_secrets: std::collections::HashMap<String, serde_json::Value> = Default::default();
+    let job_ctx = crate::render_context::JobContext {
+        job_id: step.job_id,
+        job_input: job.input.as_ref(),
+        caller_secrets: ws_config
+            .as_ref()
+            .map(|w| &w.secrets)
+            .unwrap_or(&empty_secrets),
+        owner_secrets: owner_config
+            .as_ref()
+            .map(|w| &w.secrets)
+            .unwrap_or(&empty_secrets),
+        snapshots: &snapshots,
+        job_revision: job.revision.as_deref(),
+    };
+    let step_views = crate::render_context::views(&all_steps_for_job);
+    let loop_slot = crate::render_context::LoopSlot::of(&step);
+    let mut collision_lines: Vec<String> = Vec::new();
+
     // Render step input and apply action defaults
     let rendered_input = if let Some(ref workspace) = ws_config {
-        let ctx = rendering::RenderContext {
+        let prep = rendering::PrepareContext {
             workspace,
             task_name: &job.task_name,
             step: &step,
             job_input: job.input.as_ref(),
-            completed_steps: &completed_steps,
-            state_json: state_json_value.as_ref(),
-            global_state_json: global_state_json_value.as_ref(),
             // Gate on the DB column (the TRUE cross-workspace signal), NOT on
             // whether `owner_config` is populated. For a LOCAL step the column is
             // NULL but `owner_config == Some(caller)`; passing that here would make
@@ -641,10 +601,17 @@ pub async fn claim_job(
                 None
             },
             lookup: &ws_set,
-            job_revision: job.revision.as_deref(),
         };
 
-        let raw_input = match rendering::render_step_input(&ctx) {
+        let input_ctx = crate::render_context::build(
+            &job_ctx,
+            &step_views,
+            loop_slot,
+            crate::render_context::Scope::StepInput,
+        );
+        collision_lines.extend(input_ctx.log_lines());
+
+        let raw_input = match rendering::render_step_input(&input_ctx, &prep) {
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("Failed to render step input template: {:#}", e);
@@ -654,7 +621,7 @@ pub async fn claim_job(
             }
         };
 
-        match rendering::prepare_step_action_input(raw_input, &ctx) {
+        match rendering::prepare_step_action_input(raw_input, &prep) {
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("{:#}", e);
@@ -667,53 +634,31 @@ pub async fn claim_job(
         step.input.clone()
     };
 
-    // Build secrets value for action_spec and image rendering. The action body
-    // belongs to the OWNER workspace, so its `{{ secret.* }}` references must
-    // resolve against the OWNER's secrets (== caller's for local steps).
-    let secrets_value = owner_config
-        .as_ref()
-        .and_then(|w| {
-            if w.secrets.is_empty() {
-                None
-            } else {
-                serde_json::to_value(&w.secrets).ok()
-            }
-        })
-        .unwrap_or_else(|| serde_json::json!({}));
+    // Action body: prepared input, OWNER secrets (spec §3.2).
+    let body_ctx = crate::render_context::build(
+        &job_ctx,
+        &step_views,
+        loop_slot,
+        crate::render_context::Scope::ActionBody {
+            prepared_input: rendered_input.as_ref(),
+        },
+    );
+    collision_lines.extend(body_ctx.log_lines());
 
     // Render action_spec env/cmd/script/manifest templates
-    let rendered_action_spec = match rendering::render_action_spec(
-        step.action_spec.as_ref(),
-        rendered_input.as_ref(),
-        &secrets_value,
-        &completed_steps,
-        step.loop_item.as_ref(),
-        step.loop_index,
-        step.loop_total,
-        state_json_value.as_ref(),
-        global_state_json_value.as_ref(),
-        job.revision.as_deref(),
-    ) {
-        Ok(spec) => spec,
-        Err(e) => {
-            let msg = format!("{:#}", e);
-            return Ok(
-                fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
-            );
-        }
-    };
+    let rendered_action_spec =
+        match rendering::render_action_spec(step.action_spec.as_ref(), &body_ctx) {
+            Ok(spec) => spec,
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                return Ok(
+                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
+                );
+            }
+        };
 
     // Render action_image templates (e.g. {{ input.image_tag }})
-    let rendered_image = match rendering::render_image(
-        step.action_image.as_deref(),
-        rendered_input.as_ref(),
-        &secrets_value,
-        &completed_steps,
-        step.loop_item.as_ref(),
-        step.loop_index,
-        step.loop_total,
-        job.revision.as_deref(),
-    ) {
+    let rendered_image = match rendering::render_image(step.action_image.as_deref(), &body_ctx) {
         Ok(img) => img,
         Err(e) => {
             let msg = format!("{:#}", e);
@@ -753,35 +698,19 @@ pub async fn claim_job(
 
         let provider_name = action_def.as_ref().and_then(|a| a.provider.clone());
 
-        // Reuse the full steps list fetched earlier — avoids a second DB round-trip.
-        let mut render_ctx = if let Some(ref workspace) = ws_config {
-            crate::job_creator::build_step_render_context(&job, &all_steps_for_job, workspace)
-        } else {
-            serde_json::json!({})
-        };
-
-        // `build_step_render_context` does not inject `each`; `settlement::dispatch`
-        // patches it in after the call and this path did not, so an agent step
-        // inside a `for_each` could not reference the loop variable. Mirror the
-        // same injection here. Consolidating all of this behind one owner is the
-        // subject of docs/superpowers/specs/2026-09-11-render-context-owner-design.md.
-        if let (Some(ref loop_item), Some(loop_index)) = (&step.loop_item, step.loop_index) {
-            if let Some(ctx_obj) = render_ctx.as_object_mut() {
-                ctx_obj.insert(
-                    "each".to_string(),
-                    json!({
-                        "item": loop_item,
-                        "index": loop_index,
-                        "total": step.loop_total,
-                    }),
-                );
-            }
-        }
+        let prompt_ctx = crate::render_context::build(
+            &job_ctx,
+            &step_views,
+            loop_slot,
+            crate::render_context::Scope::AgentPrompt,
+        );
+        collision_lines.extend(prompt_ctx.log_lines());
+        let render_ctx = prompt_ctx.as_value();
 
         // Render prompt and system_prompt templates. A render failure is an
         // author error: fail the step with the real cause instead of swallowing
         // it into `None` (see `render_agent_prompts`).
-        let (prompt, system) = match render_agent_prompts(action_def.as_ref(), &render_ctx) {
+        let (prompt, system) = match render_agent_prompts(action_def.as_ref(), render_ctx) {
             Ok(pair) => pair,
             Err(e) => {
                 let msg = format!("{:#}", e);
@@ -866,6 +795,14 @@ pub async fn claim_job(
     } else {
         None
     };
+
+    // A step whose name shadows a template variable is reported once per claim,
+    // not once per scope (the same step collides in every build).
+    collision_lines.sort();
+    collision_lines.dedup();
+    for line in &collision_lines {
+        state.append_server_log(step.job_id, line).await;
+    }
 
     Ok(Json(ClaimResponse {
         // Tell the worker which workspace tarball to fetch: the action's OWNER
