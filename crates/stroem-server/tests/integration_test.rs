@@ -27866,3 +27866,155 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
     assert_eq!(b["agent_system_prompt"], "rev rev-1");
     Ok(())
 }
+
+// ─── Pre-047 rows: the archive fallback is the only path to `{{ state.* }}` ──
+//
+// A snapshot row written before migration 047 has `has_json = true` but a NULL
+// sidecar column. `claim_job` must fall back to the archive for rendering — and
+// must NOT write the parsed sidecar back (spec §4.6). Post-047 rows are covered
+// by `test_claim_renders_state_in_image_and_agent_prompt`, which never reaches
+// this branch.
+#[tokio::test]
+async fn test_claim_renders_state_from_archive_for_pre_047_row() -> Result<()> {
+    let (router, pool, tmp, _container) = setup_with_state_storage().await?;
+
+    // Same on-disk archive the server's own StateStorage writes to, so blobs
+    // stored here are the ones `claim_job` retrieves.
+    let archive: Arc<dyn BlobArchive> =
+        Arc::new(LocalBlobArchive::new(tmp.path().join("state-archive")));
+    let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
+
+    let task_key = "state/default/hello-world/legacy-task.tar.gz";
+    let global_key = "state/__global__/default/legacy-global.tar.gz";
+    let task_blob = tarball_with_state_json(&json!({"tag": "legacy"}));
+    let global_blob = tarball_with_state_json(&json!({"region": "eu"}));
+    storage.store(task_key, &task_blob).await?;
+    storage.store(global_key, &global_blob).await?;
+
+    let seed_job = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    // `has_json = true` with a NULL sidecar — exactly a pre-047 row.
+    TaskStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        seed_job,
+        task_key,
+        task_blob.len() as i64,
+        true,
+        None,
+    )
+    .await?;
+    WorkspaceStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        seed_job,
+        global_key,
+        global_blob.len() as i64,
+        true,
+        None,
+    )
+    .await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-1"),
+        None,
+    )
+    .await?;
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "legacy".to_string(),
+        action_name: "greet".to_string(),
+        action_type: "script".to_string(),
+        action_image: Some("registry/app:{{ state.tag }}".to_string()),
+        action_spec: Some(json!({"script": "echo {{ global_state.region }}"})),
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let r = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "w-legacy", "capabilities": ["script"]}),
+        ))
+        .await?;
+    let worker_id = body_json(r).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(r.status(), 200);
+    let b = body_json(r).await;
+    assert_eq!(
+        b["action_image"], "registry/app:legacy",
+        "a pre-047 task snapshot must still reach image:"
+    );
+    assert_eq!(
+        b["action_spec"]["script"], "echo eu",
+        "a pre-047 global snapshot must still reach the action body"
+    );
+    // The worker still gets both keys so it can mount the snapshots.
+    assert_eq!(b["state_storage_key"], task_key);
+    assert_eq!(b["global_state_storage_key"], global_key);
+
+    // No write-back: the rows keep their NULL sidecar (spec §4.6).
+    let task_row = TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert_eq!(
+        task_row.state_json, None,
+        "claim must not backfill state_json"
+    );
+    let global_row = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert_eq!(
+        global_row.state_json, None,
+        "claim must not backfill the global state_json"
+    );
+    Ok(())
+}
