@@ -105,11 +105,6 @@ Verified by reading each site. "err" = the template hard-fails the step.
 | approval's rendered `input` | — | — | — | — | — | after steps |
 | loop-instance rows | included | included | included | skipped | skipped | skipped |
 
-`output` on a *completed* step with NULL output is omitted by all six
-(`rendering.rs:105-107`, `job_creator.rs:625-627`); S4–S6 insert
-`output: null` only for skipped/failed/suspended rows, which S1–S3 never
-include. Not a divergence.
-
 ### 1.2 The author-visible bugs
 
 1. `{{ state.x }}` in an `image:` fails the step. S3 has no state parameter
@@ -593,6 +588,7 @@ Not all additive.
 | `{{ state.x }}` in task-step input, approval message | S6 | step fails | resolves |
 | `{{ failed.error }}` in `input:`/action body | S1–S3 | step fails | resolves |
 | skipped/failed/suspended refs in `input:`/action body | S1–S3 | step fails | `.output` renders `""` (`null` through Tera; falsy in `when:`) |
+| `{{ prev.output }}`, `prev` completed with NULL output | S1–S6 | step fails (undefined) | `""` |
 | `{% if secret is defined %}`, no workspace secrets | S1, S4–S6 | false | true |
 | loop-instance entries at claim | S1–S3 | present | absent¹ |
 | approval `{{ input.foo }}` with no step mapping | S6 | job input | job input (unchanged, now specified) |
@@ -628,6 +624,20 @@ rejecting the names.
 `{{ process[0] }}` as indexing into `process`, so the keys cannot be named,
 but they are observable through `{{ __tera_context }}` (tera 1.20.1
 `processor.rs:21`). No workflow in the repository uses either.
+
+### Release notes for 0.16.4
+
+1. A completed step that produced no output now renders `{{ step.output }}`
+   as an empty string instead of failing the step (all template fields).
+2. Agent `prompt`/`system_prompt` rendered when the job's workspace config is
+   unavailable now see the full context (previously rendered against `{}` and
+   failed on any variable).
+3. Flow steps named `input`, `secret`, `state`, `global_state`, `job` or
+   `each` now shadow / are shadowed uniformly in every field (see the
+   collision table above); the server logs a `[render] … shadows …` line.
+4. Task-state snapshots written before migration 047 are not visible to
+   `when:` / `for_each:` / `type: task` inputs / approval messages until the
+   task uploads a new snapshot (claim-time rendering is unaffected).
 
 ## 7. Follow-ons
 

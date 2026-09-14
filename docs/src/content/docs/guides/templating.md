@@ -16,14 +16,16 @@ rule, not one per field.
 | `secret.*` | workspace secrets (the action's **owner** workspace in action bodies; the job's workspace elsewhere) | always present, `{}` when none |
 | `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | present only when a parsed snapshot exists — `{{ not state }}` is the "first run" test |
 | `job.revision` | workspace revision pinned at creation | always present, `null` for pre-migration jobs |
-| `<step>.output` | a finished step's output (`null` for skipped, failed and suspended steps) | hyphens in step names become underscores |
+| `<step>.output` | a finished step's output (`null` when a completed step produced none; `null` for skipped, failed and suspended steps — either renders as an empty string) | hyphens in step names become underscores |
 | `<step>.error` | a failed step's error message | |
 | `each.item` / `each.index` / `each.total` | loop variables inside a `for_each` instance | not available in `when:` — the condition runs before the loop expands |
 
 **Reserved names.** A flow step named `input`, `secret`, `state`,
 `global_state` or `job` shadows that variable; a step named `each` is shadowed
-by the loop variable. The server writes a `[render] step '…' shadows template
-variable '…'` line to the job log when this happens. Avoid these names.
+by the loop variable. When a worker claims the step, the server writes a
+`[render] step '…' shadows template variable '…'` line to the job log; for
+`when:`, `for_each:`, `type: task` inputs and approval messages the collision
+is recorded in the server log only. Avoid these names.
 
 ## Basic usage
 

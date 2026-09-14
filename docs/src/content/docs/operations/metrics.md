@@ -38,7 +38,7 @@ the worker token.
 | Name | Labels | Buckets |
 |---|---|---|
 | `stroem_http_request_duration_seconds` | `route` | `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10` seconds |
-| `stroem_snapshot_resolve_seconds` | — | `0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1` seconds. Time to resolve the task+global state snapshot rows before rendering (claim, orchestration, creation). Pool-only; no archive access. |
+| `stroem_snapshot_resolve_seconds` | `entry` — `claim`, `advance`, `init` | `0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1` seconds. Time to resolve the task+global state snapshot rows before rendering (claim, orchestration, creation). Pool-only; no archive access. |
 
 ### Gauges (sampled at scrape time)
 
