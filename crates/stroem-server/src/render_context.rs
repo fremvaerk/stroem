@@ -480,10 +480,12 @@ mod tests {
             // Order: framework keys precede step entries; each follows them.
             let ordered = build_ordered(&job, &views, slot, scope);
             let pos = |k: &str| ordered.iter().position(|(key, _)| key == k).unwrap();
-            assert!(
-                pos("job") < pos("prev"),
-                "{label}: job must precede step entries"
-            );
+            for key in ["input", "secret", "state", "global_state", "job"] {
+                assert!(
+                    pos(key) < pos("prev"),
+                    "{label}: {key} must precede step entries"
+                );
+            }
             if !is_condition {
                 assert!(
                     pos("prev") < pos("each"),

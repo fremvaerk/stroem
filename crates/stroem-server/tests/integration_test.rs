@@ -27460,7 +27460,7 @@ async fn test_state_json_round_trips_including_nul_escape() -> Result<()> {
         .unwrap();
     assert_eq!(g2.state_json, Some(sidecar.clone()));
     let glist = stroem_db::WorkspaceStateRepo::list(&pool, "default").await?;
-    assert_eq!(glist[0].state_json, Some(sidecar));
+    assert_eq!(glist[0].state_json, Some(sidecar.clone()));
 
     // NULL stays NULL.
     let job2 = JobRepo::create(
@@ -27490,6 +27490,61 @@ async fn test_state_json_round_trips_including_nul_escape() -> Result<()> {
         .await?
         .unwrap();
     assert_eq!(t3.state_json, None);
+
+    // The same NUL round trip through the production writer used by every
+    // upload site: insert_and_prune, bound in the same transaction as the
+    // caller's other statements. This is what actually protects the upload
+    // path — `insert` above is a convenience wrapper the uploaders don't use.
+    let job3 = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let mut tx = pool.begin().await?;
+    stroem_db::TaskStateRepo::insert_and_prune(
+        &mut tx,
+        "default",
+        "hello-world",
+        job3,
+        "k/3.tar.gz",
+        10,
+        true,
+        Some(&sidecar),
+        10,
+        None,
+    )
+    .await?;
+    stroem_db::WorkspaceStateRepo::insert_and_prune(
+        &mut tx,
+        "default",
+        "hello-world",
+        job3,
+        "k/global3.tar.gz",
+        10,
+        true,
+        Some(&sidecar),
+        10,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+
+    let t4 = stroem_db::TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert_eq!(t4.state_json, Some(sidecar.clone()));
+    let g4 = stroem_db::WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert_eq!(g4.state_json, Some(sidecar));
+
     Ok(())
 }
 
@@ -27570,6 +27625,22 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
     let s = latest_snapshots(&pool, "default", "hello-world", "test").await;
     assert_eq!(s.task.unwrap().json, Some(json!({"n": 2})));
     assert_eq!(s.global.unwrap().json, Some(json!({"g": true})));
+    Ok(())
+}
+
+/// A lookup error (unreachable DB) must not panic or propagate — `latest_snapshots`
+/// is best-effort: it logs and yields `None` for the side that failed (spec §3.4).
+/// No testcontainer needed: a lazily-connected pool against an address nothing
+/// listens on fails the query itself, which is exactly the error path under test.
+#[tokio::test]
+async fn test_latest_snapshots_lookup_error_yields_none() -> Result<()> {
+    use stroem_server::render_context::latest_snapshots;
+
+    let bad_pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/nope")?;
+
+    let s = latest_snapshots(&bad_pool, "default", "hello-world", "test").await;
+    assert!(s.task.is_none() && s.global.is_none());
     Ok(())
 }
 
@@ -27775,6 +27846,47 @@ async fn test_worker_global_state_upload_persists_state_json() -> Result<()> {
     Ok(())
 }
 
+/// Same request shape and the same tarball (which DOES contain a root
+/// `state.json`) as `test_worker_global_state_upload_persists_state_json`,
+/// but without `?has_json=true`. Mirrors
+/// `test_worker_task_state_upload_without_has_json_leaves_state_json_null`
+/// for the global endpoint.
+#[tokio::test]
+async fn test_worker_global_state_upload_without_has_json_leaves_state_json_null() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let sidecar = json!({"cursor": "xyz", "n": 2});
+    let body = tarball_with_state_json(&sidecar);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/worker/global-state/default/{job_id}"))
+        .header("authorization", "Bearer test-token-secret")
+        .header("content-type", "application/gzip")
+        .body(Body::from(body))?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert!(!row.has_json);
+    assert_eq!(row.state_json, None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_api_task_state_upload_persists_state_json() -> Result<()> {
     let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
@@ -27797,6 +27909,31 @@ async fn test_api_task_state_upload_persists_state_json() -> Result<()> {
     Ok(())
 }
 
+/// Same request shape as `test_api_task_state_upload_persists_state_json`
+/// but with no state query params, so `build_state_json_from_params` yields
+/// an empty map: `build_snapshot` computes `has_json = false` and the
+/// uploaded tarball carries no `state.json`.
+#[tokio::test]
+async fn test_api_task_state_upload_without_state_json_leaves_state_json_null() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/tasks/hello-world/state")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert!(!row.has_json);
+    assert_eq!(row.state_json, None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_api_global_state_upload_persists_state_json() -> Result<()> {
     let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
@@ -27816,6 +27953,31 @@ async fn test_api_global_state_upload_persists_state_json() -> Result<()> {
         .unwrap();
     assert!(row.has_json);
     assert_eq!(row.state_json, Some(sidecar));
+    Ok(())
+}
+
+/// Same request shape as `test_api_global_state_upload_persists_state_json`
+/// but with no state query params, so `build_state_json_from_params` yields
+/// an empty map: `build_snapshot` computes `has_json = false` and the
+/// uploaded tarball carries no `state.json`.
+#[tokio::test]
+async fn test_api_global_state_upload_without_state_json_leaves_state_json_null() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/state")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert!(!row.has_json);
+    assert_eq!(row.state_json, None);
     Ok(())
 }
 
