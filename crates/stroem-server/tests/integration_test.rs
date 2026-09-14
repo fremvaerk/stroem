@@ -6,21 +6,24 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use stroem_common::models::workflow::{
     ActionDef, AgentToolRef, ConnectionDef, ConnectionPropertyDef, ConnectionTypeDef, FlowStep,
     HookDef, InputFieldDef, TaskDef, TriggerDef, WorkspaceConfig,
 };
 use stroem_db::{
-    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, UserAuthLinkRepo, UserRepo,
-    WorkerRepo,
+    create_pool, run_migrations, JobRepo, JobStepRepo, NewJobStep, TaskStateRepo, UserAuthLinkRepo,
+    UserRepo, WorkerRepo, WorkspaceStateRepo,
 };
 use stroem_server::auth::hash_password;
+use stroem_server::blob_storage::{BlobArchive, LocalBlobArchive};
 use stroem_server::config::{
     AuthConfig, DbConfig, InitialUserConfig, JobDefaults, LogStorageConfig, RetentionConfig,
     ServerConfig, WorkspaceSourceDef,
 };
 use stroem_server::log_storage::LogStorage;
 use stroem_server::state::AppState;
+use stroem_server::state_storage::StateStorage;
 use stroem_server::web::build_router;
 use stroem_server::workspace::WorkspaceManager;
 use tempfile::TempDir;
@@ -27493,5 +27496,211 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
     let s = latest_snapshots(&pool, "default", "hello-world").await;
     assert_eq!(s.task.unwrap().json, Some(json!({"n": 2})));
     assert_eq!(s.global.unwrap().json, Some(json!({"g": true})));
+    Ok(())
+}
+
+// ─── Upload sites persist the sidecar (spec §3.4) ───
+
+/// Same workspace as `setup()` (task `hello-world` included), but with
+/// `state_storage` configured against a local-filesystem archive so the
+/// worker and API state-upload endpoints are reachable instead of 404ing.
+async fn setup_with_state_storage() -> Result<(
+    Router,
+    PgPool,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let state_dir = temp_dir.path().join("state-archive");
+    std::fs::create_dir_all(&state_dir)?;
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([(
+            "default".to_string(),
+            WorkspaceSourceDef::Folder {
+                triggers: true,
+                path: temp_dir.path().to_string_lossy().to_string(),
+            },
+        )]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth: None,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: None,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    let workspace = test_workspace();
+    let mgr = WorkspaceManager::from_config("default", workspace);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let archive: Arc<dyn BlobArchive> = Arc::new(LocalBlobArchive::new(state_dir));
+    let storage = StateStorage::new(archive, "state/".to_string(), 5, None);
+    let state = AppState::new(
+        pool.clone(),
+        mgr,
+        config,
+        log_storage,
+        HashMap::new(),
+        Some(storage),
+    );
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, temp_dir, container))
+}
+
+/// Build a gzip tarball with a single root-level `state.json`.
+fn tarball_with_state_json(sidecar: &serde_json::Value) -> Vec<u8> {
+    use flate2::{write::GzEncoder, Compression};
+    let mut ar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+    let bytes = sidecar.to_string().into_bytes();
+    let mut h = tar::Header::new_gnu();
+    h.set_size(bytes.len() as u64);
+    h.set_mode(0o644);
+    h.set_cksum();
+    ar.append_data(&mut h, "state.json", &bytes[..]).unwrap();
+    let enc = ar.into_inner().unwrap();
+    enc.finish().unwrap()
+}
+
+#[tokio::test]
+async fn test_worker_task_state_upload_persists_state_json() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let sidecar = json!({"cursor": "abc", "n": 1});
+    let body = tarball_with_state_json(&sidecar);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/worker/state/default/hello-world/{job_id}?has_json=true"
+        ))
+        .header("authorization", "Bearer test-token-secret")
+        .header("content-type", "application/gzip")
+        .body(Body::from(body))?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert!(row.has_json);
+    assert_eq!(row.state_json, Some(sidecar));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_worker_global_state_upload_persists_state_json() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let sidecar = json!({"cursor": "xyz", "n": 2});
+    let body = tarball_with_state_json(&sidecar);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/worker/global-state/default/{job_id}?has_json=true"
+        ))
+        .header("authorization", "Bearer test-token-secret")
+        .header("content-type", "application/gzip")
+        .body(Body::from(body))?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert!(row.has_json);
+    assert_eq!(row.state_json, Some(sidecar));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_task_state_upload_persists_state_json() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+
+    let sidecar = json!({"cursor": "abc", "n": "1"});
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/tasks/hello-world/state?cursor=abc&n=1")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert!(row.has_json);
+    assert_eq!(row.state_json, Some(sidecar));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_api_global_state_upload_persists_state_json() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+
+    let sidecar = json!({"cursor": "xyz", "n": "2"});
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/workspaces/default/state?cursor=xyz&n=2")
+        .header("content-type", "application/gzip")
+        .body(Body::empty())?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert!(row.has_json);
+    assert_eq!(row.state_json, Some(sidecar));
     Ok(())
 }

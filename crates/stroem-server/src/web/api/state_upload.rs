@@ -227,6 +227,7 @@ pub fn pack_tarball(files: &HashMap<String, Vec<u8>>) -> Result<Vec<u8>> {
 use crate::state::AppState;
 use crate::web::api::middleware::AuthUser;
 use crate::web::error::AppError;
+use crate::web::worker_api::state::extract_state_json;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -507,6 +508,14 @@ async fn commit_task_upload(
     .await
     .context("insert synthetic upload job")?;
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if has_json {
+        extract_state_json(new_bytes)
+    } else {
+        None
+    };
+
     // Insert state row + prune via repo (FK child — job row already exists above).
     let (_, deleted_keys) = stroem_db::TaskStateRepo::insert_and_prune(
         &mut tx,
@@ -516,7 +525,7 @@ async fn commit_task_upload(
         key,
         new_bytes.len() as i64,
         has_json,
-        None,
+        state_json.as_ref(),
         max_snapshots,
         Some(snapshot_id),
     )
@@ -716,6 +725,14 @@ async fn commit_global_upload(
     .await
     .context("insert synthetic upload job (global)")?;
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if has_json {
+        extract_state_json(new_bytes)
+    } else {
+        None
+    };
+
     // Insert state row + prune via repo (FK child — job row already exists above).
     let (_, deleted_keys) = stroem_db::WorkspaceStateRepo::insert_and_prune(
         &mut tx,
@@ -725,7 +742,7 @@ async fn commit_global_upload(
         key,
         new_bytes.len() as i64,
         has_json,
-        None,
+        state_json.as_ref(),
         max_snapshots,
         Some(snapshot_id),
     )

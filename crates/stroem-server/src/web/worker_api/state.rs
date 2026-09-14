@@ -125,6 +125,14 @@ pub async fn upload_global_state(
         }
     };
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if query.has_json {
+        extract_state_json(&body)
+    } else {
+        None
+    };
+
     let (snapshot_id, deleted_keys) = match stroem_db::WorkspaceStateRepo::insert_and_prune(
         &mut tx,
         &workspace,
@@ -133,7 +141,7 @@ pub async fn upload_global_state(
         &key,
         body.len() as i64,
         query.has_json,
-        None,
+        state_json.as_ref(),
         storage.global_max_snapshots(),
         None,
     )
@@ -421,6 +429,14 @@ pub async fn upload_state(
         }
     };
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if query.has_json {
+        extract_state_json(&body)
+    } else {
+        None
+    };
+
     let (snapshot_id, deleted_keys) = match stroem_db::TaskStateRepo::insert_and_prune(
         &mut tx,
         &workspace,
@@ -429,7 +445,7 @@ pub async fn upload_state(
         &key,
         body.len() as i64,
         query.has_json,
-        None,
+        state_json.as_ref(),
         storage.max_snapshots(),
         None,
     )
