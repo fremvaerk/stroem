@@ -27415,3 +27415,83 @@ async fn test_state_json_round_trips_including_nul_escape() -> Result<()> {
     assert_eq!(t3.state_json, None);
     Ok(())
 }
+
+// ─── latest_snapshots: pool-only resolution of the persisted sidecar ───
+#[tokio::test]
+async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Result<()> {
+    use stroem_server::render_context::latest_snapshots;
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    // No rows at all.
+    let none = latest_snapshots(&pool, "default", "hello-world").await;
+    assert!(none.task.is_none() && none.global.is_none());
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    // A row without JSON: metadata present, json None.
+    stroem_db::TaskStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        job_id,
+        "k/a.tar.gz",
+        5,
+        true,
+        None,
+    )
+    .await?;
+    let s = latest_snapshots(&pool, "default", "hello-world").await;
+    let t = s.task.expect("task row");
+    assert_eq!(t.storage_key, "k/a.tar.gz");
+    assert!(t.has_json && t.json.is_none());
+
+    // A newer row with JSON wins.
+    let job2 = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    stroem_db::TaskStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        job2,
+        "k/b.tar.gz",
+        5,
+        true,
+        Some(&json!({"n": 2})),
+    )
+    .await?;
+    stroem_db::WorkspaceStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        job2,
+        "k/g.tar.gz",
+        5,
+        true,
+        Some(&json!({"g": true})),
+    )
+    .await?;
+    let s = latest_snapshots(&pool, "default", "hello-world").await;
+    assert_eq!(s.task.unwrap().json, Some(json!({"n": 2})));
+    assert_eq!(s.global.unwrap().json, Some(json!({"g": true})));
+    Ok(())
+}
