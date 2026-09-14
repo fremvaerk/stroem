@@ -42,8 +42,17 @@ pub struct Snapshots {
 
 /// Resolve the latest task and global snapshots. Pool only — no archive.
 /// Best-effort: a lookup error is logged and yields `None` for that side.
+///
+/// `entry` labels the `stroem_snapshot_resolve_seconds` histogram (spec
+/// §3.4) with which entry point resolved this snapshot — `"claim"`,
+/// `"advance"` or `"init"` in production, `"test"` in tests.
 #[tracing::instrument(skip(pool))]
-pub async fn latest_snapshots(pool: &PgPool, workspace: &str, task_name: &str) -> Snapshots {
+pub async fn latest_snapshots(
+    pool: &PgPool,
+    workspace: &str,
+    task_name: &str,
+    entry: &'static str,
+) -> Snapshots {
     let started = std::time::Instant::now();
     let task = match TaskStateRepo::get_latest(pool, workspace, task_name).await {
         Ok(row) => row.map(|r| Snapshot {
@@ -78,7 +87,7 @@ pub async fn latest_snapshots(pool: &PgPool, workspace: &str, task_name: &str) -
             None
         }
     };
-    metrics::histogram!(crate::metrics::STROEM_SNAPSHOT_RESOLVE_SECONDS)
+    metrics::histogram!(crate::metrics::STROEM_SNAPSHOT_RESOLVE_SECONDS, "entry" => entry)
         .record(started.elapsed().as_secs_f64());
     Snapshots { task, global }
 }
@@ -320,7 +329,10 @@ fn build_entries(
 /// `global_state`, `job`, step entries, `each`, then (ApprovalMessage only)
 /// the rendered input. A step named like one of the first five keys shadows
 /// it; `each` and the approval mapping shadow a step. Every collision is
-/// recorded and `warn!`ed.
+/// recorded and `debug!`ed here — this runs on every cascade pass, not just
+/// claim, so it must not warn on every pass. The claim path (the only caller
+/// with job-log access) re-emits a `warn!` per deduplicated line when it
+/// flushes `RenderContext::log_lines()` to the job log.
 pub fn build(
     job: &JobContext<'_>,
     steps: &[StepView<'_>],
@@ -331,7 +343,7 @@ pub fn build(
     let ctx: Map<String, Value> = entries.into_iter().collect();
 
     for c in &collisions {
-        tracing::warn!(
+        tracing::debug!(
             job_id = %job.job_id,
             step = %c.step,
             key = c.key,

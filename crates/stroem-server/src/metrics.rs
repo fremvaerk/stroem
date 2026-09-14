@@ -29,7 +29,8 @@ pub const STROEM_STEPS_READY: &str = "stroem_steps_ready";
 /// `gauge` — 1 if a given background task loop is alive, else 0. Label: task.
 pub const STROEM_BACKGROUND_TASK_ALIVE: &str = "stroem_background_task_alive";
 
-/// Time to resolve the task+global state snapshots for rendering (seconds).
+/// `histogram` — time to resolve the task+global state snapshots for
+/// rendering (seconds). Label: entry (`claim`, `advance`, `init`).
 pub const STROEM_SNAPSHOT_RESOLVE_SECONDS: &str = "stroem_snapshot_resolve_seconds";
 
 use anyhow::{Context, Result};

@@ -348,7 +348,8 @@ async fn snapshot_resolve_histogram_is_recorded() -> Result<()> {
 
     // Exercises the real production function — no rows need to exist, it
     // still records the histogram observation on the miss path.
-    stroem_server::render_context::latest_snapshots(&h.pool, "default", "hello-world").await;
+    stroem_server::render_context::latest_snapshots(&h.pool, "default", "hello-world", "test")
+        .await;
 
     let body = scrape(&router).await?;
     assert!(
@@ -358,6 +359,10 @@ async fn snapshot_resolve_histogram_is_recorded() -> Result<()> {
     assert!(
         body.contains("stroem_snapshot_resolve_seconds_count"),
         "expected snapshot resolve histogram count in:\n{body}"
+    );
+    assert!(
+        body.contains(r#"entry="test""#),
+        "expected entry=\"test\" label in:\n{body}"
     );
     Ok(())
 }

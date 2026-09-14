@@ -27044,38 +27044,70 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
     )
     .await?;
 
-    let steps = vec![NewJobStep {
-        job_id,
-        step_name: "think".to_string(),
-        action_name: "assistant".to_string(),
-        action_type: "agent".to_string(),
-        action_image: None,
-        // `nonexistent_var` is not in any render context, so Tera errors.
-        action_spec: Some(json!({
-            "type": "agent",
-            "provider": "anthropic",
-            "prompt": "summarise {{ nonexistent_var }}"
-        })),
-        input: None,
-        status: "ready".to_string(),
-        required_ability: "agent".to_string(),
-        required_tags: vec![],
-        runner: "local".to_string(),
-        timeout_secs: None,
-        when_condition: None,
-        for_each_expr: None,
-        loop_source: None,
-        loop_index: None,
-        loop_total: None,
-        loop_item: None,
-        max_retries: None,
-        retry_backoff_secs: None,
-        retry_strategy: None,
-        retry_jitter: false,
-        action_workspace: None,
-        action_revision: None,
-    }];
+    let steps = vec![
+        NewJobStep {
+            job_id,
+            step_name: "think".to_string(),
+            action_name: "assistant".to_string(),
+            action_type: "agent".to_string(),
+            action_image: None,
+            // `nonexistent_var` is not in any render context, so Tera errors.
+            action_spec: Some(json!({
+                "type": "agent",
+                "provider": "anthropic",
+                "prompt": "summarise {{ nonexistent_var }}"
+            })),
+            input: None,
+            status: "ready".to_string(),
+            required_ability: "agent".to_string(),
+            required_tags: vec![],
+            runner: "local".to_string(),
+            timeout_secs: None,
+            when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
+        },
+        // A step named like a framework key (`secret`) already completed in
+        // the same job: the collision must be flushed to the job log even
+        // though the claim ultimately fails on the "think" step's prompt.
+        NewJobStep {
+            job_id,
+            step_name: "secret".to_string(),
+            action_name: "greet".to_string(),
+            action_type: "script".to_string(),
+            action_image: None,
+            action_spec: Some(json!({"script": "echo hi"})),
+            input: None,
+            status: "pending".to_string(),
+            required_ability: "script".to_string(),
+            required_tags: vec![],
+            runner: "local".to_string(),
+            timeout_secs: None,
+            when_condition: None,
+            for_each_expr: None,
+            loop_source: None,
+            loop_index: None,
+            loop_total: None,
+            loop_item: None,
+            max_retries: None,
+            retry_backoff_secs: None,
+            retry_strategy: None,
+            retry_jitter: false,
+            action_workspace: None,
+            action_revision: None,
+        },
+    ];
     JobStepRepo::create_steps(&pool, &steps).await?;
+    JobStepRepo::mark_completed(&pool, job_id, "secret", Some(json!({"ok": true}))).await?;
 
     let response = router
         .clone()
@@ -27092,6 +27124,7 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
         .to_string();
 
     let response = router
+        .clone()
         .oneshot(worker_request(
             "POST",
             "/worker/jobs/claim",
@@ -27125,6 +27158,33 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
     assert!(
         !stored.contains("has no rendered prompt"),
         "persisted error must be the real cause, not the downstream symptom: {stored}"
+    );
+
+    // The collision diagnostics gathered before the failing render must not
+    // be lost on the failure path (`fail_claimed_step_with_collisions`).
+    let resp = router
+        .oneshot(api_get(&format!("/api/jobs/{}/logs", job_id)))
+        .await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let log_body = body_json(resp).await;
+    let lines: Vec<String> = log_body["logs"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["line"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "[render] step 'secret' shadows template variable 'secret'"),
+        "collision line missing from job log, got: {:?}",
+        lines
     );
 
     Ok(())
@@ -27440,7 +27500,7 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
     let (_router, pool, _tmp, _container) = setup().await?;
 
     // No rows at all.
-    let none = latest_snapshots(&pool, "default", "hello-world").await;
+    let none = latest_snapshots(&pool, "default", "hello-world", "test").await;
     assert!(none.task.is_none() && none.global.is_none());
 
     let job_id = JobRepo::create(
@@ -27467,7 +27527,7 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
         None,
     )
     .await?;
-    let s = latest_snapshots(&pool, "default", "hello-world").await;
+    let s = latest_snapshots(&pool, "default", "hello-world", "test").await;
     let t = s.task.expect("task row");
     assert_eq!(t.storage_key, "k/a.tar.gz");
     assert!(t.has_json && t.json.is_none());
@@ -27507,7 +27567,7 @@ async fn test_latest_snapshots_reads_persisted_sidecar_without_archive() -> Resu
         Some(&json!({"g": true})),
     )
     .await?;
-    let s = latest_snapshots(&pool, "default", "hello-world").await;
+    let s = latest_snapshots(&pool, "default", "hello-world", "test").await;
     assert_eq!(s.task.unwrap().json, Some(json!({"n": 2})));
     assert_eq!(s.global.unwrap().json, Some(json!({"g": true})));
     Ok(())
@@ -27634,6 +27694,46 @@ async fn test_worker_task_state_upload_persists_state_json() -> Result<()> {
         .unwrap();
     assert!(row.has_json);
     assert_eq!(row.state_json, Some(sidecar));
+    Ok(())
+}
+
+/// Same request shape and the same tarball (which DOES contain a root
+/// `state.json`) as `test_worker_task_state_upload_persists_state_json`, but
+/// without `?has_json=true`. Pins the gate: the flag, not the tarball
+/// contents, decides whether the sidecar is parsed and persisted.
+#[tokio::test]
+async fn test_worker_task_state_upload_without_has_json_leaves_state_json_null() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup_with_state_storage().await?;
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let sidecar = json!({"cursor": "abc", "n": 1});
+    let body = tarball_with_state_json(&sidecar);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/worker/state/default/hello-world/{job_id}"))
+        .header("authorization", "Bearer test-token-secret")
+        .header("content-type", "application/gzip")
+        .body(Body::from(body))?;
+    let resp = router.clone().oneshot(req).await?;
+    let status = resp.status();
+    assert_eq!(status, 201, "{:?}", body_json(resp).await);
+
+    let row = TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert!(!row.has_json);
+    assert_eq!(row.state_json, None);
     Ok(())
 }
 
@@ -27878,6 +27978,91 @@ async fn test_claim_renders_state_in_image_and_agent_prompt() -> Result<()> {
         "state.x must reach agent prompt"
     );
     assert_eq!(b["agent_system_prompt"], "rev rev-1");
+    Ok(())
+}
+
+// ─── Rendering from the persisted sidecar needs no state storage ──
+//
+// The `ClaimResponse` state-key fields exist only so the worker can download
+// the archive blob; resolving `{{ state.x }}` from the persisted sidecar
+// (migration 047) works with no `state_storage:` configured at all, and the
+// four key fields must come back null rather than pointing at a storage
+// backend the worker cannot reach.
+#[tokio::test]
+async fn test_claim_omits_state_keys_when_state_storage_unconfigured() -> Result<()> {
+    let (router, pool, _tmp, _container) = setup().await?;
+    seed_task_state(&pool, json!({"x": "seeded"})).await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        Some(json!({"name": "Bob"})),
+        "api",
+        None,
+        Some("rev-1"),
+        None,
+    )
+    .await?;
+    let steps = vec![NewJobStep {
+        job_id,
+        step_name: "greet".to_string(),
+        action_name: "greet".to_string(),
+        action_type: "script".to_string(),
+        action_image: None,
+        action_spec: Some(json!({"script": "echo {{ state.x }}"})),
+        input: None,
+        status: "ready".to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: None,
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }];
+    JobStepRepo::create_steps(&pool, &steps).await?;
+
+    let r = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/register",
+            json!({"name": "w-nostorage", "capabilities": ["script"]}),
+        ))
+        .await?;
+    let worker_id = body_json(r).await["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = router
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id, "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(r.status(), 200);
+    let b = body_json(r).await;
+    assert_eq!(
+        b["action_spec"]["script"], "echo seeded",
+        "state.x must still render from the persisted sidecar with no state storage configured"
+    );
+    assert_eq!(b["state_storage_key"], Value::Null);
+    assert_eq!(b["state_has_json"], Value::Null);
+    assert_eq!(b["global_state_storage_key"], Value::Null);
+    assert_eq!(b["global_state_has_json"], Value::Null);
     Ok(())
 }
 

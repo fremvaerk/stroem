@@ -609,7 +609,7 @@ pub async fn init(
 ) -> Result<Option<JobStatus>> {
     // One sample per entry (spec §3.4): the creation-time cascade, the
     // `type: task` input and the approval messages all see the same snapshot.
-    let snapshots = render_context::latest_snapshots(pool, workspace_name, task_name).await;
+    let snapshots = render_context::latest_snapshots(pool, workspace_name, task_name, "init").await;
 
     crate::cascade::execute(pool, job_id, task, Some(workspace_config), &snapshots)
         .await

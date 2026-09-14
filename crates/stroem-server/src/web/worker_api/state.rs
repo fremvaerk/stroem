@@ -112,6 +112,14 @@ pub async fn upload_global_state(
         .await
         .context("store global state snapshot")?;
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if query.has_json {
+        extract_state_json(&body)
+    } else {
+        None
+    };
+
     // Record the snapshot and prune old ones atomically inside a transaction
     // owned here. If anything fails, delete the blob we just uploaded so no
     // orphaned data is left behind.
@@ -123,14 +131,6 @@ pub async fn upload_global_state(
                 anyhow::anyhow!(e).context("begin global state upload tx"),
             ));
         }
-    };
-
-    // Persist the parsed sidecar (migration 047) using exactly the gate and
-    // extractor the claim path used to apply on every claim.
-    let state_json = if query.has_json {
-        extract_state_json(&body)
-    } else {
-        None
     };
 
     let (snapshot_id, deleted_keys) = match stroem_db::WorkspaceStateRepo::insert_and_prune(
@@ -416,6 +416,14 @@ pub async fn upload_state(
         .await
         .context("store state snapshot")?;
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if query.has_json {
+        extract_state_json(&body)
+    } else {
+        None
+    };
+
     // Record the snapshot and prune old ones atomically inside a transaction
     // owned here. If anything fails, delete the blob we just uploaded so no
     // orphaned data is left behind.
@@ -427,14 +435,6 @@ pub async fn upload_state(
                 anyhow::anyhow!(e).context("begin state upload tx"),
             ));
         }
-    };
-
-    // Persist the parsed sidecar (migration 047) using exactly the gate and
-    // extractor the claim path used to apply on every claim.
-    let state_json = if query.has_json {
-        extract_state_json(&body)
-    } else {
-        None
     };
 
     let (snapshot_id, deleted_keys) = match stroem_db::TaskStateRepo::insert_and_prune(

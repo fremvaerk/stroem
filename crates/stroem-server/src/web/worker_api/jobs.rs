@@ -404,6 +404,26 @@ async fn fail_claimed_step(
         .into_response()
 }
 
+/// Append the collision diagnostics gathered so far, then fail the step.
+/// A step named like a framework key is a plausible cause of the very render
+/// error being reported, so the lines must not be lost on the failure path.
+async fn fail_claimed_step_with_collisions(
+    state: &Arc<AppState>,
+    job_id: Uuid,
+    step_name: &str,
+    error_msg: &str,
+    ws_set: &crate::workspace_set::WorkspaceSet<'_>,
+    mut collision_lines: Vec<String>,
+) -> Response {
+    collision_lines.sort();
+    collision_lines.dedup();
+    for line in &collision_lines {
+        state.append_server_log(job_id, line).await;
+        tracing::warn!(job_id = %job_id, "{line}");
+    }
+    fail_claimed_step(state, job_id, step_name, error_msg, ws_set).await
+}
+
 /// POST /worker/jobs/claim - Claim next ready step
 #[tracing::instrument(skip(state))]
 pub async fn claim_job(
@@ -524,8 +544,13 @@ pub async fn claim_job(
     // Pool-only. The archive is consulted ONLY for a row that predates
     // migration 047 (has_json without a persisted sidecar), for rendering,
     // and never written back — see spec §4.6 for why a backfill is unsafe.
-    let mut snapshots =
-        crate::render_context::latest_snapshots(&state.pool, &job.workspace, &job.task_name).await;
+    let mut snapshots = crate::render_context::latest_snapshots(
+        &state.pool,
+        &job.workspace,
+        &job.task_name,
+        "claim",
+    )
+    .await;
     if let Some(ref storage) = state.state_storage {
         for snap in [snapshots.task.as_mut(), snapshots.global.as_mut()]
             .into_iter()
@@ -543,10 +568,20 @@ pub async fn claim_job(
             }
         }
     }
-    let state_storage_key = snapshots.task.as_ref().map(|s| s.storage_key.clone());
-    let state_has_json = snapshots.task.as_ref().map(|s| s.has_json);
-    let global_state_storage_key = snapshots.global.as_ref().map(|s| s.storage_key.clone());
-    let global_state_has_json = snapshots.global.as_ref().map(|s| s.has_json);
+    // The worker only needs these to download the archive blob, which is
+    // impossible without configured storage; rendering from the persisted
+    // sidecar (above) is correct either way, so resolution stays unconditional.
+    let (state_storage_key, state_has_json, global_state_storage_key, global_state_has_json) =
+        if state.state_storage.is_some() {
+            (
+                snapshots.task.as_ref().map(|s| s.storage_key.clone()),
+                snapshots.task.as_ref().map(|s| s.has_json),
+                snapshots.global.as_ref().map(|s| s.storage_key.clone()),
+                snapshots.global.as_ref().map(|s| s.has_json),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
     // Snapshot of every workspace config: cross-workspace connection references
     // in this step's input resolve against it (gated by `shared`).
@@ -615,9 +650,15 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("Failed to render step input template: {:#}", e);
-                return Ok(
-                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
-                );
+                return Ok(fail_claimed_step_with_collisions(
+                    &state,
+                    step.job_id,
+                    &step.step_name,
+                    &msg,
+                    &ws_set,
+                    std::mem::take(&mut collision_lines),
+                )
+                .await);
             }
         };
 
@@ -625,9 +666,15 @@ pub async fn claim_job(
             Ok(input) => input,
             Err(e) => {
                 let msg = format!("{:#}", e);
-                return Ok(
-                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
-                );
+                return Ok(fail_claimed_step_with_collisions(
+                    &state,
+                    step.job_id,
+                    &step.step_name,
+                    &msg,
+                    &ws_set,
+                    std::mem::take(&mut collision_lines),
+                )
+                .await);
             }
         }
     } else {
@@ -651,9 +698,15 @@ pub async fn claim_job(
             Ok(spec) => spec,
             Err(e) => {
                 let msg = format!("{:#}", e);
-                return Ok(
-                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
-                );
+                return Ok(fail_claimed_step_with_collisions(
+                    &state,
+                    step.job_id,
+                    &step.step_name,
+                    &msg,
+                    &ws_set,
+                    std::mem::take(&mut collision_lines),
+                )
+                .await);
             }
         };
 
@@ -662,9 +715,15 @@ pub async fn claim_job(
         Ok(img) => img,
         Err(e) => {
             let msg = format!("{:#}", e);
-            return Ok(
-                fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
-            );
+            return Ok(fail_claimed_step_with_collisions(
+                &state,
+                step.job_id,
+                &step.step_name,
+                &msg,
+                &ws_set,
+                std::mem::take(&mut collision_lines),
+            )
+            .await);
         }
     };
 
@@ -714,9 +773,15 @@ pub async fn claim_job(
             Ok(pair) => pair,
             Err(e) => {
                 let msg = format!("{:#}", e);
-                return Ok(
-                    fail_claimed_step(&state, step.job_id, &step.step_name, &msg, &ws_set).await,
-                );
+                return Ok(fail_claimed_step_with_collisions(
+                    &state,
+                    step.job_id,
+                    &step.step_name,
+                    &msg,
+                    &ws_set,
+                    std::mem::take(&mut collision_lines),
+                )
+                .await);
             }
         };
 
@@ -797,11 +862,15 @@ pub async fn claim_job(
     };
 
     // A step whose name shadows a template variable is reported once per claim,
-    // not once per scope (the same step collides in every build).
+    // not once per scope (the same step collides in every build). The claim
+    // path is the one entry with job-log access, so it re-emits warn-level
+    // visibility here even though `render_context::build` itself only debug!s
+    // (spec §3.3 rule 1) — a cascade pass would otherwise warn on every pass.
     collision_lines.sort();
     collision_lines.dedup();
     for line in &collision_lines {
         state.append_server_log(step.job_id, line).await;
+        tracing::warn!(job_id = %step.job_id, "{line}");
     }
 
     Ok(Json(ClaimResponse {

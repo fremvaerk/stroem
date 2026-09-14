@@ -482,6 +482,14 @@ async fn commit_task_upload(
     let snapshot_id = Uuid::new_v4();
     let output = serde_json::json!({ "snapshot_id": snapshot_id });
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if has_json {
+        extract_state_json(new_bytes)
+    } else {
+        None
+    };
+
     let mut tx = pool.begin().await.context("begin upload tx")?;
 
     // Insert the synthetic job first (FK parent of task_state.job_id).
@@ -507,14 +515,6 @@ async fn commit_task_upload(
     .execute(&mut *tx)
     .await
     .context("insert synthetic upload job")?;
-
-    // Persist the parsed sidecar (migration 047) using exactly the gate and
-    // extractor the claim path used to apply on every claim.
-    let state_json = if has_json {
-        extract_state_json(new_bytes)
-    } else {
-        None
-    };
 
     // Insert state row + prune via repo (FK child — job row already exists above).
     let (_, deleted_keys) = stroem_db::TaskStateRepo::insert_and_prune(
@@ -699,6 +699,14 @@ async fn commit_global_upload(
     let snapshot_id = Uuid::new_v4();
     let output = serde_json::json!({ "snapshot_id": snapshot_id });
 
+    // Persist the parsed sidecar (migration 047) using exactly the gate and
+    // extractor the claim path used to apply on every claim.
+    let state_json = if has_json {
+        extract_state_json(new_bytes)
+    } else {
+        None
+    };
+
     let mut tx = pool.begin().await.context("begin global upload tx")?;
 
     // Insert the synthetic job first (FK parent of workspace_state.job_id).
@@ -724,14 +732,6 @@ async fn commit_global_upload(
     .execute(&mut *tx)
     .await
     .context("insert synthetic upload job (global)")?;
-
-    // Persist the parsed sidecar (migration 047) using exactly the gate and
-    // extractor the claim path used to apply on every claim.
-    let state_json = if has_json {
-        extract_state_json(new_bytes)
-    } else {
-        None
-    };
 
     // Insert state row + prune via repo (FK child — job row already exists above).
     let (_, deleted_keys) = stroem_db::WorkspaceStateRepo::insert_and_prune(

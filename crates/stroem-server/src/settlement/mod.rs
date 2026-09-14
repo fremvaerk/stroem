@@ -212,9 +212,13 @@ impl Settlement {
             // One sample per entry (spec §3.4): every render in this advance —
             // the cascade, task-step input, approval messages — sees the same
             // snapshot. Nested advances sample independently.
-            let snapshots =
-                crate::render_context::latest_snapshots(&self.pool, &job.workspace, &job.task_name)
-                    .await;
+            let snapshots = crate::render_context::latest_snapshots(
+                &self.pool,
+                &job.workspace,
+                &job.task_name,
+                "advance",
+            )
+            .await;
             // Run the cascade: promote steps, skip unreachable, expand/resolve
             // for_each placeholders (inside the cascade), check terminal.
             cascade_and_settle(&self.pool, job_id, task, workspace, &snapshots).await?;
