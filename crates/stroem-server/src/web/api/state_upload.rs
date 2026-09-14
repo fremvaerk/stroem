@@ -516,6 +516,7 @@ async fn commit_task_upload(
         key,
         new_bytes.len() as i64,
         has_json,
+        None,
         max_snapshots,
         Some(snapshot_id),
     )
@@ -724,6 +725,7 @@ async fn commit_global_upload(
         key,
         new_bytes.len() as i64,
         has_json,
+        None,
         max_snapshots,
         Some(snapshot_id),
     )

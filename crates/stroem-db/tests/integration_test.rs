@@ -3619,7 +3619,8 @@ async fn test_task_state_insert_and_get_latest() -> Result<()> {
 
     // Insert first snapshot
     let key1 = "state/prod/deploy/snap1.tar.gz";
-    let _id1 = TaskStateRepo::insert(&pool, "prod", "deploy", job_id, key1, 100, false).await?;
+    let _id1 =
+        TaskStateRepo::insert(&pool, "prod", "deploy", job_id, key1, 100, false, None).await?;
 
     let latest = TaskStateRepo::get_latest(&pool, "prod", "deploy")
         .await?
@@ -3634,7 +3635,8 @@ async fn test_task_state_insert_and_get_latest() -> Result<()> {
     // Insert second snapshot — must become the latest
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let key2 = "state/prod/deploy/snap2.tar.gz";
-    let _id2 = TaskStateRepo::insert(&pool, "prod", "deploy", job_id, key2, 200, true).await?;
+    let _id2 =
+        TaskStateRepo::insert(&pool, "prod", "deploy", job_id, key2, 200, true, None).await?;
 
     let latest = TaskStateRepo::get_latest(&pool, "prod", "deploy")
         .await?
@@ -3658,7 +3660,8 @@ async fn test_task_state_get_by_id() -> Result<()> {
 
     let job_id = create_test_job(&pool, "ws", "my-task").await?;
     let key = "state/ws/my-task/abc.tar.gz";
-    let snap_id = TaskStateRepo::insert(&pool, "ws", "my-task", job_id, key, 512, true).await?;
+    let snap_id =
+        TaskStateRepo::insert(&pool, "ws", "my-task", job_id, key, 512, true, None).await?;
 
     // Get by known ID
     let row = TaskStateRepo::get(&pool, snap_id)
@@ -3689,7 +3692,17 @@ async fn test_task_state_list() -> Result<()> {
     for i in 0..3 {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let key = format!("state/ws/batch/snap{}.tar.gz", i);
-        TaskStateRepo::insert(&pool, "ws", "batch", job_id, &key, i as i64 * 10, false).await?;
+        TaskStateRepo::insert(
+            &pool,
+            "ws",
+            "batch",
+            job_id,
+            &key,
+            i as i64 * 10,
+            false,
+            None,
+        )
+        .await?;
     }
 
     // List returns all 3 ordered newest-first
@@ -3718,7 +3731,7 @@ async fn test_task_state_prune() -> Result<()> {
     for i in 0..5 {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let key = format!("state/ws/prune-task/snap{}.tar.gz", i);
-        TaskStateRepo::insert(&pool, "ws", "prune-task", job_id, &key, 10, false).await?;
+        TaskStateRepo::insert(&pool, "ws", "prune-task", job_id, &key, 10, false, None).await?;
         keys.push(key);
     }
 
@@ -3758,13 +3771,13 @@ async fn test_task_state_delete_all() -> Result<()> {
     // Insert 3 snapshots for task-a
     for i in 0..3 {
         let key = format!("state/ws/task-a/snap{}.tar.gz", i);
-        TaskStateRepo::insert(&pool, "ws", "task-a", job_id, &key, 10, false).await?;
+        TaskStateRepo::insert(&pool, "ws", "task-a", job_id, &key, 10, false, None).await?;
     }
 
     // Insert 2 snapshots for task-b
     for i in 0..2 {
         let key = format!("state/ws/task-b/snap{}.tar.gz", i);
-        TaskStateRepo::insert(&pool, "ws", "task-b", job_id_b, &key, 10, false).await?;
+        TaskStateRepo::insert(&pool, "ws", "task-b", job_id_b, &key, 10, false, None).await?;
     }
 
     // delete_all for task-a returns 3 keys
@@ -3788,7 +3801,8 @@ async fn test_task_state_job_fk_on_delete_set_null() -> Result<()> {
 
     let job_id = create_test_job(&pool, "ws", "fk-task").await?;
     let key = "state/ws/fk-task/snap.tar.gz";
-    let snap_id = TaskStateRepo::insert(&pool, "ws", "fk-task", job_id, key, 100, false).await?;
+    let snap_id =
+        TaskStateRepo::insert(&pool, "ws", "fk-task", job_id, key, 100, false, None).await?;
 
     // Verify FK is set
     let row = TaskStateRepo::get(&pool, snap_id)
@@ -3832,7 +3846,8 @@ async fn test_workspace_state_insert_and_get_latest() -> Result<()> {
 
     // Insert first snapshot
     let id1 =
-        WorkspaceStateRepo::insert(&pool, "default", "task-a", job_id, "key1", 100, false).await?;
+        WorkspaceStateRepo::insert(&pool, "default", "task-a", job_id, "key1", 100, false, None)
+            .await?;
 
     let latest = WorkspaceStateRepo::get_latest(&pool, "default")
         .await?
@@ -3844,7 +3859,8 @@ async fn test_workspace_state_insert_and_get_latest() -> Result<()> {
     // Insert a newer snapshot from a different task
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let id2 =
-        WorkspaceStateRepo::insert(&pool, "default", "task-b", job_id, "key2", 200, true).await?;
+        WorkspaceStateRepo::insert(&pool, "default", "task-b", job_id, "key2", 200, true, None)
+            .await?;
 
     let latest = WorkspaceStateRepo::get_latest(&pool, "default")
         .await?
@@ -3878,6 +3894,7 @@ async fn test_workspace_state_insert_and_prune() -> Result<()> {
             &format!("key{}", i),
             100,
             false,
+            None,
         )
         .await?;
     }
@@ -3893,6 +3910,7 @@ async fn test_workspace_state_insert_and_prune() -> Result<()> {
         "key-final",
         100,
         false,
+        None,
         2,
         None,
     )
@@ -3922,12 +3940,12 @@ async fn test_workspace_state_delete_all() -> Result<()> {
     let job_id = create_test_job(&pool, "ws-a", "task").await?;
 
     // Insert snapshots for workspace A
-    WorkspaceStateRepo::insert(&pool, "ws-a", "task", job_id, "key-a1", 100, false).await?;
-    WorkspaceStateRepo::insert(&pool, "ws-a", "task", job_id, "key-a2", 100, false).await?;
+    WorkspaceStateRepo::insert(&pool, "ws-a", "task", job_id, "key-a1", 100, false, None).await?;
+    WorkspaceStateRepo::insert(&pool, "ws-a", "task", job_id, "key-a2", 100, false, None).await?;
 
     // Insert a snapshot for workspace B (different job to avoid FK conflicts)
     let job_id_b = create_test_job(&pool, "ws-b", "task").await?;
-    WorkspaceStateRepo::insert(&pool, "ws-b", "task", job_id_b, "key-b1", 100, false).await?;
+    WorkspaceStateRepo::insert(&pool, "ws-b", "task", job_id_b, "key-b1", 100, false, None).await?;
 
     // Delete all for workspace A
     let deleted = WorkspaceStateRepo::delete_all(&pool, "ws-a").await?;

@@ -133,6 +133,7 @@ pub async fn upload_global_state(
         &key,
         body.len() as i64,
         query.has_json,
+        None,
         storage.global_max_snapshots(),
         None,
     )
@@ -428,6 +429,7 @@ pub async fn upload_state(
         &key,
         body.len() as i64,
         query.has_json,
+        None,
         storage.max_snapshots(),
         None,
     )

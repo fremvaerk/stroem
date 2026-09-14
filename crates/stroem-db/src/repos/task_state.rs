@@ -14,6 +14,7 @@ pub struct TaskStateRow {
     pub storage_key: String,
     pub size_bytes: i64,
     pub has_json: bool,
+    pub state_json: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -27,7 +28,7 @@ impl TaskStateRepo {
         task_name: &str,
     ) -> Result<Option<TaskStateRow>> {
         let row = sqlx::query_as::<_, TaskStateRow>(
-            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, created_at \
+            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at \
              FROM task_state \
              WHERE workspace = $1 AND task_name = $2 \
              ORDER BY created_at DESC, id DESC \
@@ -44,7 +45,7 @@ impl TaskStateRepo {
     /// Get a specific snapshot by ID.
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<TaskStateRow>> {
         let row = sqlx::query_as::<_, TaskStateRow>(
-            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, created_at \
+            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at \
              FROM task_state \
              WHERE id = $1",
         )
@@ -56,6 +57,7 @@ impl TaskStateRepo {
     }
 
     /// Insert a new snapshot record. Returns the generated ID.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         pool: &PgPool,
         workspace: &str,
@@ -64,11 +66,13 @@ impl TaskStateRepo {
         storage_key: &str,
         size_bytes: i64,
         has_json: bool,
+        state_json: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
+        let state_json_text = state_json.map(|v| v.to_string());
         sqlx::query(
-            "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json)",
         )
         .bind(id)
         .bind(workspace)
@@ -77,6 +81,7 @@ impl TaskStateRepo {
         .bind(storage_key)
         .bind(size_bytes)
         .bind(has_json)
+        .bind(state_json_text)
         .execute(pool)
         .await
         .context("Failed to insert task state snapshot")?;
@@ -104,14 +109,16 @@ impl TaskStateRepo {
         storage_key: &str,
         size_bytes: i64,
         has_json: bool,
+        state_json: Option<&serde_json::Value>,
         keep: usize,
         snapshot_id: Option<Uuid>,
     ) -> Result<(Uuid, Vec<String>)> {
         let id = snapshot_id.unwrap_or_else(Uuid::new_v4);
+        let state_json_text = state_json.map(|v| v.to_string());
 
         sqlx::query(
-            "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO task_state (id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json)",
         )
         .bind(id)
         .bind(workspace)
@@ -120,6 +127,7 @@ impl TaskStateRepo {
         .bind(storage_key)
         .bind(size_bytes)
         .bind(has_json)
+        .bind(state_json_text)
         .execute(&mut **tx)
         .await
         .context("Failed to insert task state snapshot")?;
@@ -151,7 +159,7 @@ impl TaskStateRepo {
         task_name: &str,
     ) -> Result<Vec<TaskStateRow>> {
         let rows = sqlx::query_as::<_, TaskStateRow>(
-            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, created_at \
+            "SELECT id, workspace, task_name, job_id, storage_key, size_bytes, has_json, state_json, created_at \
              FROM task_state \
              WHERE workspace = $1 AND task_name = $2 \
              ORDER BY created_at DESC, id DESC",

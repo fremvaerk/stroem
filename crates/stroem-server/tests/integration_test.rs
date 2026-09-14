@@ -27316,3 +27316,102 @@ async fn test_claim_render_error_does_not_leak_secret_values() -> Result<()> {
 
     Ok(())
 }
+
+// --- Migration 047: the parsed state.json sidecar is persisted on the row ---
+//
+// Bound as TEXT with an SQL `::json` cast, NOT as serde_json::Value: sqlx encodes
+// Value as a JSONB parameter regardless of the column type, and jsonb rejects the
+// NUL-byte escape the existing extractor accepts. The NUL round-trip in this test
+// is the one that fails if anyone binds the value as Value again.
+#[tokio::test]
+async fn test_state_json_round_trips_including_nul_escape() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let sidecar = json!({"cursor": "a\u{0000}b", "count": 7});
+    stroem_db::TaskStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        job_id,
+        "k/task.tar.gz",
+        10,
+        true,
+        Some(&sidecar),
+    )
+    .await?;
+    stroem_db::WorkspaceStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        job_id,
+        "k/global.tar.gz",
+        10,
+        true,
+        Some(&sidecar),
+    )
+    .await?;
+
+    let t = stroem_db::TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert_eq!(t.state_json, Some(sidecar.clone()));
+    let g = stroem_db::WorkspaceStateRepo::get_latest(&pool, "default")
+        .await?
+        .unwrap();
+    assert_eq!(g.state_json, Some(sidecar.clone()));
+
+    // The other readers project the column too.
+    let t2 = stroem_db::TaskStateRepo::get(&pool, t.id).await?.unwrap();
+    assert_eq!(t2.state_json, Some(sidecar.clone()));
+    let list = stroem_db::TaskStateRepo::list(&pool, "default", "hello-world").await?;
+    assert_eq!(list[0].state_json, Some(sidecar.clone()));
+    let g2 = stroem_db::WorkspaceStateRepo::get(&pool, g.id)
+        .await?
+        .unwrap();
+    assert_eq!(g2.state_json, Some(sidecar.clone()));
+    let glist = stroem_db::WorkspaceStateRepo::list(&pool, "default").await?;
+    assert_eq!(glist[0].state_json, Some(sidecar));
+
+    // NULL stays NULL.
+    let job2 = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    stroem_db::TaskStateRepo::insert(
+        &pool,
+        "default",
+        "hello-world",
+        job2,
+        "k/2.tar.gz",
+        10,
+        true,
+        None,
+    )
+    .await?;
+    let t3 = stroem_db::TaskStateRepo::get_latest(&pool, "default", "hello-world")
+        .await?
+        .unwrap();
+    assert_eq!(t3.state_json, None);
+    Ok(())
+}

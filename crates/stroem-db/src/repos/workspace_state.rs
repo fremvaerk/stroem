@@ -14,6 +14,7 @@ pub struct WorkspaceStateRow {
     pub storage_key: String,
     pub size_bytes: i64,
     pub has_json: bool,
+    pub state_json: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -23,7 +24,7 @@ impl WorkspaceStateRepo {
     /// Get the latest snapshot for a workspace (global scope — not scoped to any task).
     pub async fn get_latest(pool: &PgPool, workspace: &str) -> Result<Option<WorkspaceStateRow>> {
         let row = sqlx::query_as::<_, WorkspaceStateRow>(
-            "SELECT id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, created_at \
+            "SELECT id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json, created_at \
              FROM workspace_state \
              WHERE workspace = $1 \
              ORDER BY created_at DESC, id DESC \
@@ -39,7 +40,7 @@ impl WorkspaceStateRepo {
     /// Get a specific snapshot by ID.
     pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<WorkspaceStateRow>> {
         let row = sqlx::query_as::<_, WorkspaceStateRow>(
-            "SELECT id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, created_at \
+            "SELECT id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json, created_at \
              FROM workspace_state \
              WHERE id = $1",
         )
@@ -51,6 +52,7 @@ impl WorkspaceStateRepo {
     }
 
     /// Insert a new snapshot record. Returns the generated ID.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert(
         pool: &PgPool,
         workspace: &str,
@@ -59,11 +61,13 @@ impl WorkspaceStateRepo {
         storage_key: &str,
         size_bytes: i64,
         has_json: bool,
+        state_json: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
+        let state_json_text = state_json.map(|v| v.to_string());
         sqlx::query(
-            "INSERT INTO workspace_state (id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO workspace_state (id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json)",
         )
         .bind(id)
         .bind(workspace)
@@ -72,6 +76,7 @@ impl WorkspaceStateRepo {
         .bind(storage_key)
         .bind(size_bytes)
         .bind(has_json)
+        .bind(state_json_text)
         .execute(pool)
         .await
         .context("Failed to insert workspace state snapshot")?;
@@ -102,14 +107,16 @@ impl WorkspaceStateRepo {
         storage_key: &str,
         size_bytes: i64,
         has_json: bool,
+        state_json: Option<&serde_json::Value>,
         keep: usize,
         snapshot_id: Option<Uuid>,
     ) -> Result<(Uuid, Vec<String>)> {
         let id = snapshot_id.unwrap_or_else(Uuid::new_v4);
+        let state_json_text = state_json.map(|v| v.to_string());
 
         sqlx::query(
-            "INSERT INTO workspace_state (id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO workspace_state (id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json)",
         )
         .bind(id)
         .bind(workspace)
@@ -118,6 +125,7 @@ impl WorkspaceStateRepo {
         .bind(storage_key)
         .bind(size_bytes)
         .bind(has_json)
+        .bind(state_json_text)
         .execute(&mut **tx)
         .await
         .context("Failed to insert workspace state snapshot")?;
@@ -144,7 +152,7 @@ impl WorkspaceStateRepo {
     /// List snapshots for a workspace ordered by created_at DESC.
     pub async fn list(pool: &PgPool, workspace: &str) -> Result<Vec<WorkspaceStateRow>> {
         let rows = sqlx::query_as::<_, WorkspaceStateRow>(
-            "SELECT id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, created_at \
+            "SELECT id, workspace, written_by_task, job_id, storage_key, size_bytes, has_json, state_json, created_at \
              FROM workspace_state \
              WHERE workspace = $1 \
              ORDER BY created_at DESC, id DESC",
