@@ -44,9 +44,15 @@ fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
 }
 
 async fn after_step(pool: &PgPool, job_id: Uuid, task: &TaskDef) -> anyhow::Result<()> {
-    stroem_server::settlement::cascade_and_settle(pool, job_id, task, &workspace_with(task))
-        .await
-        .map(|_| ())
+    stroem_server::settlement::cascade_and_settle(
+        pool,
+        job_id,
+        task,
+        &workspace_with(task),
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await
+    .map(|_| ())
 }
 
 // Task 4 threaded a leading `&WorkspaceManager` through job creation to support
@@ -22553,7 +22559,14 @@ async fn test_step_retry_window_closed_for_loop_rollup() -> Result<()> {
     await_retry_gate_blocked(&pool).await?;
 
     // The sibling instance's rollup runs while `x[0]`'s failure is in flight.
-    stroem_server::cascade::execute(&pool, job_id, &task, Some(&workspace)).await?;
+    stroem_server::cascade::execute(
+        &pool,
+        job_id,
+        &task,
+        Some(&workspace),
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
 
     sqlx::query("SELECT pg_advisory_unlock(4242, 1)")
         .execute(&mut *gate)

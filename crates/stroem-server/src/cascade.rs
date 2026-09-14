@@ -10,8 +10,6 @@ use stroem_common::models::workflow::{FlowStep, TaskDef, WorkspaceConfig};
 use stroem_db::{JobRepo, JobRow, JobStepRepo, JobStepRow, NewJobStep};
 use uuid::Uuid;
 
-use crate::job_creator::build_step_render_context;
-
 /// One state transition the cascade wants applied. Closed enum.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
@@ -643,6 +641,27 @@ fn apply_all(snap: &mut Snapshot, changes: &[Change]) {
     }
 }
 
+/// The `when:` / `for_each:` context for the rows as they are NOW (phase B
+/// sees phase A's changes). `Scope::Condition` never carries `each` — the
+/// placeholder's condition runs before instances exist (spec §4.2).
+fn condition_context(
+    job: &JobRow,
+    rows: &[JobStepRow],
+    ws: &WorkspaceConfig,
+    snapshots: &crate::render_context::Snapshots,
+) -> crate::render_context::RenderContext {
+    use crate::render_context::{build, views, JobContext, Scope};
+    let job_ctx = JobContext {
+        job_id: job.job_id,
+        job_input: job.input.as_ref(),
+        caller_secrets: &ws.secrets,
+        owner_secrets: &ws.secrets,
+        snapshots,
+        job_revision: job.revision.as_deref(),
+    };
+    build(&job_ctx, &views(rows), None, Scope::Condition)
+}
+
 /// The pure fixpoint (§4.4). Renders templates; never touches the database.
 /// `workspace_config == None` reproduces today's "no template context" mode.
 // used from Task 2 onward
@@ -651,6 +670,7 @@ pub fn run(
     job: &JobRow,
     steps: &[JobStepRow],
     workspace_config: Option<&WorkspaceConfig>,
+    snapshots: &crate::render_context::Snapshots,
 ) -> Result<Plan> {
     let pending_placeholders = steps
         .iter()
@@ -675,8 +695,8 @@ pub fn run(
         apply_all(&mut snap, &p0);
         pass.extend(p0);
 
-        let ctx_a = workspace_config.map(|ws| build_step_render_context(job, &snap.rows, ws));
-        let p1 = phase_promote(&snap, task, ctx_a.as_ref());
+        let ctx_a = workspace_config.map(|ws| condition_context(job, &snap.rows, ws, snapshots));
+        let p1 = phase_promote(&snap, task, ctx_a.as_ref().map(|c| c.as_value()));
         apply_all(&mut snap, &p1);
         pass.extend(p1);
 
@@ -684,8 +704,13 @@ pub fn run(
         apply_all(&mut snap, &p2);
         pass.extend(p2);
 
-        let ctx_b = workspace_config.map(|ws| build_step_render_context(job, &snap.rows, ws));
-        let p3 = phase_placeholders(&snap, task, ctx_b.as_ref(), job.job_id);
+        let ctx_b = workspace_config.map(|ws| condition_context(job, &snap.rows, ws, snapshots));
+        let p3 = phase_placeholders(
+            &snap,
+            task,
+            ctx_b.as_ref().map(|c| c.as_value()),
+            job.job_id,
+        );
         apply_all(&mut snap, &p3);
         pass.extend(p3);
 
@@ -875,19 +900,20 @@ fn is_deadlock(e: &anyhow::Error) -> bool {
 /// the pure fixpoint, apply the plan in one transaction. A guard miss (a row moved
 /// between snapshot and apply) or a Postgres deadlock rolls back and re-runs from
 /// a fresh snapshot, at most `MAX_ATTEMPTS` times.
-#[tracing::instrument(skip(pool, task, workspace_config))]
+#[tracing::instrument(skip(pool, task, workspace_config, snapshots))]
 pub async fn execute(
     pool: &PgPool,
     job_id: Uuid,
     task: &TaskDef,
     workspace_config: Option<&WorkspaceConfig>,
+    snapshots: &crate::render_context::Snapshots,
 ) -> Result<Plan> {
     // Why the last attempt was thrown away, for the exhaustion message.
     let mut last_cause = String::from("no re-run recorded");
     for attempt in 1..=MAX_ATTEMPTS {
         let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
         let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
-        let plan = run(task, &job, &steps, workspace_config)?;
+        let plan = run(task, &job, &steps, workspace_config, snapshots)?;
         if plan.changes.is_empty() {
             return Ok(plan);
         }
@@ -1153,7 +1179,14 @@ mod tests {
             row("b", "pending"),
             row("c", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:b"]);
     }
 
@@ -1171,7 +1204,14 @@ mod tests {
             row("r", "running"),
             row("join", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty(), "join must wait for r");
     }
 
@@ -1179,7 +1219,14 @@ mod tests {
     fn failed_dep_skips_dependents_transitively_in_one_run() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&["a"])), ("c", fs(&["b"]))]);
         let rows = vec![row("a", "failed"), row("b", "pending"), row("c", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["b"], "skipped");
         assert_eq!(s["c"], "skipped");
@@ -1199,7 +1246,14 @@ mod tests {
             row("x", "cancelled"),
             row("y", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["b"], "ready");
         assert_eq!(s["y"], "ready");
@@ -1209,7 +1263,14 @@ mod tests {
     fn mixed_skipped_and_failed_deps_without_cof_skips() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&[])), ("c", fs(&["a", "b"]))]);
         let rows = vec![row("a", "skipped"), row("b", "failed"), row("c", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(final_statuses(&plan, &rows)["c"], "skipped");
     }
 
@@ -1217,7 +1278,14 @@ mod tests {
     fn all_deps_skipped_cascade_skips_even_with_truthy_when() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row("a", "skipped"), row_when("b", "pending", "true")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["skip:b"]);
     }
 
@@ -1225,7 +1293,14 @@ mod tests {
     fn all_deps_skipped_applies_without_workspace_config() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row("a", "skipped"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, None).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            None,
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["skip:b"]);
     }
 
@@ -1243,7 +1318,14 @@ mod tests {
             row_when("f", "pending", "{{ not a.output.go }}"),
             row_when("e", "pending", "{{ a.output.missing.deep }}"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["t"], "ready");
         assert_eq!(s["f"], "skipped");
@@ -1270,7 +1352,14 @@ mod tests {
             row("a", "completed"),
             row_when("e", "pending", "{{ secret.db.host | round }}"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&w)).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&w),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let err = plan
             .changes
             .iter()
@@ -1289,11 +1378,68 @@ mod tests {
         );
     }
 
+    /// spec §1.2 bug 3: `{{ state.x }}` in a `when:` was always undefined
+    /// because the cascade context never carried a snapshot.
+    #[test]
+    fn when_condition_sees_task_and_global_state() {
+        use crate::render_context::{Snapshot as StateSnapshot, Snapshots};
+        let t = task(vec![
+            ("a", fs(&[])),
+            ("renew", fs(&["a"])),
+            ("g", fs(&["a"])),
+        ]);
+        let rows = vec![
+            row("a", "completed"),
+            row_when(
+                "renew",
+                "pending",
+                "{{ not state or state.days_remaining < 30 }}",
+            ),
+            row_when("g", "pending", "{{ global_state.flag }}"),
+        ];
+        let mk = |j: serde_json::Value| {
+            Some(StateSnapshot {
+                id: uuid::Uuid::nil(),
+                storage_key: "k".into(),
+                has_json: true,
+                json: Some(j),
+            })
+        };
+        let fresh = Snapshots {
+            task: mk(json!({"days_remaining": 60})),
+            global: mk(json!({"flag": false})),
+        };
+        let plan = run(&t, &job(None), &rows, Some(&ws()), &fresh).unwrap();
+        let s = final_statuses(&plan, &rows);
+        assert_eq!(s["renew"], "skipped", "fresh snapshot must skip the guard");
+        assert_eq!(s["g"], "skipped");
+
+        let stale = Snapshots {
+            task: mk(json!({"days_remaining": 10})),
+            global: mk(json!({"flag": true})),
+        };
+        let plan = run(&t, &job(None), &rows, Some(&ws()), &stale).unwrap();
+        let s = final_statuses(&plan, &rows);
+        assert_eq!(s["renew"], "ready");
+        assert_eq!(s["g"], "ready");
+
+        // No snapshot at all: `not state` is true — first run.
+        let plan = run(&t, &job(None), &rows, Some(&ws()), &Snapshots::default()).unwrap();
+        assert_eq!(final_statuses(&plan, &rows)["renew"], "ready");
+    }
+
     #[test]
     fn when_without_workspace_config_stays_pending() {
         let t = task(vec![("a", fs(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row("a", "completed"), row_when("b", "pending", "true")];
-        let plan = run(&t, &job(None), &rows, None).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            None,
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty());
     }
 
@@ -1312,7 +1458,14 @@ mod tests {
             row("c", "pending"),
             row("d", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["c"], "skipped");
         assert_eq!(
@@ -1325,7 +1478,14 @@ mod tests {
     fn rows_absent_from_flow_are_ignored() {
         let t = task(vec![("a", fs(&[]))]);
         let rows = vec![row("a", "completed"), row("ghost", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty());
     }
 
@@ -1346,7 +1506,14 @@ mod tests {
                 ..placeholder("p", "pending", "[1,2]")
             },
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["skip:a", "expand:p:2"]);
     }
 
@@ -1370,7 +1537,14 @@ mod tests {
                 "{% if a is defined %}yes{% else %}{{ a.output }}{% endif %}",
             ),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         // pass 1: a skipped, b fails (a undefined inside the else branch)
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["a"], "skipped");
@@ -1417,7 +1591,14 @@ mod tests {
             placeholder("p_cof", "pending", "[7]"),
             placeholder("ghost", "pending", "[1]"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["p_failed_dep"], "skipped");
         assert_eq!(s["p_all_skipped"], "skipped");
@@ -1447,7 +1628,14 @@ mod tests {
     fn placeholders_stay_pending_without_workspace_config() {
         let t = task(vec![("d", fs(&[])), ("p", fs(&["d"]))]);
         let rows = vec![row("d", "failed"), placeholder("p", "pending", "[1]")];
-        let plan = run(&t, &job(None), &rows, None).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            None,
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty(), "R4 needs a config even to retire");
     }
 
@@ -1458,7 +1646,14 @@ mod tests {
             placeholder("par", "pending", "[\"a\",\"b\"]"),
             placeholder("seq", "pending", "[\"a\",\"b\"]"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         for c in &plan.changes {
             if let Change::Expand {
                 placeholder,
@@ -1499,7 +1694,14 @@ mod tests {
             row_out("a", json!({"items": [1, 2, 3]})),
             placeholder("p", "pending", "{{ a.output.items | json_encode() }}"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["expand:p:3"]);
     }
 
@@ -1511,7 +1713,14 @@ mod tests {
             instance("p", 0, "completed", Some(json!(1))),
             instance("p", 1, "completed", Some(json!(2))),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(
             names(&plan),
             ["adopt:p", "rollup-ok:p"],
@@ -1526,7 +1735,14 @@ mod tests {
             placeholder("p", "pending", "[1]"),
             instance("p", 0, "completed", None),
         ];
-        let plan = run(&t, &job(None), &rows, None).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            None,
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty());
     }
 
@@ -1541,7 +1757,14 @@ mod tests {
             instance("x", 1, "pending", None),
             instance("x", 2, "pending", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:x[1]"]);
     }
 
@@ -1556,7 +1779,14 @@ mod tests {
             instance("x", 1, "completed", None),
             instance("x", 2, "pending", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let s = final_statuses(&plan, &rows);
         assert_eq!(s["x[2]"], "skipped");
         assert_eq!(s["x"], "failed", "rolled up in the following pass");
@@ -1579,7 +1809,14 @@ mod tests {
             instance("x", 1, "cancelled", None),
             instance("x", 2, "pending", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:x[2]"]);
     }
 
@@ -1592,7 +1829,14 @@ mod tests {
                 instance("x", 0, live, None),
                 instance("x", 1, "pending", None),
             ];
-            let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+            let plan = run(
+                &t,
+                &job(None),
+                &rows,
+                Some(&ws()),
+                &crate::render_context::Snapshots::default(),
+            )
+            .unwrap();
             assert!(plan.changes.is_empty(), "{live}");
         }
     }
@@ -1606,7 +1850,14 @@ mod tests {
             instance("x", 0, "completed", Some(json!("a"))),
             instance("x", 1, "cancelled", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         match &plan.changes[..] {
             [Change::Rollup {
                 placeholder,
@@ -1635,7 +1886,14 @@ mod tests {
             instance("x", 0, "completed", Some(json!("a"))),
             instance("x", 2, "completed", Some(json!("c"))),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         match &plan.changes[..] {
             [Change::Rollup {
                 placeholder,
@@ -1664,7 +1922,14 @@ mod tests {
             placeholder("y", "running", "[1]"),
             instance("y", 0, "failed", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let mut fails = vec![];
         let mut oks = vec![];
         for c in &plan.changes {
@@ -1699,7 +1964,14 @@ mod tests {
         orphan.loop_index = None;
         orphan.step_name = "x[?]".to_string();
         let rows = vec![placeholder("x", "running", "[1]"), orphan];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(
             names(&plan),
             ["rollup-fail:x"],
@@ -1726,7 +1998,14 @@ mod tests {
             instance("c", 0, "completed", None),
             placeholder("z", "running", "[1]"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty());
     }
 
@@ -1739,7 +2018,14 @@ mod tests {
             instance("x", 1, "pending", None),
         ];
         // Not sequential → no R5 skip; not all terminal → no rollup.
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(plan.changes.is_empty());
     }
 
@@ -1750,7 +2036,14 @@ mod tests {
             placeholder("x", "running", "[1]"),
             instance("x", 0, "completed", Some(json!(1))),
         ];
-        let plan = run(&t, &job(None), &rows, None).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            None,
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["rollup-ok:x"]);
     }
 
@@ -1762,7 +2055,14 @@ mod tests {
             instance("x", 0, "completed", Some(json!(5))),
             row_when("after", "pending", "{{ x.output[0] == 5 }}"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["rollup-ok:x", "promote:after"]);
     }
 
@@ -1777,7 +2077,14 @@ mod tests {
             instance("x", 0, "completed", Some(json!(5))),
             row_when("r", "pending", "{{ x.output[0] == 5 }}"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["rollup-ok:x", "promote:r"]);
     }
 
@@ -1794,7 +2101,14 @@ mod tests {
         ph.retry_backoff_secs = Some(7);
         ph.retry_strategy = Some("exponential".to_string());
         ph.retry_jitter = true;
-        let plan = run(&t, &job(None), &[ph], Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &[ph],
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let Change::Expand { instances, .. } = &plan.changes[0] else {
             panic!("expected an Expand, got {:?}", plan.changes[0]);
         };
@@ -1820,7 +2134,14 @@ mod tests {
             instance("x", 1, "cancelled", None),
             instance("x", 2, "pending", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["skip:x[2]", "rollup-ok:x"]);
         let Change::Rollup {
             outcome: RollupOutcome::Completed(out),
@@ -1843,7 +2164,14 @@ mod tests {
             instance("x", 0, "completed", Some(json!("a"))),
             instance("x", 1, "failed", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["rollup-fail:x"]);
     }
 
@@ -1864,7 +2192,14 @@ mod tests {
             rows.push(row(&format!("s{i}"), "pending"));
         }
         let t = task_owned(flow);
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(plan.changes.len(), N, "one Skip per pending step");
         let s = final_statuses(&plan, &rows);
         for i in 0..N {
@@ -1892,11 +2227,25 @@ mod tests {
             rows.push(row(&name, "pending"));
         }
         let t = task(flow);
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:s0"], "only the first is promotable");
         let mut snap = rows.clone();
         snap[1].status = "ready".to_string();
-        let again = run(&t, &job(None), &snap, Some(&ws())).unwrap();
+        let again = run(
+            &t,
+            &job(None),
+            &snap,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(
             again.changes.is_empty(),
             "snapshot at fixpoint yields an empty plan"
@@ -1916,7 +2265,14 @@ mod tests {
             rows.push(row(&name, "pending"));
         }
         let t = task_owned(flow);
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
 
         assert_eq!(plan.changes.len(), WIDTH, "every dependent is promoted");
         let mut promoted: Vec<String> = names(&plan);
@@ -1936,7 +2292,14 @@ mod tests {
         for r in snap.iter_mut().skip(1) {
             r.status = "ready".to_string();
         }
-        let again = run(&t, &job(None), &snap, Some(&ws())).unwrap();
+        let again = run(
+            &t,
+            &job(None),
+            &snap,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert!(again.changes.is_empty());
     }
 
@@ -1947,9 +2310,23 @@ mod tests {
             row("a", "completed"),
             row_when("b", "pending", "{{ input.fast }}"),
         ];
-        let plan = run(&t, &job(Some(json!({"fast": true}))), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(Some(json!({"fast": true}))),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:b"]);
-        let plan = run(&t, &job(Some(json!({"fast": false}))), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(Some(json!({"fast": false}))),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["skip:b"]);
 
         // `secret` only reaches the context when the workspace actually has one:
@@ -1960,13 +2337,27 @@ mod tests {
             row("a", "completed"),
             row_when("b", "pending", "{{ secret.API_KEY == \"k\" }}"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&with_secret)).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&with_secret),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(
             names(&plan),
             ["promote:b"],
             "secret reached the when template"
         );
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(
             names(&plan),
             ["fail:b"],
@@ -1994,6 +2385,7 @@ mod tests {
             &job(Some(json!({"use_fast": true}))),
             &rows,
             Some(&ws()),
+            &crate::render_context::Snapshots::default(),
         )
         .unwrap();
         let s = final_statuses(&plan, &rows);
@@ -2134,7 +2526,14 @@ mod tests {
     fn cws_all_deps_skipped_by_condition_promotes() {
         let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:b"]);
     }
 
@@ -2142,7 +2541,14 @@ mod tests {
     fn cws_all_deps_skipped_by_empty_loop_promotes() {
         let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row_skipped("a", "empty"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:b"]);
     }
 
@@ -2155,7 +2561,14 @@ mod tests {
             row_skipped("a", "condition"),
             row_when("b", "pending", "false"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "condition")]);
     }
 
@@ -2166,7 +2579,14 @@ mod tests {
         // continue_when_skipped.
         let t = task(vec![("a", fs(&[])), ("b", fs_cof(&["a"]))]);
         let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "cascade")]);
     }
 
@@ -2176,7 +2596,14 @@ mod tests {
         // setting it on b (the step that would benefit) has no effect.
         let t = task(vec![("a", fs(&[])), ("b", fs_cws(&["a"]))]);
         let rows = vec![row_skipped("a", "condition"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "cascade")]);
     }
 
@@ -2194,7 +2621,14 @@ mod tests {
             row_skipped("b", "condition"),
             row("c", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("c", "cascade")]);
     }
 
@@ -2202,7 +2636,14 @@ mod tests {
     fn cws_with_unreachable_dep_is_skipped_unreachable() {
         let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row_skipped("a", "unreachable"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "unreachable")]);
     }
 
@@ -2221,7 +2662,14 @@ mod tests {
             row_skipped("b", "unreachable"),
             row("c", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("c", "unreachable")]);
     }
 
@@ -2229,7 +2677,14 @@ mod tests {
     fn cws_and_cof_with_unreachable_dep_promotes() {
         let t = task(vec![("a", fs_cws(&[])), ("b", fs_cof(&["a"]))]);
         let rows = vec![row_skipped("a", "unreachable"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:b"]);
     }
 
@@ -2247,7 +2702,14 @@ mod tests {
             row_when("y", "pending", "false"),
             row("z", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         // y survives x's failure (cof) and reaches its own `when`, which is
         // false — a condition skip, not unreachable.
         assert!(skips(&plan).contains(&s("y", "condition")), "{:?}", plan);
@@ -2265,7 +2727,14 @@ mod tests {
         // Pre-migration / older-replica rows (spec §2.2).
         let t = task(vec![("a", fs_cws(&[])), ("b", fs(&["a"]))]);
         let rows = vec![row("a", "skipped"), row("b", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "unreachable")]);
     }
 
@@ -2280,7 +2749,14 @@ mod tests {
             ("c", fs(&["b"])),
         ]);
         let rows = vec![row("a", "failed"), row("b", "pending"), row("c", "pending")];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "unreachable"), s("c", "unreachable")]);
 
         // Same shape, but c also sets continue_on_failure: true — it now
@@ -2291,7 +2767,14 @@ mod tests {
             ("c", fs_cof(&["b"])),
         ]);
         let rows = vec![row("a", "failed"), row("b", "pending"), row("c", "pending")];
-        let plan = run(&t_cof, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t_cof,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("b", "unreachable")]);
         assert!(
             names(&plan).contains(&"promote:c".to_string()),
@@ -2315,7 +2798,14 @@ mod tests {
             row("b", "pending"),
             row("c", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(skips(&plan), [s("a", "condition"), s("b", "cascade")]);
         assert!(
             names(&plan).contains(&"promote:c".to_string()),
@@ -2340,7 +2830,14 @@ mod tests {
             row("b", "pending"),
             row("c", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(
             skips(&plan),
             [s("a", "condition"), s("b", "cascade"), s("c", "cascade")]
@@ -2363,7 +2860,14 @@ mod tests {
             row_skipped("b", "unreachable"),
             row("c", "pending"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         assert_eq!(names(&plan), ["promote:c"]);
     }
 
@@ -2378,7 +2882,14 @@ mod tests {
             instance("x", 1, "pending", None),
             instance("x", 2, "pending", None),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let sk = skips(&plan);
         assert!(sk.contains(&s("b", "unreachable")), "{sk:?}");
         assert!(sk.contains(&s("x[1]", "unreachable")), "{sk:?}");
@@ -2412,7 +2923,14 @@ mod tests {
             placeholder("p_cascade", "pending", "[1]"),
             placeholder("p_cws", "pending", "[1]"),
         ];
-        let plan = run(&t, &job(None), &rows, Some(&ws())).unwrap();
+        let plan = run(
+            &t,
+            &job(None),
+            &rows,
+            Some(&ws()),
+            &crate::render_context::Snapshots::default(),
+        )
+        .unwrap();
         let sk = skips(&plan);
         assert!(sk.contains(&s("p_when", "condition")), "{sk:?}");
         assert!(sk.contains(&s("p_empty", "empty")), "{sk:?}");

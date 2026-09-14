@@ -515,8 +515,14 @@ async fn orchestrate_after_server_step_failure(
     task: &stroem_common::models::workflow::TaskDef,
     workspace_config: &WorkspaceConfig,
 ) {
-    if let Err(e) =
-        crate::settlement::cascade_and_settle(pool, job_id, task, workspace_config).await
+    if let Err(e) = crate::settlement::cascade_and_settle(
+        pool,
+        job_id,
+        task,
+        workspace_config,
+        &crate::render_context::Snapshots::default(),
+    )
+    .await
     {
         tracing::error!(
             "Failed to orchestrate after server-side step '{}' failure in job {}: {:#}",
@@ -543,9 +549,15 @@ pub async fn init(
     task: &TaskDef,
     defaults: JobDefaults,
 ) -> Result<Option<JobStatus>> {
-    crate::cascade::execute(pool, job_id, task, Some(workspace_config))
-        .await
-        .context("creation-time step cascade")?;
+    crate::cascade::execute(
+        pool,
+        job_id,
+        task,
+        Some(workspace_config),
+        &crate::render_context::Snapshots::default(),
+    )
+    .await
+    .context("creation-time step cascade")?;
 
     handle_task_steps(
         workspaces,

@@ -157,14 +157,15 @@ pub async fn settle_if_all_terminal(
 /// Run the step cascade for `job_id`, then settle the job if every step is
 /// terminal. Replaces `orchestrator::on_step_completed`; the workspace config
 /// is required because production always has one.
-#[tracing::instrument(skip(pool, task, workspace_config))]
+#[tracing::instrument(skip(pool, task, workspace_config, snapshots))]
 pub async fn cascade_and_settle(
     pool: &PgPool,
     job_id: Uuid,
     task: &TaskDef,
     workspace_config: &WorkspaceConfig,
+    snapshots: &crate::render_context::Snapshots,
 ) -> Result<Option<JobStatus>> {
-    crate::cascade::execute(pool, job_id, task, Some(workspace_config))
+    crate::cascade::execute(pool, job_id, task, Some(workspace_config), snapshots)
         .await
         .context("Failed to run step cascade")?;
     settle_if_all_terminal(pool, job_id, task).await

@@ -211,7 +211,14 @@ impl Settlement {
             };
             // Run the cascade: promote steps, skip unreachable, expand/resolve
             // for_each placeholders (inside the cascade), check terminal.
-            cascade_and_settle(&self.pool, job_id, task, workspace).await?;
+            cascade_and_settle(
+                &self.pool,
+                job_id,
+                task,
+                workspace,
+                &crate::render_context::Snapshots::default(),
+            )
+            .await?;
 
             // Handle any newly-promoted type: task steps (including loop instances)
             if let Err(e) = dispatch::handle_task_steps(

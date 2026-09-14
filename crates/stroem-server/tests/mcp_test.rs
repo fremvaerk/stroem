@@ -44,9 +44,15 @@ fn workspace_with(task: &TaskDef) -> WorkspaceConfig {
 }
 
 async fn after_step(pool: &PgPool, job_id: Uuid, task: &TaskDef) -> anyhow::Result<()> {
-    stroem_server::settlement::cascade_and_settle(pool, job_id, task, &workspace_with(task))
-        .await
-        .map(|_| ())
+    stroem_server::settlement::cascade_and_settle(
+        pool,
+        job_id,
+        task,
+        &workspace_with(task),
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await
+    .map(|_| ())
 }
 
 // ─── Minimal workspace for MCP tests ────────────────────────────────────────

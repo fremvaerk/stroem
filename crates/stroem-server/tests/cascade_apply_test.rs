@@ -413,7 +413,14 @@ async fn execute_empty_plan_touches_nothing() -> Result<()> {
     let job_id = create_job(&pool).await;
     JobStepRepo::create_steps(&pool, &[step(job_id, "a", "running")]).await?;
     let task = make_task(HashMap::from([("a".to_string(), flow_step(vec![]))]));
-    let plan = execute(&pool, job_id, &task, Some(&WorkspaceConfig::new())).await?;
+    let plan = execute(
+        &pool,
+        job_id,
+        &task,
+        Some(&WorkspaceConfig::new()),
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
     assert!(plan.changes.is_empty());
     Ok(())
 }
@@ -441,11 +448,24 @@ async fn execute_replans_from_a_fresh_snapshot() -> Result<()> {
     // Prove the plan is non-empty on this snapshot, then invalidate it.
     let job = JobRepo::get(&pool, job_id).await?.unwrap();
     let steps = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
-    let stale = stroem_server::cascade::run(&task, &job, &steps, Some(&WorkspaceConfig::new()))?;
+    let stale = stroem_server::cascade::run(
+        &task,
+        &job,
+        &steps,
+        Some(&WorkspaceConfig::new()),
+        &stroem_server::render_context::Snapshots::default(),
+    )?;
     assert_eq!(stale.changes, vec![Change::Promote { step: "b".into() }]);
     JobStepRepo::cancel_pending_steps(&pool, job_id).await?;
 
-    let plan = execute(&pool, job_id, &task, Some(&WorkspaceConfig::new())).await?;
+    let plan = execute(
+        &pool,
+        job_id,
+        &task,
+        Some(&WorkspaceConfig::new()),
+        &stroem_server::render_context::Snapshots::default(),
+    )
+    .await?;
     assert!(
         plan.changes.is_empty(),
         "the re-run sees b cancelled and plans nothing"
@@ -475,9 +495,10 @@ async fn execute_concurrently_promotes_join_once() -> Result<()> {
         ("join".to_string(), flow_step(vec!["l", "r"])),
     ]));
     let ws = WorkspaceConfig::new();
+    let snapshots = stroem_server::render_context::Snapshots::default();
     let (p1, p2) = tokio::join!(
-        execute(&pool, job_id, &task, Some(&ws)),
-        execute(&pool, job_id, &task, Some(&ws)),
+        execute(&pool, job_id, &task, Some(&ws), &snapshots),
+        execute(&pool, job_id, &task, Some(&ws), &snapshots),
     );
     let (p1, p2) = (p1?, p2?);
     let promoted = p1.changes.len() + p2.changes.len();
@@ -541,7 +562,16 @@ async fn execute_retries_after_a_real_guard_miss() -> Result<()> {
         let pool = pool.clone();
         let task = task.clone();
         let ws = ws.clone();
-        tokio::spawn(async move { execute(&pool, job_id, &task, Some(&ws)).await })
+        tokio::spawn(async move {
+            execute(
+                &pool,
+                job_id,
+                &task,
+                Some(&ws),
+                &stroem_server::render_context::Snapshots::default(),
+            )
+            .await
+        })
     };
 
     // Wait for `execute`'s own UPDATE to actually block on `a`'s held row lock,
