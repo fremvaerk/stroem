@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod oauth;
 pub mod oidc;
 pub mod recovery;
+pub mod render_context;
 pub mod restart;
 pub mod scheduler;
 pub mod settlement;
