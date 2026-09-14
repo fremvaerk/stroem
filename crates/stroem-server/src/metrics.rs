@@ -61,7 +61,12 @@ pub fn install_recorder(replica_id: Uuid) -> Result<PrometheusHandle> {
             Matcher::Full(STROEM_HTTP_REQUEST_DURATION_SECONDS.to_string()),
             HTTP_DURATION_BUCKETS,
         )
-        .context("configuring http duration buckets")?;
+        .context("configuring http duration buckets")?
+        .set_buckets_for_metric(
+            Matcher::Full(STROEM_SNAPSHOT_RESOLVE_SECONDS.to_string()),
+            &[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+        )
+        .context("configuring snapshot resolve buckets")?;
     let handle = builder
         .install_recorder()
         .context("installing prometheus recorder")?;

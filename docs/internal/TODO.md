@@ -66,6 +66,9 @@ Last updated: 2026-06-03.
 - [ ] Remove the `Option<&WorkspaceConfig>` mode from `on_step_completed` (test-only; ~80 call sites pass `None`) — settlement branch.
 - [ ] Move `build_step_render_context` out of `job_creator.rs` (render-context candidate); `cascade.rs` and `job_creator.rs` currently reference each other. Superseded by candidate 4 of the 2026-09-11 architecture review — the move is one part of consolidating all four render-context builders.
 - [ ] Recovery's `mark_failed` on timed-out steps is unguarded and can overwrite a `completed` row.
+- [ ] **Reserved step names** — reject flow steps named `input`/`secret`/`state`/`global_state`/`job`/`each` at validation (render_context::FRAMEWORK_KEYS); retires the collision class in the render-context spec §6. Belongs with the validation-module candidate.
+- [ ] **Task-state storage hardening** — per-snapshot keys, download by claim-supplied key (wire change), prune surviving-reference check, extractor policy, backfill of pre-047 `state_json`. Problem statement: `docs/superpowers/specs/2026-09-13-task-state-storage-hardening-design.md`.
+- [ ] **`DispatchEnv` for settlement dispatch** — `handle_task_steps`, `handle_task_steps_pass` and `dispatch::init` now take 8 parameters each (`#[allow(clippy::too_many_arguments)]` ×3 added in the render-context work); `workspaces`, `pool`, `workspace_config`, `workspace_name`, `defaults`, `snapshots` are one per-entry dispatch environment the state tier already bundles as `Settlement`. A `DispatchEnv<'a>` collapses five arguments and removes all three allows.
 
 ## Simplification (from codex review 2026-03-17)
 

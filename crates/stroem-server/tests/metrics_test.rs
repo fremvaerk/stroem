@@ -336,6 +336,33 @@ async fn jobs_created_counter_renders_with_source_type_label() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn snapshot_resolve_histogram_is_recorded() -> Result<()> {
+    let h = boot().await?;
+    let log_dir = h._temp.path().to_path_buf();
+    let mut config = empty_config(&h.url, &log_dir);
+    config.metrics = Some(MetricsConfig {
+        public: true,
+        ..Default::default()
+    });
+    let router = build_router_with(&h, config).await;
+
+    // Exercises the real production function — no rows need to exist, it
+    // still records the histogram observation on the miss path.
+    stroem_server::render_context::latest_snapshots(&h.pool, "default", "hello-world").await;
+
+    let body = scrape(&router).await?;
+    assert!(
+        body.contains("stroem_snapshot_resolve_seconds_bucket"),
+        "expected snapshot resolve histogram buckets in:\n{body}"
+    );
+    assert!(
+        body.contains("stroem_snapshot_resolve_seconds_count"),
+        "expected snapshot resolve histogram count in:\n{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn http_route_label_uses_matched_pattern_not_raw_uri() -> Result<()> {
     let h = boot().await?;
     let log_dir = h._temp.path().to_path_buf();

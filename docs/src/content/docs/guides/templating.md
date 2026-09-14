@@ -7,17 +7,23 @@ Strøm uses [Tera](https://keats.github.io/tera/) for templating. Templates are 
 
 ## Available context
 
-Inside a step's `input` templates and `when` conditions, you have access to:
+Every template field a step can carry sees the same variables. There is one
+rule, not one per field.
 
-| Variable | Description |
-|----------|-------------|
-| `input.*` | Job-level input (from the API call or trigger) |
-| `<step_name>.output.*` | Output from a completed upstream step |
-| `secret.*` | Resolved workspace secrets |
-| `job.revision` | Workspace revision (git SHA or folder hash) pinned on the job at creation |
-| `state.*` | Previous [task state snapshot](/guides/task-state/) |
-| `global_state.*` | Previous [global workspace state](/guides/task-state/#global-workspace-state) |
-| `each.*` | Loop variables inside [`for_each` steps](/guides/loops/) |
+| Variable | Value | Notes |
+|---|---|---|
+| `input.*` | job input — or, in action bodies (`script`, `cmd`, `env`, `args`, `manifest`, `image`), the step's resolved input | approval `message:` sees the step's resolved input when the step has an input mapping, else job input |
+| `secret.*` | workspace secrets (the action's **owner** workspace in action bodies; the job's workspace elsewhere) | always present, `{}` when none |
+| `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | present only when a parsed snapshot exists — `{{ not state }}` is the "first run" test |
+| `job.revision` | workspace revision pinned at creation | always present, `null` for pre-migration jobs |
+| `<step>.output` | a finished step's output (`null` for skipped, failed and suspended steps) | hyphens in step names become underscores |
+| `<step>.error` | a failed step's error message | |
+| `each.item` / `each.index` / `each.total` | loop variables inside a `for_each` instance | not available in `when:` — the condition runs before the loop expands |
+
+**Reserved names.** A flow step named `input`, `secret`, `state`,
+`global_state` or `job` shadows that variable; a step named `each` is shadowed
+by the loop variable. The server writes a `[render] step '…' shadows template
+variable '…'` line to the job log when this happens. Avoid these names.
 
 ## Basic usage
 
