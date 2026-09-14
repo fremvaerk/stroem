@@ -720,7 +720,7 @@ pub fn run(
         changes.extend(pass);
     }
     // Scrub secret values out of every failure message before the plan leaves
-    // this function. `build_step_render_context` puts the workspace secrets
+    // this function. `condition_context` puts the workspace secrets
     // into the `when` / `for_each` context, and Tera quotes the offending value
     // in filter and type errors — so an author error touching `{{ secret.* }}`
     // would otherwise be persisted verbatim to `job_step.error_message` and
@@ -1337,7 +1337,7 @@ mod tests {
         assert!(err.unwrap().starts_with("when condition error: "));
     }
 
-    /// Security regression (2026-09-11): `build_step_render_context` puts the
+    /// Security regression (2026-09-11): `condition_context` puts the
     /// workspace secrets into the `when` context, and Tera quotes the offending
     /// value in filter/type errors. The resulting `Change::Fail` error is
     /// persisted to `job_step.error_message` and `retry_history`, so it must be
@@ -2329,8 +2329,7 @@ mod tests {
         .unwrap();
         assert_eq!(names(&plan), ["skip:b"]);
 
-        // `secret` only reaches the context when the workspace actually has one:
-        // build_step_render_context omits the key for an empty secrets map.
+        // A workspace secret reaches the `when` context under `secret`.
         let mut with_secret = ws();
         with_secret.secrets.insert("API_KEY".into(), json!("k"));
         let rows = vec![

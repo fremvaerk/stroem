@@ -116,6 +116,7 @@ async fn handle_task_steps(
         job_id,
         task,
         defaults,
+        &stroem_server::render_context::Snapshots::default(),
     )
     .await
 }
@@ -27131,8 +27132,8 @@ async fn test_claim_fails_agent_step_with_real_prompt_render_error() -> Result<(
 
 // ─── An agent step inside a for_each can reference {{ each.item }} ───
 //
-// `build_step_render_context` never injects `each`; two of its callers
-// (`settlement::dispatch`) patch it in afterwards and the agent path at
+// The old context builder never injected `each`; two of its callers
+// (`settlement::dispatch`) patched it in afterwards and the agent path at
 // `claim_job` did not. So an agent step inside a `for_each` could not use
 // `{{ each.item }}` in its prompt: the render failed, and the error was
 // swallowed into `None`. Now that a render failure fails the step, closing
@@ -28028,6 +28029,375 @@ async fn test_claim_renders_state_from_archive_for_pre_047_row() -> Result<()> {
     assert_eq!(
         global_row.state_json, None,
         "claim must not backfill the global state_json"
+    );
+    Ok(())
+}
+
+// ─── Wiring: state reaches `when:` through every settlement entry (spec §3.4) ───
+//
+// A builder tested in isolation cannot see what the caller failed to pass.
+// These drive the three production entries that render a `when:`: creation
+// (`dispatch::init`), a completion (`Settlement::advance`), and the
+// `type: task` dispatch-failure re-cascade. Each was observed to fail with
+// its entry's `latest_snapshots` call replaced by `Snapshots::default()`.
+
+/// A flow step for these tests: an existing `greet` action, optional deps,
+/// optional `when`, optional `continue_on_failure`.
+fn guarded_flow_step(deps: &[&str], when: Option<&str>, continue_on_failure: bool) -> FlowStep {
+    FlowStep {
+        action: "greet".to_string(),
+        name: None,
+        description: None,
+        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+        input: HashMap::new(),
+        continue_on_failure,
+        continue_when_skipped: false,
+        timeout: None,
+        when: when.map(|w| w.to_string()),
+        for_each: None,
+        sequential: false,
+        retry: None,
+        inline_action: None,
+    }
+}
+
+/// A task whose flow is exactly the given `(name, step)` pairs.
+fn task_with_flow(steps: Vec<(&str, FlowStep)>) -> TaskDef {
+    TaskDef {
+        name: None,
+        description: None,
+        mode: "distributed".to_string(),
+        folder: None,
+        input: HashMap::new(),
+        flow: steps.into_iter().map(|(n, s)| (n.to_string(), s)).collect(),
+        timeout: None,
+        retry: None,
+        on_success: vec![],
+        on_error: vec![],
+        on_suspended: vec![],
+        on_cancel: vec![],
+    }
+}
+
+/// A pending job-step row for these tests. `action_type` / `action_spec`
+/// decide whether settlement dispatches it server-side.
+fn pending_step(
+    job_id: Uuid,
+    step_name: &str,
+    action_type: &str,
+    action_spec: Value,
+    when_condition: Option<&str>,
+) -> NewJobStep {
+    NewJobStep {
+        job_id,
+        step_name: step_name.to_string(),
+        action_name: "greet".to_string(),
+        action_type: action_type.to_string(),
+        action_image: None,
+        action_spec: Some(action_spec),
+        input: None,
+        status: "pending".to_string(),
+        required_ability: "script".to_string(),
+        required_tags: vec![],
+        runner: "local".to_string(),
+        timeout_secs: None,
+        when_condition: when_condition.map(|w| w.to_string()),
+        for_each_expr: None,
+        loop_source: None,
+        loop_index: None,
+        loop_total: None,
+        loop_item: None,
+        max_retries: None,
+        retry_backoff_secs: None,
+        retry_strategy: None,
+        retry_jitter: false,
+        action_workspace: None,
+        action_revision: None,
+    }
+}
+
+/// Seed a task-state snapshot for an arbitrary task name (the pool-only
+/// sidecar `latest_snapshots` reads). `seed_task_state` is the `hello-world`
+/// special case of this.
+async fn seed_task_state_for(
+    pool: &PgPool,
+    task_name: &str,
+    sidecar: serde_json::Value,
+) -> Result<()> {
+    let seed_job = JobRepo::create(
+        pool,
+        "default",
+        task_name,
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    TaskStateRepo::insert(
+        pool,
+        "default",
+        task_name,
+        seed_job,
+        "k/seed.tar.gz",
+        5,
+        true,
+        Some(&sidecar),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The documented expiry guard: skip while the snapshot says there is time
+/// left, run on the first execution (no snapshot) or once it is close.
+const EXPIRY_GUARD: &str = "{{ not state or state.days_remaining < 30 }}";
+
+#[tokio::test]
+async fn test_init_evaluates_root_when_against_task_state() -> Result<()> {
+    use stroem_server::settlement::dispatch;
+    let (_router, pool, _tmp, _container) = setup().await?;
+    seed_task_state(&pool, json!({"days_remaining": 60})).await?;
+
+    // A job whose only root step is guarded by the documented expiry guard.
+    let task = task_with_flow(vec![(
+        "renew",
+        guarded_flow_step(&[], Some(EXPIRY_GUARD), false),
+    )]);
+    let mut ws = test_workspace();
+    ws.tasks.insert("hello-world".to_string(), task.clone());
+    ws.tasks.insert("other-task".to_string(), task.clone());
+
+    let job_id = JobRepo::create(
+        &pool,
+        "default",
+        "hello-world",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let s = pending_step(
+        job_id,
+        "renew",
+        "script",
+        json!({"script": "echo renew"}),
+        Some(EXPIRY_GUARD),
+    );
+    JobStepRepo::create_steps(&pool, std::slice::from_ref(&s)).await?;
+
+    let mgr = WorkspaceManager::from_config("default", ws.clone());
+    dispatch::init(
+        &pool,
+        &mgr,
+        &ws,
+        "default",
+        job_id,
+        "hello-world",
+        &task,
+        Default::default(),
+    )
+    .await?;
+
+    let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let renew = rows.iter().find(|r| r.step_name == "renew").unwrap();
+    assert_eq!(
+        renew.status, "skipped",
+        "fresh snapshot: the guard must skip the step"
+    );
+
+    // Without a snapshot the same guard promotes: `other-task` has none.
+    let job2 = JobRepo::create(
+        &pool,
+        "default",
+        "other-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let s2 = pending_step(
+        job2,
+        "renew",
+        "script",
+        json!({"script": "echo renew"}),
+        Some(EXPIRY_GUARD),
+    );
+    JobStepRepo::create_steps(&pool, std::slice::from_ref(&s2)).await?;
+    dispatch::init(
+        &pool,
+        &mgr,
+        &ws,
+        "default",
+        job2,
+        "other-task",
+        &task,
+        Default::default(),
+    )
+    .await?;
+    let rows = JobStepRepo::get_steps_for_job(&pool, job2).await?;
+    assert_eq!(
+        rows[0].status, "ready",
+        "no snapshot: `not state` is true, the step runs"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_advance_evaluates_when_against_task_state() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+    seed_task_state(&pool, json!({"days_remaining": 60})).await?;
+
+    // a -> renew, with the guard on `renew`: `a` is already completed, so the
+    // advance promotes (or skips) `renew` on this pass.
+    let task = task_with_flow(vec![
+        ("a", guarded_flow_step(&[], None, false)),
+        (
+            "renew",
+            guarded_flow_step(&["a"], Some(EXPIRY_GUARD), false),
+        ),
+    ]);
+    let mut ws = test_workspace();
+    ws.tasks.insert("hello-world".to_string(), task.clone());
+    ws.tasks.insert("other-task".to_string(), task.clone());
+    let state = hook_test_state(pool.clone(), &ws);
+
+    let seed_job = |task_name: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let job_id = JobRepo::create(
+                &pool,
+                "default",
+                task_name,
+                "distributed",
+                None,
+                "api",
+                None,
+                None,
+                None,
+            )
+            .await?;
+            let steps = vec![
+                pending_step(job_id, "a", "script", json!({"script": "echo a"}), None),
+                pending_step(
+                    job_id,
+                    "renew",
+                    "script",
+                    json!({"script": "echo renew"}),
+                    Some(EXPIRY_GUARD),
+                ),
+            ];
+            JobStepRepo::create_steps(&pool, &steps).await?;
+            JobStepRepo::mark_completed(&pool, job_id, "a", Some(json!({"ok": true}))).await?;
+            Ok::<Uuid, anyhow::Error>(job_id)
+        }
+    };
+
+    let job_id = seed_job("hello-world").await?;
+    state.settlement().advance(job_id).await?;
+    let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let renew = rows.iter().find(|r| r.step_name == "renew").unwrap();
+    assert_eq!(
+        renew.status, "skipped",
+        "fresh snapshot: the guard must skip the step"
+    );
+
+    // `other-task` has no snapshot, so the same guard promotes.
+    let job2 = seed_job("other-task").await?;
+    state.settlement().advance(job2).await?;
+    let rows = JobStepRepo::get_steps_for_job(&pool, job2).await?;
+    let renew = rows.iter().find(|r| r.step_name == "renew").unwrap();
+    assert_eq!(
+        renew.status, "ready",
+        "no snapshot: `not state` is true, the step runs"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_task_dispatch_failure_path_evaluates_when_against_task_state() -> Result<()> {
+    let (_router, pool, _tmp, _container) = setup().await?;
+    // Two tasks, two snapshots, so both branches of the guard are
+    // snapshot-driven rather than one being the absent-state default.
+    seed_task_state(&pool, json!({"after": true})).await?;
+    seed_task_state_for(&pool, "other-task", json!({"after": false})).await?;
+
+    // `spawn` is a type: task step naming a task that does not exist, so its
+    // dispatch fails and `fail_task_step` re-cascades. `after` tolerates the
+    // failure, so its `when:` is evaluated by THAT cascade.
+    let task = task_with_flow(vec![
+        ("spawn", guarded_flow_step(&[], None, false)),
+        (
+            "after",
+            guarded_flow_step(&["spawn"], Some("{{ state.after }}"), true),
+        ),
+    ]);
+    let mut ws = test_workspace();
+    ws.tasks.insert("hello-world".to_string(), task.clone());
+    ws.tasks.insert("other-task".to_string(), task.clone());
+    let state = hook_test_state(pool.clone(), &ws);
+
+    let seed_job = |task_name: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let job_id = JobRepo::create(
+                &pool,
+                "default",
+                task_name,
+                "distributed",
+                None,
+                "api",
+                None,
+                None,
+                None,
+            )
+            .await?;
+            let steps = vec![
+                pending_step(
+                    job_id,
+                    "spawn",
+                    "task",
+                    json!({"type": "task", "task": "no-such-task"}),
+                    None,
+                ),
+                pending_step(
+                    job_id,
+                    "after",
+                    "script",
+                    json!({"script": "echo after"}),
+                    Some("{{ state.after }}"),
+                ),
+            ];
+            JobStepRepo::create_steps(&pool, &steps).await?;
+            Ok::<Uuid, anyhow::Error>(job_id)
+        }
+    };
+
+    let job_id = seed_job("hello-world").await?;
+    state.settlement().advance(job_id).await?;
+    let rows = JobStepRepo::get_steps_for_job(&pool, job_id).await?;
+    let spawn = rows.iter().find(|r| r.step_name == "spawn").unwrap();
+    assert_eq!(spawn.status, "failed", "the task reference is unresolvable");
+    let after = rows.iter().find(|r| r.step_name == "after").unwrap();
+    assert_eq!(
+        after.status, "ready",
+        "the failure cascade must see the snapshot: after=true promotes"
+    );
+
+    let job2 = seed_job("other-task").await?;
+    state.settlement().advance(job2).await?;
+    let rows = JobStepRepo::get_steps_for_job(&pool, job2).await?;
+    let after = rows.iter().find(|r| r.step_name == "after").unwrap();
+    assert_eq!(
+        after.status, "skipped",
+        "the failure cascade must see the snapshot: after=false skips"
     );
     Ok(())
 }

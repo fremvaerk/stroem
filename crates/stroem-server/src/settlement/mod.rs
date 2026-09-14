@@ -209,16 +209,15 @@ impl Settlement {
             let Some((workspace, task)) = resolved.as_ref() else {
                 return Ok(());
             };
+            // One sample per entry (spec §3.4): every render in this advance —
+            // the cascade, task-step input, approval messages — sees the same
+            // snapshot. Nested advances sample independently.
+            let snapshots =
+                crate::render_context::latest_snapshots(&self.pool, &job.workspace, &job.task_name)
+                    .await;
             // Run the cascade: promote steps, skip unreachable, expand/resolve
             // for_each placeholders (inside the cascade), check terminal.
-            cascade_and_settle(
-                &self.pool,
-                job_id,
-                task,
-                workspace,
-                &crate::render_context::Snapshots::default(),
-            )
-            .await?;
+            cascade_and_settle(&self.pool, job_id, task, workspace, &snapshots).await?;
 
             // Handle any newly-promoted type: task steps (including loop instances)
             if let Err(e) = dispatch::handle_task_steps(
@@ -229,6 +228,7 @@ impl Settlement {
                 job_id,
                 task,
                 self.defaults,
+                &snapshots,
             )
             .await
             {
@@ -240,7 +240,8 @@ impl Settlement {
                 .await;
             }
             self.reconcile(job_id).await;
-            self.dispatch_approvals(&job, workspace, task).await?;
+            self.dispatch_approvals(&job, workspace, task, &snapshots)
+                .await?;
         }
 
         // Step 4.
@@ -357,6 +358,7 @@ impl Settlement {
         job: &JobRow,
         workspace: &WorkspaceConfig,
         task: &TaskDef,
+        snapshots: &crate::render_context::Snapshots,
     ) -> Result<()> {
         let job_id = job.job_id;
 
@@ -368,9 +370,15 @@ impl Settlement {
             .map(|s| s.step_name.as_str())
             .collect();
 
-        if let Err(e) =
-            dispatch::handle_approval_steps(&self.pool, workspace, &job.workspace, job_id, task)
-                .await
+        if let Err(e) = dispatch::handle_approval_steps(
+            &self.pool,
+            workspace,
+            &job.workspace,
+            job_id,
+            task,
+            snapshots,
+        )
+        .await
         {
             tracing::error!(
                 "Failed to handle approval steps for job {}: {:#}",

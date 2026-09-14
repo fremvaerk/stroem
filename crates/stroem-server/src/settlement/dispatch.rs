@@ -13,10 +13,8 @@ use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
 
 use crate::config::JobDefaults;
-use crate::job_creator::{
-    build_step_render_context, compute_depth, create_job_for_task_inner, CreationMode,
-    MAX_TASK_DEPTH,
-};
+use crate::job_creator::{compute_depth, create_job_for_task_inner, CreationMode, MAX_TASK_DEPTH};
+use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
 use crate::workspace::WorkspaceManager;
 use crate::workspace_set::WorkspaceSet;
 
@@ -24,7 +22,8 @@ use crate::workspace_set::WorkspaceSet;
 ///
 /// Called after job creation and after orchestrator promotes steps.
 /// This is the server-side dispatch for task-action steps — workers never claim them.
-#[tracing::instrument(skip(workspaces, pool, workspace_config))]
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip(workspaces, pool, workspace_config, snapshots))]
 pub async fn handle_task_steps(
     workspaces: &WorkspaceManager,
     pool: &PgPool,
@@ -33,6 +32,7 @@ pub async fn handle_task_steps(
     job_id: Uuid,
     task: &stroem_common::models::workflow::TaskDef,
     defaults: JobDefaults,
+    snapshots: &Snapshots,
 ) -> Result<()> {
     // A dispatch failure re-runs the orchestrator, which may promote further
     // `type: task` steps (e.g. `continue_on_failure` dependents) that this
@@ -47,6 +47,7 @@ pub async fn handle_task_steps(
             job_id,
             task,
             defaults,
+            snapshots,
         )
         .await?;
         if !failed_any {
@@ -66,6 +67,7 @@ async fn fail_task_step(
     err: &str,
     task: &stroem_common::models::workflow::TaskDef,
     workspace_config: &WorkspaceConfig,
+    snapshots: &Snapshots,
 ) -> Result<()> {
     // Two of the callers pass a Tera render error (task-step input, approval
     // message), and Tera quotes the offending value — so a template touching
@@ -77,12 +79,21 @@ async fn fail_task_step(
 
     tracing::error!("{}", err);
     JobStepRepo::mark_failed(pool, job_id, step_name, err).await?;
-    orchestrate_after_server_step_failure(pool, job_id, step_name, task, workspace_config).await;
+    orchestrate_after_server_step_failure(
+        pool,
+        job_id,
+        step_name,
+        task,
+        workspace_config,
+        snapshots,
+    )
+    .await;
     Ok(())
 }
 
 /// One dispatch pass over the currently-ready `type: task` steps.
 /// Returns `true` if any step was marked failed during this pass.
+#[allow(clippy::too_many_arguments)]
 async fn handle_task_steps_pass(
     workspaces: &WorkspaceManager,
     pool: &PgPool,
@@ -91,10 +102,21 @@ async fn handle_task_steps_pass(
     job_id: Uuid,
     task: &stroem_common::models::workflow::TaskDef,
     defaults: JobDefaults,
+    snapshots: &Snapshots,
 ) -> Result<bool> {
     let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
     let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
     let mut failed_any = false;
+
+    let job_ctx = JobContext {
+        job_id,
+        job_input: job.input.as_ref(),
+        caller_secrets: &workspace_config.secrets,
+        owner_secrets: &workspace_config.secrets,
+        snapshots,
+        job_revision: job.revision.as_deref(),
+    };
+    let step_views = render_context::views(&steps);
 
     for step in &steps {
         if step.status != StepStatus::Ready.as_ref() || step.action_type != "task" {
@@ -117,27 +139,29 @@ async fn handle_task_steps_pass(
                 "Maximum task nesting depth ({}) exceeded for task '{}'",
                 MAX_TASK_DEPTH, task_ref
             );
-            fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config).await?;
+            fail_task_step(
+                pool,
+                job_id,
+                &step.step_name,
+                &err,
+                task,
+                workspace_config,
+                snapshots,
+            )
+            .await?;
             failed_any = true;
             continue;
         }
 
-        // Build render context (same as claim_job, with secrets)
-        let mut context_value = build_step_render_context(&job, &steps, workspace_config);
-
-        // For loop instances, inject `each` variable into render context
-        if let (Some(ref loop_item), Some(loop_index)) = (&step.loop_item, step.loop_index) {
-            if let Some(ctx_obj) = context_value.as_object_mut() {
-                ctx_obj.insert(
-                    "each".to_string(),
-                    serde_json::json!({
-                        "item": loop_item,
-                        "index": loop_index,
-                        "total": step.loop_total,
-                    }),
-                );
-            }
-        }
+        // S6: the child task's input. `each` comes from the step row, not a
+        // post-hoc patch — `build` owns the whole context.
+        let input_ctx = render_context::build(
+            &job_ctx,
+            &step_views,
+            LoopSlot::of(step),
+            Scope::ChildTaskInput,
+        );
+        let context_value = input_ctx.as_value();
 
         // Render step input templates
         let rendered_input = if let Some(ref input) = step.input {
@@ -149,7 +173,7 @@ async fn handle_task_steps_pass(
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    match render_input_map(&map, &context_value) {
+                    match render_input_map(&map, context_value) {
                         Ok(rendered) => rendered,
                         Err(e) => {
                             let err = format!(
@@ -163,6 +187,7 @@ async fn handle_task_steps_pass(
                                 &err,
                                 task,
                                 workspace_config,
+                                snapshots,
                             )
                             .await?;
                             failed_any = true;
@@ -189,8 +214,16 @@ async fn handle_task_steps_pass(
                             "Failed to prepare action input for task step '{}': {:#}",
                             step.step_name, e
                         );
-                        fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config)
-                            .await?;
+                        fail_task_step(
+                            pool,
+                            job_id,
+                            &step.step_name,
+                            &err,
+                            task,
+                            workspace_config,
+                            snapshots,
+                        )
+                        .await?;
                         failed_any = true;
                         continue;
                     }
@@ -255,7 +288,16 @@ async fn handle_task_steps_pass(
                     "Failed to create child job for task '{}': {:#}",
                     task_ref, e
                 );
-                fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config).await?;
+                fail_task_step(
+                    pool,
+                    job_id,
+                    &step.step_name,
+                    &err,
+                    task,
+                    workspace_config,
+                    snapshots,
+                )
+                .await?;
                 failed_any = true;
             }
         }
@@ -269,16 +311,27 @@ async fn handle_task_steps_pass(
 /// Called after job creation and after the orchestrator promotes steps.
 /// Renders the approval message through Tera, stores it as step output,
 /// and transitions the step from `ready` to `suspended`.
-#[tracing::instrument(skip(pool, workspace_config))]
+#[tracing::instrument(skip(pool, workspace_config, snapshots))]
 pub async fn handle_approval_steps(
     pool: &PgPool,
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
     job_id: Uuid,
     task: &stroem_common::models::workflow::TaskDef,
+    snapshots: &Snapshots,
 ) -> Result<()> {
     let steps = JobStepRepo::get_steps_for_job(pool, job_id).await?;
     let job = JobRepo::get(pool, job_id).await?.context("Job not found")?;
+
+    let job_ctx = JobContext {
+        job_id,
+        job_input: job.input.as_ref(),
+        caller_secrets: &workspace_config.secrets,
+        owner_secrets: &workspace_config.secrets,
+        snapshots,
+        job_revision: job.revision.as_deref(),
+    };
+    let step_views = render_context::views(&steps);
 
     for step in &steps {
         if step.status != StepStatus::Ready.as_ref() || step.action_type != "approval" {
@@ -293,27 +346,16 @@ pub async fn handle_approval_steps(
             .unwrap_or("")
             .to_string();
 
-        // Build render context (same pattern as handle_task_steps)
-        let mut context_value = build_step_render_context(&job, &steps, workspace_config);
-
-        // For loop instances, inject `each` variable into render context
-        if let (Some(ref loop_item), Some(loop_index)) = (&step.loop_item, step.loop_index) {
-            if let Some(ctx_obj) = context_value.as_object_mut() {
-                ctx_obj.insert(
-                    "each".to_string(),
-                    serde_json::json!({
-                        "item": loop_item,
-                        "index": loop_index,
-                        "total": step.loop_total,
-                    }),
-                );
-            }
-        }
-
-        // Render the step's flow-level input (resolves templates like
-        // {{ prepare.output.changelog }}) and replace `input` in the context
-        // so the message template can use {{ input.changelog }} to reference
-        // resolved step input, not just job-level input.
+        // Phase 1 — the step's flow-level input (resolves templates like
+        // {{ prepare.output.changelog }}), rendered against the same context
+        // a `type: task` step's input gets.
+        let phase1 = render_context::build(
+            &job_ctx,
+            &step_views,
+            LoopSlot::of(step),
+            Scope::ChildTaskInput,
+        );
+        let mut rendered: Option<serde_json::Value> = None;
         if let Some(ref input) = step.input {
             if let Some(input_map) = input.as_object() {
                 if !input_map.is_empty() {
@@ -321,7 +363,7 @@ pub async fn handle_approval_steps(
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    match render_input_map(&map, &context_value) {
+                    match render_input_map(&map, phase1.as_value()) {
                         Ok(resolved) => {
                             // Persist rendered input to DB for the job detail API.
                             if let Err(e) = JobStepRepo::update_input(
@@ -334,9 +376,7 @@ pub async fn handle_approval_steps(
                             {
                                 tracing::warn!("Failed to persist rendered input: {:#}", e);
                             }
-                            if let Some(ctx_obj) = context_value.as_object_mut() {
-                                ctx_obj.insert("input".to_string(), resolved);
-                            }
+                            rendered = Some(resolved);
                         }
                         Err(e) => {
                             let err = format!(
@@ -350,6 +390,7 @@ pub async fn handle_approval_steps(
                                 &err,
                                 task,
                                 workspace_config,
+                                snapshots,
                             )
                             .await?;
                             continue;
@@ -358,6 +399,18 @@ pub async fn handle_approval_steps(
                 }
             }
         }
+
+        // Phase 2 — the message. `Scope::ApprovalMessage` owns the rule that
+        // a nonempty rendered input replaces `input`, so the message template
+        // can say {{ input.changelog }} instead of job-level input.
+        let message_ctx = render_context::build(
+            &job_ctx,
+            &step_views,
+            LoopSlot::of(step),
+            Scope::ApprovalMessage {
+                rendered_input: rendered.as_ref(),
+            },
+        );
 
         // Warn when no message template is configured — action_spec may be missing
         // or the action was defined without a `message` field. (FIX 8)
@@ -373,15 +426,23 @@ pub async fn handle_approval_steps(
         let rendered_message = if raw_message.is_empty() {
             String::new()
         } else {
-            match stroem_common::template::render_template(&raw_message, &context_value) {
+            match stroem_common::template::render_template(&raw_message, message_ctx.as_value()) {
                 Ok(msg) => msg,
                 Err(e) => {
                     let err = format!(
                         "Failed to render approval message for step '{}': {:#}",
                         step.step_name, e
                     );
-                    fail_task_step(pool, job_id, &step.step_name, &err, task, workspace_config)
-                        .await?;
+                    fail_task_step(
+                        pool,
+                        job_id,
+                        &step.step_name,
+                        &err,
+                        task,
+                        workspace_config,
+                        snapshots,
+                    )
+                    .await?;
                     continue;
                 }
             }
@@ -514,15 +575,10 @@ async fn orchestrate_after_server_step_failure(
     step_name: &str,
     task: &stroem_common::models::workflow::TaskDef,
     workspace_config: &WorkspaceConfig,
+    snapshots: &Snapshots,
 ) {
-    if let Err(e) = crate::settlement::cascade_and_settle(
-        pool,
-        job_id,
-        task,
-        workspace_config,
-        &crate::render_context::Snapshots::default(),
-    )
-    .await
+    if let Err(e) =
+        crate::settlement::cascade_and_settle(pool, job_id, task, workspace_config, snapshots).await
     {
         tracing::error!(
             "Failed to orchestrate after server-side step '{}' failure in job {}: {:#}",
@@ -540,24 +596,24 @@ async fn orchestrate_after_server_step_failure(
 ///
 /// Compensation on `Err` stays with the caller (`create_job_for_task_inner`):
 /// it belongs to the creation transaction's contract, not to settlement.
+#[allow(clippy::too_many_arguments)]
 pub async fn init(
     pool: &PgPool,
     workspaces: &WorkspaceManager,
     workspace_config: &WorkspaceConfig,
     workspace_name: &str,
     job_id: Uuid,
+    task_name: &str,
     task: &TaskDef,
     defaults: JobDefaults,
 ) -> Result<Option<JobStatus>> {
-    crate::cascade::execute(
-        pool,
-        job_id,
-        task,
-        Some(workspace_config),
-        &crate::render_context::Snapshots::default(),
-    )
-    .await
-    .context("creation-time step cascade")?;
+    // One sample per entry (spec §3.4): the creation-time cascade, the
+    // `type: task` input and the approval messages all see the same snapshot.
+    let snapshots = render_context::latest_snapshots(pool, workspace_name, task_name).await;
+
+    crate::cascade::execute(pool, job_id, task, Some(workspace_config), &snapshots)
+        .await
+        .context("creation-time step cascade")?;
 
     handle_task_steps(
         workspaces,
@@ -567,12 +623,20 @@ pub async fn init(
         job_id,
         task,
         defaults,
+        &snapshots,
     )
     .await?;
 
-    handle_approval_steps(pool, workspace_config, workspace_name, job_id, task)
-        .await
-        .context("dispatch initial approval steps")?;
+    handle_approval_steps(
+        pool,
+        workspace_config,
+        workspace_name,
+        job_id,
+        task,
+        &snapshots,
+    )
+    .await
+    .context("dispatch initial approval steps")?;
 
     let settled = crate::settlement::settle_if_all_terminal(pool, job_id, task)
         .await

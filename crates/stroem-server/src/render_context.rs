@@ -616,6 +616,28 @@ mod tests {
         assert!(v.get("pend").is_none() && v.get("run").is_none());
     }
 
+    /// Migrated from the deleted `job_creator` context builder's tests: a failed
+    /// step with no `error_message` carries `output: null` and NO `error` key,
+    /// so `{{ x.error }}` in a downstream `when` stays undefined rather than
+    /// rendering an empty string.
+    #[test]
+    fn failed_step_without_error_message_has_null_output_and_no_error_key() {
+        let rows = vec![row("boom", "failed", None)];
+        let caller = secrets(&[]);
+        let sn = Snapshots::default();
+        let job = JobContext {
+            job_id: uuid::Uuid::nil(),
+            job_input: None,
+            caller_secrets: &caller,
+            owner_secrets: &caller,
+            snapshots: &sn,
+            job_revision: None,
+        };
+        let v = build(&job, &views(&rows), None, Scope::Condition);
+        assert_eq!(v.as_value()["boom"]["output"], serde_json::Value::Null);
+        assert!(v.as_value()["boom"].get("error").is_none());
+    }
+
     #[test]
     fn loop_instance_rows_are_skipped_and_hyphens_sanitized() {
         let rows = vec![
