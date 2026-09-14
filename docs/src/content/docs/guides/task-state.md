@@ -91,12 +91,12 @@ Structured state is available in Tera templates as the `state` object. Use it to
 tasks:
   renew-cert:
     flow:
-      - name: check-expiry
+      check-expiry:
         action: check-ssl-expiry
         input:
           domain: "{{ input.domain }}"
 
-      - name: renew-cert
+      renew-cert:
         action: renew-ssl
         depends_on: [check-expiry]
         # Only run if no previous state, or less than 30 days remain
@@ -104,7 +104,7 @@ tasks:
         input:
           domain: "{{ input.domain }}"
 
-      - name: upload-cert
+      upload-cert:
         action: upload-to-cdn
         depends_on: [renew-cert]
         input:
@@ -142,14 +142,14 @@ When a task has multiple steps:
 tasks:
   incremental-process:
     flow:
-      - name: load-cursor
+      load-cursor:
         action: fetch-cursor        # Reads $STATE_DIR/cursor.json, emits STATE:
 
-      - name: process-batch
+      process-batch:
         action: process-data        # Reads $STATE_DIR/cursor.json (updated by step 1)
         depends_on: [load-cursor]   # Sees step 1's state
 
-      - name: save-cursor
+      save-cursor:
         action: save-cursor         # Writes new cursor to $STATE_OUT_DIR
         depends_on: [process-batch]
 ```
@@ -176,7 +176,7 @@ state_storage:
   #   endpoint: "https://s3.example.com"  # optional (for S3-compatible services)
 ```
 
-If neither `state_storage` nor `log_storage.archive` is configured, state features are disabled — state directories remain empty and no snapshots are stored.
+If neither `state_storage` nor `log_storage.archive` is configured, the worker cannot download or upload snapshots — state directories remain empty, no new snapshots are stored, and the claim response carries no snapshot keys. Templates still resolve `{{ state.* }}` / `{{ global_state.* }}` from snapshot rows already recorded: migration 047 persists the parsed sidecar on the row itself, so rendering reads it straight from the database rather than the archive.
 
 ### Archive key format
 
@@ -235,10 +235,10 @@ actions:
 tasks:
   maintain-cert:
     flow:
-      - name: check
+      check:
         action: check-ssl
 
-      - name: renew
+      renew:
         action: renew-ssl
         depends_on: [check]
         when: "{{ not state or state.days_remaining < 30 }}"
@@ -267,7 +267,7 @@ actions:
 tasks:
   log-processor:
     flow:
-      - name: ingest
+      ingest:
         action: process-logs
 ```
 
@@ -296,7 +296,7 @@ actions:
 tasks:
   web-build:
     flow:
-      - name: build
+      build:
         action: build
 ```
 
@@ -322,7 +322,7 @@ Previous global state is available at `/global-state` (`$GLOBAL_STATE_DIR`) and 
 tasks:
   deploy:
     flow:
-      - name: deploy
+      deploy:
         action: deploy-app
         input:
           token: "{{ global_state.api_token }}"

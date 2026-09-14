@@ -1,6 +1,6 @@
 # One Owner for the Step Render Context — Design
 
-Status: revision 9, proposed
+Status: revision 10, proposed
 Ships in: 0.16.4 (patch; additive migration 047; documented behaviour changes, §6)
 
 Addresses candidate 4 of the 11 September 2026 architecture review, which ranked
@@ -8,6 +8,20 @@ it the top recommendation. Line numbers cite `main` at `9916985` (spec-only
 commits since `fba4e87`; code lines unchanged).
 
 ## Revision history
+
+**Revision 10 (2026-09-14, implementation).** Amendments made during
+implementation, found by an adversarial post-implementation review: §3.3
+rule 1's collision line is `tracing::debug!`, not `tracing::warn!` — the
+cascade rebuilds the context twice per pass across up to three `execute`
+attempts on every `advance`, so a `warn!` inside `build` would repeat for the
+job's whole lifetime; the claim path re-emits each deduplicated line at
+`warn` when it flushes to the job log. Two §6 behaviour-table rows were
+added to match the shipped code rather than the original text: `{{
+prev.output }}` on a completed step with NULL output now renders `""`
+(landed in the earlier fix wave, `795d87b`); and claiming with no
+`state_storage` configured but snapshot rows present still resolves `{{
+state.* }}` / `{{ global_state.* }}` from the persisted sidecar, though the
+claim response carries no snapshot keys (§6, this revision).
 
 **Revision 9 (2026-09-13).** Revision 8's review closed three of four
 findings and left one, exact: a `json` column is not enough on its own,
@@ -292,9 +306,13 @@ Identical in all six scopes.
    majority behaviour per key (§1.1 "position" rows), chosen to change the
    fewest sites: the only order that flips is `secret` at S4–S6 (§6). `build`
    records every collision in `collisions()` and emits
-   `tracing::warn!(job_id, step, key)`. A job-log line is appended only where
-   the caller has async log access — `claim_job` — because `run` is
-   synchronous and pure and its `Plan` is discarded by both callers
+   `tracing::debug!(job_id, step, key)` — `debug`, not `warn`, because the
+   cascade rebuilds the context twice per pass across up to three `execute`
+   attempts on every `advance`, so a warn inside `build` would repeat for the
+   job's whole lifetime. The claim path, which flushes the lines to the job
+   log, re-emits each deduplicated line at `warn`. A job-log line is appended
+   only where the caller has async log access — `claim_job` — because `run`
+   is synchronous and pure and its `Plan` is discarded by both callers
    (`settle.rs:167`, `dispatch.rs:546`). Rejecting these names at validation
    is the class fix (§7).
 2. Step entries for **completed, skipped, failed and suspended** rows.
@@ -594,6 +612,7 @@ Not all additive.
 | approval `{{ input.foo }}` with no step mapping | S6 | job input | job input (unchanged, now specified) |
 | row without the column, cascade time | S5, S6 | — | no `state` until the task uploads again |
 | same-job overwrite race (§4.6 i), claim-time render | S1–S4 | blob's (last) sidecar | latest row's own sidecar |
+| claim with no state_storage configured but snapshot rows present | S1–S4 | state undefined (lookup skipped) | resolves from the persisted sidecar; response carries no snapshot keys |
 
 **Collisions** — a step whose sanitized name equals a framework key.
 

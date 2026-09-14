@@ -14,7 +14,7 @@ rule, not one per field.
 |---|---|---|
 | `input.*` | job input — or, in action bodies (`script`, `cmd`, `env`, `args`, `manifest`, `image`), the step's resolved input | approval `message:` sees the step's resolved input when the step has an input mapping, else job input |
 | `secret.*` | workspace secrets (the action's **owner** workspace in action bodies; the job's workspace elsewhere) | always present, `{}` when none |
-| `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | present only when a parsed snapshot exists — `{{ not state }}` is the "first run" test |
+| `state.*` / `global_state.*` | the latest task / global state snapshot's `state.json` | present only when a parsed snapshot exists — `{{ not state }}` is true whenever no parsed `state.json` is available — no snapshot yet, a snapshot without a sidecar, or one whose sidecar did not parse |
 | `job.revision` | workspace revision pinned at creation | always present, `null` for pre-migration jobs |
 | `<step>.output` | a finished step's output (`null` when a completed step produced none; `null` for skipped, failed and suspended steps — either renders as an empty string) | hyphens in step names become underscores |
 | `<step>.error` | a failed step's error message | |
