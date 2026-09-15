@@ -39,8 +39,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 # Install sops and vals for secret decryption
-ARG SOPS_VERSION=3.11.0
-ARG VALS_VERSION=0.43.3
+ARG SOPS_VERSION=3.13.3
+ARG VALS_VERSION=0.46.1
 RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${ARCH}" \
       -o /usr/local/bin/sops && chmod +x /usr/local/bin/sops && \
