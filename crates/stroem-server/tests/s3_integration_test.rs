@@ -7,6 +7,7 @@ use stroem_server::blob_storage::{BlobArchive, S3BlobArchive};
 use stroem_server::log_storage::{JobLogMeta, LogStorage};
 use tempfile::TempDir;
 use testcontainers::runners::AsyncRunner;
+use testcontainers::ImageExt;
 use testcontainers_modules::minio::MinIO;
 use uuid::Uuid;
 
@@ -33,7 +34,12 @@ fn test_meta() -> JobLogMeta {
 }
 
 async fn setup_minio() -> Result<(testcontainers::ContainerAsync<MinIO>, String)> {
-    let container = MinIO::default().start().await?;
+    // Docker Hub no longer serves minio/minio (404 since 2026-09); quay.io carries
+    // the same tags, so override the registry while keeping the module's pinned tag.
+    let container = MinIO::default()
+        .with_name("quay.io/minio/minio")
+        .start()
+        .await?;
     let port = container.get_host_port_ipv4(9000).await?;
     let endpoint = format!("http://127.0.0.1:{}", port);
     Ok((container, endpoint))
