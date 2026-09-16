@@ -4259,6 +4259,13 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
     let detail_text = body_json(detail).await.to_string();
     assert!(!detail_text.contains(raw_secret), "{detail_text}");
     assert!(!detail_text.contains(&escaped_secret), "{detail_text}");
+    // `detail_text` is `body_json(...).to_string()` — a re-serialisation of
+    // the JSON body, so a leaked `raw_secret`/`escaped_secret` would itself
+    // get re-escaped by that `Display` impl and might not match either
+    // substring check above verbatim. `"quote"` has no JSON-special
+    // characters of its own, so it survives re-serialisation unchanged and
+    // is a genuine (non-vacuous) check for a leak of this secret.
+    assert!(!detail_text.contains("quote"), "{detail_text}");
 
     // The job's log stream must never leak the raw or escaped secret either.
     let logs = router
@@ -4268,6 +4275,7 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
     let logs_text = body_json(logs).await.to_string();
     assert!(!logs_text.contains(raw_secret), "{logs_text}");
     assert!(!logs_text.contains(&escaped_secret), "{logs_text}");
+    assert!(!logs_text.contains("quote"), "{logs_text}");
 
     // MCP's `get_job_status` must return the same scrubbed error.
     let session_id = xws_mcp_initialize(&router).await?;
