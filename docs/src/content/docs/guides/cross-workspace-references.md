@@ -151,6 +151,20 @@ credentials `secret: true` in the connection type.
   values are **not** masked in already-created jobs until that workspace loads
   successfully again.
 
+### Trust model for owner-side rendering errors
+
+If a `type: task` step's action defaults or connection resolution render
+against an OWNER workspace's config (a different workspace than the caller's,
+or a different one than the task's) and that rendering fails — for example a
+default like `{{ secret.TOKEN | round }}` where `TOKEN` isn't numeric — the
+caller's job never sees the details. The persisted step error is a fixed
+message naming the workspace whose rendering failed and pointing at the
+server log; it never contains any representation of the value that caused
+the failure, however that value was encoded (raw, JSON-escaped, or otherwise).
+Full details, still with the workspace's secrets scrubbed, land in the server
+log for operators. A step whose owner IS the caller's own workspace is
+unaffected — its rendering errors are scrubbed and persisted as always.
+
 ### Offline CLI
 
 `stroem validate` warns on qualified type references (they are validated at job

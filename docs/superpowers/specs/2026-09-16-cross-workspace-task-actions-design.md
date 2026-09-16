@@ -1,6 +1,6 @@
 # Cross-Workspace `type: task` Actions — Design
 
-Status: revision 8, reviewed — ready for an implementation plan
+Status: revision 9, reviewed — ready for an implementation plan
 Ships in: 0.17.0 (minor; no migration; documented behaviour corrections, § 7)
 
 Closes the first item under "Deferred" in CLAUDE.md § Cross-Workspace
@@ -9,6 +9,27 @@ References and "Not yet supported" in
 cite `main` at `f174020`.
 
 ## Revision history
+
+**Revision 9 (2026-09-16, implementation).** A second Codex re-check of
+revision 8's fix (H1) found the representation-matching approach cannot
+converge: an owner default like `{{ secret.TOKEN | json_encode | round }}`
+wraps the offending value in a JSON-encoding, then quotes THAT already-
+encoded string a second time when `round`'s own type check fails — a
+double-JSON-escaped representation the raw/JSON/Debug-escaped scrub all
+miss, and any filter chain can nest arbitrarily many more such wrappings.
+Ruling: stop matching representations at the ownership boundary and
+withhold instead. `handle_task_steps_pass`'s three owner-side render-error
+branches (action-defaults merge, connection resolution against the task's
+schema, and child-job creation) now persist a fixed, value-free message —
+naming the workspace being rendered and pointing at the server log —
+whenever `O != A` or `T != A`, instead of the scrubbed chain. The full
+scrubbed chain is still `tracing::error!`-logged for operators. A
+same-workspace `type: task` step (`O == A == T`) is unaffected: the
+scrubbed chain is still persisted, exactly as revisions 4-8 left it. The
+caller-side step-input render error (bucket `C`) is never withheld — see
+§ 3.3 "Error withholding at the ownership boundary" for the full rule and
+CLAUDE.md § Cross-Workspace References / § Secrets in logs for the
+one-line summary.
 
 **Revision 8 (2026-09-16, implementation).** Three findings from an
 external (Codex) security review of the branch, all fixed: (1, High) a
@@ -43,9 +64,9 @@ found one more representation `redact_secrets_in_str` missed: Tera itself
 Debug-formats some filter arguments on an invalid value (e.g.
 `round(method=...)`, `tera::builtins::filters::number::round`, `got
 \`{:?}\``), which is Rust's `Debug`-escaping, not JSON's — the two schemes
-diverge on control characters (JSON emits `` for ESC, Rust's Debug
-emits `\u{1b}`), so a secret containing one could still survive the
-raw-value and JSON-escaped-value scrub. `redact_secrets_in_str` now also
+diverge on control characters (e.g. ESC), so a secret containing one
+could still survive the raw-value and JSON-escaped-value scrub.
+`redact_secrets_in_str` now also
 searches for each secret's `format!("{:?}", secret)` form (quotes
 stripped), whenever it differs from both the raw and JSON-escaped forms
 already searched.
@@ -487,7 +508,31 @@ length and self-overlap cases (§ 6). Scrubbing at the write covers the job log,
 `job_step.error_message`, `retry_history`, and every reader including MCP
 `get_job_status`, which returns the persisted text without the REST
 redactor (`mcp/tools.rs:570-580`). A secret rotated out of the loaded
-config is not scrubbed — inherited.
+config is not scrubbed — inherited. Span-union masking also grew to search,
+per secret, not just the raw value but its JSON-escaped and Rust
+Debug-escaped representations too — a value's Tera error can quote it
+through either encoding depending on which filter raised it (revision 8).
+
+**Error withholding at the ownership boundary (revision 9).** Matching
+representations does not converge: a filter chain (`{{ secret.TOKEN |
+json_encode | round }}`) can wrap a value in an unbounded number of
+encodings, each one more than the last scrub added. So for the three
+owner-side render-error branches in `handle_task_steps_pass` — the action
+defaults merge (bucket `D`, against `O`'s secrets), connection resolution
+against the task's schema (against `O`'s or `T`'s config), and child-job
+creation (against `T`'s config) — the rule changes from "scrub and
+persist" to "withhold and persist a value-free message" whenever the
+ownership boundary is crossed (`O != A` or `T != A`). The persisted text
+becomes a fixed, value-free sentence naming the workspace being rendered
+(`O` for the first two, `T` for creation) and pointing at the server log;
+`tracing::error!` still logs the FULL scrubbed chain (span-union masking,
+still exactly as above) so operators retain visibility. When `O == A ==
+T` (a same-workspace `type: task` step), nothing changes: the scrubbed
+chain is still persisted, exactly as revisions 4-8 left it. The
+caller-side step-input render error (bucket `C`) is never withheld,
+whatever `O`/`T` are — it renders the CALLER's own template in the
+CALLER's own context, so it can only ever quote a value the caller
+already has.
 
 ### 3.4 What does not change — verified
 
