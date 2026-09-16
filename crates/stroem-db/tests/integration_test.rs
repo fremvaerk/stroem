@@ -140,6 +140,104 @@ async fn test_list_jobs() -> Result<()> {
     Ok(())
 }
 
+/// `JobRepo::list_children` orders `created_at DESC, job_id DESC` — the
+/// child-history feed a `type: task` step's `child_jobs` DTO is built from
+/// (`web/api/jobs.rs::get_job`). Covers both legs of the ordering: distinct
+/// timestamps (the common case, one child per retry attempt over time) and a
+/// tie on `created_at` (the id tiebreak, forced here by updating both rows to
+/// the same timestamp — two real inserts a microsecond apart would never
+/// exercise it).
+#[tokio::test]
+async fn test_list_children_orders_newest_first_with_id_tiebreak() -> Result<()> {
+    let (pool, _container) = setup_db().await?;
+
+    let parent_id = JobRepo::create(
+        &pool,
+        "default",
+        "parent-task",
+        "distributed",
+        None,
+        "api",
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Distinct-timestamp leg: two real inserts, newest first.
+    let child1 = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        None,
+        Some(parent_id),
+        Some("run"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let child2 = JobRepo::create_with_parent(
+        &pool,
+        "default",
+        "child-task",
+        "distributed",
+        None,
+        "task",
+        None,
+        Some(parent_id),
+        Some("run"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    let children = JobRepo::list_children(&pool, parent_id).await?;
+    assert_eq!(children.len(), 2);
+    assert!(
+        children[0].created_at >= children[1].created_at,
+        "{children:?}"
+    );
+    // With no forced tie, `created_at` alone already orders them; the second
+    // insert (child2) must come first.
+    assert_eq!(children[0].job_id, child2);
+    assert_eq!(children[1].job_id, child1);
+
+    // Id-tiebreak leg: force both rows to the exact same `created_at` and
+    // confirm the order flips to `job_id DESC`.
+    let tied_at = chrono::Utc::now();
+    sqlx::query("UPDATE job SET created_at = $1 WHERE job_id IN ($2, $3)")
+        .bind(tied_at)
+        .bind(child1)
+        .bind(child2)
+        .execute(&pool)
+        .await?;
+
+    let expected_first = child1.max(child2);
+    let expected_second = child1.min(child2);
+    let children = JobRepo::list_children(&pool, parent_id).await?;
+    assert_eq!(children.len(), 2);
+    assert_eq!(
+        children[0].created_at, children[1].created_at,
+        "{children:?}"
+    );
+    assert_eq!(
+        children[0].job_id, expected_first,
+        "on a tied created_at, job_id DESC must break the tie: {children:?}"
+    );
+    assert_eq!(children[1].job_id, expected_second, "{children:?}");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_create_steps_and_claim() -> Result<()> {
     let (pool, _container) = setup_db().await?;

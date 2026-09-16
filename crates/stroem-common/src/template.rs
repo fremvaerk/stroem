@@ -989,6 +989,35 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_action_defaults_renders_a_self_referencing_default_twice() {
+        // `merge_action_defaults` composes `merge_defaults` (which already
+        // renders a *string* default through Tera as it fills it in) with a
+        // second `render_value_deep` pass over the same "filled from
+        // defaults" bucket (needed for the *object*-default case its own doc
+        // comment documents, e.g. `{host: "{{ secret.foo }}"}`). For a plain
+        // string default that itself renders to another `{{ }}` expression,
+        // this doubles up: `merge_defaults` renders `"{{ secret.X }}"` to
+        // secret X's OWN raw value, and `render_value_deep` then renders
+        // THAT a second time. See `crates/stroem-server/tests/integration_test.rs`
+        // `test_xws_task_two_pass_default_is_pinned_behaviour`, which locks
+        // this in end-to-end through a `type: task` action's input default.
+        use std::collections::HashMap;
+        let caller_bucket = json!({});
+        let mut schema = HashMap::new();
+        schema.insert(
+            "note".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                default: Some(json!("{{ secret.X }}")),
+                ..Default::default()
+            },
+        );
+        let secrets_ctx = json!({"secret": {"X": "{{ secret.Y }}", "Y": "yval"}});
+        let merged = merge_action_defaults(&caller_bucket, &schema, &secrets_ctx).unwrap();
+        assert_eq!(merged, json!({"note": "yval"}));
+    }
+
+    #[test]
     fn test_render_nested_context() {
         let template = "{{ user.name }} lives in {{ user.city }}";
         let context = json!({
