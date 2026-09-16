@@ -14,9 +14,13 @@ pub const MAX_STEP_TIMEOUT_SECS: u64 = 86_400;
 /// Also the upper bound for `ServerConfig.default_job_timeout`.
 pub const MAX_JOB_TIMEOUT_SECS: u64 = 604_800;
 
-/// Resolves whether a workspace has a given action, for cross-workspace action
-/// reference validation (`owner_ws.action`). `(workspace, action) -> exists`.
-pub type CrossWorkspaceActionResolver<'a> = &'a dyn Fn(&str, &str) -> bool;
+/// Resolves cross-workspace references for server-side validation:
+/// `(workspace, name) -> exists`. The server implements it over its loaded
+/// workspace configs; the CLI has no resolver and warns instead.
+pub trait CrossWorkspaceResolver {
+    fn has_action(&self, workspace: &str, action: &str) -> bool;
+    fn has_task(&self, workspace: &str, task: &str) -> bool;
+}
 
 /// Validates a workflow config and returns list of warnings.
 /// Errors are returned as Err.
@@ -39,21 +43,21 @@ pub fn validate_workflow_config_with_libraries(config: &WorkspaceConfig) -> Resu
 /// cross-workspace action references (`owner_ws.action` in a flow step's `action`
 /// field).
 ///
-/// `resolve_cross_workspace_action(workspace, action)` should return `true` when
-/// `workspace` exists and has an action named `action`. Intended for the server
-/// layer, which has access to all loaded workspace configs — mirrors how
-/// library-prefixed action keys are only accepted once merged into `config.actions`.
+/// `resolver` should report `true` when `workspace` exists and has an action
+/// (or task) with the given name. Intended for the server layer, which has
+/// access to all loaded workspace configs — mirrors how library-prefixed
+/// action keys are only accepted once merged into `config.actions`.
 pub fn validate_workflow_config_with_cross_workspace_resolver(
     config: &WorkspaceConfig,
-    resolve_cross_workspace_action: CrossWorkspaceActionResolver,
+    resolver: &dyn CrossWorkspaceResolver,
 ) -> Result<Vec<String>> {
-    validate_workflow_config_inner(config, true, Some(resolve_cross_workspace_action))
+    validate_workflow_config_inner(config, true, Some(resolver))
 }
 
 fn validate_workflow_config_inner(
     config: &WorkspaceConfig,
     libraries_resolved: bool,
-    resolve_cross_workspace_action: Option<CrossWorkspaceActionResolver>,
+    resolver: Option<&dyn CrossWorkspaceResolver>,
 ) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
@@ -61,14 +65,40 @@ fn validate_workflow_config_inner(
     for (action_name, action) in &config.actions {
         warnings.extend(validate_action(action_name, action)?);
 
-        // For type: task, verify the referenced task exists
+        // For type: task, verify the referenced task exists — locally (incl.
+        // library-flattened keys), or in another workspace via the resolver.
         if action.action_type == "task" {
             let task_ref = action.task.as_ref().expect(
                 "task field is required for action_type == task, enforced by validate_action",
             );
-            if !libraries_resolved && task_ref.contains('.') {
-                // Library task — skip when libraries not resolved
-            } else if !config.tasks.contains_key(task_ref) {
+            if config.tasks.contains_key(task_ref) {
+                // local or library-flattened key
+            } else if task_ref.starts_with('.') || task_ref.ends_with('.') {
+                bail!(
+                    "Action '{}' references malformed task '{}' (empty workspace or task name)",
+                    action_name,
+                    task_ref
+                );
+            } else if let (Some(ws), name) = crate::template::parse_qualified_ref(task_ref) {
+                match (libraries_resolved, resolver) {
+                    (false, _) => warnings.push(format!(
+                        "Action '{}' references task '{}' outside this workspace - cannot validate cross-workspace task reference offline",
+                        action_name, task_ref
+                    )),
+                    (true, Some(r)) if r.has_task(ws, name) => {}
+                    (true, Some(_)) => bail!(
+                        "action '{}': workspace '{}' has no task '{}'",
+                        action_name,
+                        ws,
+                        name
+                    ),
+                    (true, None) => bail!(
+                        "Action '{}' references non-existent task '{}'",
+                        action_name,
+                        task_ref
+                    ),
+                }
+            } else {
                 bail!(
                     "Action '{}' references non-existent task '{}'",
                     action_name,
@@ -133,9 +163,9 @@ fn validate_workflow_config_inner(
                 // cross-workspace reference (`owner_ws.action`) — ask the resolver
                 // if one was provided (server layer, with access to all workspaces).
                 let (owner_ws, bare_action) = crate::template::parse_qualified_ref(action_ref);
-                let cross_workspace_ok = match (owner_ws, resolve_cross_workspace_action) {
+                let cross_workspace_ok = match (owner_ws, resolver) {
                     (Some(ws), Some(resolver)) => {
-                        if resolver(ws, bare_action) {
+                        if resolver.has_action(ws, bare_action) {
                             true
                         } else {
                             bail!(
@@ -341,6 +371,7 @@ fn validate_workflow_config_inner(
                 &hook.action,
                 config,
                 libraries_resolved,
+                &mut warnings,
             )?;
         }
         for (i, hook) in task.on_error.iter().enumerate() {
@@ -349,6 +380,7 @@ fn validate_workflow_config_inner(
                 &hook.action,
                 config,
                 libraries_resolved,
+                &mut warnings,
             )?;
         }
         for (i, hook) in task.on_suspended.iter().enumerate() {
@@ -357,6 +389,7 @@ fn validate_workflow_config_inner(
                 &hook.action,
                 config,
                 libraries_resolved,
+                &mut warnings,
             )?;
         }
         for (i, hook) in task.on_cancel.iter().enumerate() {
@@ -365,6 +398,7 @@ fn validate_workflow_config_inner(
                 &hook.action,
                 config,
                 libraries_resolved,
+                &mut warnings,
             )?;
         }
     }
@@ -523,6 +557,7 @@ fn validate_workflow_config_inner(
             &hook.action,
             config,
             libraries_resolved,
+            &mut warnings,
         )?;
     }
     for (i, hook) in config.on_error.iter().enumerate() {
@@ -531,6 +566,7 @@ fn validate_workflow_config_inner(
             &hook.action,
             config,
             libraries_resolved,
+            &mut warnings,
         )?;
     }
     for (i, hook) in config.on_suspended.iter().enumerate() {
@@ -539,6 +575,7 @@ fn validate_workflow_config_inner(
             &hook.action,
             config,
             libraries_resolved,
+            &mut warnings,
         )?;
     }
     for (i, hook) in config.on_cancel.iter().enumerate() {
@@ -547,6 +584,7 @@ fn validate_workflow_config_inner(
             &hook.action,
             config,
             libraries_resolved,
+            &mut warnings,
         )?;
     }
 
@@ -1820,18 +1858,37 @@ fn validate_approval_action(action: &ActionDef, action_name: &str) -> Result<Vec
     Ok(vec![])
 }
 
-/// Validates that a hook references an existing action (or a library action).
+/// Validates that a hook references an existing action (or a library action),
+/// and that a `type: task` hook action does not point outside this workspace —
+/// hook actions are never resolved cross-workspace.
 fn validate_hook_action_exists(
     label: &str,
     action: &str,
     config: &WorkspaceConfig,
     libraries_resolved: bool,
+    warnings: &mut Vec<String>,
 ) -> Result<()> {
     if !libraries_resolved && action.contains('.') {
         return Ok(()); // library action — skip when libraries not resolved
     }
-    if !config.actions.contains_key(action) {
+    let Some(def) = config.actions.get(action) else {
         bail!("{} references non-existent action '{}'", label, action);
+    };
+    if def.action_type == "task" {
+        if let Some(task_ref) = def.task.as_deref() {
+            if !config.tasks.contains_key(task_ref) && task_ref.contains('.') {
+                if libraries_resolved {
+                    bail!(
+                        "{} uses action '{}' whose task '{}' is in another workspace; hook actions cannot call tasks across workspaces",
+                        label, action, task_ref
+                    );
+                }
+                warnings.push(format!(
+                    "{} uses action '{}' whose task '{}' is not local - cannot validate offline",
+                    label, action, task_ref
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -5140,6 +5197,19 @@ tasks:
 
     // --- cross-workspace action reference tests ---
 
+    struct FakeResolver {
+        actions: Vec<(&'static str, &'static str)>,
+        tasks: Vec<(&'static str, &'static str)>,
+    }
+    impl CrossWorkspaceResolver for FakeResolver {
+        fn has_action(&self, ws: &str, a: &str) -> bool {
+            self.actions.iter().any(|(w, x)| *w == ws && *x == a)
+        }
+        fn has_task(&self, ws: &str, t: &str) -> bool {
+            self.tasks.iter().any(|(w, x)| *w == ws && *x == t)
+        }
+    }
+
     #[test]
     fn test_validate_with_resolver_accepts_cross_workspace_action() {
         // Flow step references "B.remote" — not a local/library action, but the
@@ -5152,7 +5222,10 @@ tasks:
         action: B.remote
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolver = |ws: &str, action: &str| ws == "B" && action == "remote";
+        let resolver = FakeResolver {
+            actions: vec![("B", "remote")],
+            tasks: vec![],
+        };
         let result = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver);
         assert!(
             result.is_ok(),
@@ -5172,7 +5245,10 @@ tasks:
         action: B.remote
 "#;
         let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
-        let resolver = |_ws: &str, _action: &str| false;
+        let resolver = FakeResolver {
+            actions: vec![],
+            tasks: vec![],
+        };
         let result = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver);
         assert!(
             result.is_err(),
@@ -5182,6 +5258,165 @@ tasks:
         assert_eq!(
             err, "action 'B.remote': workspace 'B' has no action 'remote'",
             "Error message should match the precise cross-workspace format, got: {err}"
+        );
+    }
+
+    const DOTTED_TASK_YAML: &str = r#"
+actions:
+  run-remote:
+    type: task
+    task: B.deploy
+tasks:
+  caller:
+    flow:
+      go:
+        action: run-remote
+"#;
+
+    #[test]
+    fn dotted_task_ref_offline_is_a_warning_not_an_error() {
+        let config: WorkspaceConfig = serde_yaml::from_str(DOTTED_TASK_YAML).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("cannot validate cross-workspace task reference offline")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn dotted_task_ref_server_accepts_when_resolver_has_task() {
+        let config: WorkspaceConfig = serde_yaml::from_str(DOTTED_TASK_YAML).unwrap();
+        let resolver = FakeResolver {
+            actions: vec![],
+            tasks: vec![("B", "deploy")],
+        };
+        assert!(validate_workflow_config_with_cross_workspace_resolver(&config, &resolver).is_ok());
+    }
+
+    #[test]
+    fn dotted_task_ref_server_rejects_when_resolver_lacks_task() {
+        let config: WorkspaceConfig = serde_yaml::from_str(DOTTED_TASK_YAML).unwrap();
+        let resolver = FakeResolver {
+            actions: vec![],
+            tasks: vec![],
+        };
+        let err = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "action 'run-remote': workspace 'B' has no task 'deploy'"
+        );
+    }
+
+    #[test]
+    fn dotted_task_ref_local_flattened_key_wins_over_split() {
+        let yaml = r#"
+actions:
+  run-remote:
+    type: task
+    task: common.deploy
+  noop:
+    type: script
+    script: "echo hi"
+tasks:
+  common.deploy:
+    flow:
+      a:
+        action: noop
+  caller:
+    flow:
+      go:
+        action: run-remote
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        // No resolver at all: the flattened key is found locally, never split.
+        assert!(validate_workflow_config_with_libraries(&config).is_ok());
+    }
+
+    #[test]
+    fn dotted_task_ref_with_empty_side_is_an_error_in_both_modes() {
+        for bad in [".deploy", "B."] {
+            let yaml = format!(
+                "actions:\n  run-remote:\n    type: task\n    task: \"{bad}\"\ntasks:\n  caller:\n    flow:\n      go:\n        action: run-remote\n"
+            );
+            let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
+            let err = validate_workflow_config(&config).unwrap_err().to_string();
+            assert!(err.contains("malformed task"), "{bad}: {err}");
+            let resolver = FakeResolver {
+                actions: vec![],
+                tasks: vec![],
+            };
+            let err = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("malformed task"), "{bad}: {err}");
+        }
+    }
+
+    const HOOK_WITH_DOTTED_TASK_YAML: &str = r#"
+actions:
+  notify:
+    type: task
+    task: B.notify
+  greet:
+    type: script
+    script: "echo hi"
+tasks:
+  deploy:
+    flow:
+      a:
+        action: greet
+    on_error:
+      - action: notify
+"#;
+
+    #[test]
+    fn hook_with_qualified_task_is_rejected_on_server() {
+        let config: WorkspaceConfig = serde_yaml::from_str(HOOK_WITH_DOTTED_TASK_YAML).unwrap();
+        let resolver = FakeResolver {
+            actions: vec![],
+            tasks: vec![("B", "notify")],
+        };
+        let err = validate_workflow_config_with_cross_workspace_resolver(&config, &resolver)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("hook actions cannot call tasks across workspaces"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn hook_with_qualified_task_is_a_warning_offline() {
+        let config: WorkspaceConfig = serde_yaml::from_str(HOOK_WITH_DOTTED_TASK_YAML).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("cannot validate offline")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn hook_with_unresolved_library_task_offline_stays_a_warning() {
+        // `common.notify` might be a library task the CLI cannot see. Must not fail.
+        let yaml = HOOK_WITH_DOTTED_TASK_YAML.replace("B.notify", "common.notify");
+        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(validate_workflow_config(&config).is_ok());
+    }
+
+    #[test]
+    fn missing_bare_task_ref_is_still_an_error_offline() {
+        let yaml = DOTTED_TASK_YAML.replace("B.deploy", "deploy");
+        let config: WorkspaceConfig = serde_yaml::from_str(&yaml).unwrap();
+        let err = validate_workflow_config(&config).unwrap_err().to_string();
+        assert!(
+            err.contains("references non-existent task 'deploy'"),
+            "{err}"
         );
     }
 
