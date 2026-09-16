@@ -447,6 +447,17 @@ impl WorkspaceManager {
         self.load_errors.insert(name.to_string(), error.to_string());
     }
 
+    /// Test-only: replace a loaded workspace's config in place (simulates a
+    /// reload that changed the YAML) without touching the source. Not
+    /// `#[cfg(test)]` for the same reason as `mark_unavailable_for_test`:
+    /// integration test binaries link this crate without `cfg(test)`.
+    #[doc(hidden)]
+    pub async fn replace_config_for_test(&self, name: &str, cfg: WorkspaceConfig) {
+        if let Some(entry) = self.entries.get(name) {
+            *entry.config.write().await = Arc::new(cfg);
+        }
+    }
+
     /// Test-only: flip an already-registered entry (e.g. from `from_configs`)
     /// to the "configured but unavailable" state — `has_workspace` stays
     /// `true`, `get_config` returns `None` — mirroring a workspace whose
