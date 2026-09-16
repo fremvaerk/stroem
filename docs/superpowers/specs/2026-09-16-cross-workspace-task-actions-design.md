@@ -38,6 +38,18 @@ happens before creation and the diagnostic lands on the source job's log.
 All three fixed in this revision's docs; see § 7 item 5 and the user
 guide for the corrected wording.
 
+**Revision 8 follow-up (2026-09-16, same day).** A Codex re-check of (1)
+found one more representation `redact_secrets_in_str` missed: Tera itself
+Debug-formats some filter arguments on an invalid value (e.g.
+`round(method=...)`, `tera::builtins::filters::number::round`, `got
+\`{:?}\``), which is Rust's `Debug`-escaping, not JSON's — the two schemes
+diverge on control characters (JSON emits `` for ESC, Rust's Debug
+emits `\u{1b}`), so a secret containing one could still survive the
+raw-value and JSON-escaped-value scrub. `redact_secrets_in_str` now also
+searches for each secret's `format!("{:?}", secret)` form (quotes
+stripped), whenever it differs from both the raw and JSON-escaped forms
+already searched.
+
 **Revision 7 (2026-09-16, implementation).** Two corrections found in the
 final whole-branch review, both fixed in code/docs, not design: (1) § 7
 item 5 understated the creation-time pre-check's scope — it runs for
