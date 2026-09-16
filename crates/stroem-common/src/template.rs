@@ -600,10 +600,20 @@ pub fn resolve_connection_inputs_scoped(
                 if value.is_object() {
                     continue;
                 }
+                // Print only the JSON type name, never the value itself: this
+                // value can be an owner action default that rendered a
+                // `{{ secret.* }}` template into a real secret (e.g. a
+                // connection-typed field defaulted to an array containing a
+                // secret string). Printing the value here would put the
+                // secret into a message that gets persisted to
+                // `job_step.error_message`/`retry_history` and returned by
+                // REST/MCP; the exact-string secret scrub only matches the
+                // RAW secret value, so a JSON-escaped rendering of it (e.g.
+                // inside a quoted array element) would slip past that scrub.
                 bail!(
                     "Input field '{}' expects a connection name (string), got {}",
                     field_name,
-                    value
+                    json_type_name(&value)
                 );
             }
         };
@@ -2518,6 +2528,35 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("expects a connection name"));
+    }
+
+    /// H1 regression: the "expects a connection name" bail must print only
+    /// the JSON type name, never the value. A connection-typed field can be
+    /// filled by an owner action DEFAULT that rendered a `{{ secret.* }}`
+    /// template into a real secret (e.g. a default of `["{{ secret.TOKEN
+    /// }}"]`), so printing the value here would leak the secret into a
+    /// message that `redact_secrets_in_str`'s exact-string scrub might not
+    /// fully cover once JSON-escaped (see `workspace_set.rs`).
+    #[test]
+    fn test_resolve_connection_inputs_array_value_error_omits_value() {
+        let ws = make_ws_with_connection();
+        let secret = "s3cr3t-token-value";
+        let input = json!({"db": [secret]});
+        let mut schema = HashMap::new();
+        schema.insert("db".to_string(), field("postgres", false, None));
+
+        let result = resolve_connection_inputs(
+            &input,
+            &schema,
+            &SingleWorkspace {
+                name: "local",
+                config: &ws,
+            },
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expects a connection name"));
+        assert!(err.contains("array"), "{err}");
+        assert!(!err.contains(secret), "{err}");
     }
 
     #[test]

@@ -111,6 +111,24 @@ pub fn collect_config_secret_values(cfg: &WorkspaceConfig) -> Vec<String> {
 /// Mask used wherever a secret value is scrubbed out of user-visible text.
 pub const REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 
+/// Append every occurrence (overlapping ones included) of `needle` in `s` to
+/// `spans`, as `(start, end)` byte offsets into `s`. Advances by one
+/// character (not by `needle`'s length) after each match so an occurrence
+/// that starts inside a previous one is still found — see
+/// [`redact_secrets_in_str`]'s doc comment for why overlap matters.
+fn collect_occurrences(s: &str, needle: &str, spans: &mut Vec<(usize, usize)>) {
+    let mut from = 0usize;
+    while from <= s.len() {
+        let Some(rel) = s[from..].find(needle) else {
+            break;
+        };
+        let begin = from + rel;
+        spans.push((begin, begin + needle.len()));
+        let step = s[begin..].chars().next().map_or(1, char::len_utf8);
+        from = begin + step;
+    }
+}
+
 /// Mask every occurrence of every known secret value in `s`. Occurrences are
 /// found in the original text (overlapping ones included) and intersecting or
 /// adjacent spans are merged, so two values whose occurrences cross — or one
@@ -122,6 +140,17 @@ pub const REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 /// messages are persisted to `job_step.error_message` and `retry_history`,
 /// appended to the job log, and returned to the worker, so they must be
 /// scrubbed at the point of failure rather than only on read.
+///
+/// Each secret is searched for in TWO forms: the raw value, and its
+/// JSON-escaped representation (quotes/backslashes/control characters
+/// escaped the way `serde_json` would render it inside a string), whenever
+/// that differs from the raw value. A value error printed via a JSON
+/// `Value`'s `Display` impl (e.g. `resolve_connection_inputs_scoped`'s
+/// "expects a connection name" bail, before it was changed to print only the
+/// type) renders a secret this way — a secret containing a quote or a
+/// backslash then survives an exact-string match on the raw value alone.
+/// Searching for both forms keeps any future error path that serialises a
+/// value covered, not just the ones known today.
 pub fn redact_secrets_in_str(s: &str, secret_values: &[String]) -> String {
     // Collect every occurrence — overlapping ones included — against the
     // ORIGINAL text. Replacing sequentially against already-modified text
@@ -131,17 +160,18 @@ pub fn redact_secrets_in_str(s: &str, secret_values: &[String]) -> String {
         if secret.is_empty() {
             continue;
         }
-        let mut from = 0usize;
-        while from <= s.len() {
-            let Some(rel) = s[from..].find(secret.as_str()) else {
-                break;
-            };
-            let begin = from + rel;
-            spans.push((begin, begin + secret.len()));
-            // Advance by one character so an occurrence that starts inside
-            // this one is still found.
-            let step = s[begin..].chars().next().map_or(1, char::len_utf8);
-            from = begin + step;
+        collect_occurrences(s, secret, &mut spans);
+        // The JSON-escaped form (without the surrounding quotes `to_string`
+        // would add): only search it when it differs from the raw value, so
+        // a secret with no special characters doesn't get searched twice.
+        if let Ok(escaped) = serde_json::to_string(secret) {
+            let escaped = escaped
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(&escaped);
+            if escaped != secret && !escaped.is_empty() {
+                collect_occurrences(s, escaped, &mut spans);
+            }
         }
     }
     if spans.is_empty() {
@@ -383,6 +413,62 @@ mod tests {
     fn redact_adjacent_occurrences_merge() {
         let out = redact_secrets_in_str("abab", &secrets(&["ab"]));
         assert_eq!(out, REDACTED);
+    }
+
+    // ─── H1 regression: JSON-escaped occurrences of a secret ─────────────────
+
+    /// A secret containing a quote, a backslash, and a newline appears in the
+    /// text ONLY in its JSON-escaped form (as `serde_json::Value`'s `Display`
+    /// impl would render it inside a string, e.g. an array literal like
+    /// `["contains\"quote\\and\nnewline"]`). The raw value never occurs
+    /// verbatim, so a matcher that only searches the raw string finds
+    /// nothing; `redact_secrets_in_str` must still fully mask it.
+    #[test]
+    fn redact_secrets_in_str_masks_json_escaped_only_occurrence() {
+        let secret = "contains\"quote\\and\nnewline";
+        let escaped = serde_json::to_string(secret).unwrap();
+        let text = format!("Input field 'db' expects a connection name, got [{escaped}]");
+        assert!(
+            !text.contains(secret),
+            "test setup: raw value must not appear verbatim in the escaped text"
+        );
+        let out = redact_secrets_in_str(&text, &secrets(&[secret]));
+        assert!(!out.contains(secret));
+        assert!(!out.contains("quote"));
+        assert!(!out.contains("backslash") && !out.contains('\\'));
+        assert_eq!(
+            out,
+            format!("Input field 'db' expects a connection name, got [\"{REDACTED}\"]")
+        );
+    }
+
+    /// Both the raw and the JSON-escaped form of the same secret appear in
+    /// the text (e.g. the raw value logged once, and a JSON-serialised copy
+    /// of it logged elsewhere) — both occurrences must be masked.
+    #[test]
+    fn redact_secrets_in_str_masks_both_raw_and_escaped_occurrences() {
+        let secret = "has\"quote";
+        let escaped = serde_json::to_string(secret).unwrap(); // `"has\"quote"`
+        let text = format!("raw={secret} escaped={escaped}");
+        let out = redact_secrets_in_str(&text, &secrets(&[secret]));
+        assert!(!out.contains("has"));
+        assert!(!out.contains("quote"));
+        assert_eq!(out, format!("raw={REDACTED} escaped=\"{REDACTED}\""));
+    }
+
+    /// A secret with no JSON-special characters has an escaped form equal to
+    /// its raw form — searching for it a second time must not double-count
+    /// or otherwise change the result versus searching the raw value alone.
+    #[test]
+    fn redact_secrets_in_str_escaped_form_equal_to_raw_adds_nothing() {
+        let secret = "plain-secret-value";
+        assert_eq!(
+            serde_json::to_string(secret).unwrap(),
+            format!("\"{secret}\"")
+        );
+        let text = format!("got {secret} here");
+        let out = redact_secrets_in_str(&text, &secrets(&[secret]));
+        assert_eq!(out, format!("got {REDACTED} here"));
     }
 
     #[test]

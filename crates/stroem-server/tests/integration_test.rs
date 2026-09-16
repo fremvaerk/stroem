@@ -3059,6 +3059,12 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         ("X".to_string(), json!("{{ secret.Y }}")),
         ("Y".to_string(), json!("yval")),
         ("ROTATING".to_string(), json!("old-secret-value")),
+        // Contains a JSON-special quote and backslash: an array-valued
+        // owner default that embeds this renders it into
+        // `resolve_connection_inputs_scoped`'s "expects a connection name"
+        // bail via `serde_json::Value`'s `Display` impl, which escapes both
+        // characters — the H1 secret-scrub regression target.
+        ("TOKEN_ESCAPE".to_string(), json!("has\"quote\\and-slash")),
     ]);
 
     ws.actions.insert(
@@ -3124,6 +3130,25 @@ fn xws_build_ws_b() -> WorkspaceConfig {
     );
     ws.actions
         .insert("run-bad-default".to_string(), run_bad_default);
+
+    // H1 regression fixture: `db` is connection-typed (`pg`) on `deploy`'s
+    // own schema; this action's OWN default for it is an ARRAY containing a
+    // rendered secret, not a connection name. `merge_action_defaults`
+    // renders the template into the real secret value before
+    // `resolve_task_input_by_provenance`/`resolve_connection_inputs_scoped`
+    // ever sees it, so the array that reaches the "expects a connection
+    // name" bail already contains the raw secret, not a template string.
+    let mut run_bad_array_default = xws_task_action("deploy");
+    run_bad_array_default.input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "pg".to_string(),
+            default: Some(json!(["{{ secret.TOKEN_ESCAPE }}"])),
+            ..Default::default()
+        },
+    );
+    ws.actions
+        .insert("run-bad-array-default".to_string(), run_bad_array_default);
 
     let mut run_two_pass = xws_task_action("deploy");
     run_two_pass.input.insert(
@@ -3330,6 +3355,10 @@ fn xws_build_ws_a() -> WorkspaceConfig {
     ws.tasks.insert(
         "pipeline-secret-error".to_string(),
         xws_task_def(vec![("run", xws_flow_step("B.run-bad-default"))]),
+    );
+    ws.tasks.insert(
+        "pipeline-secret-array-error".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-bad-array-default"))]),
     );
     ws.tasks.insert(
         "pipeline-two-pass".to_string(),
@@ -4143,6 +4172,98 @@ async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
     );
     assert!(!status_text.contains("ABCD-token"), "{status_text}");
     assert!(!status_text.contains("-token"), "{status_text}");
+    Ok(())
+}
+
+/// H1 regression: an owner action default for a connection-typed task input
+/// (`db`, typed `pg` on `deploy`'s own schema) is an ARRAY containing a
+/// rendered secret (`TOKEN_ESCAPE`, which contains a quote and a backslash),
+/// not a connection name. `resolve_connection_inputs_scoped`'s "expects a
+/// connection name" bail used to print the value itself — `serde_json`'s
+/// `Display` impl renders the array with the secret JSON-escaped (`\"` and
+/// `\\`), which the exact-string secret scrub in `redact_secrets_in_str`
+/// would miss. Both halves of the fix are exercised here: the bail now
+/// prints only the JSON type name (never the value), and the scrub also
+/// searches for each secret's JSON-escaped form as defense in depth.
+/// Asserts neither the raw secret nor its JSON-escaped form appears in the
+/// persisted step error, the REST job detail, the job log, or MCP's
+/// `get_job_status` text.
+#[tokio::test]
+async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let raw_secret = "has\"quote\\and-slash";
+    let escaped_secret = serde_json::to_string(raw_secret)?; // includes the surrounding quotes
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-secret-array-error/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    // With the fix, the bail prints only the JSON type name — no secret
+    // value ever reaches the message, so there is nothing here for
+    // `redact_secrets_in_str` to mask (unlike the sibling scalar-secret
+    // test above, whose Tera filter error DOES quote the value and relies
+    // on the scrub). Assert the type name is present and neither secret
+    // form leaked, rather than asserting a `••••••` marker that this
+    // particular message no longer has any reason to contain.
+    assert!(err.contains("expects a connection name"), "{err}");
+    assert!(err.contains("array"), "{err}");
+    assert!(!err.contains(raw_secret), "{err}");
+    assert!(!err.contains(&escaped_secret), "{err}");
+    assert!(!err.contains("quote"), "{err}");
+
+    // The REST job detail must carry the same scrubbed text.
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}")))
+        .await?;
+    let detail_text = body_json(detail).await.to_string();
+    assert!(!detail_text.contains(raw_secret), "{detail_text}");
+    assert!(!detail_text.contains(&escaped_secret), "{detail_text}");
+
+    // The job's log stream must never leak the raw or escaped secret either.
+    let logs = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}/logs")))
+        .await?;
+    let logs_text = body_json(logs).await.to_string();
+    assert!(!logs_text.contains(raw_secret), "{logs_text}");
+    assert!(!logs_text.contains(&escaped_secret), "{logs_text}");
+
+    // MCP's `get_job_status` must return the same scrubbed error.
+    let session_id = xws_mcp_initialize(&router).await?;
+    let status_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": {
+            "name": "get_job_status",
+            "arguments": {"job_id": parent.to_string()}
+        }
+    });
+    let response = router
+        .oneshot(xws_mcp_request(session_id.as_deref(), status_body))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let mcp_resp = body_json(response).await;
+    let status_text = mcp_resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("get_job_status content[0].text should be a string");
+    assert!(status_text.contains("array"), "{status_text}");
+    assert!(!status_text.contains(raw_secret), "{status_text}");
+    assert!(!status_text.contains(&escaped_secret), "{status_text}");
     Ok(())
 }
 
