@@ -69,6 +69,22 @@ Last updated: 2026-06-03.
 - [ ] **Reserved step names** — reject flow steps named `input`/`secret`/`state`/`global_state`/`job`/`each` at validation (render_context::FRAMEWORK_KEYS); retires the collision class in the render-context spec §6. Belongs with the validation-module candidate.
 - [ ] **Task-state storage hardening** — per-snapshot keys, download by claim-supplied key (wire change), prune surviving-reference check, extractor policy, backfill of pre-047 `state_json`. Problem statement: `docs/superpowers/specs/2026-09-13-task-state-storage-hardening-design.md`.
 - [ ] **`DispatchEnv` for settlement dispatch** — `handle_task_steps`, `handle_task_steps_pass` and `dispatch::init` now take 8 parameters each (`#[allow(clippy::too_many_arguments)]` ×3 added in the render-context work); `workspaces`, `pool`, `workspace_config`, `workspace_name`, `defaults`, `snapshots` are one per-entry dispatch environment the state tier already bundles as `Settlement`. A `DispatchEnv<'a>` collapses five arguments and removes all three allows.
+- [ ] Cross-workspace `type: task` carried lifecycle risks (same exposure as any `type: task` child today, sharpened by cross-team ownership) — problem statement `docs/superpowers/specs/2026-09-16-task-step-lifecycle-hardening-design.md`:
+  - [ ] Double dispatch: two concurrent settlement passes can both see a step ready and both create a child.
+  - [ ] A stale dispatcher can fail a winner's step after another dispatcher already succeeded.
+  - [ ] Dispatch is not crash-safe: a crash between marking the step `running` and the child's commit leaves a `running` step with no child and no automatic repair.
+  - [ ] A child missed by cancellation's enumeration snapshot when committed just after it, by a dispatcher working from an earlier readiness read.
+  - [ ] A timed-out parent step does not cancel its child, and a stale child can settle a retried replacement attempt.
+  - [ ] A job whose task vanished mid-run is not settled by its own steps and stays `running` until a job timeout or an operator cancel.
+  - [ ] A child suspended at creation (its first step is an approval) fires no `on_suspended` hook.
+  - [ ] Terminal claim and the write to the parent step are not atomic; a crash between them loses that delivery.
+- [ ] `settlement::dispatch::fail_task_step` never calls `append_server_log`, so `type: task` dispatch failures reach `job_step.error_message` but never the job log (pre-existing; found scrubbing the Task 10 tests for cross-workspace `type: task`).
+- [ ] Ancestry-based cycle detection for cross-workspace `type: task` chains — rejected for now: bounded indirect recursion guarded by `when` is a legitimate pattern it would break; today's only bound is `MAX_TASK_DEPTH` (10).
+- [ ] Atomic `(config, revision)` read on `WorkspaceManager` — a reload between reading the config snapshot and the revision (cross-workspace `type: task` dispatch, and top-level execute) can pair a stale config with a newer revision.
+- [ ] Same-workspace object values in connection-typed inputs are trusted pass-through, cross-workspace `type: task` inputs included — only a cross-boundary value is required to be a connection name.
+- [ ] `JobRepo::list_children` runs on every job detail request, even for jobs with no `type: task` steps.
+- [ ] `WorkspaceManager::replace_config_for_test` does not bump `get_revision` — test-only helper, but a gap if a test asserts on revision after using it.
+- [ ] Offline `stroem validate` emits two warnings, not one, for a hook action that wraps a `type: task` action naming an unresolved dotted task (once for the hook, once for the wrapped action) — cosmetic, both warn rather than fail.
 
 ## Simplification (from codex review 2026-03-17)
 
@@ -1506,7 +1522,7 @@ Feature: a flow step's `action:` may be `owner_ws.action`, resolved live against
 ### Deferred follow-ups
 - [x] Qualified connection references used outside a cross-workspace action's own input resolution (e.g. an explicit `jobs.clickhouse-prod` from an arbitrary field, not the connection input of a `jobs`-owned action) — `resolve_connection_inputs` still takes a single `&WorkspaceConfig`, not a resolver — done via `WorkspaceLookup` + `WorkspaceSet`, see "Cross-Workspace Connections" below
 - [x] Qualified connection-type references (`type: jobs.clickhouse` on a caller-declared input) — done, see "Cross-Workspace Connections" below
-- [ ] Cross-workspace `type: task` actions — `task: owner_ws.some_task` is not resolved; `handle_task_steps` (`job_creator.rs:490`) only looks up tasks locally
+- [x] Cross-workspace `type: task` actions — `task: owner_ws.some_task` now resolves (`job_creator::resolve_task_ref` + `settlement/dispatch.rs::handle_task_steps_pass`); see `docs/superpowers/specs/2026-09-16-cross-workspace-task-actions-design.md`, CLAUDE.md § Cross-Workspace References, and the new carried-risk / cycle-detection / atomic-revision items above
 - [ ] Cross-workspace `agent` steps render prompt/system_prompt/MCP/task-tools against the CALLER's workspace config, not the owner's (only script/docker/pod action bodies + their connection inputs are owner-aware)
 - [ ] Cross-workspace hook actions — `hooks.rs` has no `parse_qualified_ref` usage; hook action validation (`validate_hook_action_exists`) was deliberately left untouched to match
 - [ ] Wire workspace-config validation (`validate_workflow_config_with_libraries` / the new cross-workspace-resolver variant) into the server's actual load/reload pipeline — pre-existing gap for ANY action reference (not introduced by this feature); today job-creation-time resolution is the only real safety net, giving a precise 400 rather than a validation-time error

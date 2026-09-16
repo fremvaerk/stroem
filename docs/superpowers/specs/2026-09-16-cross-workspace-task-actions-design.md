@@ -10,6 +10,17 @@ cite `main` at `f174020`.
 
 ## Revision history
 
+**Revision 6 (2026-09-16, implementation).** Implemented as designed, with
+one seam differing from § 3.7: the parent→child link is
+`JobRepo::list_children(parent)` (`crates/stroem-db/src/repos/job.rs`) —
+every child job of the parent, `ORDER BY created_at DESC, job_id DESC` —
+fetched once per job detail request and grouped in memory by
+`parent_step_name`, rather than a `get_child_jobs_for_step(parent, step)`
+call per step. The step DTO field is `child_jobs`, populated for `type:
+task` steps only, each entry `{ id, workspace, task_name, status,
+created_at }`: execution history newest-first, with no attempt identity, as
+specified.
+
 **Revision 5 (2026-09-16).** Revision 4's review found no design blocker
 ("proceed with implementation planning") and two wording defects, fixed:
 § 7 item 4 now states the exact conditions for a submit-time 400
