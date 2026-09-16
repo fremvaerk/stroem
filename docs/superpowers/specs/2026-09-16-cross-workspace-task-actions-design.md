@@ -1,6 +1,6 @@
 # Cross-Workspace `type: task` Actions — Design
 
-Status: revision 4, proposed
+Status: revision 5, reviewed — ready for an implementation plan
 Ships in: 0.17.0 (minor; no migration; documented behaviour corrections, § 7)
 
 Closes the first item under "Deferred" in CLAUDE.md § Cross-Workspace
@@ -9,6 +9,17 @@ References and "Not yet supported" in
 cite `main` at `f174020`.
 
 ## Revision history
+
+**Revision 5 (2026-09-16).** Revision 4's review found no design blocker
+("proceed with implementation planning") and two wording defects, fixed:
+§ 7 item 4 now states the exact conditions for a submit-time 400
+(unguarded, caller-supplied literal, foreign bucket) and where every other
+case fails; the § 6 guarded-step test uses a true guard (a skipped step
+does not fail); the crossing-overlap example in § 3.3 names the order it
+describes. The mask edge cases the review listed (values containing `•`
+or equal to a substring of the mask, empty values, multi-byte boundaries,
+and that a non-overlapping matcher does not satisfy the definition) are
+added to § 6.
 
 **Revision 4 (2026-09-16).** Revision 3's review gave a conditional pass on
 the feature and found five contained defects, all fixed here. Longest-first
@@ -396,7 +407,8 @@ secret that is a prefix of an owner secret (`prefix` vs
 `prefix-sensitive-token`) leaves the suffix legible; two values whose
 occurrences *cross* — `incorrect value: got "ABCD` (a caller value shaped
 like Tera's own error text, `:117-118`) and `ABCD-token` — leave
-`-token"` after the longer one is masked, whatever the order; and a
+`-token"` when the longer is masked first (and a different fragment when
+the owner value is masked first); and a
 self-overlapping value (`aba` in `ababa`) is never fully covered by
 non-overlapping replacement. The helper is therefore redefined as
 **span-union masking**: find every occurrence of every value in the
@@ -616,7 +628,12 @@ and a third workspace `C`.
   `redact_secrets_in_str`: containment (`prefix`, `prefix-sensitive-token`),
   crossing (`incorrect value: got "ABCD`, `ABCD-token` in `incorrect
   value: got "ABCD-token"`), equal-length overlap, and self-overlap (`aba`
-  in `ababa`) — every byte of every occurrence masked, in any list order.
+  in `ababa`) — every byte of every occurrence masked, in any list order;
+  a value containing `•` and a value equal to a substring of `••••••` are
+  matched in the original text only (the mask is never rescanned); empty
+  values are ignored; a multi-byte value adjacent to another keeps valid
+  UTF-8 boundaries; a non-overlapping matcher (`str::matches`-style) fails
+  the self-overlap case, pinning that overlapping search is required.
   Validation: dotted `task:` CLI skip + warning; server accept / reject via
   `has_task`; local flattened key wins over the split; empty side rejected;
   hook with a qualified task → server error, CLI warning; an unresolved
@@ -649,8 +666,10 @@ and a third workspace `C`.
   submit is accepted (task-schema pre-check) and the child gets the
   PostgreSQL connection; a literal object in a connection-typed field on a
   cross-workspace call → 400 at submit; the same via `{{ }}` → step fails
-  at dispatch with the boundary message; a `when`-guarded step skips the
-  pre-check and fails at dispatch.
+  at dispatch with the boundary message; a `when`-guarded step with a
+  literal object skips the pre-check (201 at submit) and, with a **true**
+  guard, fails at dispatch — with a false guard it is skipped and never
+  fails.
 - **Integration, errors** — execute: `task: nope.deploy` → 400, `task:
   B.nope` → 400, `B` a placeholder → 500, `task: A.p` inside `p` → 400;
   `A → B → missing C` → 200 and `A`'s step fails with `B`'s message. Owner
@@ -690,8 +709,12 @@ and a third workspace `C`.
    task declares as a primitive now arrives as the name string, not the
    resolved object.
 4. On a cross-workspace call, a non-string value in a connection-typed
-   task input is rejected (400 at submit for literals, failed step for
-   templated values).
+   task input is rejected. It is a 400 at submit only when the value is a
+   literal supplied by the caller's flow step, the step has no `when`, and
+   the caller is not the task's workspace; a templated value, a value on a
+   `when`-guarded step, or a foreign action default fails the step at
+   dispatch if the step is reached. Within one workspace an object is
+   still accepted as before.
 5. A `type: task` action referencing a task by qualified name is now
    pre-checked at submit (400 on unknown workspace / no such task /
    self-reference); a hook action wrapping such a task is rejected by
