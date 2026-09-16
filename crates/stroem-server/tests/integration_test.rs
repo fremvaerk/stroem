@@ -3032,12 +3032,33 @@ fn xws_build_ws_b() -> WorkspaceConfig {
             values: HashMap::from([("host".to_string(), json!("b-private-host"))]),
         },
     );
+    // A second connection type, deliberately mismatched against `deploy`'s
+    // OWN `db: {type: pg}` schema — `run-deploy-redis` types its own `db`
+    // field as `redis` to prove the ACTION's schema is never consulted for a
+    // caller-supplied literal (only the TASK's own schema is).
+    ws.connection_types.insert(
+        "redis".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::from([(
+                "host".to_string(),
+                ConnectionPropertyDef {
+                    property_type: "string".to_string(),
+                    required: false,
+                    default: None,
+                    secret: false,
+                },
+            )]),
+        },
+    );
     // TOKEN backs the secret-scrub test; X/Y back the "single Tera pass"
-    // pinning test (X's own raw value is itself a template string).
+    // pinning test (X's own raw value is itself a template string); ROTATING
+    // backs the "persisted schema, live secret" test — its OWN VALUE is
+    // meant to be mutated between a job's creation and its dispatch.
     ws.secrets = HashMap::from([
         ("TOKEN".to_string(), json!("ABCD-token")),
         ("X".to_string(), json!("{{ secret.Y }}")),
         ("Y".to_string(), json!("yval")),
+        ("ROTATING".to_string(), json!("old-secret-value")),
     ]);
 
     ws.actions.insert(
@@ -3058,10 +3079,37 @@ fn xws_build_ws_b() -> WorkspaceConfig {
             ..Default::default()
         },
     );
+    // Not part of `deploy`'s own task schema — an extra action-level default
+    // the child job's `input` simply carries through. Its template renders
+    // against whatever `ROTATING` is AT DISPATCH TIME, unlike `db`'s schema
+    // (including this default's own TEMPLATE STRING), which is frozen in
+    // `action_spec` at job creation.
+    run_deploy.input.insert(
+        "token".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            default: Some(json!("{{ secret.ROTATING }}")),
+            ..Default::default()
+        },
+    );
     ws.actions.insert("run-deploy".to_string(), run_deploy);
 
     ws.actions
         .insert("run-deploy-via-c".to_string(), xws_task_action("C.build"));
+
+    // `deploy`'s own schema types `db` as `pg`; this action's schema
+    // (wrongly) types it `redis`. A caller-supplied literal for `db` must
+    // still be resolved against `deploy`'s OWN schema, never this one.
+    let mut run_deploy_redis = xws_task_action("deploy");
+    run_deploy_redis.input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "redis".to_string(),
+            ..Default::default()
+        },
+    );
+    ws.actions
+        .insert("run-deploy-redis".to_string(), run_deploy_redis);
 
     let mut run_bad_default = xws_task_action("deploy");
     run_bad_default.input.insert(
@@ -3230,11 +3278,33 @@ fn xws_build_ws_a() -> WorkspaceConfig {
         xws_task_def(vec![("run", conn_object_step.clone())]),
     );
 
-    let mut conn_object_when_step = conn_object_step;
+    let mut conn_object_when_step = conn_object_step.clone();
     conn_object_when_step.when = Some("{{ true }}".to_string());
     ws.tasks.insert(
         "pipeline-conn-object-when".to_string(),
         xws_task_def(vec![("run", conn_object_when_step)]),
+    );
+
+    // Same bad literal, but the `when` is FALSE: the step must be skipped by
+    // the cascade before ever reaching the connection resolver — no error
+    // anywhere, and the job completes.
+    let mut conn_object_false_when_step = conn_object_step;
+    conn_object_false_when_step.when = Some("{{ false }}".to_string());
+    ws.tasks.insert(
+        "pipeline-conn-object-false-when".to_string(),
+        xws_task_def(vec![("run", conn_object_false_when_step)]),
+    );
+
+    // The ACTION's own schema mistypes `db` as `redis`; `deploy`'s TASK
+    // schema types it `pg`. A caller-supplied literal connection name must
+    // resolve against the TASK's schema, never the action's.
+    let mut conn_cross_type_step = xws_flow_step("B.run-deploy-redis");
+    conn_cross_type_step
+        .input
+        .insert("db".to_string(), json!("b-shared"));
+    ws.tasks.insert(
+        "pipeline-conn-cross-type".to_string(),
+        xws_task_def(vec![("run", conn_cross_type_step)]),
     );
 
     let mut conn_templated_step = xws_flow_step("call-deploy");
@@ -3288,6 +3358,15 @@ fn xws_build_ws_a() -> WorkspaceConfig {
                 FlowStep {
                     depends_on: vec!["setup".to_string()],
                     ..xws_flow_step("call-deploy")
+                },
+            ),
+            // Downstream of the type: task step, no continue_on_failure —
+            // must cascade-skip when `run` fails.
+            (
+                "after",
+                FlowStep {
+                    depends_on: vec!["run".to_string()],
+                    ..xws_flow_step("setup-script")
                 },
             ),
         ]),
@@ -3416,7 +3495,10 @@ async fn setup_cross_task_workspaces(
         recovery: Default::default(),
         retention: RetentionConfig::default(),
         acl: opts.acl,
-        mcp: None,
+        mcp: Some(stroem_server::config::McpConfig {
+            enabled: true,
+            ..Default::default()
+        }),
         metrics: None,
         agents: None,
         state_storage: None,
@@ -3488,6 +3570,46 @@ fn xws_authed_post(uri: &str, token: &str, body: Value) -> Request<Body> {
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::from(serde_json::to_string(&body).unwrap()))
         .unwrap()
+}
+
+/// MCP is unauthenticated here (`CrossTaskOpts::default()` sets no
+/// `auth`), matching `mcp_test.rs`'s `setup_with_mcp` — a Host header is
+/// still required by rmcp's DNS-rebinding guard.
+fn xws_mcp_request(session_id: Option<&str>, body: Value) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("Host", "localhost")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+    if let Some(sid) = session_id {
+        builder = builder.header("Mcp-Session-Id", sid);
+    }
+    builder
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+async fn xws_mcp_initialize(router: &Router) -> Result<Option<String>> {
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "id": 0,
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1.0"}
+        }
+    });
+    let response = router
+        .clone()
+        .oneshot(xws_mcp_request(None, init_body))
+        .await?;
+    Ok(response
+        .headers()
+        .get("Mcp-Session-Id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string()))
 }
 
 #[tokio::test]
@@ -3570,6 +3692,16 @@ async fn test_xws_task_form_a_creates_child_in_owner_workspace() -> Result<()> {
 
     let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
     assert_eq!(steps[0].status, "completed", "{steps:?}");
+    // Propagation must carry the CHILD JOB's own output (an aggregate keyed
+    // by the child's step names) onto the parent step, not just its status.
+    let run_output = steps[0]
+        .output
+        .clone()
+        .expect("parent step output after propagation");
+    assert_eq!(
+        run_output["go"]["deployed"], true,
+        "parent step output must carry the child's own output: {run_output}"
+    );
     let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
     assert_eq!(parent_row.status, "completed");
     Ok(())
@@ -3594,7 +3726,10 @@ async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
     // "run" is still pending behind "setup" — no child yet.
     assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
 
-    // Mutate B's action default BETWEEN job creation and dispatch.
+    // Mutate B's action default AND rotate a secret BETWEEN job creation and
+    // dispatch — the schema/default TEMPLATE is frozen in `action_spec` at
+    // creation, but the SECRET VALUE a default template renders against is
+    // read live at dispatch.
     let mut b_mut = xws_build_ws_b();
     b_mut
         .actions
@@ -3604,6 +3739,9 @@ async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
         .get_mut("db")
         .unwrap()
         .default = Some(json!("b-shared"));
+    b_mut
+        .secrets
+        .insert("ROTATING".to_string(), json!("new-secret-value"));
     mgr.replace_config_for_test("B", b_mut).await;
 
     let worker_id = register_test_worker(&pool).await;
@@ -3639,6 +3777,12 @@ async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
         child_input["db"]["host"], "b-private-host",
         "the child must use the default captured in `action_spec` at job \
          creation, not B's live (post-mutation) default: {child_input}"
+    );
+    assert_eq!(
+        child_input["token"], "new-secret-value",
+        "the default TEMPLATE is persisted, but it must render against B's \
+         LIVE (post-rotation) secret value, not a value snapshotted at \
+         creation: {child_input}"
     );
     Ok(())
 }
@@ -3878,6 +4022,20 @@ async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result
     let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
     assert_eq!(parent_row.status, "failed");
     assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+
+    // "after" depends on the failed "run" with no `continue_on_failure` —
+    // it must be cascade-skipped, not left dangling `pending`/`ready`, and
+    // nothing in this job may still be `running`.
+    let after = steps.iter().find(|s| s.step_name == "after").unwrap();
+    assert_eq!(after.status, "skipped", "{steps:?}");
+    assert!(
+        after.skip_reason.is_some(),
+        "a cascade-skipped step must carry a skip_reason: {after:?}"
+    );
+    assert!(
+        steps.iter().all(|s| s.status != "running"),
+        "no step may be left running once the job is failed: {steps:?}"
+    );
     Ok(())
 }
 
@@ -3919,11 +4077,39 @@ async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
     // own log stream — see the task-10 report for this observation — so
     // this only asserts absence of a leak, not presence of the message.)
     let logs = router
+        .clone()
         .oneshot(api_get(&format!("/api/jobs/{parent}/logs")))
         .await?;
     let logs_text = body_json(logs).await.to_string();
     assert!(!logs_text.contains("ABCD-token"), "{logs_text}");
     assert!(!logs_text.contains("-token"), "{logs_text}");
+
+    // MCP's `get_job_status` must return the SAME scrubbed error, never the
+    // raw column value (it reads `job_step.error_message` directly).
+    let session_id = xws_mcp_initialize(&router).await?;
+    let status_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": {
+            "name": "get_job_status",
+            "arguments": {"job_id": parent.to_string()}
+        }
+    });
+    let response = router
+        .oneshot(xws_mcp_request(session_id.as_deref(), status_body))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let mcp_resp = body_json(response).await;
+    let status_text = mcp_resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("get_job_status content[0].text should be a string");
+    assert!(
+        status_text.contains("••••••"),
+        "MCP get_job_status must surface the scrubbed error: {status_text}"
+    );
+    assert!(!status_text.contains("ABCD-token"), "{status_text}");
+    assert!(!status_text.contains("-token"), "{status_text}");
     Ok(())
 }
 
@@ -3994,6 +4180,7 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
     // A templated string is skipped by the literal precheck and resolves
     // fine once rendered at dispatch.
     let resp = router
+        .clone()
         .oneshot(api_request(
             "POST",
             "/api/workspaces/A/tasks/pipeline-conn-templated/execute",
@@ -4007,6 +4194,48 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
         .pop()
         .expect("child job");
     assert_eq!(child.workspace, "B");
+
+    // The identical bad-literal shape, but the `when` is FALSE this time:
+    // the step must be cascade-skipped before the connection resolver ever
+    // runs — 200 at submit, `skipped` (not `failed`), job `completed`, no
+    // error anywhere.
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-conn-object-false-when/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "skipped", "{steps:?}");
+    assert!(run.error_message.is_none(), "{:?}", run.error_message);
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "completed", "{parent_row:?}");
+
+    // The action's own schema mistypes `db` as `redis`; a caller-supplied
+    // literal must still resolve against `deploy`'s OWN (`pg`) schema.
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-conn-cross-type/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    let child_input = child.input.expect("child input");
+    assert_eq!(
+        child_input["db"]["host"], "b-shared-host",
+        "the TASK's schema must win over the action's mismatched one: {child_input}"
+    );
     Ok(())
 }
 
