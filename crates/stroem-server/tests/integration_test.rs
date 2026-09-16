@@ -24795,23 +24795,30 @@ async fn test_sub_task_inherits_defaults() -> Result<()> {
 // ─── Regression: task-step dispatch failure must cascade (prod job 201012e5) ──
 
 /// A `type: task` step is dispatched server-side by `handle_task_steps`. When
-/// child-job creation fails there (e.g. the referenced task/action does not
-/// exist), the step is marked `failed` — but the orchestrator must then run
+/// dispatch fails there (e.g. the step's own input template fails to
+/// render), the step is marked `failed` — but the orchestrator must then run
 /// for that failure exactly as it does when a worker reports one, so that
 /// dependents are cascade-skipped and the job closes as `failed`. Previously
 /// nothing re-orchestrated, leaving dependents `pending` and the job stuck in
 /// `running` forever.
+///
+/// The referenced task must exist and resolve cleanly here — an unresolvable
+/// `type: task` reference is now rejected at submit time (Task 5's
+/// creation-time pre-check, see
+/// `test_task_step_unresolvable_task_ref_is_rejected_at_submit` below), so a
+/// job carrying one is never created and never reaches dispatch.
 #[tokio::test]
 async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> {
     let mut workspace = task_action_test_workspace();
 
-    // type:task action whose target task does not exist → child creation fails.
+    // type:task action whose target task exists (creation succeeds) but whose
+    // flow step carries an input template that fails to render at dispatch.
     let greet_action = workspace.actions["greet"].clone();
     workspace.actions.insert(
-        "run-missing".to_string(),
+        "run-target".to_string(),
         ActionDef {
             action_type: "task".to_string(),
-            task: Some("nonexistent-task".to_string()),
+            task: Some("cleanup".to_string()),
             ..greet_action
         },
     );
@@ -24832,9 +24839,9 @@ async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> 
     flow.insert(
         "dispatch".to_string(),
         FlowStep {
-            action: "run-missing".to_string(),
+            action: "run-target".to_string(),
             depends_on: vec!["first".to_string()],
-            input: HashMap::new(),
+            input: HashMap::from([("x".to_string(), json!("{{ input.undefined_var }}"))]),
             ..base_step.clone()
         },
     );
@@ -24907,7 +24914,7 @@ async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> 
             .error_message
             .as_deref()
             .unwrap_or("")
-            .contains("Failed to create child job"),
+            .contains("Failed to render input for task step"),
         "{:?}",
         steps["dispatch"].error_message
     );
@@ -24922,6 +24929,64 @@ async fn test_task_step_dispatch_failure_cascades_and_fails_job() -> Result<()> 
         "job must close as failed, not stay running"
     );
     assert!(job.completed_at.is_some());
+    Ok(())
+}
+
+/// An unresolvable `type: task` reference (the target task does not exist) is
+/// now caught at job-creation time by Task 5's creation-time pre-check —
+/// `resolve_task_ref` is called for every `type: task` action while building
+/// the job's steps, before the transaction commits — so the job is never
+/// created and dispatch never sees it.
+#[tokio::test]
+async fn test_task_step_unresolvable_task_ref_is_rejected_at_submit() -> Result<()> {
+    let mut workspace = task_action_test_workspace();
+
+    // type:task action whose target task does not exist.
+    let greet_action = workspace.actions["greet"].clone();
+    workspace.actions.insert(
+        "run-missing".to_string(),
+        ActionDef {
+            action_type: "task".to_string(),
+            task: Some("nonexistent-task".to_string()),
+            ..greet_action
+        },
+    );
+
+    let base_task = workspace.tasks["cleanup"].clone();
+    let base_step = base_task.flow.values().next().unwrap().clone();
+    let mut flow = HashMap::new();
+    flow.insert(
+        "dispatch".to_string(),
+        FlowStep {
+            action: "run-missing".to_string(),
+            depends_on: vec![],
+            input: HashMap::new(),
+            ..base_step
+        },
+    );
+    workspace.tasks.insert(
+        "unresolvable-ref-pipeline".to_string(),
+        TaskDef { flow, ..base_task },
+    );
+
+    let (router, _pool, _tmp, _container) = setup_with_workspace(workspace).await?;
+
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/default/tasks/unresolvable-ref-pipeline/execute",
+            json!({"input": {}}),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(response).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("not found"),
+        "{:?}",
+        body["error"]
+    );
+
     Ok(())
 }
 
