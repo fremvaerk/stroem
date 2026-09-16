@@ -890,6 +890,90 @@ pub fn prepare_action_input_cross(
     .context("Failed to resolve action connection inputs")
 }
 
+/// Resolve a `type: task` child's connection-typed inputs against the TASK's
+/// schema, by provenance. `caller_input` was supplied by the caller's flow
+/// step (workspace `caller_ws`); `action_defaults` are the keys the action's
+/// own `input` defaults added (workspace `action_ws`); the task lives in
+/// `task_ws`. Each bucket resolves a bare name in the workspace whose YAML
+/// wrote it first, then in `task_ws` only if the connection is `shared`.
+///
+/// Boundary rule: a value crossing a workspace boundary into a
+/// connection-typed field must be a connection NAME. Objects are refused
+/// there because `resolve_connection_inputs_scoped` passes any object
+/// through unchecked; within one workspace that pass-through is unchanged.
+pub fn resolve_task_input_by_provenance(
+    caller_input: &serde_json::Value,
+    action_defaults: &serde_json::Value,
+    task_schema: &HashMap<String, InputFieldDef>,
+    lookup: &dyn WorkspaceLookup,
+    caller_ws: &str,
+    action_ws: &str,
+    task_ws: &str,
+) -> Result<serde_json::Value> {
+    let caller = resolve_provenance_bucket(caller_input, task_schema, lookup, caller_ws, task_ws)?;
+    let defaults =
+        resolve_provenance_bucket(action_defaults, task_schema, lookup, action_ws, task_ws)?;
+    let mut out = caller.as_object().cloned().unwrap_or_default();
+    if let Some(d) = defaults.as_object() {
+        for (k, v) in d {
+            out.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+fn resolve_provenance_bucket(
+    input: &serde_json::Value,
+    task_schema: &HashMap<String, InputFieldDef>,
+    lookup: &dyn WorkspaceLookup,
+    value_ws: &str,
+    task_ws: &str,
+) -> Result<serde_json::Value> {
+    if value_ws != task_ws {
+        if let Some(map) = input.as_object() {
+            for (field, def) in task_schema {
+                if PRIMITIVE_TYPES.contains(&def.field_type.as_str()) {
+                    continue;
+                }
+                if let Some(v) = map.get(field) {
+                    if !v.is_string() {
+                        bail!(
+                            "input '{}': a connection passed across workspaces must be a connection name, got {}",
+                            field,
+                            json_type_name(v)
+                        );
+                    }
+                }
+            }
+        }
+    }
+    resolve_connection_inputs_scoped(
+        input,
+        task_schema,
+        &ResolveScope {
+            lookup,
+            schema_ws: task_ws,
+            value_ws,
+            fallback_ws: if value_ws == task_ws {
+                None
+            } else {
+                Some(task_ws)
+            },
+        },
+    )
+}
+
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3196,5 +3280,294 @@ mod tests {
         // Degenerate forms are treated as local.
         assert_eq!(parse_qualified_ref(".foo"), (None, ".foo"));
         assert_eq!(parse_qualified_ref("foo."), (None, "foo."));
+    }
+
+    /// A: connection `shared-a` (untyped, shared) and `mine` (type T.pg, not shared).
+    /// O: connection `o-private` (type T.pg, not shared), `o-shared` (type T.pg, shared).
+    /// T: type `pg`, type `redis`; connections `t-shared` (pg, shared),
+    ///    `t-private` (pg, not shared), `t-redis` (redis, shared), `t-untyped` (no type, shared).
+    fn provenance_workspaces() -> MultiWs {
+        let mut a = WorkspaceConfig::default();
+        a.connections
+            .insert("mine".to_string(), conn(Some("T.pg"), false, "a.mine"));
+        a.connections
+            .insert("shared-a".to_string(), conn(None, true, "a.shared"));
+        let mut o = WorkspaceConfig::default();
+        o.connections.insert(
+            "o-private".to_string(),
+            conn(Some("T.pg"), false, "o.private"),
+        );
+        o.connections
+            .insert("o-shared".to_string(), conn(Some("T.pg"), true, "o.shared"));
+        let mut t = WorkspaceConfig::default();
+        t.connection_types.insert("pg".to_string(), empty_type());
+        t.connection_types.insert("redis".to_string(), empty_type());
+        t.connections
+            .insert("t-shared".to_string(), conn(Some("pg"), true, "t.shared"));
+        t.connections.insert(
+            "t-private".to_string(),
+            conn(Some("pg"), false, "t.private"),
+        );
+        t.connections
+            .insert("t-redis".to_string(), conn(Some("redis"), true, "t.redis"));
+        t.connections
+            .insert("t-untyped".to_string(), conn(None, true, "t.untyped"));
+        MultiWs {
+            local: "A".to_string(),
+            configs: HashMap::from([
+                ("A".to_string(), a),
+                ("O".to_string(), o),
+                ("T".to_string(), t),
+            ]),
+            unavailable: vec![],
+        }
+    }
+
+    fn pg_schema() -> HashMap<String, InputFieldDef> {
+        let f: InputFieldDef = serde_yaml::from_str("type: pg").unwrap();
+        HashMap::from([("db".to_string(), f)])
+    }
+
+    #[test]
+    fn provenance_caller_value_found_in_caller_first() {
+        let ws = provenance_workspaces();
+        let out = resolve_task_input_by_provenance(
+            &json!({"db": "mine"}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "A",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(out["db"]["host"], "a.mine");
+    }
+
+    #[test]
+    fn provenance_caller_bare_name_falls_back_to_shared_task_owner() {
+        let ws = provenance_workspaces();
+        let out = resolve_task_input_by_provenance(
+            &json!({"db": "t-shared"}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "A",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(out["db"]["host"], "t.shared");
+    }
+
+    #[test]
+    fn provenance_caller_bare_name_to_unshared_task_owner_is_rejected() {
+        let ws = provenance_workspaces();
+        let err = resolve_task_input_by_provenance(
+            &json!({"db": "t-private"}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "A",
+            "T",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+    }
+
+    #[test]
+    fn provenance_action_default_resolves_ungated_in_action_owner() {
+        let ws = provenance_workspaces();
+        let out = resolve_task_input_by_provenance(
+            &json!({}),
+            &json!({"db": "o-private"}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "O",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(out["db"]["host"], "o.private");
+    }
+
+    #[test]
+    fn provenance_action_default_naming_task_owner_is_shared_gated() {
+        let ws = provenance_workspaces();
+        let ok = resolve_task_input_by_provenance(
+            &json!({}),
+            &json!({"db": "t-shared"}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "O",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(ok["db"]["host"], "t.shared");
+        let err = resolve_task_input_by_provenance(
+            &json!({}),
+            &json!({"db": "t-private"}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "O",
+            "T",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is not shared"), "{err:#}");
+    }
+
+    #[test]
+    fn provenance_declared_type_mismatch_is_rejected() {
+        let ws = provenance_workspaces();
+        let err = resolve_task_input_by_provenance(
+            &json!({"db": "t-redis"}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "A",
+            "T",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("expects type"), "{err:#}");
+    }
+
+    #[test]
+    fn provenance_named_untyped_connection_is_accepted() {
+        let ws = provenance_workspaces();
+        let out = resolve_task_input_by_provenance(
+            &json!({"db": "t-untyped"}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "A",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(out["db"]["host"], "t.untyped");
+    }
+
+    #[test]
+    fn provenance_boundary_rule_refuses_non_strings_per_bucket() {
+        let ws = provenance_workspaces();
+        for bad in [
+            json!({"host": "x"}),
+            json!([1]),
+            json!(1),
+            json!(true),
+            json!(null),
+        ] {
+            // Caller bucket foreign (A != T), default bucket local (O == T).
+            let err = resolve_task_input_by_provenance(
+                &json!({"db": bad}),
+                &json!({}),
+                &pg_schema(),
+                &ws,
+                "A",
+                "T",
+                "T",
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("must be a connection name"),
+                "caller bucket, value {bad}: {err:#}"
+            );
+            // Default bucket foreign (O != T), caller bucket local (A == T).
+            let err = resolve_task_input_by_provenance(
+                &json!({}),
+                &json!({"db": bad}),
+                &pg_schema(),
+                &ws,
+                "T",
+                "O",
+                "T",
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("must be a connection name"),
+                "default bucket, value {bad}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_local_bucket_keeps_object_passthrough_and_scalar_rejection() {
+        let ws = provenance_workspaces();
+        // A == T: an object passes through untouched (inherited behaviour) …
+        let out = resolve_task_input_by_provenance(
+            &json!({"db": {"host": "pre-resolved"}}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "T",
+            "T",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(out["db"]["host"], "pre-resolved");
+        // … while an array / scalar still fails with the resolver's own message.
+        let err = resolve_task_input_by_provenance(
+            &json!({"db": 5}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "T",
+            "T",
+            "T",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("expects a connection name"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn provenance_all_local_equals_plain_resolution() {
+        let ws = provenance_workspaces();
+        let by_prov = resolve_task_input_by_provenance(
+            &json!({"db": "t-private"}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "T",
+            "T",
+            "T",
+        )
+        .unwrap();
+        let plain = resolve_connection_inputs_scoped(
+            &json!({"db": "t-private"}),
+            &pg_schema(),
+            &ResolveScope {
+                lookup: &ws,
+                schema_ws: "T",
+                value_ws: "T",
+                fallback_ws: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(by_prov, plain);
+    }
+
+    #[test]
+    fn provenance_caller_key_wins_over_default_key() {
+        let ws = provenance_workspaces();
+        let out = resolve_task_input_by_provenance(
+            &json!({"db": "mine", "x": 1}),
+            &json!({"db": "o-private", "y": 2}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "O",
+            "T",
+        )
+        .unwrap();
+        assert_eq!(out["db"]["host"], "a.mine");
+        assert_eq!(out["x"], 1);
+        assert_eq!(out["y"], 2);
     }
 }
