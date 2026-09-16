@@ -111,7 +111,10 @@ pub fn collect_config_secret_values(cfg: &WorkspaceConfig) -> Vec<String> {
 /// Mask used wherever a secret value is scrubbed out of user-visible text.
 pub const REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 
-/// Replace every occurrence of a known secret value in `s` with [`REDACTED`].
+/// Mask every occurrence of every known secret value in `s`. Occurrences are
+/// found in the original text (overlapping ones included) and intersecting or
+/// adjacent spans are merged, so two values whose occurrences cross — or one
+/// value overlapping itself — leave no legible fragment.
 ///
 /// Used for free text that can embed a secret without any JSON structure to
 /// key off — notably Tera error messages, which quote the offending value
@@ -120,15 +123,46 @@ pub const REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 /// appended to the job log, and returned to the worker, so they must be
 /// scrubbed at the point of failure rather than only on read.
 pub fn redact_secrets_in_str(s: &str, secret_values: &[String]) -> String {
-    let mut out = s.to_string();
+    // Collect every occurrence — overlapping ones included — against the
+    // ORIGINAL text. Replacing sequentially against already-modified text
+    // leaves fragments whenever two occurrences intersect.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     for secret in secret_values {
         if secret.is_empty() {
             continue;
         }
-        if out.contains(secret.as_str()) {
-            out = out.replace(secret.as_str(), REDACTED);
+        let mut from = 0usize;
+        while from <= s.len() {
+            let Some(rel) = s[from..].find(secret.as_str()) else {
+                break;
+            };
+            let begin = from + rel;
+            spans.push((begin, begin + secret.len()));
+            // Advance by one character so an occurrence that starts inside
+            // this one is still found.
+            let step = s[begin..].chars().next().map_or(1, char::len_utf8);
+            from = begin + step;
         }
     }
+    if spans.is_empty() {
+        return s.to_string();
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (b, e) in spans {
+        match merged.last_mut() {
+            Some(last) if b <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((b, e)),
+        }
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut cursor = 0usize;
+    for (b, e) in merged {
+        out.push_str(&s[cursor..b]);
+        out.push_str(REDACTED);
+        cursor = e;
+    }
+    out.push_str(&s[cursor..]);
     out
 }
 
@@ -280,6 +314,75 @@ mod tests {
         let secrets = vec![String::new(), "s3cr3t".to_string()];
         let out = redact_secrets_in_str("a s3cr3t b", &secrets);
         assert_eq!(out, format!("a {REDACTED} b"));
+    }
+
+    fn secrets(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn redact_containment_masks_the_whole_longer_value_in_any_order() {
+        let text = "got prefix-sensitive-token here";
+        for order in [
+            secrets(&["prefix", "prefix-sensitive-token"]),
+            secrets(&["prefix-sensitive-token", "prefix"]),
+        ] {
+            let out = redact_secrets_in_str(text, &order);
+            assert_eq!(out, format!("got {REDACTED} here"), "order {order:?}");
+            assert!(!out.contains("sensitive"));
+        }
+    }
+
+    #[test]
+    fn redact_crossing_occurrences_leave_no_fragment() {
+        // The exact shape Tera produces: the caller-controlled value covers the
+        // error prefix and the START of the owner secret; the owner secret
+        // continues past it. Sequential replacement leaves `-token"`.
+        let text = r#"incorrect value: got "ABCD-token""#;
+        for order in [
+            secrets(&[r#"incorrect value: got "ABCD"#, "ABCD-token"]),
+            secrets(&["ABCD-token", r#"incorrect value: got "ABCD"#]),
+        ] {
+            let out = redact_secrets_in_str(text, &order);
+            assert_eq!(out, format!("{REDACTED}\""), "order {order:?}");
+        }
+    }
+
+    #[test]
+    fn redact_equal_length_overlap() {
+        let out = redact_secrets_in_str("xabcdx", &secrets(&["abc", "bcd"]));
+        assert_eq!(out, format!("x{REDACTED}x"));
+    }
+
+    #[test]
+    fn redact_self_overlapping_value_covers_every_byte() {
+        // `aba` occurs at 0 and at 2 in `ababa`; a non-overlapping matcher
+        // finds only the first and leaves `ba`.
+        let out = redact_secrets_in_str("ababa", &secrets(&["aba"]));
+        assert_eq!(out, REDACTED);
+    }
+
+    #[test]
+    fn redact_value_containing_mask_glyph_and_mask_substring() {
+        let bullet = "\u{2022}";
+        let text = format!("v={bullet}x{bullet} and mask={REDACTED}");
+        let out = redact_secrets_in_str(&text, &secrets(&[&format!("{bullet}x{bullet}"), bullet]));
+        // The mask in the output is never rescanned; the literal value is masked once.
+        assert_eq!(out, format!("v={REDACTED} and mask={REDACTED}"));
+    }
+
+    #[test]
+    fn redact_multibyte_adjacent_values_keep_utf8_boundaries() {
+        let out = redact_secrets_in_str("héllo wörld", &secrets(&["héllo", " wörld"]));
+        assert_eq!(out, REDACTED); // adjacent spans merge into one mask
+        let out = redact_secrets_in_str("aé", &secrets(&["é"]));
+        assert_eq!(out, format!("a{REDACTED}"));
+    }
+
+    #[test]
+    fn redact_adjacent_occurrences_merge() {
+        let out = redact_secrets_in_str("abab", &secrets(&["ab"]));
+        assert_eq!(out, REDACTED);
     }
 
     #[test]
