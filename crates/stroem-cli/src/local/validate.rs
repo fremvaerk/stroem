@@ -1,32 +1,37 @@
 use anyhow::{Context, Result};
 use std::path::Path;
+use stroem_common::models::workflow::WorkspaceConfig;
 use stroem_common::validation::validate_workflow_config;
 use stroem_common::workspace_loader;
 
-/// Pure validation function that returns all warnings (load + validation).
-fn validate_workspace(path: &Path) -> Result<Vec<String>> {
+/// Pure validation function that returns config and all warnings (load + validation).
+fn validate_workspace(path: &Path) -> Result<(WorkspaceConfig, Vec<String>)> {
     let (config, mut load_warnings) = workspace_loader::load_workspace(path)
         .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
 
     if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
-        return Ok(load_warnings);
+        return Ok((config, load_warnings));
     }
 
     let validation_warnings = validate_workflow_config(&config)?;
     load_warnings.extend(validation_warnings);
-    Ok(load_warnings)
+    Ok((config, load_warnings))
 }
 
 pub fn cmd_validate(path: &str) -> Result<()> {
     let path = Path::new(path);
 
-    let warnings = validate_workspace(path)?;
+    let (config, warnings) = match validate_workspace(path) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("[FAIL] {:#}", e);
+            anyhow::bail!("Validation failed");
+        }
+    };
+
     for w in &warnings {
         println!("  WARN: {}", w);
     }
-
-    let (config, _) = workspace_loader::load_workspace(path)
-        .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
 
     if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
         println!("No workflow definitions found at {}", path.display());
@@ -200,7 +205,7 @@ actions:
         .unwrap();
 
         // Validate workspace and collect warnings
-        let warnings = validate_workspace(dir.path()).unwrap();
+        let (_config, warnings) = validate_workspace(dir.path()).unwrap();
 
         // Verify warning is present with full text including " offline"
         assert!(
