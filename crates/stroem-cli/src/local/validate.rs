@@ -3,38 +3,42 @@ use std::path::Path;
 use stroem_common::validation::validate_workflow_config;
 use stroem_common::workspace_loader;
 
+/// Pure validation function that returns all warnings (load + validation).
+fn validate_workspace(path: &Path) -> Result<Vec<String>> {
+    let (config, mut load_warnings) = workspace_loader::load_workspace(path)
+        .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
+
+    if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
+        return Ok(load_warnings);
+    }
+
+    let validation_warnings = validate_workflow_config(&config)?;
+    load_warnings.extend(validation_warnings);
+    Ok(load_warnings)
+}
+
 pub fn cmd_validate(path: &str) -> Result<()> {
     let path = Path::new(path);
 
-    let (config, load_warnings) = workspace_loader::load_workspace(path)
-        .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
-
-    for w in &load_warnings {
+    let warnings = validate_workspace(path)?;
+    for w in &warnings {
         println!("  WARN: {}", w);
     }
+
+    let (config, _) = workspace_loader::load_workspace(path)
+        .with_context(|| format!("Failed to load workspace from {}", path.display()))?;
 
     if config.actions.is_empty() && config.tasks.is_empty() && config.triggers.is_empty() {
         println!("No workflow definitions found at {}", path.display());
         return Ok(());
     }
 
-    match validate_workflow_config(&config) {
-        Ok(warnings) => {
-            for w in &warnings {
-                println!("  WARN: {}", w);
-            }
-            println!(
-                "[OK] Workspace loaded: {} actions, {} tasks, {} triggers",
-                config.actions.len(),
-                config.tasks.len(),
-                config.triggers.len()
-            );
-        }
-        Err(e) => {
-            eprintln!("[FAIL] {:#}", e);
-            anyhow::bail!("Validation failed");
-        }
-    }
+    println!(
+        "[OK] Workspace loaded: {} actions, {} tasks, {} triggers",
+        config.actions.len(),
+        config.tasks.len(),
+        config.triggers.len()
+    );
 
     Ok(())
 }
@@ -195,16 +199,15 @@ actions:
         )
         .unwrap();
 
-        // Load and validate workspace
-        let (config, _) = workspace_loader::load_workspace(dir.path()).unwrap();
-        let warnings = validate_workflow_config(&config).unwrap();
+        // Validate workspace and collect warnings
+        let warnings = validate_workspace(dir.path()).unwrap();
 
-        // Verify warning is present
+        // Verify warning is present with full text including " offline"
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("cannot validate cross-workspace task reference")),
-            "Expected warning about cross-workspace task reference, got: {:?}",
+                .any(|w| w.contains("cannot validate cross-workspace task reference offline")),
+            "Expected warning about cross-workspace task reference offline, got: {:?}",
             warnings
         );
     }
