@@ -1,6 +1,6 @@
 # Cross-Workspace `type: task` Actions — Design
 
-Status: revision 3, proposed
+Status: revision 4, proposed
 Ships in: 0.17.0 (minor; no migration; documented behaviour corrections, § 7)
 
 Closes the first item under "Deferred" in CLAUDE.md § Cross-Workspace
@@ -9,6 +9,34 @@ References and "Not yet supported" in
 cite `main` at `f174020`.
 
 ## Revision history
+
+**Revision 4 (2026-09-16).** Revision 3's review gave a conditional pass on
+the feature and found five contained defects, all fixed here. Longest-first
+sequential replacement is not a complete scrub: two secrets whose
+occurrences *cross* (`incorrect value: got "ABCD` and `ABCD-token`, the
+exact shape Tera produces, `workspace_set.rs:117-118`) leave the owner
+secret's suffix legible, and a self-overlapping value (`aba` in `ababa`)
+is never fully masked by non-overlapping replacement — § 3.3 now masks the
+union of every match span found in the *original* text. The creation
+pre-check selected only literal *strings*, so the promised submit-time 400
+for a literal object was actually a 200 with a failed step — § 3.2 now
+includes the shape check, keeps the `when` exemption, and wraps the error
+in a classifier-recognised context. The child list cannot identify the
+"current attempt" (a step retry resets the row before any replacement
+child exists, `job_step.rs:768-779`; duplicate dispatch creates two
+children for one attempt) — § 3.7 is execution history, newest first, with
+a deterministic secondary sort. Only *objects* pass through the local
+resolver (`template.rs:600-606`; arrays and scalars already fail), and the
+boundary rule is per bucket, not only for `A == O == T` — § 3.3 step 5 and
+§ 6 say so. The pre-check's lookup pins `T` to `resolved.config`, like
+dispatch. § 4's wording is qualified where it overclaimed (job timeout also
+ends a stranded job; a stale dispatcher can fail a winner's step; the
+terminal claim and propagation are not atomic), and § 3.6's "cancelled by
+the caller's cancellation" carries the enumeration-race caveat. The
+lifecycle problem statement gains a seventh paragraph (terminal claim →
+propagation window), required outcomes for committed-child-without-init,
+compensation failure and `retry_at`, the agent barrier as a requirement,
+and the lock-order caveat against the cascade spec's `cancel` contract.
 
 **Revision 3 (2026-09-16). Scope cut.** Revision 2's review (Codex, same
 thread) closed F1, F7, F8 and F10 and found thirteen new findings, seven
@@ -40,7 +68,7 @@ connection-typed task field must be names, not objects (§ 3.3 step 5);
 secrets are scrubbed longest-first (§ 3.3); for a `type: task` action the
 creation pre-check runs against the *task* schema (§ 3.2); the
 hook-validation rejection is server-side only, the CLI warns (§ 5); the
-parent→child link returns the current attempt (§ 3.7); and every citation
+parent→child link is a list (§ 3.7); and every citation
 in revision 2's audit table is corrected (`rendering.rs:134`,
 `job_creator.rs:542`, `jobs.rs:304-305`, `terminal.rs:185-187`,
 `validation.rs:1824` + call sites, `collect_config_secret_values` is
@@ -205,15 +233,29 @@ resolved (`job_creator.rs:373`) and before `build_step`, for
    resolution happens against the **task's** schema (a wrapper declaring one
    connection type but forwarding into a task expecting another would be
    rejected at submit and accepted at dispatch). So for `type: task`
-   actions the action-schema pre-check is **skipped** and replaced by: the
-   flow step's literal (no `{{`) string values whose key is a
-   connection-typed field of `resolved.task.input` are resolved with the
-   caller scope of § 3.3 step 5 (`schema_ws: T, value_ws: A, fallback_ws:
-   Some(T) if A ≠ T`); an error is a 400. It keeps the existing rule that a
-   `when`-guarded step is not pre-checked at all (`:625-632`), and it
-   checks only caller-supplied literals — action defaults and task defaults
-   are the owners reading their own config. Templated values are checked
-   at dispatch.
+   actions the action-schema pre-check is **skipped** and replaced by one
+   that mirrors step 5's caller bucket exactly. For each key of the flow
+   step's `input:` that is a connection-typed field of
+   `resolved.task.input` and whose value is **literal** (a string with no
+   `{{`, or any non-string):
+   - the **shape rule** of step 5 applies first — when `A ≠ T`, a
+     non-string (object, array, number, bool, null) is refused with the
+     same message;
+   - a string is resolved with the caller scope (`schema_ws: T, value_ws:
+     A, fallback_ws: Some(T) if A ≠ T`), through
+     `WorkspaceSet::load(workspaces, T, Some(&resolved.config))` so the
+     type definitions come from the snapshot the task was resolved
+     against (the creator's own `ws_set`, `:315`, pins the caller).
+   Both errors are wrapped in `.context("Failed to resolve connection
+   inputs")` — the phrase the existing pre-check relies on (`:664`) and
+   the classifier matches on the outermost message (`"resolve
+   connection"`, `web/api/mod.rs:406`) — so they are 400, while an
+   unavailable owner inside the chain still classifies as 500 (`:394`).
+   The existing rule that a `when`-guarded step is not pre-checked at all
+   stays (`:625-632`): for such a step a bad literal fails at dispatch if
+   the step is reached, never at submit. Only caller-supplied literals are
+   checked — action defaults and task defaults are the owners reading
+   their own config. Templated values are checked at dispatch.
 
 Nothing new is stamped on the step row. `action_workspace` /
 `action_revision` keep their meaning and are set exactly as today; the
@@ -274,18 +316,23 @@ step. The existing local `task` there is the **parent's** `TaskDef`
    For each connection-typed field of `task_schema` (primitives skipped,
    `template.rs:590-591`) present in a bucket:
 
-   - **Boundary rule.** If the bucket's value workspace differs from `T`
-     (`A ≠ T` for `C`, `O ≠ T` for `D`) the value **must be a string**
-     (a connection name); an object, array, number or bool is an error:
-     `input '{field}': a connection passed across workspaces must be a
-     connection name, got {type}`. Objects reach this point through a
-     literal object in the flow step (`template.rs:457-458`), a template
-     rendering to an object (`:433-436`) or an object-valued default
-     (`:532`); `resolve_connection_inputs_scoped` passes every object
-     through unchecked (`:600-602`), so across a boundary they are refused
-     rather than trusted. Within one workspace (`A == O == T`) the existing
-     pass-through stays — same-workspace behaviour is unchanged and the
-     object-trust limitation is inherited (TODO.md).
+   - **Boundary rule, per bucket.** If the bucket's value workspace
+     differs from `T` (`A ≠ T` for `C`, `O ≠ T` for `D` — each judged on
+     its own, so `C` can be local while `D` is foreign and vice versa) the
+     value **must be a string** (a connection name); anything else —
+     object, array, number, bool, null — is an error: `input '{field}': a
+     connection passed across workspaces must be a connection name, got
+     {type}`. Objects reach this point through a literal object in the
+     flow step (`template.rs:457-458`), a template rendering to an object
+     — including a prior step's output (`:433-436`) — or an object-valued
+     default (`:532`); `resolve_connection_inputs_scoped` passes every
+     **object** through unchecked (`:600-602`) and already rejects arrays
+     and scalars (`:603-606`), so across a boundary objects are refused
+     rather than trusted. For a local bucket the existing behaviour stays:
+     objects pass through, other non-strings fail — same-workspace
+     behaviour is unchanged and the local object-trust limitation is
+     inherited (TODO.md). The rule runs before any resolution and uses the
+     same primitive classification as the resolver (`:590-591`).
    - **Names** resolve with `resolve_connection_inputs_scoped`
      (`template.rs:580`) using the **task's** schema: `C` with
      `ResolveScope { schema_ws: T, value_ws: A, fallback_ws: Some(T) if A ≠
@@ -342,13 +389,22 @@ default) quotes the offending value. `handle_task_steps_pass` builds the
 scrub list once per step as `collect_config_secret_values(A_cfg) ++ (O_cfg)
 ++ (T_cfg)` (`workspace_set.rs:103-109`; unfiltered — only empty strings are
 skipped by the replacer, `:125`), `T_cfg` once step 2 has it, and
-`fail_task_step` takes the list instead of a config. Because
-`redact_secrets_in_str` replaces sequentially (`:122-130`), a caller secret
-that is a prefix of an owner secret (`prefix` vs `prefix-sensitive-token`)
-would mask the prefix and leave the suffix legible. `redact_secrets_in_str`
-therefore **sorts its values longest-first** before replacing (a change to
-the shared helper, strictly safer for every caller; unit-tested with
-overlapping values). Scrubbing at the write covers the job log,
+`fail_task_step` takes the list instead of a config. `redact_secrets_in_str`
+replaces values one after another against already-modified text
+(`:122-130`), which is incomplete whenever occurrences intersect: a caller
+secret that is a prefix of an owner secret (`prefix` vs
+`prefix-sensitive-token`) leaves the suffix legible; two values whose
+occurrences *cross* — `incorrect value: got "ABCD` (a caller value shaped
+like Tera's own error text, `:117-118`) and `ABCD-token` — leave
+`-token"` after the longer one is masked, whatever the order; and a
+self-overlapping value (`aba` in `ababa`) is never fully covered by
+non-overlapping replacement. The helper is therefore redefined as
+**span-union masking**: find every occurrence of every value in the
+*original* text (overlapping occurrences included), merge intersecting or
+adjacent spans, and replace each merged span with `••••••`. A masked span
+is never re-scanned. This is a change to the shared helper, strictly
+safer for every caller; unit-tested with containment, crossing, equal-
+length and self-overlap cases (§ 6). Scrubbing at the write covers the job log,
 `job_step.error_message`, `retry_history`, and every reader including MCP
 `get_job_status`, which returns the persisted text without the REST
 redactor (`mcp/tools.rs:570-580`). A secret rotated out of the loaded
@@ -420,11 +476,12 @@ already lives under:
   discloses them to every caller.
 - What never crosses: `T`'s secrets and config are not rendered in `A`'s
   context; the child's detail is `T`-ACL'd and redacted; render errors are
-  scrubbed with all three configs' secrets, longest-first (§ 3.3).
+  scrubbed with all three configs' secrets by span union (§ 3.3).
 - A child is **not** the owner's scheduler run: it takes no task-level
   retry (`terminal::plan` gates on `parent_job_id.is_none()`,
   `terminal.rs:185-187`), fires no workspace-level hooks, and is cancelled
-  by the caller's cancellation. Established child semantics, documented.
+  by the caller's cancellation (subject to the enumeration race in § 4).
+  Established child semantics, documented.
 
 ### 3.7 Parent → child link
 
@@ -435,30 +492,45 @@ child, and a cross-team child is in `T`'s job list only. The step DTO gains
 `child_jobs: Vec<{ id, workspace, task_name, status, created_at }>` for
 `type: task` steps, newest first, from the new
 `JobRepo::get_child_jobs_for_step(parent, step)` (`WHERE parent_job_id = $1
-AND parent_step_name = $2 ORDER BY created_at DESC`). A step retry reuses
-the parent step row (`job_step.rs:769-779`) and creates another child, so
-this is a list: the first entry is the current attempt's child, earlier
-entries are previous attempts. The Job Detail step row links each to
+AND parent_step_name = $2 ORDER BY created_at DESC, job_id DESC`). This is
+**execution history**, not attempt identity: a step retry reuses the
+parent step row (`job_step.rs:769-779`) and creates another child — but
+resets the row *before* that child exists — and duplicate dispatch (§ 4)
+can create two children for one attempt, so the list makes no claim about
+which entry is "current". The UI labels it "child jobs" and links each to
 `/jobs/{id}`; the link follows the child's own ACL (404 if denied).
+Attempt association is the lifecycle spec's.
 
 ## 4. Carried lifecycle risks
 
-These exist today for every `type: task` child and are neither caused nor
-worsened by a cross-workspace child. They are owned by
-`2026-09-16-task-step-lifecycle-hardening-design.md`, which takes revision
-2's review as its problem statement. A cross-team caller should know them:
+These exist today for every `type: task` child; the feature reuses the
+same dispatch, propagation and settlement mechanisms unchanged, so a
+cross-workspace child has exactly the same exposure — plus the operational
+one that the two workspaces are now managed by different teams. They are
+owned by `2026-09-16-task-step-lifecycle-hardening-design.md`, which takes
+revision 2's review as its problem statement. A cross-team caller should
+know them, and § 9's guide states each:
 
 - **Dispatch is not exclusive.** Two `advance` calls on the same job can
   both read a ready `type: task` step (`dispatch.rs:107-122`);
   `mark_running_server` discards `rows_affected` (`job_step.rs:630-645`),
-  so both create a child — the owner's task runs twice.
+  so both create a child — the owner's task runs twice. A dispatcher
+  working from a stale read that then hits a render or default-merge
+  error fails the step through the unguarded `fail_task_step`
+  (`dispatch.rs:81`) even though another dispatcher succeeded.
 - **Dispatch is not crash-safe.** The step is marked `running`
   (`dispatch.rs:247`) before the child's transaction commits
   (`job_creator.rs:460`); a crash in between leaves a `running` step with
-  no child and no worker, which only a configured step timeout repairs
-  (`job_step.rs:1083-1093`). A child committed before its `init` ran is
-  stranded if its root steps are server-managed (`job_step.rs:570`,
-  `:1116`).
+  no child and no worker. Nothing repairs it automatically: a step
+  timeout, if configured, fails or *retries* it (`job_step.rs:1083-1093`,
+  `recovery.rs:140`), a job timeout cancels the job, an operator can
+  cancel it. A child committed before its `init` ran has no automatic
+  initialisation recovery if its root steps are server-managed
+  (`job_step.rs:570`, `:1116`).
+- **Terminal delivery is not atomic.** A child's one-shot terminal claim
+  (`terminal.rs:43-45`, taken at `settlement/mod.rs:270`) precedes the
+  parent-step write (`:282`); a crash between them consumes the claim
+  without delivering the result to the caller's step.
 - **Cancellation can miss a child** committed after `cancel`'s enumeration
   snapshot (`job.rs:771-778`, `settlement/mod.rs:748`) by a dispatcher
   working from an earlier readiness read.
@@ -467,12 +539,15 @@ worsened by a cross-workspace child. They are owned by
   / `mark_failed` (`recovery.rs:117-159`, `propagate.rs:135-148`,
   `job_step.rs:665-710`); with a step retry the stale child can settle the
   *replacement* attempt (`job_step.rs:754-789`).
-- **A job whose task is removed mid-run is never settled**: `resolve`
-  returns `None` (`settlement/mod.rs:160-167`), `advance` returns early for
-  a non-terminal job (`:209-211`), no sweep re-enters it. The caller's step
-  waits forever. Independent workspace reloads make this a cross-team
-  contract: **removing a task that other workspaces call strands their
-  running jobs** — the guide says so.
+- **A job whose task is removed mid-run is not settled by its own
+  steps**: `resolve` returns `None` (`settlement/mod.rs:160-167`), `advance`
+  returns early for a non-terminal job (`:209-211`), no sweep re-enters
+  it. Absent a job timeout (which cancels it without needing the task
+  definition, `job.rs:884-889`, `recovery.rs:205-214`) or an operator
+  cancel, it stays `running` and the caller's step waits. Independent
+  workspace reloads make this a cross-team contract: **removing a task
+  that other workspaces call strands their running jobs** — the guide
+  says so.
 - **A child suspended at creation fires no `on_suspended` hook**:
   `dispatch::init` suspends via the pool-tier `handle_approval_steps`
   (`dispatch.rs:315`, `:452`) and no child path reaches
@@ -532,11 +607,16 @@ and a third workspace `C`.
   `T`; present-but-unshared → `is not shared`; action default naming `O`'s
   own private connection resolves ungated; action default naming `T`'s →
   shared gate; declared-type mismatch → error; named untyped connection
-  accepted; **boundary rule**: an object / array / number in a
-  connection-typed field is refused when `A ≠ T` (caller) or `O ≠ T`
-  (default) and passed through when `A == O == T`; `A == O == T` equals the
-  local result. `redact_secrets_in_str`: overlapping values (`prefix`,
-  `prefix-sensitive-token`) both fully masked regardless of list order.
+  accepted; **boundary rule**: an object, array, number, bool or null in a
+  connection-typed field is refused when the bucket is foreign — `A ≠ T`
+  for the caller bucket, `O ≠ T` for the default bucket, each tested with
+  the other bucket local (`A == T ≠ O` and `O == T ≠ A`); for a local
+  bucket an object passes through and an array / scalar fails as today
+  (`template.rs:600-606`); `A == O == T` equals the local result.
+  `redact_secrets_in_str`: containment (`prefix`, `prefix-sensitive-token`),
+  crossing (`incorrect value: got "ABCD`, `ABCD-token` in `incorrect
+  value: got "ABCD-token"`), equal-length overlap, and self-overlap (`aba`
+  in `ababa`) — every byte of every occurrence masked, in any list order.
   Validation: dotted `task:` CLI skip + warning; server accept / reject via
   `has_task`; local flattened key wins over the split; empty side rejected;
   hook with a qualified task → server error, CLI warning; an unresolved
@@ -546,7 +626,11 @@ and a third workspace `C`.
   loaded-but-no-task; each error's exact phrase. Pre-check: direct
   self-reference `A.p` inside `A` → the `(invalid)` message; literal caller
   connection name checked against the task schema, not the wrapper's
-  action schema. `classify_execute_error`: `"has no task"` → 400.
+  action schema; literal object / null on a foreign call → error wrapped
+  in `Failed to resolve connection inputs`; the same on a `when`-guarded
+  step → no error at creation. `classify_execute_error`: `"has no task"`
+  → 400; the wrapped boundary error → 400; an unavailable owner inside
+  the wrapped chain → 500.
 - **Integration, resolution** — Form A creates a child with `workspace =
   B`, `task_name = "deploy"`, `revision = B`'s (≠ `A`'s); completing it
   propagates output to the parent step and the parent completes. Form B
@@ -579,7 +663,7 @@ and a third workspace `C`.
   Run on A/pipeline }`: 200 on the parent, **404** on the child detail and
   logs; admin sees both; the parent's step DTO carries `child_jobs` and the
   link target 404s for the restricted user. After a step retry the list
-  has two entries, newest first.
+  has two entries, newest first, and the DTO makes no "current" claim.
 - **Integration, hooks** — `B/deploy`'s `on_error` fires in `B`; `A`'s
   workspace-level `on_error` does not fire for the child; `B`'s task-level
   `retry` does not create a retry job for the child; a qualified task in a
@@ -634,14 +718,17 @@ event-source backpressure counting across workspaces.
   and boundary rules, the revision rule and how it differs from actions,
   the trust model (§ 3.6) in user terms, ACL and visibility (404), hooks /
   retry / cancel semantics of a child, the depth bound for cycles, the
-  parent → child link, and the § 4 caveats a cross-team caller must know
-  (double dispatch, stranding on task removal, silent approvals); remove
+  parent → child link, and every § 4 caveat a cross-team caller must
+  know — double dispatch, a stale dispatcher failing a dispatched step,
+  a child missed by cancellation, a child running on after its parent
+  step timed out, stranding on task removal, the terminal-delivery
+  window, silent approvals; remove
   the first "Not yet supported" bullet (`:245`) and state that hook actions
   still cannot.
 - `docs/src/content/docs/guides/action-types.md` `type: task` section: § 7.
 - `CLAUDE.md` § Cross-Workspace References: replace the deferred bullet with
   the `A / O / T` rule, `resolve_task_ref`, the boundary rule and the
-  longest-first scrub; § Task Actions: the persisted-`action_spec`
+  span-union scrub; § Task Actions: the persisted-`action_spec`
   defaults and the task-schema pre-check. `CONTEXT.md`: "Owner workspace
   (action owner / task owner)".
 - `docs/internal/TODO.md`: the § 4 risks with a pointer to the lifecycle

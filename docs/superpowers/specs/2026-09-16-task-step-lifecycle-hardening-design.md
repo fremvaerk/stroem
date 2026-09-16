@@ -4,7 +4,7 @@ Status: problem statement, not yet designed
 Ships in: unscheduled; after `2026-09-16-cross-workspace-task-actions-design.md`
 Builds on: `2026-09-08-cascade-concurrency-hardening-design.md` (deferred; the
 per-job advisory lock and row-locked verification vector it designs are the
-natural mechanism for § 4.1 here)
+natural mechanism for the first candidate in § 3 here)
 
 Split out of the cross-workspace task-actions design at its revision 3. That
 design's revision 2 pulled in fixes for three inherited gaps in how a
@@ -34,9 +34,10 @@ completion and a recovery tick, or two replicas) each read the ready steps
 for one step. For a deployment task that is two deployments. The same
 stale read lets a dispatcher that loses the race fail the winner's step:
 resolution, rendering and default merging happen before any claim, and
-every error on that stretch goes through `fail_task_step`, whose
-`mark_failed` has no status guard (`dispatch.rs:63-92`, `:81`;
-`job_step.rs:689-710`).
+the render / default-merge / creation error branches on that stretch go
+through `fail_task_step`, whose `mark_failed` has no status guard
+(`dispatch.rs:63-92`, `:81`; `job_step.rs:689-710`); the remaining
+errors (missing `action_spec`, DB) propagate with `?`.
 
 **(ii) Dispatch is not crash-safe.** The step is marked `running`
 (`dispatch.rs:247`) and the job `running` (`:250`) before the child's
@@ -45,8 +46,10 @@ leaves a `running` step with no child and no worker. Recovery's phase 2
 sees only steps with a `timeout_secs` (`job_step.rs:1083-1093`); the
 unmatched-step sweep and worker claiming both exclude server-managed kinds
 (`job_step.rs:570`, `:1116`). A crash after the commit but before
-`dispatch::init` (`job_creator.rs:486-496`) strands a child whose root
-steps are `type: task` or `type: approval` — nothing initialises them.
+`dispatch::init` (`job_creator.rs:486-496`) leaves a child whose root
+steps are `type: task` or `type: approval` with no automatic
+initialisation recovery — only a job timeout or an operator cancel ends
+it.
 `init`'s own failure is compensated in a second transaction (`:500-519`)
 that fails the committed child; if the compensation errors, the creator
 returns `Err` for a child that exists.
@@ -82,8 +85,10 @@ and when the config is loaded but the task is gone (`settlement/mod.rs:
 136-152`, `:160-167`); for a non-terminal job `advance` returns early
 (`:209-211`). No sweep re-enters `advance` for a job with no further step
 activity (recovery phases: `recovery.rs:62`, `:117`, `:161`, `:205`,
-`:219`). The job stays `running` with all steps terminal; its parent step
-waits forever. Failing the job is not a one-line fix: the drain gate reads
+`:219`). The job stays `running` with all steps terminal until a job
+timeout cancels it (selected without the task definition,
+`job.rs:884-889`, `recovery.rs:205-214`) or an operator does; its parent
+step waits as long. Failing the job is not a one-line fix: the drain gate reads
 statuses, not process termination (`has_live_steps`, `job_step.rs:1012-1024`);
 `advance`'s terminal branch clears the cancel signal before claiming
 (`settlement/mod.rs:261-270`, `:266`) while workers poll only that cache
@@ -120,13 +125,33 @@ suspended when the delay is decided. Agent-tool children go through
 `agent_child_created` with its `BornTerminal` barrier
 (`settlement/mod.rs:534-555`) and must keep it.
 
+**(vii) Terminal delivery is not atomic with the claim.** A child's
+terminal handling takes the one-shot claim (`metrics_recorded_at`,
+`terminal.rs:41-49`, taken at `settlement/mod.rs:270`) and only then writes
+the parent step (`:282`). A crash between the two consumes the claim; the
+next `advance` on the child loses the claim and never propagates, so the
+caller's step stays `running` with a terminal child under it. Reconcile
+(`job.rs:814-845`) does not cover it: it looks for a terminal descendant
+under a `running` parent step, which this is, but the child's claim is
+already spent, so its `advance` skips the terminal actions.
+
 ## 2. What the fix must provide
 
 - **One owner per step transition** on the server-managed path: exactly one
   dispatcher moves a step `ready → running`, and only that dispatcher may
   fail it for a pre-creation error; a loser observes that it lost and does
-  nothing. Crash between claim and child commit leaves the step
+  nothing. Dispatch respects `retry_at` (today it does not,
+  `dispatch.rs:122`). Crash between claim and child commit leaves the step
   re-dispatchable, or a sweep repairs it.
+- **Defined outcomes for every creation fault boundary**: a child
+  committed whose `init` never ran is initialised by a sweep or failed
+  with the `[creation]` line; an `init` failure whose compensation also
+  fails is retried or surfaced as a stranded-job alarm — in no case does
+  the creator return `Err` for a child that exists without the caller's
+  step reflecting it.
+- **Terminal delivery survives a crash after the claim**: propagation is
+  either inside the claim's transaction, or idempotent and re-driven by
+  reconcile (paragraph (vii)).
 - **Cancellation and dispatch serialise** without a lock-upgrade deadlock
   (`FOR SHARE` on the parent job row followed by an `UPDATE` of it is
   exactly that; Postgres aborts a victim with `40P01`, which the creator
@@ -146,6 +171,10 @@ suspended when the delay is decided. Agent-tool children go through
   top-level job, a child, a grandchild, a retry job (respecting retry
   delay) and an agent-tool child; partial-init and retry-linkage failures do
   not lose it. Or: best-effort delivery, stated as such.
+- **The agent registration barrier is preserved**: agent-tool children keep
+  `agent_child_created` and its `BornTerminal` refusal
+  (`settlement/mod.rs:534-555`); nothing here routes them through
+  `job_created`.
 - Same-workspace and cross-workspace children behave identically.
 
 ## 3. Candidate directions (to be designed, not decided)
@@ -160,8 +189,12 @@ suspended when the delay is decided. Agent-tool children go through
   same lock at the start of the child-creation transaction and having
   `cancel` take it before stamping would make dispatch, cascade and cancel
   mutually exclusive per job with no upgrade path and one lock order.
-  TODO.md #9 ("one write standard on `job_step`") concentrates the write
-  surface this attaches to.
+  **Caveat:** the cascade spec deliberately leaves `JobRepo::cancel` as a
+  separate autocommitted write *before* the lock is taken
+  (`2026-09-08-cascade-concurrency-hardening-design.md:85-90`); moving the
+  stamp under the lock changes that contract and must be reconciled with
+  the cascade design, not assumed from it. TODO.md #9 ("one write standard
+  on `job_step`") concentrates the write surface this attaches to.
 - **Claim + child insert in one transaction**, returning a typed
   `DispatchLost` on a zero-row claim; pre-claim failures become
   `fail_if_still_ready` writes (guarded on `status = 'ready'` and the
@@ -199,8 +232,9 @@ workers, a nested child, a late failing worker with retries, cancellation
 polling on the originating replica, concurrent cancellation); hooks
 (`advance` racing the initial sweep, approval resolved before the sweep,
 partial-init failure after descendant creation, retry-linkage failure,
-retry-job root approvals, the agent barrier); a cross-workspace and a
-same-workspace variant of each.
+retry-job root approvals, the agent barrier); terminal claim taken then
+crash before propagation, with the reconcile that must redeliver; a
+cross-workspace and a same-workspace variant of each.
 
 ## 5. Relationship to other work
 
