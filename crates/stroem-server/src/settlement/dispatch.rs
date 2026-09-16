@@ -7,13 +7,17 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use stroem_common::models::job::{JobStatus, StepStatus};
-use stroem_common::models::workflow::{TaskDef, WorkspaceConfig};
-use stroem_common::template::{prepare_action_input, render_input_map};
+use stroem_common::models::workflow::{InputFieldDef, TaskDef, WorkspaceConfig};
+use stroem_common::template::{
+    merge_action_defaults, render_input_map, resolve_task_input_by_provenance,
+};
 use stroem_db::{JobRepo, JobStepRepo};
 use uuid::Uuid;
 
 use crate::config::JobDefaults;
-use crate::job_creator::{compute_depth, create_job_for_task_inner, CreationMode, MAX_TASK_DEPTH};
+use crate::job_creator::{
+    compute_depth, create_job_for_task_inner, resolve_task_ref, CreationMode, MAX_TASK_DEPTH,
+};
 use crate::render_context::{self, JobContext, LoopSlot, Scope, Snapshots};
 use crate::workspace::WorkspaceManager;
 use crate::workspace_set::WorkspaceSet;
@@ -60,6 +64,7 @@ pub async fn handle_task_steps(
 /// Mark a server-dispatched step failed and immediately re-orchestrate so its
 /// dependents are cascade-skipped / the job closes. Every failure branch in
 /// `handle_task_steps_pass` must go through here.
+#[allow(clippy::too_many_arguments)]
 async fn fail_task_step(
     pool: &PgPool,
     job_id: Uuid,
@@ -68,13 +73,19 @@ async fn fail_task_step(
     task: &stroem_common::models::workflow::TaskDef,
     workspace_config: &WorkspaceConfig,
     snapshots: &Snapshots,
+    extra_secret_values: &[String],
 ) -> Result<()> {
     // Two of the callers pass a Tera render error (task-step input, approval
     // message), and Tera quotes the offending value — so a template touching
     // `{{ secret.* }}` embeds the secret. Scrub here, the single choke point
     // both reach, before the message is logged or persisted to
     // `job_step.error_message` / `retry_history`.
-    let secret_values = crate::workspace_set::collect_config_secret_values(workspace_config);
+    //
+    // The caller's own secrets plus — for a `type: task` step — the action
+    // owner's and task owner's (spec § 3.3), because an owner-side default
+    // rendering error quotes the owner's value.
+    let mut secret_values = crate::workspace_set::collect_config_secret_values(workspace_config);
+    secret_values.extend_from_slice(extra_secret_values);
     let err = &crate::workspace_set::redact_secrets_in_str(err, &secret_values)[..];
 
     tracing::error!("{}", err);
@@ -147,11 +158,73 @@ async fn handle_task_steps_pass(
                 task,
                 workspace_config,
                 snapshots,
+                &[],
             )
             .await?;
             failed_any = true;
             continue;
         }
+
+        // 1. Action owner O and its config snapshot.
+        let base_ws: &str = step.action_workspace.as_deref().unwrap_or(workspace_name);
+        let base_arc = if base_ws == workspace_name {
+            None
+        } else {
+            workspaces.get_config(base_ws).await
+        };
+        let base_cfg: &WorkspaceConfig = if base_ws == workspace_name {
+            workspace_config
+        } else {
+            match base_arc.as_deref() {
+                Some(c) => c,
+                None => {
+                    let err = format!(
+                        "workspace '{}' is not available (owner of action '{}')",
+                        base_ws, step.action_name
+                    );
+                    fail_task_step(
+                        pool,
+                        job_id,
+                        &step.step_name,
+                        &err,
+                        task,
+                        workspace_config,
+                        snapshots,
+                        &[],
+                    )
+                    .await?;
+                    failed_any = true;
+                    continue;
+                }
+            }
+        };
+        let mut scrub = crate::workspace_set::collect_config_secret_values(base_cfg);
+
+        // 2. Task owner T.
+        let resolved = match resolve_task_ref(workspaces, base_ws, base_cfg, task_ref).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = format!(
+                    "Failed to resolve task for step '{}': {:#}",
+                    step.step_name, e
+                );
+                fail_task_step(
+                    pool,
+                    job_id,
+                    &step.step_name,
+                    &err,
+                    task,
+                    workspace_config,
+                    snapshots,
+                    &scrub,
+                )
+                .await?;
+                failed_any = true;
+                continue;
+            }
+        };
+        let t_cfg: &WorkspaceConfig = resolved.config(base_cfg);
+        scrub.extend(crate::workspace_set::collect_config_secret_values(t_cfg));
 
         // S6: the child task's input. `each` comes from the step row, not a
         // post-hoc patch — `build` owns the whole context.
@@ -188,6 +261,7 @@ async fn handle_task_steps_pass(
                                 task,
                                 workspace_config,
                                 snapshots,
+                                &scrub,
                             )
                             .await?;
                             failed_any = true;
@@ -202,37 +276,104 @@ async fn handle_task_steps_pass(
             serde_json::json!({})
         };
 
-        // Merge action-level input defaults and resolve connection inputs
-        let rendered_input = if let Some(action) = workspace_config.actions.get(&step.action_name) {
-            if !action.input.is_empty() {
-                let ws_set =
-                    WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;
-                match prepare_action_input(&rendered_input, &action.input, &ws_set) {
-                    Ok(prepared) => prepared,
-                    Err(e) => {
-                        let err = format!(
-                            "Failed to prepare action input for task step '{}': {:#}",
-                            step.step_name, e
-                        );
-                        fail_task_step(
-                            pool,
-                            job_id,
-                            &step.step_name,
-                            &err,
-                            task,
-                            workspace_config,
-                            snapshots,
-                        )
-                        .await?;
-                        failed_any = true;
-                        continue;
-                    }
+        // 4. Action-level defaults from the PERSISTED action_spec (never a live
+        //    lookup), rendered with O's live secrets. Keys it adds are bucket D.
+        let action_schema: HashMap<String, InputFieldDef> = match action_spec.get("input") {
+            Some(v) if !v.is_null() => match serde_json::from_value(v.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let err = format!(
+                        "step '{}': action_spec.input is not an input schema: {}",
+                        step.step_name, e
+                    );
+                    fail_task_step(
+                        pool,
+                        job_id,
+                        &step.step_name,
+                        &err,
+                        task,
+                        workspace_config,
+                        snapshots,
+                        &scrub,
+                    )
+                    .await?;
+                    failed_any = true;
+                    continue;
                 }
-            } else {
-                rendered_input
-            }
+            },
+            _ => HashMap::new(),
+        };
+        let caller_bucket = rendered_input;
+        let default_bucket = if action_schema.is_empty() {
+            serde_json::json!({})
         } else {
-            rendered_input
+            let secrets_ctx = serde_json::json!({ "secret": &base_cfg.secrets });
+            match merge_action_defaults(&caller_bucket, &action_schema, &secrets_ctx) {
+                Ok(merged) => {
+                    let caller_keys = caller_bucket.as_object().cloned().unwrap_or_default();
+                    let mut d = serde_json::Map::new();
+                    if let Some(m) = merged.as_object() {
+                        for (k, v) in m {
+                            if !caller_keys.contains_key(k) {
+                                d.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                    serde_json::Value::Object(d)
+                }
+                Err(e) => {
+                    let err = format!(
+                        "Failed to prepare action input for task step '{}': {:#}",
+                        step.step_name, e
+                    );
+                    fail_task_step(
+                        pool,
+                        job_id,
+                        &step.step_name,
+                        &err,
+                        task,
+                        workspace_config,
+                        snapshots,
+                        &scrub,
+                    )
+                    .await?;
+                    failed_any = true;
+                    continue;
+                }
+            }
+        };
+
+        // 5. Connection resolution against the TASK's schema, by provenance.
+        let ws_set = WorkspaceSet::load(workspaces, &resolved.workspace, Some(t_cfg)).await;
+        let rendered_input = match resolve_task_input_by_provenance(
+            &caller_bucket,
+            &default_bucket,
+            &resolved.task.input,
+            &ws_set,
+            workspace_name,
+            base_ws,
+            &resolved.workspace,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = format!(
+                    "Failed to resolve connection inputs for task step '{}': {:#}",
+                    step.step_name, e
+                );
+                fail_task_step(
+                    pool,
+                    job_id,
+                    &step.step_name,
+                    &err,
+                    task,
+                    workspace_config,
+                    snapshots,
+                    &scrub,
+                )
+                .await?;
+                failed_any = true;
+                continue;
+            }
         };
 
         // Persist rendered input to DB so the job detail API shows resolved values.
@@ -251,7 +392,16 @@ async fn handle_task_steps_pass(
 
         let source_id = format!("{}/{}", job_id, step.step_name);
 
-        // Create child job with parent tracking (inherits parent revision).
+        // 7. Revision: inherit the parent's for a same-workspace child; the
+        //    owner's current one for a foreign child (spec § 3.3 step 7).
+        let revision: Option<String> = if resolved.workspace == job.workspace {
+            job.revision.clone()
+        } else {
+            workspaces.get_revision(&resolved.workspace)
+        };
+
+        // Create child job with parent tracking (inherits parent revision, or
+        // the task owner's current revision for a foreign child).
         // agents_config is not available here (handle_task_steps only has pool),
         // so agent steps in child jobs will be dispatched by the orchestrator
         // when it processes the child job's ready steps. `defaults` is threaded
@@ -259,15 +409,15 @@ async fn handle_task_steps_pass(
         match create_job_for_task_inner(
             workspaces,
             pool,
-            workspace_config,
-            workspace_name,
-            task_ref,
+            t_cfg,
+            &resolved.workspace,
+            &resolved.task_name,
             rendered_input,
             "task",
             Some(&source_id),
             Some(job_id),
             Some(&step.step_name),
-            job.revision.as_deref(),
+            revision.as_deref(),
             CreationMode::Normal, // child task jobs never inherit re-run/restart lineage
             None,                 // agents_config not available; orchestrator will dispatch
             defaults,
@@ -275,13 +425,22 @@ async fn handle_task_steps_pass(
         .await
         {
             Ok(created) => {
-                let child_job_id = created.job_id;
-                tracing::info!(
-                    "Created child job {} for task step '{}' -> task '{}'",
-                    child_job_id,
-                    step.step_name,
-                    task_ref
-                );
+                if resolved.workspace == job.workspace {
+                    tracing::info!(
+                        "Created child job {} for task step '{}' -> task '{}'",
+                        created.job_id,
+                        step.step_name,
+                        resolved.task_name
+                    );
+                } else {
+                    tracing::info!(
+                        "Created child job {} for task step '{}' -> task '{}' in workspace '{}'",
+                        created.job_id,
+                        step.step_name,
+                        resolved.task_name,
+                        resolved.workspace
+                    );
+                }
             }
             Err(e) => {
                 let err = format!(
@@ -296,6 +455,7 @@ async fn handle_task_steps_pass(
                     task,
                     workspace_config,
                     snapshots,
+                    &scrub,
                 )
                 .await?;
                 failed_any = true;
@@ -391,6 +551,7 @@ pub async fn handle_approval_steps(
                                 task,
                                 workspace_config,
                                 snapshots,
+                                &[],
                             )
                             .await?;
                             continue;
@@ -441,6 +602,7 @@ pub async fn handle_approval_steps(
                         task,
                         workspace_config,
                         snapshots,
+                        &[],
                     )
                     .await?;
                     continue;
