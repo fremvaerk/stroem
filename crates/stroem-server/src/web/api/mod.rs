@@ -405,6 +405,7 @@ pub(crate) fn classify_execute_error(e: anyhow::Error) -> AppError {
         || outer.contains("does not exist") // connection/action missing
         || outer.contains("resolve connection") // resolve_connection_inputs context
         || outer.contains("has no action") // cross-workspace: owner workspace exists, action doesn't
+        || outer.contains("has no task") // cross-workspace: owner workspace exists, task doesn't
         || outer.contains("required")
         || outer.contains("invalid")
         || outer.contains("validation")
@@ -493,5 +494,42 @@ mod classify_execute_error_tests {
             AppError::BadRequest(msg) => assert!(msg.contains("extra"), "{msg}"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn owner_workspace_has_no_task_is_bad_request() {
+        let e = anyhow::anyhow!("task 'B.nope': workspace 'B' has no task 'nope'");
+        match classify_execute_error(e) {
+            AppError::BadRequest(msg) => assert!(msg.contains("has no task"), "{msg}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn has_no_task_buried_under_infra_context_is_internal() {
+        let e = anyhow::anyhow!("task 'B.nope': workspace 'B' has no task 'nope'")
+            .context("Failed to create job");
+        assert!(matches!(classify_execute_error(e), AppError::Internal(_)));
+    }
+
+    #[test]
+    fn task_step_literal_boundary_error_wrapped_in_resolve_context_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "input 'db': a connection passed across workspaces must be a connection name, got object"
+        )
+        .context("step 'run': failed to resolve connection inputs");
+        match classify_execute_error(e) {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("must be a connection name"), "{msg}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_step_unavailable_owner_wrapped_in_resolve_context_is_internal() {
+        let e = anyhow::anyhow!("connection 'x': workspace 'B' is not available")
+            .context("step 'run': failed to resolve connection inputs");
+        assert!(matches!(classify_execute_error(e), AppError::Internal(_)));
     }
 }
