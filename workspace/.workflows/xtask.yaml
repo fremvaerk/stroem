@@ -13,4 +13,4 @@ tasks:
         action: shout
         depends_on: [call]
         input:
-          message: "child said {{ call.output.seen }}"
+          message: "child said {{ call.output.run.seen }}"
