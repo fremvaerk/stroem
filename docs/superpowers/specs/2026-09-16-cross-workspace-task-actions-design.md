@@ -10,6 +10,22 @@ cite `main` at `f174020`.
 
 ## Revision history
 
+**Revision 7 (2026-09-16, implementation).** Two corrections found in the
+final whole-branch review, both fixed in code/docs, not design: (1) § 7
+item 5 understated the creation-time pre-check's scope — it runs for
+EVERY `type: task` reference, bare or qualified, and regardless of
+`when` (§ 3.2 already specified this; only the release-notes wording was
+wrong), and the hook-wrapping sentence is corrected to say the rejection
+is a runtime bail in `settlement/hooks.rs`, not server-side validation
+(the validator exists but is not wired into any load/reload path — see
+CLAUDE.md § Cross-Workspace References). (2) § 7 item 7 (new): when the
+action owner differs from the caller, the parent job step's persisted
+`input` now carries only the caller-supplied bucket, not the merged
+input — the owner's resolved defaults (which can include the owner's
+UNSHARED connections, fully resolved) no longer leak onto a step visible
+to anyone with View on the caller's task. The child job's own input is
+unaffected.
+
 **Revision 6 (2026-09-16, implementation).** Implemented as designed, with
 one seam differing from § 3.7: the parent→child link is
 `JobRepo::list_children(parent)` (`crates/stroem-db/src/repos/job.rs`) —
@@ -717,8 +733,8 @@ and a third workspace `C`.
    longer resolved against the action schema — at creation (literal
    pre-check) or at dispatch. Resolution happens once, against the
    **task's** schema. A field the action declares as a connection but the
-   task declares as a primitive now arrives as the name string, not the
-   resolved object.
+   task declares as a primitive, OR that is absent from the task's schema
+   entirely, now arrives as the name string, not the resolved object.
 4. On a cross-workspace call, a non-string value in a connection-typed
    task input is rejected. It is a 400 at submit only when the value is a
    literal supplied by the caller's flow step, the step has no `when`, and
@@ -726,11 +742,26 @@ and a third workspace `C`.
    `when`-guarded step, or a foreign action default fails the step at
    dispatch if the step is reached. Within one workspace an object is
    still accepted as before.
-5. A `type: task` action referencing a task by qualified name is now
-   pre-checked at submit (400 on unknown workspace / no such task /
-   self-reference); a hook action wrapping such a task is rejected by
-   server-side validation and fails the hook job with a clear message.
+5. The creation-time pre-check (§ 3.2 step 1) now runs for EVERY `type:
+   task` action reference, bare or qualified, and regardless of `when` — a
+   task that cannot be resolved (unknown workspace, no such task,
+   self-reference, or a bad literal connection) is a 400 at submit (500 if
+   the owner workspace is configured but transiently unavailable), same as
+   an ordinary action reference. Before this release only a qualified
+   (cross-workspace) reference was pre-checked this way; a bare reference
+   to a missing task failed at dispatch instead. A hook action wrapping
+   such a task is rejected at RUNTIME by `settlement/hooks.rs`'s bail (the
+   hook job fails with a clear message) — the config-load-time validator
+   that could reject it at hook-definition time
+   (`validate_workflow_config_with_cross_workspace_resolver`) exists but is
+   not wired into any server load/reload path yet (pre-existing gap,
+   tracked in `docs/internal/TODO.md`).
 6. The job detail step DTO carries `child_jobs` for `type: task` steps.
+7. A cross-workspace `type: task` step's PARENT job step no longer shows
+   the action owner's resolved input defaults when the owner differs from
+   the caller — only the caller-supplied input is persisted on the
+   parent's `job_step.input`. The child job's own input still carries the
+   full merged (caller + owner-default) input, unchanged.
 
 ## 8. Out of scope
 

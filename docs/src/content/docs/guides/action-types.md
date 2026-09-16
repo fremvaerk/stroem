@@ -393,8 +393,8 @@ changed several existing behaviours:
    longer resolved against the action schema — at creation (literal
    pre-check) or at dispatch. Resolution happens once, against the
    **task's** schema. A field the action declares as a connection but the
-   task declares as a primitive now arrives as the name string, not the
-   resolved object.
+   task declares as a primitive, or that is absent from the task's schema
+   entirely, now arrives as the name string, not the resolved object.
 4. On a cross-workspace call, a non-string value in a connection-typed task
    input is rejected. It is a `400` at submit only when the value is a
    literal supplied by the caller's flow step, the step has no `when`, and
@@ -402,11 +402,22 @@ changed several existing behaviours:
    `when`-guarded step, or a foreign action default fails the step at
    dispatch if the step is reached. Within one workspace an object is still
    accepted as before.
-5. A `type: task` action referencing a task by qualified name is now
-   pre-checked at submit (`400` on unknown workspace / no such task /
-   self-reference); a hook action wrapping such a task is rejected by
-   server-side validation and fails the hook job with a clear message.
+5. The creation-time check that a `type: task` action's target task exists
+   now runs for **every** `type: task` reference — a plain, same-workspace
+   task name included — and regardless of whether the step has a `when`
+   guard: an unknown workspace, a missing task, a self-reference, or a bad
+   literal connection value is a `400` at submit (`500` if the owner
+   workspace is configured but currently unavailable). Before this release,
+   only a cross-workspace (qualified) reference got this treatment; a plain
+   reference to a missing task used to fail the step later, at dispatch. A
+   hook action wrapping such a task fails at runtime instead, with a clear
+   message, when the hook job is created.
 6. The job detail step DTO carries `child_jobs` for `type: task` steps.
+7. A cross-workspace `type: task` step's own job-step `input` (visible on
+   the **parent** job) no longer shows the action owner's resolved default
+   values when the owner is a different workspace from the caller — only
+   what the caller itself supplied. The child job's input is unaffected and
+   still carries the full merged input.
 
 A note on defaults that predates this release but is easy to miss: a
 default value in a `type: task` action's `input` is rendered once while

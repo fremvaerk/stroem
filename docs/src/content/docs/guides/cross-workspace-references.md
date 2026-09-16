@@ -282,6 +282,14 @@ for a local child.
   `when`-guarded step, or a foreign action default instead fails the step
   at dispatch, if the step is reached. Within one workspace an object still
   passes through as before.
+- The **parent** job's own step `input` (what `GET /api/jobs/{id}` shows
+  for the `type: task` step itself, not the child) only ever shows what
+  the caller supplied — never the action owner's resolved defaults — when
+  the owner is a different workspace from the caller. This keeps the
+  owner's unshared connections, resolved into plain values by its
+  defaults, out of view for anyone who can only see the caller's job. The
+  child job's own input is unaffected and still carries the full merged
+  input.
 
 ### Revision
 
@@ -360,10 +368,15 @@ are tracked as carried risks for a separate fix:
 ### Errors calling a task
 
 `task: nope.deploy` (unknown workspace), `task: platform.nope` (no such
-task), and a task that references itself by qualified name are all `400`
-at submit; the task owner being temporarily unavailable is `500`. Only the
-submitted task's own steps are checked at submit time — a nested reference
-that fails resolves when its step is dispatched, and fails that step only.
+task), and a task that references itself, are all `400` at submit; the
+task owner being temporarily unavailable is `500`. This check runs for
+**every** `type: task` action reference, not just a cross-workspace
+(qualified) one — a plain, same-workspace `task: deploy` naming a task
+that does not exist is also a `400` at submit, and it runs whether or not
+the flow step has a `when` guard (only the *literal connection input*
+check below is skipped for a `when`-guarded step). Only the submitted
+task's own steps are checked at submit time — a nested reference that
+fails resolves when its step is dispatched, and fails that step only.
 
 ## Errors
 
@@ -371,11 +384,11 @@ An unresolvable action reference — either the named workspace doesn't exist, o
 
 This does **not** cover the owner workspace being transiently unavailable (for example, a Git-backed workspace that failed to load on its last poll) — that's a server/load-health condition, not a caller mistake, and still surfaces as `500`.
 
-A step guarded by a `when` condition is not pre-checked at job creation at all — literal connection references included — since the condition may make the step never run. A bad reference on a `when`-guarded step surfaces as a step failure only if and when that step is actually reached.
+A step guarded by a `when` condition still has its `type: task` action's target task existence checked at job creation (see above) — a missing task is a config error regardless of `when`. What a `when` guard skips is the *literal connection input* pre-check, since the condition may make the step never run: a bad literal connection value on a `when`-guarded step surfaces as a step failure only if and when that step is actually reached.
 
 ## Not yet supported
 
 The following are deliberately out of scope for this release:
 
 - **Cross-workspace agent actions.** An `agent` step that is a cross-workspace reference still renders its prompt, system prompt, and MCP/task tools against the *caller's* workspace config, not the owner's — only script/docker/pod action bodies (and their connection-typed inputs) render in the owner context.
-- **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are. A `type: task` hook action naming another workspace's task is rejected by server-side validation and fails the hook job.
+- **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are. A `type: task` hook action naming another workspace's task is rejected at runtime, when the hook job is created, and fails that hook job with a clear message. (A config-load-time validator that would catch this when the workspace is loaded exists in `stroem-common` but is not yet wired into any server load/reload path — this is a pre-existing gap tracked in `docs/internal/TODO.md`, not something this release added.)
