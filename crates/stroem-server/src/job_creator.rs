@@ -1049,4 +1049,253 @@ mod tests {
             .to_string();
         assert_eq!(e, "task 'C.deploy': workspace 'C' is not available");
     }
+
+    /// Task owner `T`: a `deploy` task with a connection-typed input `db`
+    /// (type `pg`, declared in `T`) plus a plain-string `name`; and `T`'s own
+    /// connection type `pg` with a shared connection `pg-prod` and an
+    /// unshared `pg-private`.
+    fn precheck_task_config() -> WorkspaceConfig {
+        use stroem_common::models::workflow::{ConnectionDef, ConnectionTypeDef, InputFieldDef};
+
+        let mut t = WorkspaceConfig::default();
+        t.connection_types.insert(
+            "pg".to_string(),
+            ConnectionTypeDef {
+                properties: Default::default(),
+            },
+        );
+        t.connections.insert(
+            "pg-prod".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".into()),
+                shared: true,
+                values: Default::default(),
+            },
+        );
+        t.connections.insert(
+            "pg-private".to_string(),
+            ConnectionDef {
+                connection_type: Some("pg".into()),
+                shared: false,
+                values: Default::default(),
+            },
+        );
+        let mut input = HashMap::new();
+        input.insert(
+            "db".to_string(),
+            InputFieldDef {
+                field_type: "pg".to_string(),
+                ..serde_yaml::from_str("type: string").unwrap()
+            },
+        );
+        input.insert(
+            "name".to_string(),
+            InputFieldDef {
+                field_type: "string".to_string(),
+                ..serde_yaml::from_str("type: string").unwrap()
+            },
+        );
+        t.tasks.insert(
+            "deploy".to_string(),
+            TaskDef {
+                name: None,
+                description: None,
+                mode: "distributed".to_string(),
+                folder: None,
+                input,
+                flow: HashMap::new(),
+                timeout: None,
+                retry: None,
+                on_success: vec![],
+                on_error: vec![],
+                on_suspended: vec![],
+                on_cancel: vec![],
+            },
+        );
+        t
+    }
+
+    /// Caller `A`: its own connection `pg-local`, typed against `T`'s `pg`
+    /// connection type via the qualified `T.pg` reference.
+    fn precheck_caller_config() -> WorkspaceConfig {
+        use stroem_common::models::workflow::ConnectionDef;
+
+        let mut a = WorkspaceConfig::default();
+        a.connections.insert(
+            "pg-local".to_string(),
+            ConnectionDef {
+                connection_type: Some("T.pg".into()),
+                shared: false,
+                values: Default::default(),
+            },
+        );
+        a
+    }
+
+    fn precheck_task_manager() -> (WorkspaceManager, WorkspaceConfig, WorkspaceConfig) {
+        let a_cfg = precheck_caller_config();
+        let t_cfg = precheck_task_config();
+        let mgr = WorkspaceManager::from_configs(vec![
+            ("A".into(), a_cfg.clone(), None),
+            ("T".into(), t_cfg.clone(), None),
+        ]);
+        (mgr, a_cfg, t_cfg)
+    }
+
+    fn deploy_step(input_yaml: &str) -> FlowStep {
+        serde_yaml::from_str(&format!("action: a\ninput:\n{input_yaml}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_skips_when_guarded_step() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        // A literal object would normally trip the cross-workspace boundary
+        // rule below — the `when` guard must short-circuit before that.
+        let mut step = deploy_step("  db: {}");
+        step.when = Some("input.flag".to_string());
+
+        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_caller_local_connection_ok() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        let step = deploy_step("  db: \"pg-local\"");
+
+        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_shared_fallback_ok_unshared_rejected() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+
+        let shared_step = deploy_step("  db: \"pg-prod\"");
+        precheck_task_step_literals("s", &shared_step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap();
+
+        let unshared_step = deploy_step("  db: \"pg-private\"");
+        let err = precheck_task_step_literals("s", &unshared_step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not shared"),
+            "chain was: {err:#}"
+        );
+        assert!(err
+            .to_string()
+            .contains("failed to resolve connection inputs"));
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_foreign_object_and_null_rejected() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+
+        let object_step = deploy_step("  db: {}");
+        let err = precheck_task_step_literals("s", &object_step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}")
+                .contains("a connection passed across workspaces must be a connection name"),
+            "chain was: {err:#}"
+        );
+        assert!(err
+            .to_string()
+            .contains("failed to resolve connection inputs"));
+
+        let null_step = deploy_step("  db: null");
+        let err = precheck_task_step_literals("s", &null_step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}")
+                .contains("a connection passed across workspaces must be a connection name"),
+            "chain was: {err:#}"
+        );
+        assert!(err
+            .to_string()
+            .contains("failed to resolve connection inputs"));
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_same_workspace_object_passthrough_ok() {
+        let (mgr, _a_cfg, t_cfg) = precheck_task_manager();
+        // base == T == A: the caller IS the task's own workspace, so the
+        // cross-workspace boundary rule never applies and an already-object
+        // literal passes through unchanged (same as the local-only path).
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Base,
+        };
+        let step = deploy_step("  db: {}");
+
+        precheck_task_step_literals("s", &step, &resolved, &mgr, "T", &t_cfg)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_templated_value_not_checked() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        let step = deploy_step("  db: \"{{ prev.output.db }}\"");
+
+        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn precheck_task_step_literals_primitive_field_skipped() {
+        let (mgr, a_cfg, t_cfg) = precheck_task_manager();
+        let resolved = ResolvedTask {
+            workspace: "T".to_string(),
+            task_name: "deploy".to_string(),
+            task: t_cfg.tasks.get("deploy").unwrap().clone(),
+            config: OwnerConfig::Foreign(Arc::new(t_cfg.clone())),
+        };
+        // "name" is primitive-typed; an object literal there is never even
+        // considered, regardless of the cross-workspace boundary rule.
+        let step = deploy_step("  name: {}");
+
+        precheck_task_step_literals("s", &step, &resolved, &mgr, "A", &a_cfg)
+            .await
+            .unwrap();
+    }
 }
