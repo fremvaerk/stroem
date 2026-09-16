@@ -185,7 +185,10 @@ pub async fn fire_hooks(
 /// - Task-level hooks take priority; workspace-level hooks fire as fallback for top-level jobs only.
 /// - Each hook creates a new single-step job with `source_type = "hook"`.
 /// - Failures are logged but never affect the original job.
-#[tracing::instrument(skip(s, workspace_config, task))]
+#[tracing::instrument(
+    skip(s, workspace_config, job, task),
+    fields(job_id = %job.job_id, workspace = %job.workspace, task = %job.task_name)
+)]
 pub async fn fire_hooks_of_kind(
     s: &Settlement,
     workspace_config: &WorkspaceConfig,
@@ -318,7 +321,10 @@ pub async fn fire_hooks_of_kind(
 /// - Task-level `on_suspended` hooks take priority; workspace-level fallback fires for top-level jobs.
 /// - Each hook creates a new single-step job with `source_type = "hook"`.
 /// - Failures are logged but never affect the original job or step.
-#[tracing::instrument(skip(s, workspace_config, task))]
+#[tracing::instrument(
+    skip(s, workspace_config, job, task, rendered_message),
+    fields(job_id = %job.job_id, workspace = %job.workspace, task = %job.task_name)
+)]
 pub async fn fire_suspended_hooks(
     s: &Settlement,
     workspace_config: &WorkspaceConfig,
@@ -1595,5 +1601,95 @@ mod tests {
              got {depth} — a chain with {INTERMEDIATE_LEVELS} intermediate task levels per hook \
              link must not defeat the hop budget"
         );
+    }
+
+    // ─── H2 regression: instrument spans must not Debug-print the JobRow ─────
+
+    /// A `tracing_subscriber::Layer` that records every field on every new
+    /// span as a `"name=value"` string, so a test can assert none of them
+    /// contain a sentinel that should have been kept out of the span.
+    struct FieldCapture {
+        fields: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for FieldCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor<'a>(&'a mut Vec<String>);
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push(format!("{}={:?}", field.name(), value));
+                }
+            }
+            let mut fields = self.fields.lock().unwrap();
+            attrs.record(&mut Visitor(&mut fields));
+        }
+    }
+
+    const SENTINEL: &str = "SENTINEL-DO-NOT-LOG";
+
+    /// Regression for H2: `fire_hooks_of_kind`'s and `fire_suspended_hooks`'s
+    /// `#[tracing::instrument]` spans used to omit `job: &JobRow` from
+    /// `skip(...)`. `JobRow` derives plain `Debug`, which prints `input` /
+    /// `output` / `raw_input` unredacted — for a cross-workspace `type: task`
+    /// step those can carry the owner's resolved connection values and
+    /// secrets, so the old span recorded them into server logs at info
+    /// level. Both spans now `skip` the row and record only
+    /// `job_id`/`workspace`/`task` as explicit fields; this installs a test
+    /// subscriber that captures every span field verbatim and asserts a
+    /// sentinel placed in `job.input` never appears in any of them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn hook_spans_do_not_record_job_row_debug() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = FieldCapture {
+            fields: captured.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mgr =
+            crate::workspace::WorkspaceManager::from_config("default", WorkspaceConfig::new());
+        let app_state = crate::state::test_app_state_with_workspaces(mgr, temp_dir.path());
+        let s = app_state.settlement();
+
+        let mut job = stroem_db::JobRow::test_default();
+        job.input = Some(json!({"field": SENTINEL}));
+        job.output = Some(json!({"field": SENTINEL}));
+        job.raw_input = Some(json!({"field": SENTINEL}));
+
+        let ws_config = WorkspaceConfig::new();
+        // No task-level or workspace-level hooks configured for any kind, so
+        // both functions return right after the span is entered — before
+        // touching `s.pool` (which is a never-connected lazy pool here).
+        let task = make_task_def(vec![], vec![], vec![]);
+
+        fire_hooks_of_kind(&s, &ws_config, &job, &task, HookKind::Success).await;
+        fire_suspended_hooks(&s, &ws_config, &job, &task, "approve", "message").await;
+
+        let fields = captured.lock().unwrap();
+        assert!(
+            !fields.is_empty(),
+            "expected at least one span to have been recorded"
+        );
+        for f in fields.iter() {
+            assert!(
+                !f.contains(SENTINEL),
+                "sentinel leaked into an instrument span field: {f}"
+            );
+        }
     }
 }
