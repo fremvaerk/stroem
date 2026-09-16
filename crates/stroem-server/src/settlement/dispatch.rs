@@ -377,9 +377,18 @@ async fn handle_task_steps_pass(
         };
 
         // Persist rendered input to DB so the job detail API shows resolved values.
+        // When O == A the merged input (bucket C + D) is safe to show on the
+        // caller's own step, as before. When O != A, bucket D can carry the
+        // owner's UNSHARED connections fully resolved (F2) — persist only the
+        // caller-supplied bucket C on the parent step; the child job row still
+        // gets the full merged `rendered_input` via create_job_for_task_inner below.
+        let persisted_input = if base_ws == workspace_name {
+            rendered_input.clone()
+        } else {
+            caller_bucket.clone()
+        };
         if let Err(e) =
-            JobStepRepo::update_input(pool, job_id, &step.step_name, Some(rendered_input.clone()))
-                .await
+            JobStepRepo::update_input(pool, job_id, &step.step_name, Some(persisted_input)).await
         {
             tracing::warn!("Failed to persist rendered input: {:#}", e);
         }

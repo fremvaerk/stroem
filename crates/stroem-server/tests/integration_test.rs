@@ -3784,6 +3784,36 @@ async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
          LIVE (post-rotation) secret value, not a value snapshotted at \
          creation: {child_input}"
     );
+
+    // F2: the PARENT step's own persisted input must not carry B's
+    // (the owner's) resolved defaults — `db` and `token` came only from
+    // bucket D, never from A's caller-supplied input. A viewer with only
+    // View on the caller's task would otherwise see the owner's unshared
+    // `b-private` connection fully resolved, despite the child job being
+    // 404 for them.
+    let parent_detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{}", parent)))
+        .await?;
+    assert_eq!(parent_detail.status(), 200);
+    let parent_body = body_json(parent_detail).await;
+    let run_step = parent_body["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step_name"] == "run")
+        .expect("run step");
+    let run_input = &run_step["input"];
+    assert!(
+        run_input.get("db").is_none(),
+        "parent step input must not carry the owner's default-only `db` \
+         key: {run_input}"
+    );
+    assert!(
+        run_input.get("token").is_none(),
+        "parent step input must not carry the owner's default-only \
+         `token` key (would otherwise leak `new-secret-value`): {run_input}"
+    );
     Ok(())
 }
 
@@ -3961,7 +3991,10 @@ async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Res
     );
     let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
     assert_eq!(parent_row.status, "failed");
-    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+    // `list_children` (all statuses), not `get_child_jobs` (active only) — a
+    // created-then-settled child would otherwise pass this assertion by
+    // falling outside the active-only filter.
+    assert!(JobRepo::list_children(&pool, parent).await?.is_empty());
     Ok(())
 }
 
@@ -3980,7 +4013,7 @@ async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result
         .await?;
     assert_eq!(resp.status(), 200);
     let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
-    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+    assert!(JobRepo::list_children(&pool, parent).await?.is_empty());
 
     let mut b_mut = xws_build_ws_b();
     b_mut.tasks.remove("deploy");
@@ -4021,7 +4054,7 @@ async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result
     );
     let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
     assert_eq!(parent_row.status, "failed");
-    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+    assert!(JobRepo::list_children(&pool, parent).await?.is_empty());
 
     // "after" depends on the failed "run" with no `continue_on_failure` —
     // it must be cascade-skipped, not left dangling `pending`/`ready`, and
