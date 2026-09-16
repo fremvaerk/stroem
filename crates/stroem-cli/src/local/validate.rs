@@ -183,4 +183,29 @@ actions:
         // Should not panic — either Ok with warnings or Err
         let _ = cmd_validate(dir.path().to_str().unwrap());
     }
+
+    #[test]
+    fn validate_warns_on_cross_workspace_task_ref_and_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf = dir.path().join(".workflows");
+        std::fs::create_dir_all(&wf).unwrap();
+        std::fs::write(
+            wf.join("x.yaml"),
+            "actions:\n  run-remote:\n    type: task\n    task: B.deploy\ntasks:\n  caller:\n    flow:\n      go:\n        action: run-remote\n",
+        )
+        .unwrap();
+
+        // Load and validate workspace
+        let (config, _) = workspace_loader::load_workspace(dir.path()).unwrap();
+        let warnings = validate_workflow_config(&config).unwrap();
+
+        // Verify warning is present
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("cannot validate cross-workspace task reference")),
+            "Expected warning about cross-workspace task reference, got: {:?}",
+            warnings
+        );
+    }
 }
