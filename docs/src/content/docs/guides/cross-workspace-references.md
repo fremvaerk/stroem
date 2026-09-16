@@ -153,17 +153,26 @@ credentials `secret: true` in the connection type.
 
 ### Trust model for owner-side rendering errors
 
-If a `type: task` step's action defaults or connection resolution render
-against an OWNER workspace's config (a different workspace than the caller's,
-or a different one than the task's) and that rendering fails — for example a
-default like `{{ secret.TOKEN | round }}` where `TOKEN` isn't numeric — the
-caller's job never sees the details. The persisted step error is a fixed
-message naming the workspace whose rendering failed and pointing at the
-server log; it never contains any representation of the value that caused
-the failure, however that value was encoded (raw, JSON-escaped, or otherwise).
-Full details, still with the workspace's secrets scrubbed, land in the server
-log for operators. A step whose owner IS the caller's own workspace is
-unaffected — its rendering errors are scrubbed and persisted as always.
+If a `type: task` step's action defaults or the task's own defaults render
+against an OWNER workspace's config (a different workspace than the caller's)
+and that rendering fails — for example a default like `{{ secret.TOKEN |
+round }}` where `TOKEN` isn't numeric — the caller's job never sees the
+details. The persisted step error is a fixed message naming the workspace
+whose rendering failed and pointing at the server log; it never contains any
+representation of the value that caused the failure, however that value was
+encoded (raw, JSON-escaped, or otherwise — a filter chain can produce
+arbitrarily many encodings, so this is withheld outright rather than
+scrubbed). Full details, still with the workspace's secrets scrubbed, land
+in the server log for operators.
+
+This only applies to a value that actually came from the OWNER's own
+config. A value the CALLER supplied itself — even a bad one, even on a step
+that crosses into another workspace — is always shown as before; it's the
+caller's own data. Likewise, a structural problem (the referenced task
+doesn't exist, a required field is missing, a database error) is never
+withheld either, whichever workspace it's reported against. A step whose
+owner IS the caller's own workspace is unaffected by any of this — its
+rendering errors are scrubbed and persisted as always.
 
 ### Offline CLI
 

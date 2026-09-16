@@ -1,6 +1,6 @@
 # Cross-Workspace `type: task` Actions — Design
 
-Status: revision 9, reviewed — ready for an implementation plan
+Status: revision 10, reviewed — ready for an implementation plan
 Ships in: 0.17.0 (minor; no migration; documented behaviour corrections, § 7)
 
 Closes the first item under "Deferred" in CLAUDE.md § Cross-Workspace
@@ -9,6 +9,26 @@ References and "Not yet supported" in
 cite `main` at `f174020`.
 
 ## Revision history
+
+**Revision 10 (2026-09-16, implementation).** Controller review of
+revision 9's withholding rule found it too coarse: deciding by which
+PHASE of dispatch failed hides errors that carry no owner value — the
+caller's own boundary-rule error (which already prints only a type name)
+and a genuinely structural error like `B`'s "workspace 'C' has no task
+'build'". Those must stay visible. Refines to decide by error ORIGIN
+instead, via typed markers threaded through the `anyhow` chain:
+`template::ProvenanceError { bucket: Caller | ActionDefault }` (tagging
+each bucket of `resolve_task_input_by_provenance`) and
+`job_creator::OwnerSideRender` (tagging `create_job_for_task_inner`'s own
+default-merge and connection-resolution errors, never a caller value or a
+structural failure). Two integration tests that round 3 had changed to
+expect withholding were reverted to their PRE-round-3 (visible) assertions
+once the origin-based rule correctly classified them as Caller-bucket and
+structural respectively — see § 3.3 "Error withholding at the ownership
+boundary, by error ORIGIN" for the full rule, including a deviation from
+the literal plan: the markers are found with `anyhow::Error::downcast_ref`
+called directly, not `.chain().find_map(downcast_ref)`, which does not
+reliably locate a `.context(...)` value.
 
 **Revision 9 (2026-09-16, implementation).** A second Codex re-check of
 revision 8's fix (H1) found the representation-matching approach cannot
@@ -513,26 +533,57 @@ per secret, not just the raw value but its JSON-escaped and Rust
 Debug-escaped representations too — a value's Tera error can quote it
 through either encoding depending on which filter raised it (revision 8).
 
-**Error withholding at the ownership boundary (revision 9).** Matching
-representations does not converge: a filter chain (`{{ secret.TOKEN |
-json_encode | round }}`) can wrap a value in an unbounded number of
-encodings, each one more than the last scrub added. So for the three
-owner-side render-error branches in `handle_task_steps_pass` — the action
-defaults merge (bucket `D`, against `O`'s secrets), connection resolution
-against the task's schema (against `O`'s or `T`'s config), and child-job
-creation (against `T`'s config) — the rule changes from "scrub and
-persist" to "withhold and persist a value-free message" whenever the
-ownership boundary is crossed (`O != A` or `T != A`). The persisted text
-becomes a fixed, value-free sentence naming the workspace being rendered
-(`O` for the first two, `T` for creation) and pointing at the server log;
-`tracing::error!` still logs the FULL scrubbed chain (span-union masking,
-still exactly as above) so operators retain visibility. When `O == A ==
-T` (a same-workspace `type: task` step), nothing changes: the scrubbed
-chain is still persisted, exactly as revisions 4-8 left it. The
-caller-side step-input render error (bucket `C`) is never withheld,
-whatever `O`/`T` are — it renders the CALLER's own template in the
-CALLER's own context, so it can only ever quote a value the caller
-already has.
+**Error withholding at the ownership boundary, by error ORIGIN (revisions
+9-10).** Matching representations does not converge: a filter chain (`{{
+secret.TOKEN | json_encode | round }}`) can wrap a value in an unbounded
+number of encodings, each one more than the last scrub added — so an
+owner-side render error is withheld (a fixed, value-free message) rather
+than scrubbed. Revision 9's first cut decided withholding by which PHASE
+of dispatch failed, which over-withheld: it also hid a value that
+happened to be the CALLER's own (safe to show — it's the caller's own
+data) and a structural error that carries no owner value at all (e.g. `T`
+"has no task 'build'"). Revision 10 decides by error ORIGIN instead, via
+typed markers threaded through the `anyhow` chain:
+
+- `template::resolve_task_input_by_provenance` tags each bucket's error
+  with `template::ProvenanceError { bucket }` (`ProvenanceBucket::Caller`
+  or `::ActionDefault`) via `.context(...)`. A `Caller`-bucket failure —
+  the caller's own literal, however bad — is NEVER withheld, whatever
+  `O`/`T` are. An `ActionDefault`-bucket failure (`O`'s own default) is
+  withheld when `O != A`.
+- `job_creator::create_job_for_task_inner` tags its own `merge_defaults`
+  and `resolve_connection_inputs` errors (rendering `T`'s OWN task
+  schema, never a caller value — the provenance pass upstream already
+  turned every caller-supplied connection-typed value into an object) with
+  `job_creator::OwnerSideRender` via `.context(...)`. That marker present
+  and `T != A` withholds; any other `create_job_for_task_inner` error
+  (task not found, a DB failure, a missing required field, or a NESTED
+  step's own dispatch failure — e.g. a two-hop chain's grandchild
+  discovering ITS action's task doesn't exist — bubbling back up) stays
+  visible regardless of `T`.
+- The action-defaults MERGE itself (`merge_action_defaults`, bucket `D`)
+  needs no origin tag: every error it can raise renders one of `O`'s own
+  templates (a caller-supplied field is explicitly excluded from that
+  render pass, per its own doc comment), so it is withheld whenever `O !=
+  A`, unconditionally.
+- Both markers are found with `err.downcast_ref::<Marker>()` called on the
+  `anyhow::Error` itself — not `err.chain().find_map(|e|
+  e.downcast_ref(...))`, which requires the marker to implement
+  `std::error::Error` and does not reliably locate a `.context(...)`
+  value; `anyhow::Error::downcast_ref` requires only `Display + Debug +
+  Send + Sync + 'static` and walks every context layer looking for a
+  match, at any depth.
+
+The persisted text is unchanged from revision 9: a fixed, value-free
+sentence naming the workspace being rendered (`O` for the action-defaults
+merge and connection resolution, `T` for creation) and pointing at the
+server log; `tracing::error!` still logs the FULL scrubbed chain
+(span-union masking, as above) so operators retain visibility. When `O ==
+A == T` (a same-workspace `type: task` step), nothing changes: the
+scrubbed chain is still persisted, exactly as revisions 4-8 left it. The
+caller-side step-input render error (bucket `C`, rendered in the CALLER's
+own context before any owner config is involved) was never withheld and
+still isn't.
 
 ### 3.4 What does not change — verified
 
