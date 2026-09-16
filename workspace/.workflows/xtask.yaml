@@ -1,0 +1,16 @@
+actions:
+  call-xtask:
+    type: task
+    task: test.xtask-target
+
+tasks:
+  xtask:
+    mode: distributed
+    flow:
+      call:
+        action: call-xtask
+      echo:
+        action: shout
+        depends_on: [call]
+        input:
+          message: "child said {{ call.output.seen }}"

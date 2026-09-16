@@ -1,0 +1,18 @@
+secrets:
+  XTASK_SECRET: "only-in-test-ws"
+
+actions:
+  cat-and-secret:
+    type: script
+    runner: local
+    script: |
+      echo "XTASK_FILE=$(cat data/marker.txt)"
+      echo "XTASK_SECRET={{ secret.XTASK_SECRET }}"
+      echo 'OUTPUT: {"seen": "yes"}'
+
+tasks:
+  xtask-target:
+    mode: distributed
+    flow:
+      run:
+        action: cat-and-secret

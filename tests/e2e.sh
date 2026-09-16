@@ -711,6 +711,36 @@ CWS_PLAIN=$(echo "$CWS_DETAIL" | jq -r '.steps[] | select(.step_name == "plain-c
 [ "$CWS_FOLLOW" = "skipped/cascade" ] || { echo "$CWS_DETAIL" | jq .steps; fail "follow-up expected skipped/cascade, got $CWS_FOLLOW"; }
 pass "continue_when_skipped: dependent of a flagged skip ran, dependent of an unflagged skip cascaded"
 
+# --- 19. Cross-workspace type: task action ---
+# xtask (in "default") calls test.xtask-target; the child must run as a
+# "test" job (its files and its secret), and its output must reach the
+# parent's next step.
+info "Triggering xtask task (cross-workspace type: task)..."
+EXEC_RESP_XT=$(acurl -X POST "$BASE_URL/api/workspaces/default/tasks/xtask/execute" \
+    -H "Content-Type: application/json" -d '{"input": {}}')
+XT_JOB_ID=$(echo "$EXEC_RESP_XT" | jq -r '.job_id')
+[ -n "$XT_JOB_ID" ] && [ "$XT_JOB_ID" != "null" ] || fail "xtask execute failed: $EXEC_RESP_XT"
+XT_POLLED=0; XT_STATUS="pending"
+while [ "$XT_STATUS" != "completed" ] && [ "$XT_STATUS" != "failed" ]; do
+    sleep 2; XT_POLLED=$((XT_POLLED + 2))
+    [ "$XT_POLLED" -lt "$MAX_POLL" ] || { acurl "$BASE_URL/api/jobs/$XT_JOB_ID" | jq .; fail "xtask did not finish"; }
+    XT_DETAIL=$(acurl "$BASE_URL/api/jobs/$XT_JOB_ID"); XT_STATUS=$(echo "$XT_DETAIL" | jq -r '.status'); printf "."
+done; echo ""
+[ "$XT_STATUS" = "completed" ] || { echo "$XT_DETAIL" | jq .; fail "xtask failed"; }
+pass "xtask completed"
+
+XT_CHILD_ID=$(echo "$XT_DETAIL" | jq -r '.steps[] | select(.step_name=="call") | .child_jobs[0].id')
+XT_CHILD_WS=$(echo "$XT_DETAIL" | jq -r '.steps[] | select(.step_name=="call") | .child_jobs[0].workspace')
+[ "$XT_CHILD_WS" = "test" ] || fail "child workspace is '$XT_CHILD_WS', expected 'test'"
+pass "child job $XT_CHILD_ID runs in workspace test"
+
+XT_CHILD_LOGS=$(acurl "$BASE_URL/api/jobs/$XT_CHILD_ID/logs" | jq -r '.logs')
+echo "$XT_CHILD_LOGS" | grep -q "XTASK_FILE=CROSS_WS_OK" || fail "child did not read the test workspace's file"
+echo "$XT_CHILD_LOGS" | grep -q "XTASK_SECRET=only-in-test-ws" || fail "child did not render the test workspace's secret"
+XT_LOGS=$(acurl "$BASE_URL/api/jobs/$XT_JOB_ID/logs" | jq -r '.logs')
+echo "$XT_LOGS" | grep -qi "child said yes" || fail "child output did not reach the parent's next step"
+pass "cross-workspace task: owner files, owner secret and output propagation verified"
+
 # --- Summary ---
 echo ""
 echo -e "${GREEN}========================================${NC}"
