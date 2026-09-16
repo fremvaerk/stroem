@@ -3068,9 +3068,14 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         // Contains U+001B (ESC), a control character: an owner default
         // using Tera's `round(method=...)` filter on an invalid method
         // value renders this into the filter's error via Rust's `{:?}`
-        // (Debug) formatting, not JSON escaping — the two escaping schemes
-        // diverge on control characters (JSON: ``, Debug: `\u{1b}`).
+        // (Debug) formatting, not JSON escaping -- the two escaping schemes
+        // diverge on how they render a control character like this one.
         ("TOKEN_CTRL".to_string(), json!("prefix\u{1b}suffix")),
+        // H1 round 3: a filter chain (`json_encode` then `round`) wraps this
+        // secret in a representation no finite scrub enumerates — the
+        // reason the fix withholds owner-side render errors entirely at the
+        // ownership boundary instead of chasing one more representation.
+        ("TOKEN_CHAIN".to_string(), json!("left\"right")),
     ]);
 
     ws.actions.insert(
@@ -3173,6 +3178,28 @@ fn xws_build_ws_b() -> WorkspaceConfig {
     ws.actions
         .insert("run-bad-round-default".to_string(), run_bad_round_default);
 
+    // H1 round 3 fixture: a filter CHAIN (`json_encode` then `round`) on an
+    // invalid value. `json_encode` first turns the secret into a JSON-text
+    // string; `round`'s `value` arg then fails its own numeric type check
+    // (`try_get_value!("round", "value", f64, value)`) and quotes THAT
+    // already-JSON-encoded string via `serde_json::Value`'s `Display` impl
+    // — the secret ends up double-JSON-escaped, a representation neither
+    // the raw, single-JSON-escaped, nor Debug-escaped scrub matches. Any
+    // filter chain can nest arbitrarily many such wrappings, which is why
+    // the fix withholds the whole error at the ownership boundary instead
+    // of adding yet another representation to match.
+    let mut run_bad_chain_default = xws_task_action("deploy");
+    run_bad_chain_default.input.insert(
+        "note".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            default: Some(json!("{{ secret.TOKEN_CHAIN | json_encode | round }}")),
+            ..Default::default()
+        },
+    );
+    ws.actions
+        .insert("run-bad-chain-default".to_string(), run_bad_chain_default);
+
     let mut run_two_pass = xws_task_action("deploy");
     run_two_pass.input.insert(
         "note".to_string(),
@@ -3210,6 +3237,16 @@ fn xws_build_ws_b() -> WorkspaceConfig {
     ws.tasks.insert(
         "deploy-via-c".to_string(),
         xws_task_def(vec![("run", xws_flow_step("run-deploy-via-c"))]),
+    );
+
+    // Same-workspace regression pin (H1 round 3, spec § 3.3): O == T == B
+    // here — when this task is executed directly against B (not through a
+    // cross-workspace caller in A), the withholding rule does not apply and
+    // `run-bad-default`'s Tera error must still be scrubbed (mask present),
+    // exactly as before round 3.
+    ws.tasks.insert(
+        "local-secret-error".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("run-bad-default"))]),
     );
 
     // `nope` is deliberately absent.
@@ -3386,6 +3423,10 @@ fn xws_build_ws_a() -> WorkspaceConfig {
     ws.tasks.insert(
         "pipeline-secret-round-error".to_string(),
         xws_task_def(vec![("run", xws_flow_step("B.run-bad-round-default"))]),
+    );
+    ws.tasks.insert(
+        "pipeline-secret-chain-error".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-bad-chain-default"))]),
     );
     ws.tasks.insert(
         "pipeline-two-pass".to_string(),
@@ -4015,6 +4056,16 @@ async fn test_xws_task_execute_errors() -> Result<()> {
     Ok(())
 }
 
+/// A's own "run" step (action `call-deploy-chain`, local to `A`, wrapping
+/// `B.deploy-via-c`) crosses the ownership boundary into `B` (task owner
+/// T = B != A = caller), so when `create_job_for_task_inner`'s synchronous
+/// initialisation of B's OWN job discovers ITS "run" step references a
+/// missing `C.build` and fails, that failure bubbles back up through
+/// `create_job_for_task_inner`'s `Err` to A's dispatch code as branch (c)
+/// (spec § 3.3) — withheld, not the deep "has no task 'build'" chain the
+/// pre-round-3 version of this test asserted. The owner named in the
+/// withheld message is T (`B`), the workspace whose config was actually
+/// being rendered, not O (`A`, the action's own owner).
 #[tokio::test]
 async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Result<()> {
     let (router, pool, mgr, _tmp, _c) =
@@ -4039,6 +4090,22 @@ async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Res
     assert_eq!(run.status, "failed", "{steps:?}");
     assert!(
         run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("details withheld"),
+        "{:?}",
+        run.error_message
+    );
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("workspace 'B'"),
+        "{:?}",
+        run.error_message
+    );
+    assert!(
+        !run.error_message
             .as_deref()
             .unwrap_or("")
             .contains("has no task 'build'"),
@@ -4128,6 +4195,14 @@ async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result
     Ok(())
 }
 
+/// H1 round-3 fix: an owner-side render error crossing a workspace boundary
+/// (O != A or T != A) is now WITHHELD, not scrubbed — a value's Tera error
+/// can take an unbounded number of representations via a filter chain (see
+/// `test_xws_task_secret_scrub_withholds_owner_side_render_errors`), so no
+/// finite scrub converges. This action's owner (`run-bad-default`, `B`)
+/// differs from the caller's workspace (`A`), so the persisted error is now
+/// the value-free withheld message, never the `••••••`-masked chain the
+/// pre-round-3 version of this test asserted.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
     let (router, pool, _mgr, _tmp, _c) =
@@ -4148,11 +4223,13 @@ async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
     let run = steps.iter().find(|s| s.step_name == "run").unwrap();
     assert_eq!(run.status, "failed", "{steps:?}");
     let err = run.error_message.clone().unwrap_or_default();
-    assert!(err.contains("••••••"), "{err}");
+    assert!(err.contains("details withheld"), "{err}");
+    assert!(err.contains("workspace 'B'"), "{err}");
+    assert!(!err.contains("••••••"), "{err}");
     assert!(!err.contains("ABCD-token"), "{err}");
     assert!(!err.contains("-token"), "{err}");
 
-    // The REST job detail must carry the same scrubbed text.
+    // The REST job detail must carry the same withheld text.
     let detail = router
         .clone()
         .oneshot(api_get(&format!("/api/jobs/{parent}")))
@@ -4173,7 +4250,7 @@ async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
     assert!(!logs_text.contains("ABCD-token"), "{logs_text}");
     assert!(!logs_text.contains("-token"), "{logs_text}");
 
-    // MCP's `get_job_status` must return the SAME scrubbed error, never the
+    // MCP's `get_job_status` must return the SAME withheld text, never the
     // raw column value (it reads `job_step.error_message` directly).
     let session_id = xws_mcp_initialize(&router).await?;
     let status_body = json!({
@@ -4194,25 +4271,25 @@ async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
         .as_str()
         .expect("get_job_status content[0].text should be a string");
     assert!(
-        status_text.contains("••••••"),
-        "MCP get_job_status must surface the scrubbed error: {status_text}"
+        status_text.contains("details withheld"),
+        "MCP get_job_status must surface the withheld message: {status_text}"
     );
     assert!(!status_text.contains("ABCD-token"), "{status_text}");
     assert!(!status_text.contains("-token"), "{status_text}");
     Ok(())
 }
 
-/// H1 regression: an owner action default for a connection-typed task input
-/// (`db`, typed `pg` on `deploy`'s own schema) is an ARRAY containing a
-/// rendered secret (`TOKEN_ESCAPE`, which contains a quote and a backslash),
-/// not a connection name. `resolve_connection_inputs_scoped`'s "expects a
-/// connection name" bail used to print the value itself — `serde_json`'s
-/// `Display` impl renders the array with the secret JSON-escaped (`\"` and
-/// `\\`), which the exact-string secret scrub in `redact_secrets_in_str`
-/// would miss. Both halves of the fix are exercised here: the bail now
-/// prints only the JSON type name (never the value), and the scrub also
-/// searches for each secret's JSON-escaped form as defense in depth.
-/// Asserts neither the raw secret nor its JSON-escaped form appears in the
+/// H1 regression, now folded into H1 round 3's withholding rule: an owner
+/// action default for a connection-typed task input (`db`, typed `pg` on
+/// `deploy`'s own schema) is an ARRAY containing a rendered secret
+/// (`TOKEN_ESCAPE`, which contains a quote and a backslash), not a
+/// connection name. `resolve_connection_inputs_scoped`'s "expects a
+/// connection name" bail is fixed to print only the JSON type name, never
+/// the value — but this action's owner (`B`) differs from the caller's
+/// workspace (`A`), so `resolve_task_input_by_provenance`'s error (branch
+/// (b), spec § 3.3) is withheld entirely regardless: the persisted error is
+/// the value-free withheld message, not even a type-name-only one. Asserts
+/// neither the raw secret nor its JSON-escaped form appears in the
 /// persisted step error, the REST job detail, the job log, or MCP's
 /// `get_job_status` text.
 #[tokio::test]
@@ -4238,15 +4315,12 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
     let run = steps.iter().find(|s| s.step_name == "run").unwrap();
     assert_eq!(run.status, "failed", "{steps:?}");
     let err = run.error_message.clone().unwrap_or_default();
-    // With the fix, the bail prints only the JSON type name — no secret
-    // value ever reaches the message, so there is nothing here for
-    // `redact_secrets_in_str` to mask (unlike the sibling scalar-secret
-    // test above, whose Tera filter error DOES quote the value and relies
-    // on the scrub). Assert the type name is present and neither secret
-    // form leaked, rather than asserting a `••••••` marker that this
-    // particular message no longer has any reason to contain.
-    assert!(err.contains("expects a connection name"), "{err}");
-    assert!(err.contains("array"), "{err}");
+    // Cross-workspace (O = B != A = caller): withheld entirely, not even
+    // the type-name-only message `resolve_connection_inputs_scoped` now
+    // produces — see the same-workspace pin test for that message.
+    assert!(err.contains("details withheld"), "{err}");
+    assert!(err.contains("workspace 'B'"), "{err}");
+    assert!(!err.contains("expects a connection name"), "{err}");
     assert!(!err.contains(raw_secret), "{err}");
     assert!(!err.contains(&escaped_secret), "{err}");
     assert!(!err.contains("quote"), "{err}");
@@ -4296,22 +4370,25 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
     let status_text = mcp_resp["result"]["content"][0]["text"]
         .as_str()
         .expect("get_job_status content[0].text should be a string");
-    assert!(status_text.contains("array"), "{status_text}");
+    assert!(status_text.contains("details withheld"), "{status_text}");
     assert!(!status_text.contains(raw_secret), "{status_text}");
     assert!(!status_text.contains(&escaped_secret), "{status_text}");
     Ok(())
 }
 
-/// H1 follow-up regression: an owner action default (`note`) renders Tera's
-/// `{{ 1 | round(method=secret.TOKEN_CTRL) }}`, where `TOKEN_CTRL` contains
-/// U+001B (a control character) and is not one of `round`'s allowed methods.
+/// H1 follow-up regression, now folded into H1 round 3's withholding rule:
+/// an owner action default (`note`) renders Tera's `{{ 1 |
+/// round(method=secret.TOKEN_CTRL) }}`, where `TOKEN_CTRL` contains U+001B
+/// (a control character) and is not one of `round`'s allowed methods.
 /// `tera::builtins::filters::number::round` formats the invalid `method`
 /// argument with `{:?}` (Rust `Debug`), not `serde_json`'s JSON escaping —
-/// the two schemes diverge on control characters (JSON: ``, Debug:
-/// `\u{1b}`), so a scrub that only searches the raw value and its
-/// JSON-escaped form misses this. Asserts neither the raw secret nor its
-/// Debug-escaped form appears in the persisted step error, the REST job
-/// detail, the job log, or MCP's `get_job_status` text.
+/// the two schemes diverge on control characters. This action's owner
+/// (`B`) differs from the caller's workspace (`A`), so
+/// `merge_action_defaults`'s error (branch (a), spec section 3.3) is
+/// withheld entirely rather than scrubbed -- the persisted error contains
+/// no representation of the secret at all. Asserts neither the raw secret
+/// nor its Debug-escaped form appears in the persisted step error, the
+/// REST job detail, the job log, or MCP's `get_job_status` text.
 #[tokio::test]
 async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Result<()> {
     let (router, pool, _mgr, _tmp, _c) =
@@ -4340,12 +4417,14 @@ async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Resu
     let run = steps.iter().find(|s| s.step_name == "run").unwrap();
     assert_eq!(run.status, "failed", "{steps:?}");
     let err = run.error_message.clone().unwrap_or_default();
-    assert!(err.contains("••••••"), "{err}");
+    assert!(err.contains("details withheld"), "{err}");
+    assert!(err.contains("workspace 'B'"), "{err}");
+    assert!(!err.contains("••••••"), "{err}");
     assert!(!err.contains("prefix"), "{err}");
     assert!(!err.contains("suffix"), "{err}");
     assert!(!err.contains(&debug_escaped), "{err}");
 
-    // The REST job detail must carry the same scrubbed text.
+    // The REST job detail must carry the same withheld text.
     let detail = router
         .clone()
         .oneshot(api_get(&format!("/api/jobs/{parent}")))
@@ -4365,7 +4444,7 @@ async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Resu
     assert!(!logs_text.contains("suffix"), "{logs_text}");
     assert!(!logs_text.contains(&debug_escaped), "{logs_text}");
 
-    // MCP's `get_job_status` must return the same scrubbed error.
+    // MCP's `get_job_status` must return the same withheld text.
     let session_id = xws_mcp_initialize(&router).await?;
     let status_body = json!({
         "jsonrpc": "2.0",
@@ -4385,12 +4464,137 @@ async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Resu
         .as_str()
         .expect("get_job_status content[0].text should be a string");
     assert!(
-        status_text.contains("••••••"),
-        "MCP get_job_status must surface the scrubbed error: {status_text}"
+        status_text.contains("details withheld"),
+        "MCP get_job_status must surface the withheld message: {status_text}"
     );
     assert!(!status_text.contains("prefix"), "{status_text}");
     assert!(!status_text.contains("suffix"), "{status_text}");
     assert!(!status_text.contains(&debug_escaped), "{status_text}");
+    Ok(())
+}
+
+/// H1 round 3 (the finding that closed the representation-matching approach
+/// for good): an owner action default renders `{{ secret.TOKEN_CHAIN |
+/// json_encode | round }}`. `json_encode` turns the secret into a
+/// JSON-text STRING; `round`'s own numeric type check on that string then
+/// fails and quotes it via `serde_json::Value`'s `Display` impl — the
+/// secret ends up JSON-escaped a SECOND time, a representation the raw,
+/// single-JSON-escaped, and Debug-escaped scrubs all miss (and a longer
+/// filter chain could nest arbitrarily many more). Because this action's
+/// owner (`B`) differs from the caller's workspace (`A`), the error is
+/// withheld entirely (spec § 3.3) rather than scrubbed, so no filter chain,
+/// however deep, can leak the secret into this job. Asserts the persisted
+/// step error, REST detail, job log, and MCP text contain neither `left`
+/// nor `right`, contain the withheld wording, and that the job still fails
+/// with its dependents cascaded as before.
+#[tokio::test]
+async fn test_xws_task_secret_scrub_withholds_owner_side_render_errors() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-secret-chain-error/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    assert!(err.contains("details withheld"), "{err}");
+    assert!(err.contains("workspace 'B'"), "{err}");
+    assert!(!err.contains("left"), "{err}");
+    assert!(!err.contains("right"), "{err}");
+    assert!(!err.contains("••••••"), "{err}");
+
+    // The REST job detail must carry the same withheld text.
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}")))
+        .await?;
+    let detail_text = body_json(detail).await.to_string();
+    assert!(!detail_text.contains("left"), "{detail_text}");
+    assert!(!detail_text.contains("right"), "{detail_text}");
+
+    // The job's log stream must never leak the secret either.
+    let logs = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}/logs")))
+        .await?;
+    let logs_text = body_json(logs).await.to_string();
+    assert!(!logs_text.contains("left"), "{logs_text}");
+    assert!(!logs_text.contains("right"), "{logs_text}");
+
+    // MCP's `get_job_status` must return the same withheld text.
+    let session_id = xws_mcp_initialize(&router).await?;
+    let status_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": {
+            "name": "get_job_status",
+            "arguments": {"job_id": parent.to_string()}
+        }
+    });
+    let response = router
+        .oneshot(xws_mcp_request(session_id.as_deref(), status_body))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let mcp_resp = body_json(response).await;
+    let status_text = mcp_resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("get_job_status content[0].text should be a string");
+    assert!(
+        status_text.contains("details withheld"),
+        "MCP get_job_status must surface the withheld message: {status_text}"
+    );
+    assert!(!status_text.contains("left"), "{status_text}");
+    assert!(!status_text.contains("right"), "{status_text}");
+
+    // Dependents cascade exactly as any other server-dispatched failure —
+    // withholding only changes the persisted TEXT, never the job/step
+    // lifecycle.
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "failed");
+    Ok(())
+}
+
+/// Same-workspace regression pin (H1 round 3, spec § 3.3): withholding only
+/// applies when the ownership boundary is crossed (O != A or T != A).
+/// `local-secret-error` runs `run-bad-default` (the same action/task
+/// pair as `test_xws_task_secret_scrub_covers_owner_default_error`) but
+/// executed directly against `B` — its own owner — so `O == T == A == B`
+/// here and the pre-round-3 behaviour must be unchanged: the Tera error is
+/// scrubbed (`••••••` present), not withheld.
+#[tokio::test]
+async fn test_xws_task_secret_scrub_same_workspace_still_masks() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/B/tasks/local-secret-error/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    assert!(err.contains("••••••"), "{err}");
+    assert!(!err.contains("details withheld"), "{err}");
+    assert!(!err.contains("ABCD-token"), "{err}");
+    assert!(!err.contains("-token"), "{err}");
     Ok(())
 }
 
@@ -4434,8 +4638,15 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
         .to_string();
     assert!(msg.contains("must be a connection name"), "{msg}");
 
-    // Same shape, but `when`-guarded: creation succeeds, dispatch fails
-    // the step with the identical message.
+    // Same shape, but `when`-guarded: creation succeeds, dispatch fails the
+    // step. Unlike the 400-at-submit case above (a synchronous validation
+    // response, unaffected by H1 round 3's withholding rule), this failure
+    // goes through `resolve_task_input_by_provenance` at dispatch time
+    // (spec § 3.3 branch (b)) — since the action's owner (`A`, `call-deploy`
+    // is local) differs from the task's owner (`B`, `deploy`), the boundary
+    // is crossed and the persisted error is the value-free withheld
+    // message, not the "must be a connection name" text the pre-round-3
+    // version of this test asserted.
     let resp = router
         .clone()
         .oneshot(api_request(
@@ -4453,7 +4664,15 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
         run.error_message
             .as_deref()
             .unwrap_or("")
-            .contains("must be a connection name"),
+            .contains("details withheld"),
+        "{:?}",
+        run.error_message
+    );
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("workspace 'A'"),
         "{:?}",
         run.error_message
     );

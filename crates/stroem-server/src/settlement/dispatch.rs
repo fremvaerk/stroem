@@ -64,6 +64,18 @@ pub async fn handle_task_steps(
 /// Mark a server-dispatched step failed and immediately re-orchestrate so its
 /// dependents are cascade-skipped / the job closes. Every failure branch in
 /// `handle_task_steps_pass` must go through here.
+///
+/// `err` is always scrubbed (`redact_secrets_in_str`) and logged via
+/// `tracing::error!`, so operators always see the full (scrubbed) chain in
+/// the server log. `persist_override`, when `Some`, is what gets persisted
+/// to `job_step.error_message` (and so returned by REST/MCP) INSTEAD of the
+/// scrubbed `err` — used when an owner-side render error's value can take an
+/// unbounded number of representations (raw, JSON-escaped, Rust
+/// Debug-escaped, and any further wrapping a filter chain like `{{ secret.X
+/// | json_encode | round }}` can apply) that no finite scrub can enumerate
+/// (spec § 3.3, "Error scrubbing"). Withholding at the ownership boundary,
+/// rather than trying to match one more representation each time a new one
+/// is found, is the only rule that actually converges.
 #[allow(clippy::too_many_arguments)]
 async fn fail_task_step(
     pool: &PgPool,
@@ -74,6 +86,7 @@ async fn fail_task_step(
     workspace_config: &WorkspaceConfig,
     snapshots: &Snapshots,
     extra_secret_values: &[String],
+    persist_override: Option<&str>,
 ) -> Result<()> {
     // Two of the callers pass a Tera render error (task-step input, approval
     // message), and Tera quotes the offending value — so a template touching
@@ -86,10 +99,11 @@ async fn fail_task_step(
     // rendering error quotes the owner's value.
     let mut secret_values = crate::workspace_set::collect_config_secret_values(workspace_config);
     secret_values.extend_from_slice(extra_secret_values);
-    let err = &crate::workspace_set::redact_secrets_in_str(err, &secret_values)[..];
+    let scrubbed = crate::workspace_set::redact_secrets_in_str(err, &secret_values);
 
-    tracing::error!("{}", err);
-    JobStepRepo::mark_failed(pool, job_id, step_name, err).await?;
+    tracing::error!("{}", scrubbed);
+    let persisted = persist_override.unwrap_or(&scrubbed);
+    JobStepRepo::mark_failed(pool, job_id, step_name, persisted).await?;
     orchestrate_after_server_step_failure(
         pool,
         job_id,
@@ -100,6 +114,20 @@ async fn fail_task_step(
     )
     .await;
     Ok(())
+}
+
+/// Build the value-free message persisted for an owner-side render error
+/// when the step crosses a workspace boundary (spec § 3.3): no representation
+/// of the owner's value, not even a scrubbed one, ever reaches the caller's
+/// job. `owner` is the workspace whose config/secrets were being rendered —
+/// the action owner O for the action-defaults merge and the connection
+/// resolution, the task owner T for child-job creation.
+fn withheld_owner_render_error(step_name: &str, owner: &str) -> String {
+    format!(
+        "Failed to prepare input for task step '{step_name}': rendering in workspace '{owner}' \
+         failed (details withheld from this job; see the server log or validate the owner \
+         workspace)"
+    )
 }
 
 /// One dispatch pass over the currently-ready `type: task` steps.
@@ -159,6 +187,7 @@ async fn handle_task_steps_pass(
                 workspace_config,
                 snapshots,
                 &[],
+                None,
             )
             .await?;
             failed_any = true;
@@ -191,6 +220,7 @@ async fn handle_task_steps_pass(
                         workspace_config,
                         snapshots,
                         &[],
+                        None,
                     )
                     .await?;
                     failed_any = true;
@@ -217,6 +247,7 @@ async fn handle_task_steps_pass(
                     workspace_config,
                     snapshots,
                     &scrub,
+                    None,
                 )
                 .await?;
                 failed_any = true;
@@ -225,6 +256,12 @@ async fn handle_task_steps_pass(
         };
         let t_cfg: &WorkspaceConfig = resolved.config(base_cfg);
         scrub.extend(crate::workspace_set::collect_config_secret_values(t_cfg));
+
+        // O != A or T != A: an owner-side render error below (action
+        // defaults, connection resolution, child-job creation) is withheld
+        // from the caller's job rather than scrubbed — see
+        // `fail_task_step`'s doc comment.
+        let foreign = base_ws != workspace_name || resolved.workspace != workspace_name;
 
         // S6: the child task's input. `each` comes from the step row, not a
         // post-hoc patch — `build` owns the whole context.
@@ -253,6 +290,10 @@ async fn handle_task_steps_pass(
                                 "Failed to render input for task step '{}': {:#}",
                                 step.step_name, e
                             );
+                            // Bucket C (caller-side): this is the CALLER's own
+                            // input rendering in the CALLER's own context, never
+                            // the owner's — unaffected by withholding regardless
+                            // of `foreign`.
                             fail_task_step(
                                 pool,
                                 job_id,
@@ -262,6 +303,7 @@ async fn handle_task_steps_pass(
                                 workspace_config,
                                 snapshots,
                                 &scrub,
+                                None,
                             )
                             .await?;
                             failed_any = true;
@@ -295,6 +337,7 @@ async fn handle_task_steps_pass(
                         workspace_config,
                         snapshots,
                         &scrub,
+                        None,
                     )
                     .await?;
                     failed_any = true;
@@ -326,6 +369,13 @@ async fn handle_task_steps_pass(
                         "Failed to prepare action input for task step '{}': {:#}",
                         step.step_name, e
                     );
+                    // (a) Owner-side default rendering, against O's secrets.
+                    // A filter chain (e.g. `{{ secret.X | json_encode | round
+                    // }}`) can wrap a secret in an unbounded number of
+                    // representations no finite scrub enumerates — withhold
+                    // the whole chain from the caller when O != A.
+                    let persist_override =
+                        foreign.then(|| withheld_owner_render_error(&step.step_name, base_ws));
                     fail_task_step(
                         pool,
                         job_id,
@@ -335,6 +385,7 @@ async fn handle_task_steps_pass(
                         workspace_config,
                         snapshots,
                         &scrub,
+                        persist_override.as_deref(),
                     )
                     .await?;
                     failed_any = true;
@@ -360,6 +411,13 @@ async fn handle_task_steps_pass(
                     "Failed to resolve connection inputs for task step '{}': {:#}",
                     step.step_name, e
                 );
+                // (b) Connection resolution against the task's schema — can
+                // quote a value that traces back to O's or T's config
+                // (owner defaults, owner connections); withheld like (a)
+                // whenever the boundary is crossed (O != A or T != A),
+                // regardless of which specific value triggered it.
+                let persist_override =
+                    foreign.then(|| withheld_owner_render_error(&step.step_name, base_ws));
                 fail_task_step(
                     pool,
                     job_id,
@@ -369,6 +427,7 @@ async fn handle_task_steps_pass(
                     workspace_config,
                     snapshots,
                     &scrub,
+                    persist_override.as_deref(),
                 )
                 .await?;
                 failed_any = true;
@@ -456,6 +515,12 @@ async fn handle_task_steps_pass(
                     "Failed to create child job for task '{}': {:#}",
                     task_ref, e
                 );
+                // (c) Child-job creation, against T's config — withheld
+                // like (a)/(b), but the owner named in the message is T
+                // (`resolved.workspace`), not O, since this step renders
+                // the TASK owner's own config (defaults, connections).
+                let persist_override = foreign
+                    .then(|| withheld_owner_render_error(&step.step_name, &resolved.workspace));
                 fail_task_step(
                     pool,
                     job_id,
@@ -465,6 +530,7 @@ async fn handle_task_steps_pass(
                     workspace_config,
                     snapshots,
                     &scrub,
+                    persist_override.as_deref(),
                 )
                 .await?;
                 failed_any = true;
@@ -561,6 +627,7 @@ pub async fn handle_approval_steps(
                                 workspace_config,
                                 snapshots,
                                 &[],
+                                None,
                             )
                             .await?;
                             continue;
@@ -612,6 +679,7 @@ pub async fn handle_approval_steps(
                         workspace_config,
                         snapshots,
                         &[],
+                        None,
                     )
                     .await?;
                     continue;

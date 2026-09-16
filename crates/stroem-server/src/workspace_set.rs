@@ -156,7 +156,7 @@ fn collect_occurrences(s: &str, needle: &str, spans: &mut Vec<(usize, usize)>) {
 /// containing a quote, backslash, or control character then survives an
 /// exact match on the raw value alone, and a JSON-escaped search alone
 /// misses the Debug form wherever the two escaping rules diverge (e.g. a
-/// control character: JSON emits ``, Rust's Debug emits `\u{1b}`).
+/// control character (JSON's `\u00XX` vs Rust's `\u{XX}` numeral base).
 /// Searching for all three forms keeps any future error path that
 /// serialises or Debug-prints a value covered, not just the ones known
 /// today.
@@ -505,10 +505,10 @@ mod tests {
     /// appears in the text ONLY in its Rust `Debug`-escaped form — the shape
     /// Tera itself produces for some filter arguments via `{:?}` (e.g.
     /// `round`'s `method` argument on an invalid value). Neither the raw
-    /// value nor its JSON-escaped form occurs verbatim (JSON emits ``
-    /// for ESC; Rust's Debug emits `\u{1b}` — the two escaping schemes
-    /// diverge on control characters), so a matcher limited to those two
-    /// forms finds nothing; `redact_secrets_in_str` must still fully mask it.
+    /// value nor its JSON-escaped form occurs verbatim (JSON and Rust's
+    /// Debug escaping render a control character like ESC differently),
+    /// so a matcher limited to those two forms finds nothing;
+    /// `redact_secrets_in_str` must still fully mask it.
     #[test]
     fn redact_secrets_in_str_masks_debug_escaped_only_occurrence() {
         let secret = "prefix\u{1b}suffix\0end\"q\\b";
