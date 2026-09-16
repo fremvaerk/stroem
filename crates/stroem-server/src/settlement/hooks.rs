@@ -571,6 +571,14 @@ async fn fire_single_hook(
             .as_ref()
             .context("type: task action missing task field")?;
 
+        if !workspace_config.tasks.contains_key(task_ref.as_str()) && task_ref.contains('.') {
+            anyhow::bail!(
+                "hook uses action '{}' whose task '{}' is in another workspace; hook actions cannot call tasks across workspaces",
+                hook.action,
+                task_ref
+            );
+        }
+
         let created = crate::job_creator::create_job_for_task_detailed(
             workspaces,
             pool,
