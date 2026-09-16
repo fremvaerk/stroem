@@ -85,6 +85,7 @@ Last updated: 2026-06-03.
 - [ ] `JobRepo::list_children` runs on every job detail request, even for jobs with no `type: task` steps.
 - [ ] `WorkspaceManager::replace_config_for_test` does not bump `get_revision` — test-only helper, but a gap if a test asserts on revision after using it.
 - [ ] Offline `stroem validate` emits two warnings, not one, for a hook action that wraps a `type: task` action naming an unresolved dotted task (once for the hook, once for the wrapped action) — cosmetic, both warn rather than fail.
+- [ ] MCP `execute_task` (`crates/stroem-server/src/mcp/tools.rs` ~:524) maps every job-creation error to `internal_err`, so the precise `400`-worthy phrases from cross-workspace `type: task` resolution (`unknown workspace`, `has no task`, self-reference, `resolve connection`) reach MCP clients as internal errors instead of the same 400 the REST API returns — pre-existing, sharpened by cross-workspace `type: task`. Fix: route through `classify_execute_error` (`web/api/mod.rs`) before mapping to an MCP error code.
 
 ## Simplification (from codex review 2026-03-17)
 
