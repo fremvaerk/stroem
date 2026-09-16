@@ -161,18 +161,31 @@ details. The persisted step error is a fixed message naming the workspace
 whose rendering failed and pointing at the server log; it never contains any
 representation of the value that caused the failure, however that value was
 encoded (raw, JSON-escaped, or otherwise — a filter chain can produce
-arbitrarily many encodings, so this is withheld outright rather than
-scrubbed). Full details, still with the workspace's secrets scrubbed, land
-in the server log for operators.
+arbitrarily many encodings, which is exactly why this is withheld outright
+rather than scrubbed).
+
+Full details still land in the server log for operators, with the
+workspace's known secret values scrubbed out — but that scrub is
+best-effort (it matches a secret's exact value plus its JSON-escaped and
+Rust-debug-escaped forms), not a guarantee: an unusual encoding, such as a
+long or unusual filter chain, could in principle still leave a trace of the
+value in the log text. The server log is an operator-trusted surface, so
+this is an acceptable tradeoff there — it is precisely why the caller-facing
+job record gets the stronger guarantee (withholding, not scrubbing) instead.
 
 This only applies to a value that actually came from the OWNER's own
 config. A value the CALLER supplied itself — even a bad one, even on a step
 that crosses into another workspace — is always shown as before; it's the
 caller's own data. Likewise, a structural problem (the referenced task
 doesn't exist, a required field is missing, a database error) is never
-withheld either, whichever workspace it's reported against. A step whose
-owner IS the caller's own workspace is unaffected by any of this — its
-rendering errors are scrubbed and persisted as always.
+withheld either, whichever workspace it's reported against — with one
+exception: a structural problem INSIDE the owner's own task default (for
+example, a task-level default names a connection that doesn't exist) is
+withheld the same as a rendered-secret failure, because at the point this is
+decided it is indistinguishable from one — both are "the owner's own task
+schema failed to resolve." A step whose owner IS the caller's own workspace
+is unaffected by any of this — its rendering errors are scrubbed and
+persisted as always.
 
 ### Offline CLI
 

@@ -560,7 +560,14 @@ typed markers threaded through the `anyhow` chain:
   (task not found, a DB failure, a missing required field, or a NESTED
   step's own dispatch failure — e.g. a two-hop chain's grandchild
   discovering ITS action's task doesn't exist — bubbling back up) stays
-  visible regardless of `T`.
+  visible regardless of `T`. One deliberate over-withhold: a STRUCTURAL
+  problem inside `T`'s own task default — e.g. the default names a
+  connection that doesn't exist — is tagged `OwnerSideRender` the same as
+  a rendered-secret failure and so IS withheld, because at the point this
+  decision is made the two are indistinguishable: both are "`T`'s own task
+  schema failed to resolve," and `OwnerSideRender` only records WHICH
+  function raised the error, not whether the raised value happens to
+  contain a secret.
 - The action-defaults MERGE itself (`merge_action_defaults`, bucket `D`)
   needs no origin tag: every error it can raise renders one of `O`'s own
   templates (a caller-supplied field is explicitly excluded from that
@@ -577,13 +584,21 @@ typed markers threaded through the `anyhow` chain:
 The persisted text is unchanged from revision 9: a fixed, value-free
 sentence naming the workspace being rendered (`O` for the action-defaults
 merge and connection resolution, `T` for creation) and pointing at the
-server log; `tracing::error!` still logs the FULL scrubbed chain
-(span-union masking, as above) so operators retain visibility. When `O ==
-A == T` (a same-workspace `type: task` step), nothing changes: the
-scrubbed chain is still persisted, exactly as revisions 4-8 left it. The
-caller-side step-input render error (bucket `C`, rendered in the CALLER's
-own context before any owner config is involved) was never withheld and
-still isn't.
+server log; `tracing::error!` still logs the scrubbed chain (span-union
+masking, as above) so operators retain visibility. That server-log scrub
+is best-effort, not a guarantee, the same as it always was: it matches a
+secret's exact value plus its JSON-escaped and Rust-Debug-escaped forms
+(revisions 8 and its follow-up), but an unusual or long enough filter
+chain could still leave SOME trace of a value in that text. The server log
+is an operator-trusted surface, unlike the caller's job record, which is
+exactly why withholding — not scrubbing — is what protects the
+caller-visible surfaces (`job_step.error_message`, REST, MCP); the
+server-log scrub only needs to be good, not airtight. When `O == A == T`
+(a same-workspace `type: task` step), nothing changes: the scrubbed chain
+is still persisted to the CALLER-visible surfaces too, exactly as
+revisions 4-8 left it. The caller-side step-input render error (bucket
+`C`, rendered in the CALLER's own context before any owner config is
+involved) was never withheld and still isn't.
 
 ### 3.4 What does not change — verified
 

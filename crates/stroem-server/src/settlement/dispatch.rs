@@ -286,8 +286,11 @@ async fn handle_task_steps_pass(
                             );
                             // Bucket C (caller-side): this is the CALLER's own
                             // input rendering in the CALLER's own context, never
-                            // the owner's — unaffected by withholding regardless
-                            // of `foreign`.
+                            // the owner's — never withheld, whatever O/T are.
+                            // (No origin marker needed here: this whole
+                            // function only ever renders the caller's step
+                            // input, so the phase itself already identifies
+                            // the origin.)
                             fail_task_step(
                                 pool,
                                 job_id,
