@@ -257,12 +257,6 @@ async fn handle_task_steps_pass(
         let t_cfg: &WorkspaceConfig = resolved.config(base_cfg);
         scrub.extend(crate::workspace_set::collect_config_secret_values(t_cfg));
 
-        // O != A or T != A: an owner-side render error below (action
-        // defaults, connection resolution, child-job creation) is withheld
-        // from the caller's job rather than scrubbed — see
-        // `fail_task_step`'s doc comment.
-        let foreign = base_ws != workspace_name || resolved.workspace != workspace_name;
-
         // S6: the child task's input. `each` comes from the step row, not a
         // post-hoc patch — `build` owns the whole context.
         let input_ctx = render_context::build(
@@ -369,13 +363,17 @@ async fn handle_task_steps_pass(
                         "Failed to prepare action input for task step '{}': {:#}",
                         step.step_name, e
                     );
-                    // (a) Owner-side default rendering, against O's secrets.
-                    // A filter chain (e.g. `{{ secret.X | json_encode | round
-                    // }}`) can wrap a secret in an unbounded number of
-                    // representations no finite scrub enumerates — withhold
-                    // the whole chain from the caller when O != A.
-                    let persist_override =
-                        foreign.then(|| withheld_owner_render_error(&step.step_name, base_ws));
+                    // (a) Owner-side default rendering, against O's secrets —
+                    // every error `merge_action_defaults` can raise here
+                    // renders one of O's OWN template defaults, never a
+                    // caller-supplied value, so origin and phase agree: it is
+                    // withheld whenever O != A. A filter chain (e.g. `{{
+                    // secret.X | json_encode | round }}`) can wrap a secret in
+                    // an unbounded number of representations no finite scrub
+                    // enumerates.
+                    let owner_boundary = base_ws != workspace_name;
+                    let persist_override = owner_boundary
+                        .then(|| withheld_owner_render_error(&step.step_name, base_ws));
                     fail_task_step(
                         pool,
                         job_id,
@@ -411,13 +409,21 @@ async fn handle_task_steps_pass(
                     "Failed to resolve connection inputs for task step '{}': {:#}",
                     step.step_name, e
                 );
-                // (b) Connection resolution against the task's schema — can
-                // quote a value that traces back to O's or T's config
-                // (owner defaults, owner connections); withheld like (a)
-                // whenever the boundary is crossed (O != A or T != A),
-                // regardless of which specific value triggered it.
+                // (b) Connection resolution against the task's schema — this
+                // can fail on the CALLER's own bucket (a bad literal the
+                // caller itself supplied, safe to show) or on the
+                // ActionDefault bucket (O's own default, must be withheld
+                // when O != A). Decide by ORIGIN, not phase: only withhold
+                // an ActionDefault-bucket failure, and only when the
+                // boundary is actually crossed.
+                let is_owner_side = e
+                    .downcast_ref::<stroem_common::template::ProvenanceError>()
+                    .is_some_and(|p| {
+                        p.bucket == stroem_common::template::ProvenanceBucket::ActionDefault
+                    });
+                let owner_boundary = is_owner_side && base_ws != workspace_name;
                 let persist_override =
-                    foreign.then(|| withheld_owner_render_error(&step.step_name, base_ws));
+                    owner_boundary.then(|| withheld_owner_render_error(&step.step_name, base_ws));
                 fail_task_step(
                     pool,
                     job_id,
@@ -515,11 +521,20 @@ async fn handle_task_steps_pass(
                     "Failed to create child job for task '{}': {:#}",
                     task_ref, e
                 );
-                // (c) Child-job creation, against T's config — withheld
-                // like (a)/(b), but the owner named in the message is T
-                // (`resolved.workspace`), not O, since this step renders
-                // the TASK owner's own config (defaults, connections).
-                let persist_override = foreign
+                // (c) Child-job creation can fail for structural reasons
+                // that must stay visible (the task doesn't exist, a DB
+                // error, a missing required field, a nested step's own
+                // dispatch failure bubbling up) as well as for T's own
+                // input defaults / connections failing to render
+                // (`job_creator::OwnerSideRender`). Only the latter is
+                // withheld, and only when T actually differs from A — the
+                // owner named is T (`resolved.workspace`), since this is
+                // T's own config being rendered.
+                let is_owner_side = e
+                    .downcast_ref::<crate::job_creator::OwnerSideRender>()
+                    .is_some();
+                let owner_boundary = is_owner_side && resolved.workspace != workspace_name;
+                let persist_override = owner_boundary
                     .then(|| withheld_owner_render_error(&step.step_name, &resolved.workspace));
                 fail_task_step(
                     pool,

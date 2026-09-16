@@ -193,6 +193,34 @@ pub async fn create_child_job_for_task_detailed(
     .await
 }
 
+/// Error-chain marker recording that a `create_job_for_task_inner` failure
+/// occurred while rendering the TASK OWNER's own config (input defaults or
+/// connection resolution) — as opposed to a structural error (task not
+/// found, a DB failure, a missing required field) or a value the CALLER
+/// supplied. After `resolve_task_input_by_provenance` runs upstream in
+/// `settlement/dispatch.rs`, every caller-supplied connection-typed value
+/// arriving here is already a resolved object; any string this function
+/// still tries to resolve as a connection name came from a TASK schema
+/// default the task owner itself declared. `handle_task_steps_pass` uses
+/// this to decide whether to withhold the error from a caller in a
+/// different workspace (spec § 3.3) — find it with
+/// `err.downcast_ref::<OwnerSideRender>().is_some()` (called on the
+/// `anyhow::Error` itself; see `template::ProvenanceError`'s doc comment
+/// for why this, not a `.chain()` walk, is the form that actually finds a
+/// `.context(...)` value).
+#[derive(Debug)]
+pub(crate) struct OwnerSideRender;
+
+impl std::fmt::Display for OwnerSideRender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rendering the task's own defaults")
+    }
+}
+
+// `downcast_ref::<OwnerSideRender>()` on a chain link requires this — a bare
+// `Display + Debug` is not enough for `std::error::Error`'s blanket downcast.
+impl std::error::Error for OwnerSideRender {}
+
 /// Create a job with parent tracking (for type: task sub-jobs).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_job_for_task_inner<'a>(
@@ -283,7 +311,8 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // Merge input defaults from the task schema
         let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
         let merged_input = merge_defaults(&effective_input, &task.input, &secrets_ctx)
-            .context("Failed to merge input defaults")?;
+            .context("Failed to merge input defaults")
+            .context(OwnerSideRender)?;
 
         // Restart replays the source job's `raw_input` with no form in front of
         // it, so a schema that gained a required field without a default since
@@ -317,7 +346,8 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // Qualified names (`ws.conn`) resolve against other workspaces, gated by `shared`.
         let ws_set = WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;
         let resolved_input = resolve_connection_inputs(&merged_input, &task.input, &ws_set)
-            .context("Failed to resolve connection inputs")?;
+            .context("Failed to resolve connection inputs")
+            .context(OwnerSideRender)?;
 
         // Build job steps from the task flow
         let mut new_steps = Vec::new();

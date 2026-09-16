@@ -3232,6 +3232,31 @@ fn xws_build_ws_b() -> WorkspaceConfig {
     });
     ws.tasks.insert("deploy".to_string(), deploy_task);
 
+    // Round 4 fixture: a TASK-level default (not an action-level one) with
+    // the same bad filter chain as `run-bad-chain-default` — this renders
+    // inside `create_job_for_task_inner`'s own `merge_defaults` call
+    // (`job_creator::OwnerSideRender`), not inside the action-defaults
+    // merge. A separate task (never `deploy` itself, whose schema every
+    // other fixture shares) so this bad default cannot break unrelated
+    // tests that create a `deploy` job.
+    let mut deploy_bad_task_default = xws_task_def(vec![("go", xws_flow_step("deploy-script"))]);
+    deploy_bad_task_default.input.insert(
+        "note".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            default: Some(json!("{{ secret.TOKEN_CHAIN | json_encode | round }}")),
+            ..Default::default()
+        },
+    );
+    ws.tasks.insert(
+        "deploy-bad-task-default".to_string(),
+        deploy_bad_task_default,
+    );
+    ws.actions.insert(
+        "run-deploy-bad-task-default".to_string(),
+        xws_task_action("deploy-bad-task-default"),
+    );
+
     // Two hops from A: `run-deploy-via-c`'s task field is resolved when
     // THIS job (deploy-via-c) is created, not when A's own job is created.
     ws.tasks.insert(
@@ -3380,6 +3405,24 @@ fn xws_build_ws_a() -> WorkspaceConfig {
         xws_task_def(vec![("run", conn_object_false_when_step)]),
     );
 
+    // Round 4 pin: the SAME bad literal object, but on a Form-B call
+    // (flow step references `B.run-deploy` directly, no local wrapping
+    // action — `O = B`, same as the caller-bucket test above except O is
+    // reached without an intervening local action). The failing value is
+    // still the CALLER's own (`ProvenanceBucket::Caller`), so it must
+    // never be withheld regardless of which form reached `O`.
+    let mut conn_object_form_b_when_step = FlowStep {
+        when: Some("{{ true }}".to_string()),
+        ..xws_flow_step("B.run-deploy")
+    };
+    conn_object_form_b_when_step
+        .input
+        .insert("db".to_string(), json!({"host": "x"}));
+    ws.tasks.insert(
+        "pipeline-form-b-conn-object-when".to_string(),
+        xws_task_def(vec![("run", conn_object_form_b_when_step)]),
+    );
+
     // The ACTION's own schema mistypes `db` as `redis`; `deploy`'s TASK
     // schema types it `pg`. A caller-supplied literal connection name must
     // resolve against the TASK's schema, never the action's.
@@ -3427,6 +3470,17 @@ fn xws_build_ws_a() -> WorkspaceConfig {
     ws.tasks.insert(
         "pipeline-secret-chain-error".to_string(),
         xws_task_def(vec![("run", xws_flow_step("B.run-bad-chain-default"))]),
+    );
+    // Round 4: the bad filter chain lives on the TASK's own default this
+    // time (`deploy-bad-task-default`), not the wrapping action's — this
+    // fails inside `create_job_for_task_inner` (branch (c)), tagged
+    // `OwnerSideRender`, owner named T (`B`).
+    ws.tasks.insert(
+        "pipeline-task-default-chain-error".to_string(),
+        xws_task_def(vec![(
+            "run",
+            xws_flow_step("B.run-deploy-bad-task-default"),
+        )]),
     );
     ws.tasks.insert(
         "pipeline-two-pass".to_string(),
@@ -4056,16 +4110,13 @@ async fn test_xws_task_execute_errors() -> Result<()> {
     Ok(())
 }
 
-/// A's own "run" step (action `call-deploy-chain`, local to `A`, wrapping
-/// `B.deploy-via-c`) crosses the ownership boundary into `B` (task owner
-/// T = B != A = caller), so when `create_job_for_task_inner`'s synchronous
-/// initialisation of B's OWN job discovers ITS "run" step references a
-/// missing `C.build` and fails, that failure bubbles back up through
-/// `create_job_for_task_inner`'s `Err` to A's dispatch code as branch (c)
-/// (spec § 3.3) — withheld, not the deep "has no task 'build'" chain the
-/// pre-round-3 version of this test asserted. The owner named in the
-/// withheld message is T (`B`), the workspace whose config was actually
-/// being rendered, not O (`A`, the action's own owner).
+/// Round-4 pin: this failure is STRUCTURAL (task `build` genuinely doesn't
+/// exist in `C`), discovered synchronously inside
+/// `create_job_for_task_inner` while it resolves the nested `type: task`
+/// action `run-deploy-via-c` for `B`'s own `deploy-via-c` job — it never
+/// touches `job_creator::OwnerSideRender`, so round 4's origin-based
+/// withholding rule correctly leaves it visible, exactly as before rounds
+/// 3/4 ever existed.
 #[tokio::test]
 async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Result<()> {
     let (router, pool, mgr, _tmp, _c) =
@@ -4090,22 +4141,6 @@ async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Res
     assert_eq!(run.status, "failed", "{steps:?}");
     assert!(
         run.error_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("details withheld"),
-        "{:?}",
-        run.error_message
-    );
-    assert!(
-        run.error_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("workspace 'B'"),
-        "{:?}",
-        run.error_message
-    );
-    assert!(
-        !run.error_message
             .as_deref()
             .unwrap_or("")
             .contains("has no task 'build'"),
@@ -4598,6 +4633,73 @@ async fn test_xws_task_secret_scrub_same_workspace_still_masks() -> Result<()> {
     Ok(())
 }
 
+/// Round 4 pin: a CALLER-supplied bad literal connection value on a Form-B
+/// call (the flow step references `B.run-deploy` directly — no local
+/// wrapping action) fails inside `resolve_task_input_by_provenance` tagged
+/// `ProvenanceBucket::Caller`. Origin, not the ownership boundary, decides
+/// withholding: a Caller-bucket failure is the caller's OWN value, so it
+/// is never withheld — even though `O = B != A` here, same as
+/// `test_xws_task_secret_scrub_withholds_owner_side_render_errors`'s
+/// ActionDefault-bucket case, which IS withheld.
+#[tokio::test]
+async fn test_xws_task_form_b_caller_literal_never_withheld() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-form-b-conn-object-when/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    assert!(err.contains("must be a connection name"), "{err}");
+    assert!(!err.contains("details withheld"), "{err}");
+    Ok(())
+}
+
+/// Round 4 pin: `deploy-bad-task-default`'s bad filter chain is a TASK
+/// default (`B`'s own task schema), not an action default — it fails
+/// inside `create_job_for_task_inner`'s own `merge_defaults` call, tagged
+/// `job_creator::OwnerSideRender`, so branch (c) withholds with owner T
+/// (`B`, the task owner, since this renders T's own config), the same
+/// outcome as an ActionDefault-bucket failure but reached through the
+/// creator instead of the provenance resolver.
+#[tokio::test]
+async fn test_xws_task_secret_scrub_withholds_task_default_chain_error() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-task-default-chain-error/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    assert!(err.contains("details withheld"), "{err}");
+    assert!(err.contains("workspace 'B'"), "{err}");
+    assert!(!err.contains("left"), "{err}");
+    assert!(!err.contains("right"), "{err}");
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "failed");
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_xws_task_provenance_through_http() -> Result<()> {
     let (router, pool, _mgr, _tmp, _c) =
@@ -4639,14 +4741,11 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
     assert!(msg.contains("must be a connection name"), "{msg}");
 
     // Same shape, but `when`-guarded: creation succeeds, dispatch fails the
-    // step. Unlike the 400-at-submit case above (a synchronous validation
-    // response, unaffected by H1 round 3's withholding rule), this failure
-    // goes through `resolve_task_input_by_provenance` at dispatch time
-    // (spec § 3.3 branch (b)) — since the action's owner (`A`, `call-deploy`
-    // is local) differs from the task's owner (`B`, `deploy`), the boundary
-    // is crossed and the persisted error is the value-free withheld
-    // message, not the "must be a connection name" text the pre-round-3
-    // version of this test asserted.
+    // step. Round 4 pin: the bad literal is the CALLER's OWN value
+    // (`ProvenanceBucket::Caller`), so — unlike an ActionDefault-bucket
+    // failure — it is never withheld, whatever the ownership boundary is:
+    // the persisted error is the identical "must be a connection name"
+    // text the 400-at-submit case above returns.
     let resp = router
         .clone()
         .oneshot(api_request(
@@ -4664,15 +4763,7 @@ async fn test_xws_task_provenance_through_http() -> Result<()> {
         run.error_message
             .as_deref()
             .unwrap_or("")
-            .contains("details withheld"),
-        "{:?}",
-        run.error_message
-    );
-    assert!(
-        run.error_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("workspace 'A'"),
+            .contains("must be a connection name"),
         "{:?}",
         run.error_message
     );

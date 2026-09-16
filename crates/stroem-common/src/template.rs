@@ -900,6 +900,48 @@ pub fn prepare_action_input_cross(
     .context("Failed to resolve action connection inputs")
 }
 
+/// Which bucket of a `type: task` step's input a
+/// [`resolve_task_input_by_provenance`] failure came from.
+///
+/// Attached to the error chain via `.context(ProvenanceError { bucket })` so
+/// a caller (`settlement/dispatch.rs::handle_task_steps_pass`) can tell
+/// whether the offending value is the CALLER's own (safe to show — it's the
+/// caller's own data, in the caller's own workspace) or came from an
+/// owner-side ACTION DEFAULT (must be withheld from a caller in a different
+/// workspace — spec § 3.3, "Error withholding at the ownership boundary").
+/// Deciding by which PHASE of dispatch failed over-withholds: the boundary
+/// rule's own bail (`resolve_provenance_bucket`, below) already prints only
+/// a type name regardless of bucket, and a caller-supplied bad literal is
+/// the caller's own value — round 3 hid both behind the withheld message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceBucket {
+    Caller,
+    ActionDefault,
+}
+
+/// Error-chain marker recording which [`ProvenanceBucket`] a
+/// `resolve_task_input_by_provenance` failure originated in. Find it with
+/// `err.downcast_ref::<ProvenanceError>()` — `anyhow::Error::downcast_ref`
+/// (called on the `anyhow::Error` itself, not on a `.chain()` link) walks
+/// every `.context(...)` layer looking for a value of the given type; it
+/// only requires `Display + Debug + Send + Sync + 'static`, not
+/// `std::error::Error`, and finds a context value at any depth, not just
+/// the outermost one.
+#[derive(Debug)]
+pub struct ProvenanceError {
+    pub bucket: ProvenanceBucket,
+}
+
+impl std::fmt::Display for ProvenanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "resolving {:?} inputs", self.bucket)
+    }
+}
+
+// `downcast_ref::<ProvenanceError>()` on a chain link requires this — a bare
+// `Display + Debug` is not enough for `std::error::Error`'s blanket downcast.
+impl std::error::Error for ProvenanceError {}
+
 /// Resolve a `type: task` child's connection-typed inputs against the TASK's
 /// schema, by provenance. `caller_input` was supplied by the caller's flow
 /// step (workspace `caller_ws`); `action_defaults` are the keys the action's
@@ -911,6 +953,9 @@ pub fn prepare_action_input_cross(
 /// connection-typed field must be a connection NAME. Objects are refused
 /// there because `resolve_connection_inputs_scoped` passes any object
 /// through unchecked; within one workspace that pass-through is unchanged.
+///
+/// Each bucket's error is tagged with a [`ProvenanceError`] so a caller can
+/// tell which one failed — see that type's doc comment for why this matters.
 pub fn resolve_task_input_by_provenance(
     caller_input: &serde_json::Value,
     action_defaults: &serde_json::Value,
@@ -920,9 +965,15 @@ pub fn resolve_task_input_by_provenance(
     action_ws: &str,
     task_ws: &str,
 ) -> Result<serde_json::Value> {
-    let caller = resolve_provenance_bucket(caller_input, task_schema, lookup, caller_ws, task_ws)?;
+    let caller = resolve_provenance_bucket(caller_input, task_schema, lookup, caller_ws, task_ws)
+        .context(ProvenanceError {
+        bucket: ProvenanceBucket::Caller,
+    })?;
     let defaults =
-        resolve_provenance_bucket(action_defaults, task_schema, lookup, action_ws, task_ws)?;
+        resolve_provenance_bucket(action_defaults, task_schema, lookup, action_ws, task_ws)
+            .context(ProvenanceError {
+                bucket: ProvenanceBucket::ActionDefault,
+            })?;
     let mut out = caller.as_object().cloned().unwrap_or_default();
     if let Some(d) = defaults.as_object() {
         for (k, v) in d {
@@ -3560,6 +3611,52 @@ mod tests {
                 "default bucket, value {bad}: {err:#}"
             );
         }
+    }
+
+    /// Round 4 regression: `resolve_task_input_by_provenance` tags each
+    /// bucket's error with a [`ProvenanceError`] so
+    /// `settlement/dispatch.rs::handle_task_steps_pass` can withhold an
+    /// ActionDefault-bucket failure (owner-side) while still showing a
+    /// Caller-bucket failure (the caller's own value) unredacted.
+    #[test]
+    fn provenance_error_tags_the_failing_bucket() {
+        let ws = provenance_workspaces();
+
+        // Caller bucket foreign (A != T) fails on a non-string value.
+        let err = resolve_task_input_by_provenance(
+            &json!({"db": 5}),
+            &json!({}),
+            &pg_schema(),
+            &ws,
+            "A",
+            "T",
+            "T",
+        )
+        .unwrap_err();
+        let tag = err.downcast_ref::<ProvenanceError>();
+        assert_eq!(
+            tag.map(|t| t.bucket),
+            Some(ProvenanceBucket::Caller),
+            "{err:#}"
+        );
+
+        // ActionDefault bucket foreign (O != T) fails on a non-string value.
+        let err = resolve_task_input_by_provenance(
+            &json!({}),
+            &json!({"db": 5}),
+            &pg_schema(),
+            &ws,
+            "T",
+            "O",
+            "T",
+        )
+        .unwrap_err();
+        let tag = err.downcast_ref::<ProvenanceError>();
+        assert_eq!(
+            tag.map(|t| t.bucket),
+            Some(ProvenanceBucket::ActionDefault),
+            "{err:#}"
+        );
     }
 
     #[test]
