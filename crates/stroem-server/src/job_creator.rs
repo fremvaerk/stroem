@@ -311,8 +311,8 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // Merge input defaults from the task schema
         let secrets_ctx = serde_json::json!({ "secret": workspace_config.secrets });
         let merged_input = merge_defaults(&effective_input, &task.input, &secrets_ctx)
-            .context("Failed to merge input defaults")
-            .context(OwnerSideRender)?;
+            .context(OwnerSideRender)
+            .context("Failed to merge input defaults")?;
 
         // Restart replays the source job's `raw_input` with no form in front of
         // it, so a schema that gained a required field without a default since
@@ -346,8 +346,8 @@ pub(crate) fn create_job_for_task_inner<'a>(
         // Qualified names (`ws.conn`) resolve against other workspaces, gated by `shared`.
         let ws_set = WorkspaceSet::load(workspaces, workspace_name, Some(workspace_config)).await;
         let resolved_input = resolve_connection_inputs(&merged_input, &task.input, &ws_set)
-            .context("Failed to resolve connection inputs")
-            .context(OwnerSideRender)?;
+            .context(OwnerSideRender)
+            .context("Failed to resolve connection inputs")?;
 
         // Build job steps from the task flow
         let mut new_steps = Vec::new();

@@ -2902,6 +2902,21 @@ async fn test_execute_task_missing_connection_returns_400() -> Result<()> {
         .await?;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // Round 5 regression: `create_job_for_task_inner` wraps this same-workspace
+    // task-default resolution failure with `job_creator::OwnerSideRender`
+    // (a marker for `settlement/dispatch.rs`'s cross-workspace withholding
+    // decision, irrelevant here) INSIDE the "Failed to resolve connection
+    // inputs" string context, not outside it — the marker must never become
+    // the OUTERMOST message, or `classify_execute_error`'s outermost-only
+    // phrase match (`"resolve connection"`) stops matching and this answers
+    // 500 instead of 400. Assert the real resolver phrase reaches the body,
+    // not just the status code, so a regression here fails loudly.
+    let msg = body_json(response).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("resolve connection"), "{msg}");
+    assert!(msg.contains("does not exist"), "{msg}");
 
     Ok(())
 }

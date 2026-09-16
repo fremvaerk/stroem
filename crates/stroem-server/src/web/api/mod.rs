@@ -480,6 +480,55 @@ mod classify_execute_error_tests {
         }
     }
 
+    /// Round 5 regression: `create_job_for_task_inner` tags this exact
+    /// error with `job_creator::OwnerSideRender` (a marker
+    /// `settlement/dispatch.rs` reads to decide cross-workspace
+    /// withholding — irrelevant to this same-workspace classification) via
+    /// `.context(OwnerSideRender).context("Failed to merge input
+    /// defaults")`. The marker must sit INSIDE the string context so the
+    /// classifier's outermost-message check still sees "Failed to merge
+    /// input defaults", not the marker's own Display text. Builds the
+    /// chain the way the creator actually builds it now.
+    #[test]
+    fn bad_default_template_with_owner_side_marker_is_bad_request() {
+        let e = anyhow::anyhow!(
+            "Failed to render default template for input field 'x': Variable `secret.nope` not found"
+        )
+        .context(crate::job_creator::OwnerSideRender)
+        .context("Failed to merge input defaults");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("Failed to merge input defaults"), "{msg}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// Round 5 regression: same shape as
+    /// `bad_default_template_with_owner_side_marker_is_bad_request`, for
+    /// `create_job_for_task_inner`'s OTHER `OwnerSideRender`-tagged site —
+    /// `resolve_connection_inputs` failing on a missing bare connection
+    /// name. The marker sitting inside the "Failed to resolve connection
+    /// inputs" string context is what keeps the outermost message
+    /// matchable by the `"resolve connection"` legacy phrase.
+    #[test]
+    fn missing_bare_connection_with_owner_side_marker_is_bad_request() {
+        let e = anyhow::anyhow!("connection 'typo' does not exist in workspace 'default'")
+            .context(crate::job_creator::OwnerSideRender)
+            .context("Failed to resolve connection inputs");
+
+        let err = classify_execute_error(e);
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("Failed to resolve connection inputs"), "{msg}");
+                assert!(msg.contains("does not exist"), "{msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
     #[test]
     fn restart_missing_required_input_is_bad_request() {
         // `create_job_for_task_inner` bails with this exact phrasing when a
