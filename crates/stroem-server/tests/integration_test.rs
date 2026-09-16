@@ -2929,6 +2929,1399 @@ async fn test_execute_task_cross_workspace_unknown_action_returns_400() -> Resul
     Ok(())
 }
 
+// ─── Cross-workspace `type: task` resolution: three-workspace fixture ────
+//
+// A (caller) -> B (usual task owner) -> C (reached only through B, for the
+// "qualified to a third workspace" and "chain" cases). See task-10 brief
+// (`.superpowers/sdd/2026-09-16-cross-workspace-task-actions/task-10-brief.md`).
+
+fn xws_flow_step(action: &str) -> FlowStep {
+    FlowStep {
+        action: action.to_string(),
+        name: None,
+        description: None,
+        depends_on: vec![],
+        input: HashMap::new(),
+        continue_on_failure: false,
+        continue_when_skipped: false,
+        timeout: None,
+        when: None,
+        for_each: None,
+        sequential: false,
+        retry: None,
+        inline_action: None,
+    }
+}
+
+/// A `type: task` action referencing `task_ref` (bare or `ws.task`
+/// qualified), with no extra input schema.
+fn xws_task_action(task_ref: &str) -> ActionDef {
+    let mut a = trivial_script_action("");
+    a.action_type = "task".to_string();
+    a.script = None;
+    a.runner = None;
+    a.task = Some(task_ref.to_string());
+    a
+}
+
+fn xws_task_def(steps: Vec<(&str, FlowStep)>) -> TaskDef {
+    TaskDef {
+        name: None,
+        description: None,
+        mode: "distributed".to_string(),
+        folder: None,
+        input: HashMap::new(),
+        flow: steps.into_iter().map(|(n, s)| (n.to_string(), s)).collect(),
+        timeout: None,
+        retry: None,
+        on_success: vec![],
+        on_error: vec![],
+        on_suspended: vec![],
+        on_cancel: vec![],
+    }
+}
+
+/// Workspace `C`: only reached through `B` (or directly, qualified from
+/// `A`). Task `build` — a single trivial script step.
+fn xws_build_ws_c() -> WorkspaceConfig {
+    let mut ws = WorkspaceConfig::default();
+    ws.actions
+        .insert("c-echo".to_string(), trivial_script_action("echo built"));
+    ws.tasks.insert(
+        "build".to_string(),
+        xws_task_def(vec![("go", xws_flow_step("c-echo"))]),
+    );
+    ws
+}
+
+/// Workspace `B`: the usual task owner. Connections `b-shared` (shared) and
+/// `b-private` (unshared); task `deploy` (script step "go", optional `db`
+/// connection input, `on_error` hook, and a task-level retry that must never
+/// apply to a child job); actions `run-deploy` / `run-deploy-via-c` /
+/// `run-bad-default` / `run-two-pass` wrapping `deploy` (or `C.build`) as
+/// `type: task` with various input defaults.
+fn xws_build_ws_b() -> WorkspaceConfig {
+    let mut ws = WorkspaceConfig::default();
+    ws.connection_types.insert(
+        "pg".to_string(),
+        ConnectionTypeDef {
+            properties: HashMap::from([(
+                "host".to_string(),
+                ConnectionPropertyDef {
+                    property_type: "string".to_string(),
+                    required: false,
+                    default: None,
+                    secret: false,
+                },
+            )]),
+        },
+    );
+    ws.connections.insert(
+        "b-shared".to_string(),
+        ConnectionDef {
+            connection_type: Some("pg".to_string()),
+            shared: true,
+            values: HashMap::from([("host".to_string(), json!("b-shared-host"))]),
+        },
+    );
+    ws.connections.insert(
+        "b-private".to_string(),
+        ConnectionDef {
+            connection_type: Some("pg".to_string()),
+            shared: false,
+            values: HashMap::from([("host".to_string(), json!("b-private-host"))]),
+        },
+    );
+    // TOKEN backs the secret-scrub test; X/Y back the "single Tera pass"
+    // pinning test (X's own raw value is itself a template string).
+    ws.secrets = HashMap::from([
+        ("TOKEN".to_string(), json!("ABCD-token")),
+        ("X".to_string(), json!("{{ secret.Y }}")),
+        ("Y".to_string(), json!("yval")),
+    ]);
+
+    ws.actions.insert(
+        "deploy-script".to_string(),
+        trivial_script_action("echo deployed"),
+    );
+    ws.actions.insert(
+        "notify-b".to_string(),
+        trivial_script_action("echo notified"),
+    );
+
+    let mut run_deploy = xws_task_action("deploy");
+    run_deploy.input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "pg".to_string(),
+            default: Some(json!("b-private")),
+            ..Default::default()
+        },
+    );
+    ws.actions.insert("run-deploy".to_string(), run_deploy);
+
+    ws.actions
+        .insert("run-deploy-via-c".to_string(), xws_task_action("C.build"));
+
+    let mut run_bad_default = xws_task_action("deploy");
+    run_bad_default.input.insert(
+        "note".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            // `round` expects a number: rendering this against a string
+            // secret raises a Tera error that quotes the raw value.
+            default: Some(json!("{{ secret.TOKEN | round }}")),
+            ..Default::default()
+        },
+    );
+    ws.actions
+        .insert("run-bad-default".to_string(), run_bad_default);
+
+    let mut run_two_pass = xws_task_action("deploy");
+    run_two_pass.input.insert(
+        "note".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            default: Some(json!("{{ secret.X }}")),
+            ..Default::default()
+        },
+    );
+    ws.actions.insert("run-two-pass".to_string(), run_two_pass);
+
+    let mut deploy_task = xws_task_def(vec![("go", xws_flow_step("deploy-script"))]);
+    deploy_task.input.insert(
+        "db".to_string(),
+        InputFieldDef {
+            field_type: "pg".to_string(),
+            required: false,
+            ..Default::default()
+        },
+    );
+    deploy_task.on_error.push(HookDef {
+        action: "notify-b".to_string(),
+        input: HashMap::new(),
+    });
+    deploy_task.retry = Some(stroem_common::models::workflow::RetryConfig {
+        max_attempts: 2,
+        delay: stroem_common::duration::HumanDuration(1),
+        backoff: stroem_common::models::workflow::BackoffStrategy::Fixed,
+        jitter: false,
+    });
+    ws.tasks.insert("deploy".to_string(), deploy_task);
+
+    // Two hops from A: `run-deploy-via-c`'s task field is resolved when
+    // THIS job (deploy-via-c) is created, not when A's own job is created.
+    ws.tasks.insert(
+        "deploy-via-c".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("run-deploy-via-c"))]),
+    );
+
+    // `nope` is deliberately absent.
+    ws
+}
+
+/// Workspace `A`: the caller. See the doc comments on each task below for
+/// which seam it exercises.
+fn xws_build_ws_a() -> WorkspaceConfig {
+    let mut ws = WorkspaceConfig {
+        // PREFIX is crafted so it is a substring of the generic prefix of
+        // the Tera filter-type error immediately preceding B's own TOKEN
+        // value (".. got \"ABCD-token\" ..") — a naive per-secret sequential
+        // redaction (rather than span-union) would consume "ABCD" via this
+        // caller secret and leave a dangling "-token" fragment from B's own
+        // secret unmasked.
+        secrets: HashMap::from([("PREFIX".to_string(), json!("incorrect value: got \"ABCD"))]),
+        ..Default::default()
+    };
+
+    ws.actions
+        .insert("call-deploy".to_string(), xws_task_action("B.deploy"));
+    ws.actions.insert(
+        "call-deploy-chain".to_string(),
+        xws_task_action("B.deploy-via-c"),
+    );
+    ws.actions
+        .insert("call-self".to_string(), xws_task_action("A.pipeline-self"));
+    ws.actions
+        .insert("call-nope".to_string(), xws_task_action("B.nope"));
+    ws.actions
+        .insert("call-unknown".to_string(), xws_task_action("Z.deploy"));
+    ws.actions.insert(
+        "hook-call-b-notify".to_string(),
+        xws_task_action("B.notify"),
+    );
+    ws.actions.insert(
+        "hook-echo".to_string(),
+        trivial_script_action("echo hook-src"),
+    );
+    ws.actions.insert(
+        "a-deploy-script".to_string(),
+        trivial_script_action("echo a-local-deploy"),
+    );
+    ws.actions.insert(
+        "setup-script".to_string(),
+        trivial_script_action("echo setup"),
+    );
+    ws.actions
+        .insert("common.run".to_string(), xws_task_action("common.deploy"));
+    ws.actions.insert(
+        "a-common-script".to_string(),
+        trivial_script_action("echo common"),
+    );
+    ws.actions.insert(
+        "notify-a".to_string(),
+        trivial_script_action("echo notify-a"),
+    );
+    ws.actions
+        .insert("local-call".to_string(), xws_task_action("local-child"));
+    ws.actions.insert(
+        "local-child-script".to_string(),
+        trivial_script_action("echo local-child"),
+    );
+
+    // Form A: a LOCAL action whose `task:` is qualified to B — resolved
+    // relative to the action's owner (A itself).
+    ws.tasks.insert(
+        "pipeline".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("call-deploy"))]),
+    );
+    // Form B: the flow step references B's OWN action directly.
+    ws.tasks.insert(
+        "pipeline-via-owner".to_string(),
+        xws_task_def(vec![
+            ("setup", xws_flow_step("setup-script")),
+            (
+                "run",
+                FlowStep {
+                    depends_on: vec!["setup".to_string()],
+                    ..xws_flow_step("B.run-deploy")
+                },
+            ),
+        ]),
+    );
+    ws.tasks.insert(
+        "pipeline-self".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("call-self"))]),
+    );
+    ws.tasks.insert(
+        "pipeline-nope".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("call-nope"))]),
+    );
+    ws.tasks.insert(
+        "pipeline-unknown".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("call-unknown"))]),
+    );
+
+    let mut conn_literal_step = xws_flow_step("call-deploy");
+    conn_literal_step
+        .input
+        .insert("db".to_string(), json!("b-shared"));
+    ws.tasks.insert(
+        "pipeline-conn-literal".to_string(),
+        xws_task_def(vec![("run", conn_literal_step)]),
+    );
+
+    let mut conn_object_step = xws_flow_step("call-deploy");
+    conn_object_step
+        .input
+        .insert("db".to_string(), json!({"host": "x"}));
+    ws.tasks.insert(
+        "pipeline-conn-object".to_string(),
+        xws_task_def(vec![("run", conn_object_step.clone())]),
+    );
+
+    let mut conn_object_when_step = conn_object_step;
+    conn_object_when_step.when = Some("{{ true }}".to_string());
+    ws.tasks.insert(
+        "pipeline-conn-object-when".to_string(),
+        xws_task_def(vec![("run", conn_object_when_step)]),
+    );
+
+    let mut conn_templated_step = xws_flow_step("call-deploy");
+    conn_templated_step
+        .input
+        .insert("db".to_string(), json!("{{ \"b-shared\" }}"));
+    ws.tasks.insert(
+        "pipeline-conn-templated".to_string(),
+        xws_task_def(vec![("run", conn_templated_step)]),
+    );
+
+    // Regression: A also owns a task literally named `deploy` — resolving
+    // `B.run-deploy`'s (unqualified) `task: deploy` must never pick this one.
+    ws.tasks.insert(
+        "pipeline-collision".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-deploy"))]),
+    );
+    ws.tasks.insert(
+        "deploy".to_string(),
+        xws_task_def(vec![("go", xws_flow_step("a-deploy-script"))]),
+    );
+
+    ws.tasks.insert(
+        "pipeline-secret-error".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-bad-default"))]),
+    );
+    ws.tasks.insert(
+        "pipeline-two-pass".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-two-pass"))]),
+    );
+    // One hop: the action lives in B but its `task:` is qualified straight
+    // to C — resolved (and the child created) directly from A's own job.
+    ws.tasks.insert(
+        "pipeline-via-c".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-deploy-via-c"))]),
+    );
+    // Two hops: A's own root step resolves to B's `deploy-via-c` task (which
+    // exists) — the missing `C.build` reference is only discovered when
+    // deploy-via-c's OWN job is created, at dispatch time.
+    ws.tasks.insert(
+        "pipeline-chain".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("call-deploy-chain"))]),
+    );
+
+    ws.tasks.insert(
+        "pipeline-gated".to_string(),
+        xws_task_def(vec![
+            ("setup", xws_flow_step("setup-script")),
+            (
+                "run",
+                FlowStep {
+                    depends_on: vec!["setup".to_string()],
+                    ..xws_flow_step("call-deploy")
+                },
+            ),
+        ]),
+    );
+
+    let mut hook_source = xws_task_def(vec![("run", xws_flow_step("hook-echo"))]);
+    hook_source.on_error.push(HookDef {
+        action: "hook-call-b-notify".to_string(),
+        input: HashMap::new(),
+    });
+    ws.tasks.insert("hook-source".to_string(), hook_source);
+
+    // A local, same-workspace `type: task` step — the child must inherit
+    // the parent's pinned revision.
+    ws.tasks.insert(
+        "local-parent".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("local-call"))]),
+    );
+    ws.tasks.insert(
+        "local-child".to_string(),
+        xws_task_def(vec![("go", xws_flow_step("local-child-script"))]),
+    );
+
+    // A dotted, LOCAL (library-flattened-style) task/action pair. The dot
+    // must never be read as a cross-workspace qualifier.
+    ws.tasks.insert(
+        "common.deploy".to_string(),
+        xws_task_def(vec![("go", xws_flow_step("a-common-script"))]),
+    );
+    ws.tasks.insert(
+        "call-common".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("common.run"))]),
+    );
+
+    // Workspace-level fallback hook — never applicable to B's child jobs
+    // (B's own config and hook selection governs them). Sanity target for
+    // `test_xws_task_hooks`.
+    ws.on_error.push(HookDef {
+        action: "notify-a".to_string(),
+        input: HashMap::new(),
+    });
+
+    ws
+}
+
+const XWS_ADMIN_EMAIL: &str = "xws-admin@test.com";
+const XWS_CALLER_EMAIL: &str = "xws-caller@test.com";
+const XWS_USER_PASSWORD: &str = "xws-test-password-123";
+
+#[derive(Default)]
+struct CrossTaskOpts {
+    acl: Option<stroem_server::config::AclConfig>,
+    auth: bool,
+}
+
+async fn setup_cross_task_workspaces(
+    opts: CrossTaskOpts,
+) -> Result<(
+    Router,
+    PgPool,
+    Arc<WorkspaceManager>,
+    TempDir,
+    testcontainers::ContainerAsync<Postgres>,
+)> {
+    let container = Postgres::default().start().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+    let pool = create_pool(&url).await?;
+    run_migrations(&pool).await?;
+
+    let temp_dir = TempDir::new()?;
+    let log_dir = temp_dir.path().join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let ws_a = xws_build_ws_a();
+    let ws_b = xws_build_ws_b();
+    let ws_c = xws_build_ws_c();
+
+    let auth = if opts.auth {
+        Some(AuthConfig {
+            jwt_secret: AUTH_JWT_SECRET.to_string(),
+            refresh_secret: AUTH_REFRESH_SECRET.to_string(),
+            base_url: None,
+            providers: HashMap::new(),
+            initial_user: None,
+        })
+    } else {
+        None
+    };
+
+    let config = ServerConfig {
+        listen: "127.0.0.1:0".to_string(),
+        db: DbConfig { url },
+        log_storage: LogStorageConfig {
+            local_dir: log_dir.to_string_lossy().to_string(),
+            s3: None,
+            archive: None,
+        },
+        workspaces: HashMap::from([
+            (
+                "A".to_string(),
+                WorkspaceSourceDef::Folder {
+                    triggers: true,
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "B".to_string(),
+                WorkspaceSourceDef::Folder {
+                    triggers: true,
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+            (
+                "C".to_string(),
+                WorkspaceSourceDef::Folder {
+                    triggers: true,
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                },
+            ),
+        ]),
+        libraries: HashMap::new(),
+        git_auth: HashMap::new(),
+        worker_token: "test-token-secret".to_string(),
+        auth,
+        recovery: Default::default(),
+        retention: RetentionConfig::default(),
+        acl: opts.acl,
+        mcp: None,
+        metrics: None,
+        agents: None,
+        state_storage: None,
+        artifact_storage: None,
+        default_step_timeout: None,
+        default_job_timeout: None,
+    };
+
+    if opts.auth {
+        use stroem_db::UserGroupRepo;
+        let password_hash = hash_password(XWS_USER_PASSWORD)?;
+        let admin_id = Uuid::new_v4();
+        UserRepo::create(&pool, admin_id, XWS_ADMIN_EMAIL, Some(&password_hash), None).await?;
+        UserRepo::set_admin(&pool, admin_id, true).await?;
+
+        let caller_id = Uuid::new_v4();
+        UserRepo::create(
+            &pool,
+            caller_id,
+            XWS_CALLER_EMAIL,
+            Some(&password_hash),
+            None,
+        )
+        .await?;
+        UserGroupRepo::add(&pool, caller_id, "callers").await?;
+    }
+
+    let mgr = WorkspaceManager::from_configs(vec![
+        ("A".to_string(), ws_a, Some("rev-a-1".to_string())),
+        ("B".to_string(), ws_b, Some("rev-b-1".to_string())),
+        ("C".to_string(), ws_c, Some("rev-c-1".to_string())),
+    ]);
+    let log_storage = LogStorage::new(&config.log_storage.local_dir);
+    let state = AppState::new(pool.clone(), mgr, config, log_storage, HashMap::new(), None);
+    let mgr_handle = Arc::clone(&state.workspaces);
+    let router = build_router(state, CancellationToken::new());
+
+    Ok((router, pool, mgr_handle, temp_dir, container))
+}
+
+async fn xws_login(router: &Router, email: &str) -> Result<String> {
+    let response = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/auth/login",
+            json!({"email": email, "password": XWS_USER_PASSWORD}),
+        ))
+        .await?;
+    assert_eq!(response.status(), 200, "login failed for {email}");
+    let body = body_json(response).await;
+    Ok(body["access_token"].as_str().unwrap().to_string())
+}
+
+fn xws_authed_get(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn xws_authed_post(uri: &str, token: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_xws_task_form_a_creates_child_in_owner_workspace() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job in B");
+    assert_eq!(child.workspace, "B");
+    assert_eq!(child.task_name, "deploy");
+    assert_eq!(child.revision.as_deref(), Some("rev-b-1"));
+    assert_eq!(child.parent_step_name.as_deref(), Some("run"));
+
+    // D1(b): the parent step's DTO carries a single-entry `child_jobs` ref
+    // with the right shape (list_children's ordering is covered separately
+    // by a stroem-db repo test).
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}")))
+        .await?;
+    assert_eq!(detail.status(), 200);
+    let detail_body = body_json(detail).await;
+    let run_step = detail_body["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step_name"] == "run")
+        .expect("run step in detail");
+    let child_refs = run_step["child_jobs"].as_array().expect("child_jobs array");
+    assert_eq!(child_refs.len(), 1, "{child_refs:?}");
+    assert_eq!(
+        child_refs[0]["id"].as_str().unwrap(),
+        child.job_id.to_string()
+    );
+    assert_eq!(child_refs[0]["workspace"], "B");
+    assert_eq!(child_refs[0]["task_name"], "deploy");
+    assert_eq!(child_refs[0]["status"], child.status);
+
+    // Drive the child to completion through the real worker HTTP path so
+    // production `Settlement::propagate` (not a hand-rolled simulation)
+    // carries completion back to the parent step and job.
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), 200);
+    let claim_body = body_json(claim).await;
+    assert_eq!(claim_body["step_name"], "go");
+    assert_eq!(
+        claim_body["job_id"].as_str().unwrap(),
+        child.job_id.to_string()
+    );
+
+    let complete = router
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/go/complete", child.job_id),
+            json!({"output": {"deployed": true}}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    assert_eq!(steps[0].status, "completed", "{steps:?}");
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "completed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_form_b_uses_persisted_action_defaults() -> Result<()> {
+    let (router, pool, mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-via-owner/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    // "run" is still pending behind "setup" — no child yet.
+    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+
+    // Mutate B's action default BETWEEN job creation and dispatch.
+    let mut b_mut = xws_build_ws_b();
+    b_mut
+        .actions
+        .get_mut("run-deploy")
+        .unwrap()
+        .input
+        .get_mut("db")
+        .unwrap()
+        .default = Some(json!("b-shared"));
+    mgr.replace_config_for_test("B", b_mut).await;
+
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), 200);
+    assert_eq!(body_json(claim).await["step_name"], "setup");
+
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/setup/complete", parent),
+            json!({"output": {}}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child created after dispatch");
+    assert_eq!(child.workspace, "B");
+    assert_eq!(child.task_name, "deploy");
+    let child_input = child.input.expect("child input");
+    assert_eq!(
+        child_input["db"]["host"], "b-private-host",
+        "the child must use the default captured in `action_spec` at job \
+         creation, not B's live (post-mutation) default: {child_input}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_owner_task_qualified_to_third_workspace() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-via-c/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job in C");
+    assert_eq!(child.workspace, "C");
+    assert_eq!(child.task_name, "build");
+    assert_eq!(child.revision.as_deref(), Some("rev-c-1"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_name_collision_runs_owner_task() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-collision/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    assert_eq!(
+        child.workspace, "B",
+        "must resolve B's own `deploy`, not A's same-named task"
+    );
+    assert_eq!(child.task_name, "deploy");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_same_workspace_child_inherits_parent_revision() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/local-parent/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.revision.as_deref(), Some("rev-a-1"));
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    assert_eq!(child.workspace, "A");
+    assert_eq!(child.task_name, "local-child");
+    assert_eq!(
+        child.revision.as_deref(),
+        Some("rev-a-1"),
+        "a same-workspace child must inherit the parent's pinned revision"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_execute_errors() -> Result<()> {
+    let (router, _pool, mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-unknown/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 400);
+    let msg = body_json(resp).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("unknown workspace"), "{msg}");
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-nope/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 400);
+    let msg = body_json(resp).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("has no task"), "{msg}");
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-self/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 400);
+    let msg = body_json(resp).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("self-reference"), "{msg}");
+
+    // B loaded once, then flipped to "configured but unavailable" (last
+    // reload failed) — resolving `pipeline`'s `B.deploy` must surface as
+    // 500 (an infra condition), never 400 (a caller mistake).
+    mgr.mark_unavailable_for_test("B");
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 500);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_chain_missing_grandchild_is_200_then_failed_step() -> Result<()> {
+    let (router, pool, mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let mut c_mut = xws_build_ws_c();
+    c_mut.tasks.remove("build");
+    mgr.replace_config_for_test("C", c_mut).await;
+
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-chain/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("has no task 'build'"),
+        "{:?}",
+        run.error_message
+    );
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "failed");
+    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_owner_task_removed_before_dispatch_fails_step() -> Result<()> {
+    let (router, pool, mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-gated/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+
+    let mut b_mut = xws_build_ws_b();
+    b_mut.tasks.remove("deploy");
+    mgr.replace_config_for_test("B", b_mut).await;
+
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), 200);
+    assert_eq!(body_json(claim).await["step_name"], "setup");
+
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/setup/complete", parent),
+            json!({"output": {}}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("has no task 'deploy'"),
+        "{:?}",
+        run.error_message
+    );
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "failed");
+    assert!(JobRepo::get_child_jobs(&pool, parent).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_secret_scrub_covers_owner_default_error() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-secret-error/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    assert!(err.contains("••••••"), "{err}");
+    assert!(!err.contains("ABCD-token"), "{err}");
+    assert!(!err.contains("-token"), "{err}");
+
+    // The REST job detail must carry the same scrubbed text.
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}")))
+        .await?;
+    let detail_text = body_json(detail).await.to_string();
+    assert!(!detail_text.contains("ABCD-token"), "{detail_text}");
+    assert!(!detail_text.contains("-token"), "{detail_text}");
+
+    // The job's log stream must never leak the raw secret either. (A
+    // `type: task` dispatch failure is not currently appended to the job's
+    // own log stream — see the task-10 report for this observation — so
+    // this only asserts absence of a leak, not presence of the message.)
+    let logs = router
+        .oneshot(api_get(&format!("/api/jobs/{parent}/logs")))
+        .await?;
+    let logs_text = body_json(logs).await.to_string();
+    assert!(!logs_text.contains("ABCD-token"), "{logs_text}");
+    assert!(!logs_text.contains("-token"), "{logs_text}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_provenance_through_http() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    // A literal connection NAME resolves via caller-then-owner-shared
+    // provenance (A has no `b-shared`; B's is shared, so it's used).
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-conn-literal/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    let child_input = child.input.expect("child input");
+    assert_eq!(child_input["db"]["host"], "b-shared-host", "{child_input}");
+
+    // An inline object literal crossing workspaces is rejected at creation.
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-conn-object/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 400);
+    let msg = body_json(resp).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(msg.contains("must be a connection name"), "{msg}");
+
+    // Same shape, but `when`-guarded: creation succeeds, dispatch fails
+    // the step with the identical message.
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-conn-object-when/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    assert!(
+        run.error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("must be a connection name"),
+        "{:?}",
+        run.error_message
+    );
+
+    // A templated string is skipped by the literal precheck and resolves
+    // fine once rendered at dispatch.
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-conn-templated/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    assert_eq!(child.workspace, "B");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_persisted_library_action_stays_local() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/call-common/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    assert_eq!(
+        child.workspace, "A",
+        "a dotted local task reference must never be read as cross-workspace"
+    );
+    assert_eq!(child.task_name, "common.deploy");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_two_pass_default_is_pinned_behaviour() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+    let resp = router
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-two-pass/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+    let child_input = child.input.expect("child input");
+    // PIN: `merge_action_defaults` composes `merge_defaults` (which already
+    // renders a string default through Tera as it fills it in) with a
+    // second `render_value_deep` pass over the whole "filled from defaults"
+    // bucket. `note`'s default `{{ secret.X }}` is rendered by the first
+    // pass to X's own raw value, the literal string `{{ secret.Y }}` — and
+    // the second pass renders THAT too, landing on `yval`. See
+    // `stroem_common::template::tests::test_merge_action_defaults_renders_a_self_referencing_default_twice`
+    // for the isolated unit-level pin of this mechanism.
+    assert_eq!(child_input["note"], "yval", "{child_input}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_child_detail_is_owner_acl_404() -> Result<()> {
+    use stroem_server::config::{AclAction, AclConfig, AclRule};
+    let acl = AclConfig {
+        default: AclAction::Deny,
+        rules: vec![AclRule {
+            workspace: "A".to_string(),
+            tasks: vec!["pipeline".to_string()],
+            action: AclAction::Run,
+            groups: vec!["callers".to_string()],
+            users: vec![],
+        }],
+    };
+    let (router, pool, _mgr, _tmp, _c) = setup_cross_task_workspaces(CrossTaskOpts {
+        acl: Some(acl),
+        auth: true,
+    })
+    .await?;
+
+    let caller_token = xws_login(&router, XWS_CALLER_EMAIL).await?;
+    let admin_token = xws_login(&router, XWS_ADMIN_EMAIL).await?;
+
+    let resp = router
+        .clone()
+        .oneshot(xws_authed_post(
+            "/api/workspaces/A/tasks/pipeline/execute",
+            &caller_token,
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+
+    // Caller: 200 on the parent's own detail, with the child ref visible.
+    let detail = router
+        .clone()
+        .oneshot(xws_authed_get(
+            &format!("/api/jobs/{parent}"),
+            &caller_token,
+        ))
+        .await?;
+    assert_eq!(detail.status(), 200);
+    let detail_body = body_json(detail).await;
+    let run_step = detail_body["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step_name"] == "run")
+        .expect("run step");
+    assert_eq!(
+        run_step["child_jobs"][0]["id"].as_str().unwrap(),
+        child.job_id.to_string()
+    );
+
+    // Caller: 404 (not 403) on the CHILD's own detail and logs — B has no
+    // ACL rule for `deploy`, so the default-Deny answers "not found".
+    let child_detail = router
+        .clone()
+        .oneshot(xws_authed_get(
+            &format!("/api/jobs/{}", child.job_id),
+            &caller_token,
+        ))
+        .await?;
+    assert_eq!(child_detail.status(), 404);
+    let child_logs = router
+        .clone()
+        .oneshot(xws_authed_get(
+            &format!("/api/jobs/{}/logs", child.job_id),
+            &caller_token,
+        ))
+        .await?;
+    assert_eq!(child_logs.status(), 404);
+
+    // Admin: 200 on both (ACL bypass).
+    let admin_parent = router
+        .clone()
+        .oneshot(xws_authed_get(&format!("/api/jobs/{parent}"), &admin_token))
+        .await?;
+    assert_eq!(admin_parent.status(), 200);
+    let admin_child = router
+        .oneshot(xws_authed_get(
+            &format!("/api/jobs/{}", child.job_id),
+            &admin_token,
+        ))
+        .await?;
+    assert_eq!(admin_child.status(), 200);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_xws_task_hooks() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    // 1) Failing B's `deploy` child fires ITS OWN `on_error` hook (a job in
+    //    B); A's workspace-level `on_error` is never consulted; a
+    //    task-level retry never applies to a child job (it has a parent).
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+    let child = JobRepo::get_child_jobs(&pool, parent)
+        .await?
+        .pop()
+        .expect("child job");
+
+    let worker_id = register_test_worker(&pool).await;
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), 200);
+    assert_eq!(body_json(claim).await["step_name"], "go");
+
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/go/complete", child.job_id),
+            json!({"exit_code": 1, "error": "boom"}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    let child_row = JobRepo::get(&pool, child.job_id).await?.unwrap();
+    assert_eq!(child_row.status, "failed");
+    assert!(
+        child_row.retry_job_id.is_none(),
+        "task-level retry must never apply to a child job (it has a parent)"
+    );
+
+    let b_hook_jobs = JobRepo::list(&pool, Some("B"), None, Some("hook"), None, 50, 0).await?;
+    let b_hook_job = b_hook_jobs
+        .iter()
+        .find(|j| {
+            j.source_id.as_deref() == Some(&child.job_id.to_string())
+                && j.task_name == "_hook:notify-b"
+        })
+        .unwrap_or_else(|| panic!("{b_hook_jobs:?}"));
+
+    // Drain the hook job's own (script) step so it never competes with
+    // `hook-source`'s "run" step for the SAME worker's next global claim
+    // below (both are ready, capability "script", at the same time).
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/hook/complete", b_hook_job.job_id),
+            json!({"output": {}}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    // The child's failure propagates to the parent step and, since
+    // `pipeline` has no `continue_on_failure`, to the top-level `pipeline`
+    // job itself — which legitimately fires A's workspace-level `on_error`
+    // fallback (it has no task-level hooks of its own). What must NOT
+    // happen is A's hook being sourced from the CHILD job directly.
+    let parent_row = JobRepo::get(&pool, parent).await?.unwrap();
+    assert_eq!(parent_row.status, "failed", "{parent_row:?}");
+    let a_hook_jobs = JobRepo::list(&pool, Some("A"), None, Some("hook"), None, 50, 0).await?;
+    assert!(
+        a_hook_jobs
+            .iter()
+            .all(|j| j.source_id.as_deref() != Some(&child.job_id.to_string())),
+        "A's on_error hook must never be sourced from B's child job directly: {a_hook_jobs:?}"
+    );
+    let a_hook_job = a_hook_jobs
+        .iter()
+        .find(|j| j.source_id.as_deref() == Some(&parent.to_string()))
+        .unwrap_or_else(|| {
+            panic!(
+                "A's own workspace-level on_error should fire for A's own failed job: {a_hook_jobs:?}"
+            )
+        });
+
+    // Drain this hook job's step too, for the same reason as above.
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/hook/complete", a_hook_job.job_id),
+            json!({"output": {}}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    // 2) A hook action of `type: task` naming another workspace's task must
+    //    not create a hook job at all — the source job's own log records
+    //    why (see `settlement::hooks::fire_single_hook`).
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/hook-source/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let src: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let claim = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            "/worker/jobs/claim",
+            json!({"worker_id": worker_id.to_string(), "capabilities": ["script"]}),
+        ))
+        .await?;
+    assert_eq!(claim.status(), 200);
+    assert_eq!(body_json(claim).await["step_name"], "run");
+
+    let complete = router
+        .clone()
+        .oneshot(worker_request(
+            "POST",
+            &format!("/worker/jobs/{}/steps/run/complete", src),
+            json!({"exit_code": 1, "error": "boom"}),
+        ))
+        .await?;
+    assert_eq!(complete.status(), 200);
+
+    let src_hook_jobs = JobRepo::list(&pool, None, None, Some("hook"), None, 200, 0)
+        .await?
+        .into_iter()
+        .filter(|j| j.source_id.as_deref() == Some(&src.to_string()))
+        .count();
+    assert_eq!(
+        src_hook_jobs, 0,
+        "a cross-workspace `type: task` hook action must never create a job"
+    );
+
+    let logs = router
+        .oneshot(api_get(&format!("/api/jobs/{src}/logs")))
+        .await?;
+    let logs_text = body_json(logs).await.to_string();
+    assert!(
+        logs_text.contains("hook actions cannot call tasks across workspaces"),
+        "{logs_text}"
+    );
+    Ok(())
+}
+
 // ─── Test 2: Worker register and claim ────────────────────────────────
 
 #[tokio::test]
