@@ -192,6 +192,22 @@ function StepRow({
                 {workerNames.get(step.worker_id) ?? step.worker_id.substring(0, 8)}
               </Link>
             )}
+            {step.child_jobs && step.child_jobs.length > 0 && (
+              <span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground/60">
+                child jobs:
+                {step.child_jobs.map((c) => (
+                  <Link
+                    key={c.id}
+                    to={`/jobs/${c.id}`}
+                    className="hover:underline"
+                    onClick={(e) => e.stopPropagation()}
+                    title={`${c.workspace}/${c.task_name} (${c.status})`}
+                  >
+                    {c.workspace}/{c.task_name}
+                  </Link>
+                ))}
+              </span>
+            )}
             {step.carried_over && (
               <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                 carried over

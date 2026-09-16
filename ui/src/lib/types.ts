@@ -86,6 +86,14 @@ export interface JobListItem {
 
 export type SkipReason = "condition" | "empty" | "cascade" | "unreachable";
 
+export interface ChildJobRef {
+  id: string;
+  workspace: string;
+  task_name: string;
+  status: string;
+  created_at: string;
+}
+
 export interface JobStep {
   step_name: string;
   action_name: string;
@@ -119,6 +127,7 @@ export interface JobStep {
   approval_fields: Record<string, unknown> | null;
   carried_over: boolean;
   skip_reason: SkipReason | null;
+  child_jobs?: ChildJobRef[];
 }
 
 export interface JobDetail {

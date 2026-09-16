@@ -310,6 +310,10 @@ pub async fn get_job(
         .await
         .context("get job steps")?;
 
+    let children = JobRepo::list_children(&state.pool, job_id)
+        .await
+        .context("list child jobs")?;
+
     let mut steps_json: Vec<serde_json::Value> = steps
         .iter()
         .map(|step| {
@@ -354,6 +358,22 @@ pub async fn get_job(
                         step_json["approval_fields"] = input_schema.clone();
                     }
                 }
+            }
+            if step.action_type == "task" {
+                let refs: Vec<serde_json::Value> = children
+                    .iter()
+                    .filter(|c| c.parent_step_name.as_deref() == Some(step.step_name.as_str()))
+                    .map(|c| {
+                        json!({
+                            "id": c.job_id,
+                            "workspace": c.workspace,
+                            "task_name": c.task_name,
+                            "status": c.status,
+                            "created_at": c.created_at,
+                        })
+                    })
+                    .collect();
+                step_json["child_jobs"] = serde_json::Value::Array(refs);
             }
             step_json
         })

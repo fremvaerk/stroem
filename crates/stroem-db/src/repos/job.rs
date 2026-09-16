@@ -781,6 +781,21 @@ impl JobRepo {
         Ok(jobs)
     }
 
+    /// Every child job of `parent_job_id`, any status, newest first — the
+    /// execution history of the parent's `type: task` steps. Ties on
+    /// `created_at` are broken by id so the order is deterministic.
+    pub async fn list_children(pool: &PgPool, parent_job_id: Uuid) -> Result<Vec<JobRow>> {
+        let jobs = sqlx::query_as::<_, JobRow>(&format!(
+            "SELECT {} FROM job WHERE parent_job_id = $1 ORDER BY created_at DESC, job_id DESC",
+            JOB_COLUMNS
+        ))
+        .bind(parent_job_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to list child jobs")?;
+        Ok(jobs)
+    }
+
     /// `type: task` **descendant** jobs that are terminal while the parent step
     /// that spawned them is still `running` — i.e. jobs that settled
     /// synchronously inside `create_job_for_task_inner` (all steps skipped,
