@@ -1,6 +1,6 @@
 # Cross-Workspace `type: task` Actions — Design
 
-Status: revision 5, reviewed — ready for an implementation plan
+Status: revision 8, reviewed — ready for an implementation plan
 Ships in: 0.17.0 (minor; no migration; documented behaviour corrections, § 7)
 
 Closes the first item under "Deferred" in CLAUDE.md § Cross-Workspace
@@ -9,6 +9,34 @@ References and "Not yet supported" in
 cite `main` at `f174020`.
 
 ## Revision history
+
+**Revision 8 (2026-09-16, implementation).** Three findings from an
+external (Codex) security review of the branch, all fixed: (1, High) a
+connection-typed field holding a non-string non-object value made
+`resolve_connection_inputs_scoped`'s bail print the offending JSON value
+verbatim — an owner default like `db: ["{{ secret.TOKEN }}"]` rendered the
+secret straight into a persisted/returned error message in JSON-escaped
+form, which the exact-string scrub in `redact_secrets_in_str` missed.
+Fixed both ends: the bail (and its `resolve_task_input_by_provenance`
+sibling) now prints only the JSON type name, never the value, and
+`redact_secrets_in_str` additionally scrubs each secret's JSON-escaped
+representation whenever it differs from the raw value, so any future
+error that serialises a value stays covered. (2, High)
+`settlement/hooks.rs`'s two `#[tracing::instrument]` spans
+(`fire_hooks_of_kind`, `fire_suspended_hooks`) captured the whole
+`&JobRow` — including unredacted `input`/`output`/`raw_input`, which can
+carry owner-resolved secrets and connection values — in the span's Debug
+fields at info level; both now `skip` the row and record `job_id`,
+`workspace`, `task` explicitly. (3, Low) two documentation wording
+defects: § 7 item 5 (and the matching text in the user guide and
+CLAUDE.md) bundled the literal-connection-value check into the "always
+runs, `when` or not" task-existence check — the literal check is in fact
+exempt for a `when`-guarded step; and the user guide's "Not yet
+supported" section said a cross-workspace hook action's `type: task`
+"fails the hook job," when in fact no hook job is ever created — the bail
+happens before creation and the diagnostic lands on the source job's log.
+All three fixed in this revision's docs; see § 7 item 5 and the user
+guide for the corrected wording.
 
 **Revision 7 (2026-09-16, implementation).** Two corrections found in the
 final whole-branch review, both fixed in code/docs, not design: (1) § 7
@@ -713,7 +741,8 @@ and a third workspace `C`.
 - **Integration, hooks** — `B/deploy`'s `on_error` fires in `B`; `A`'s
   workspace-level `on_error` does not fire for the child; `B`'s task-level
   `retry` does not create a retry job for the child; a qualified task in a
-  hook action fails the hook job with the § 5 wording.
+  hook action creates no hook job and logs the § 5 wording's diagnostic to
+  the source job.
 - **`tests/e2e.sh`** — one cross-workspace `type: task` step, server ↔
   worker: `B`'s step reads a file that exists only in `B`'s tarball and a
   `{{ secret.* }}` that exists only in `B`, and its output round-trips to
@@ -742,20 +771,26 @@ and a third workspace `C`.
    `when`-guarded step, or a foreign action default fails the step at
    dispatch if the step is reached. Within one workspace an object is
    still accepted as before.
-5. The creation-time pre-check (§ 3.2 step 1) now runs for EVERY `type:
-   task` action reference, bare or qualified, and regardless of `when` — a
-   task that cannot be resolved (unknown workspace, no such task,
-   self-reference, or a bad literal connection) is a 400 at submit (500 if
-   the owner workspace is configured but transiently unavailable), same as
-   an ordinary action reference. Before this release only a qualified
-   (cross-workspace) reference was pre-checked this way; a bare reference
-   to a missing task failed at dispatch instead. A hook action wrapping
-   such a task is rejected at RUNTIME by `settlement/hooks.rs`'s bail (the
-   hook job fails with a clear message) — the config-load-time validator
-   that could reject it at hook-definition time
-   (`validate_workflow_config_with_cross_workspace_resolver`) exists but is
-   not wired into any server load/reload path yet (pre-existing gap,
-   tracked in `docs/internal/TODO.md`).
+5. The creation-time task-existence pre-check (§ 3.2 step 1) now runs for
+   EVERY `type: task` action reference, bare or qualified, and regardless
+   of `when` — a task that cannot be resolved (unknown workspace, no such
+   task, or self-reference) is a 400 at submit (500 if the owner workspace
+   is configured but transiently unavailable), same as an ordinary action
+   reference. Before this release only a qualified (cross-workspace)
+   reference was pre-checked this way; a bare reference to a missing task
+   failed at dispatch instead. The separate literal-connection pre-check
+   (§ 3.2 step 3) is NOT regardless of `when`: a `when`-guarded step skips
+   it entirely (the step may never run), so a bad literal connection value
+   there is a 400 at submit only when the step has no `when`; otherwise it
+   falls back to failing the step at dispatch if reached, same as a
+   templated value. A hook action wrapping such a task is rejected at
+   RUNTIME by `settlement/hooks.rs::fire_single_hook`'s bail *before* any
+   hook job is created — there is no hook job to fail, and the diagnostic
+   is logged to the SOURCE job (the job whose completion fired the hook) —
+   the config-load-time validator that could reject it at hook-definition
+   time (`validate_workflow_config_with_cross_workspace_resolver`) exists
+   but is not wired into any server load/reload path yet (pre-existing
+   gap, tracked in `docs/internal/TODO.md`).
 6. The job detail step DTO carries `child_jobs` for `type: task` steps.
 7. A cross-workspace `type: task` step's PARENT job step no longer shows
    the action owner's resolved input defaults when the owner differs from

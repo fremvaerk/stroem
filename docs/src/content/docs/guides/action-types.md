@@ -405,13 +405,16 @@ changed several existing behaviours:
 5. The creation-time check that a `type: task` action's target task exists
    now runs for **every** `type: task` reference — a plain, same-workspace
    task name included — and regardless of whether the step has a `when`
-   guard: an unknown workspace, a missing task, a self-reference, or a bad
-   literal connection value is a `400` at submit (`500` if the owner
-   workspace is configured but currently unavailable). Before this release,
-   only a cross-workspace (qualified) reference got this treatment; a plain
-   reference to a missing task used to fail the step later, at dispatch. A
-   hook action wrapping such a task fails at runtime instead, with a clear
-   message, when the hook job is created.
+   guard: an unknown workspace, a missing task, or a self-reference is a
+   `400` at submit (`500` if the owner workspace is configured but currently
+   unavailable). Before this release, only a cross-workspace (qualified)
+   reference got this treatment; a plain reference to a missing task used to
+   fail the step later, at dispatch. The separate check for a **bad literal
+   connection value** on the task's schema is exempt for a `when`-guarded
+   step (the step may never run) — it is a `400` at submit only when the
+   step has no `when`; otherwise it falls back to failing the step at
+   dispatch if reached, same as a templated value. A hook action wrapping
+   a cross-workspace task is not created at all — see below.
 6. The job detail step DTO carries `child_jobs` for `type: task` steps.
 7. A cross-workspace `type: task` step's own job-step `input` (visible on
    the **parent** job) no longer shows the action owner's resolved default
