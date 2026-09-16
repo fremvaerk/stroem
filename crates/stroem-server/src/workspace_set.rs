@@ -141,16 +141,25 @@ fn collect_occurrences(s: &str, needle: &str, spans: &mut Vec<(usize, usize)>) {
 /// appended to the job log, and returned to the worker, so they must be
 /// scrubbed at the point of failure rather than only on read.
 ///
-/// Each secret is searched for in TWO forms: the raw value, and its
+/// Each secret is searched for in THREE forms: the raw value, its
 /// JSON-escaped representation (quotes/backslashes/control characters
-/// escaped the way `serde_json` would render it inside a string), whenever
-/// that differs from the raw value. A value error printed via a JSON
-/// `Value`'s `Display` impl (e.g. `resolve_connection_inputs_scoped`'s
-/// "expects a connection name" bail, before it was changed to print only the
-/// type) renders a secret this way — a secret containing a quote or a
-/// backslash then survives an exact-string match on the raw value alone.
-/// Searching for both forms keeps any future error path that serialises a
-/// value covered, not just the ones known today.
+/// escaped the way `serde_json` would render it inside a string), and its
+/// Rust `Debug`-escaped representation (`str::escape_debug`'s rules —
+/// notably a control character renders as `\u{XX}`, distinct from JSON's
+/// `\u00XX`), each only when it differs from the forms already searched. A
+/// value error printed via a JSON `Value`'s `Display` impl (e.g. the
+/// now-fixed `resolve_connection_inputs_scoped` "expects a connection name"
+/// bail) renders a secret in JSON-escaped form; Tera itself formats some
+/// filter arguments with `{:?}` (e.g. `round`'s `method` argument on a
+/// non-numeric/invalid value, `tera::builtins::filters::number::round`),
+/// which renders a secret in Rust's Debug-escaped form instead — a secret
+/// containing a quote, backslash, or control character then survives an
+/// exact match on the raw value alone, and a JSON-escaped search alone
+/// misses the Debug form wherever the two escaping rules diverge (e.g. a
+/// control character: JSON emits ``, Rust's Debug emits `\u{1b}`).
+/// Searching for all three forms keeps any future error path that
+/// serialises or Debug-prints a value covered, not just the ones known
+/// today.
 pub fn redact_secrets_in_str(s: &str, secret_values: &[String]) -> String {
     // Collect every occurrence — overlapping ones included — against the
     // ORIGINAL text. Replacing sequentially against already-modified text
@@ -161,17 +170,36 @@ pub fn redact_secrets_in_str(s: &str, secret_values: &[String]) -> String {
             continue;
         }
         collect_occurrences(s, secret, &mut spans);
+
         // The JSON-escaped form (without the surrounding quotes `to_string`
         // would add): only search it when it differs from the raw value, so
         // a secret with no special characters doesn't get searched twice.
-        if let Ok(escaped) = serde_json::to_string(secret) {
-            let escaped = escaped
+        let json_escaped = serde_json::to_string(secret).ok().map(|escaped| {
+            escaped
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))
-                .unwrap_or(&escaped);
+                .map(str::to_string)
+                .unwrap_or(escaped)
+        });
+        if let Some(ref escaped) = json_escaped {
             if escaped != secret && !escaped.is_empty() {
                 collect_occurrences(s, escaped, &mut spans);
             }
+        }
+
+        // The Rust Debug-escaped form (without the surrounding quotes
+        // `{:?}` would add): only search it when it differs from BOTH the
+        // raw value and the JSON-escaped form already searched above.
+        let debug_escaped = format!("{secret:?}");
+        let debug_escaped = debug_escaped
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(&debug_escaped);
+        if debug_escaped != secret
+            && Some(debug_escaped) != json_escaped.as_deref()
+            && !debug_escaped.is_empty()
+        {
+            collect_occurrences(s, debug_escaped, &mut spans);
         }
     }
     if spans.is_empty() {
@@ -469,6 +497,99 @@ mod tests {
         let text = format!("got {secret} here");
         let out = redact_secrets_in_str(&text, &secrets(&[secret]));
         assert_eq!(out, format!("got {REDACTED} here"));
+    }
+
+    // ─── H1 follow-up: Rust Debug-escaped occurrences of a secret ────────────
+
+    /// A secret containing U+001B (ESC), a NUL, a quote, and a backslash
+    /// appears in the text ONLY in its Rust `Debug`-escaped form — the shape
+    /// Tera itself produces for some filter arguments via `{:?}` (e.g.
+    /// `round`'s `method` argument on an invalid value). Neither the raw
+    /// value nor its JSON-escaped form occurs verbatim (JSON emits ``
+    /// for ESC; Rust's Debug emits `\u{1b}` — the two escaping schemes
+    /// diverge on control characters), so a matcher limited to those two
+    /// forms finds nothing; `redact_secrets_in_str` must still fully mask it.
+    #[test]
+    fn redact_secrets_in_str_masks_debug_escaped_only_occurrence() {
+        let secret = "prefix\u{1b}suffix\0end\"q\\b";
+        let debug_escaped = format!("{secret:?}");
+        let debug_escaped = debug_escaped
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap()
+            .to_string();
+        let json_escaped = serde_json::to_string(secret).unwrap();
+        assert_ne!(
+            debug_escaped,
+            json_escaped[1..json_escaped.len() - 1],
+            "test setup: Rust Debug and JSON escaping must diverge on this secret"
+        );
+        let text = format!("round(method=\"{debug_escaped}\")");
+        assert!(
+            !text.contains(secret),
+            "test setup: raw value must not appear verbatim in the Debug-escaped text"
+        );
+        assert!(
+            !text.contains(&json_escaped[1..json_escaped.len() - 1]),
+            "test setup: JSON-escaped form must not appear verbatim either"
+        );
+        let out = redact_secrets_in_str(&text, &secrets(&[secret]));
+        assert!(!out.contains(secret));
+        assert!(!out.contains("prefix") && !out.contains("suffix"));
+        assert!(!out.contains("\\u{1b}"));
+        assert_eq!(out, format!("round(method=\"{REDACTED}\")"));
+    }
+
+    /// The raw value, its JSON-escaped form, and its Rust Debug-escaped form
+    /// ALL appear in the same text — every occurrence must be masked.
+    #[test]
+    fn redact_secrets_in_str_masks_raw_json_and_debug_occurrences() {
+        let secret = "ctl\u{1b}val\"q";
+        let json_escaped = serde_json::to_string(secret).unwrap();
+        let json_escaped = &json_escaped[1..json_escaped.len() - 1];
+        let debug_escaped = format!("{secret:?}");
+        let debug_escaped = &debug_escaped[1..debug_escaped.len() - 1];
+        assert_ne!(json_escaped, debug_escaped, "test setup: forms must differ");
+        let text = format!("raw={secret} json={json_escaped} debug={debug_escaped}");
+        let out = redact_secrets_in_str(&text, &secrets(&[secret]));
+        assert!(!out.contains("ctl"));
+        assert!(!out.contains("val"));
+        assert_eq!(
+            out,
+            format!("raw={REDACTED} json={REDACTED} debug={REDACTED}")
+        );
+    }
+
+    /// Template-layer regression: Tera's `round` filter Debug-formats its
+    /// `method` argument on an invalid value
+    /// (`tera::builtins::filters::number::round`, `got \`{:?}\``). Rendering
+    /// `{{ 1 | round(method=secret.TOKEN) }}` with a secret containing
+    /// U+001B (ESC) produces a real Tera error whose text embeds the secret
+    /// in Rust's Debug-escaped form — confirming the shape `redact_secrets_in_str`
+    /// must handle is not just a synthetic string but an actual render error.
+    /// Runs that error text through `redact_secrets_in_str` and asserts
+    /// neither the raw secret pieces (`prefix`/`suffix`) nor its
+    /// Debug-escaped `\u{1b}` form survive.
+    #[test]
+    fn redact_secrets_in_str_masks_tera_round_filter_debug_error() {
+        let secret = "prefix\u{1b}suffix";
+        let context = serde_json::json!({"secret": {"TOKEN": secret}});
+        let err = stroem_common::template::render_template(
+            "{{ 1 | round(method=secret.TOKEN) }}",
+            &context,
+        )
+        .expect_err("an invalid `method` value must fail rendering");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text.contains("prefix") && err_text.contains("suffix"),
+            "test setup: the raw Tera error must actually embed the secret: {err_text}"
+        );
+
+        let out = redact_secrets_in_str(&err_text, &secrets(&[secret]));
+        assert!(!out.contains("prefix"), "{out}");
+        assert!(!out.contains("suffix"), "{out}");
+        assert!(!out.contains("\\u{1b}"), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
     }
 
     #[test]

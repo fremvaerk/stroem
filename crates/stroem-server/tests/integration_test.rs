@@ -3065,6 +3065,12 @@ fn xws_build_ws_b() -> WorkspaceConfig {
         // bail via `serde_json::Value`'s `Display` impl, which escapes both
         // characters — the H1 secret-scrub regression target.
         ("TOKEN_ESCAPE".to_string(), json!("has\"quote\\and-slash")),
+        // Contains U+001B (ESC), a control character: an owner default
+        // using Tera's `round(method=...)` filter on an invalid method
+        // value renders this into the filter's error via Rust's `{:?}`
+        // (Debug) formatting, not JSON escaping — the two escaping schemes
+        // diverge on control characters (JSON: ``, Debug: `\u{1b}`).
+        ("TOKEN_CTRL".to_string(), json!("prefix\u{1b}suffix")),
     ]);
 
     ws.actions.insert(
@@ -3149,6 +3155,23 @@ fn xws_build_ws_b() -> WorkspaceConfig {
     );
     ws.actions
         .insert("run-bad-array-default".to_string(), run_bad_array_default);
+
+    // Follow-up H1 regression fixture: Tera's `round` filter Debug-formats
+    // its `method` argument on an invalid value
+    // (`tera::builtins::filters::number::round`), not JSON-serialises it —
+    // this renders a control character differently than `run-bad-default`'s
+    // plain-quoted Tera error above.
+    let mut run_bad_round_default = xws_task_action("deploy");
+    run_bad_round_default.input.insert(
+        "note".to_string(),
+        InputFieldDef {
+            field_type: "string".to_string(),
+            default: Some(json!("{{ 1 | round(method=secret.TOKEN_CTRL) }}")),
+            ..Default::default()
+        },
+    );
+    ws.actions
+        .insert("run-bad-round-default".to_string(), run_bad_round_default);
 
     let mut run_two_pass = xws_task_action("deploy");
     run_two_pass.input.insert(
@@ -3359,6 +3382,10 @@ fn xws_build_ws_a() -> WorkspaceConfig {
     ws.tasks.insert(
         "pipeline-secret-array-error".to_string(),
         xws_task_def(vec![("run", xws_flow_step("B.run-bad-array-default"))]),
+    );
+    ws.tasks.insert(
+        "pipeline-secret-round-error".to_string(),
+        xws_task_def(vec![("run", xws_flow_step("B.run-bad-round-default"))]),
     );
     ws.tasks.insert(
         "pipeline-two-pass".to_string(),
@@ -4264,6 +4291,98 @@ async fn test_xws_task_secret_scrub_covers_array_valued_owner_default() -> Resul
     assert!(status_text.contains("array"), "{status_text}");
     assert!(!status_text.contains(raw_secret), "{status_text}");
     assert!(!status_text.contains(&escaped_secret), "{status_text}");
+    Ok(())
+}
+
+/// H1 follow-up regression: an owner action default (`note`) renders Tera's
+/// `{{ 1 | round(method=secret.TOKEN_CTRL) }}`, where `TOKEN_CTRL` contains
+/// U+001B (a control character) and is not one of `round`'s allowed methods.
+/// `tera::builtins::filters::number::round` formats the invalid `method`
+/// argument with `{:?}` (Rust `Debug`), not `serde_json`'s JSON escaping —
+/// the two schemes diverge on control characters (JSON: ``, Debug:
+/// `\u{1b}`), so a scrub that only searches the raw value and its
+/// JSON-escaped form misses this. Asserts neither the raw secret nor its
+/// Debug-escaped form appears in the persisted step error, the REST job
+/// detail, the job log, or MCP's `get_job_status` text.
+#[tokio::test]
+async fn test_xws_task_secret_scrub_covers_debug_escaped_owner_default() -> Result<()> {
+    let (router, pool, _mgr, _tmp, _c) =
+        setup_cross_task_workspaces(CrossTaskOpts::default()).await?;
+
+    let raw_secret = "prefix\u{1b}suffix";
+    let debug_escaped = format!("{raw_secret:?}");
+    let debug_escaped = debug_escaped
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap()
+        .to_string();
+
+    let resp = router
+        .clone()
+        .oneshot(api_request(
+            "POST",
+            "/api/workspaces/A/tasks/pipeline-secret-round-error/execute",
+            json!({}),
+        ))
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let parent: Uuid = body_json(resp).await["job_id"].as_str().unwrap().parse()?;
+
+    let steps = JobStepRepo::get_steps_for_job(&pool, parent).await?;
+    let run = steps.iter().find(|s| s.step_name == "run").unwrap();
+    assert_eq!(run.status, "failed", "{steps:?}");
+    let err = run.error_message.clone().unwrap_or_default();
+    assert!(err.contains("••••••"), "{err}");
+    assert!(!err.contains("prefix"), "{err}");
+    assert!(!err.contains("suffix"), "{err}");
+    assert!(!err.contains(&debug_escaped), "{err}");
+
+    // The REST job detail must carry the same scrubbed text.
+    let detail = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}")))
+        .await?;
+    let detail_text = body_json(detail).await.to_string();
+    assert!(!detail_text.contains("prefix"), "{detail_text}");
+    assert!(!detail_text.contains("suffix"), "{detail_text}");
+    assert!(!detail_text.contains(&debug_escaped), "{detail_text}");
+
+    // The job's log stream must never leak the raw or Debug-escaped secret.
+    let logs = router
+        .clone()
+        .oneshot(api_get(&format!("/api/jobs/{parent}/logs")))
+        .await?;
+    let logs_text = body_json(logs).await.to_string();
+    assert!(!logs_text.contains("prefix"), "{logs_text}");
+    assert!(!logs_text.contains("suffix"), "{logs_text}");
+    assert!(!logs_text.contains(&debug_escaped), "{logs_text}");
+
+    // MCP's `get_job_status` must return the same scrubbed error.
+    let session_id = xws_mcp_initialize(&router).await?;
+    let status_body = json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": {
+            "name": "get_job_status",
+            "arguments": {"job_id": parent.to_string()}
+        }
+    });
+    let response = router
+        .oneshot(xws_mcp_request(session_id.as_deref(), status_body))
+        .await?;
+    assert_eq!(response.status(), 200);
+    let mcp_resp = body_json(response).await;
+    let status_text = mcp_resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("get_job_status content[0].text should be a string");
+    assert!(
+        status_text.contains("••••••"),
+        "MCP get_job_status must surface the scrubbed error: {status_text}"
+    );
+    assert!(!status_text.contains("prefix"), "{status_text}");
+    assert!(!status_text.contains("suffix"), "{status_text}");
+    assert!(!status_text.contains(&debug_escaped), "{status_text}");
     Ok(())
 }
 
