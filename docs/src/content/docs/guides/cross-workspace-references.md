@@ -230,6 +230,141 @@ tasks:
 - The `recalc` step is stamped with the owner workspace (`jobs`) and its pinned revision.
 - The worker fetches the `jobs` tarball for that step, so files like `agg_sessions_4.sql` are present, and `clickhouse-prod` resolves using `jobs`' own secrets.
 
+## Calling tasks in other workspaces
+
+A `type: task` action can name a task in another workspace, two ways:
+
+```yaml
+# Form A — direct
+actions:
+  call-deploy:
+    type: task
+    task: platform.deploy        # workspace "platform", task "deploy"
+
+# Form B — through the owner's own wrapper action
+tasks:
+  release:
+    flow:
+      deploy:
+        action: platform.run-deploy   # platform defines run-deploy as type: task
+```
+
+Three workspaces can be involved: the **caller** (where the flow step
+lives), the **action owner** (the workspace that owns the `type: task`
+action — the caller for form A, `platform` for form B), and the **task
+owner**. The `task:` name is looked up in the action owner first —
+library-flattened names like `common.deploy` live there — and only on a
+miss is it split into `workspace.task`.
+
+The child is a real job of the task owner: it runs with that workspace's
+files, secrets, connections and revision, appears in its own job list,
+fires that task's own `on_*` hooks, and is governed by that workspace's
+ACL. The caller's step receives the child's status and output exactly as
+for a local child.
+
+### Inputs
+
+- The flow step's `input:` renders in the **caller's** context.
+- The `type: task` action's own `input` defaults are read from the
+  definition persisted on the step at job creation (so editing the action
+  does not change an in-flight job), rendered with the action owner's
+  live secrets.
+- Connection-typed fields of the **task's** input schema resolve by where
+  the value came from: a caller value resolves in the caller first, then
+  in the task owner if the connection is `shared: true`; an action default
+  resolves in the action owner first, then the task owner if shared; the
+  task's own defaults resolve in the task owner without a gate.
+- A value that crosses a workspace boundary into a connection-typed field
+  must be a connection name — an object, array, number, boolean, or null
+  is rejected. This is a `400` at submit only for a literal value supplied
+  by the caller's flow step, on a step with no `when` guard, when the
+  caller isn't the task's own workspace; a templated value, a value on a
+  `when`-guarded step, or a foreign action default instead fails the step
+  at dispatch, if the step is reached. Within one workspace an object still
+  passes through as before.
+
+### Revision
+
+A same-workspace child inherits its parent's revision. A cross-workspace
+child gets the task owner's **current** revision at the moment it is
+created — the value the owner's own triggers would use — unlike
+cross-workspace *actions*, whose owner revision is pinned when the parent
+job is created.
+
+### Trust model
+
+**Calling a task is delegation to its author.** Any workspace can call any
+task; the `Run` permission on the caller's task is the authorization, and
+there is no per-child check. Write a task other workspaces may call as you
+would a webhook-triggered task: any input the schema accepts may arrive.
+The connection rules above cover connection-typed inputs *declared on the
+task* only — a plain input that your own task templates into a connection
+name on one of its actions binds in your own workspace, with no `shared`
+gate, exactly as when your own trigger runs it. The child's output is
+returned to the caller verbatim, so a task that emits credentials in its
+output discloses them to every caller.
+
+A child is not a scheduler run of the owner's task: it takes no
+task-level retry, fires no workspace-level hooks, and is cancelled when the
+caller's job is cancelled (see the cancellation caveat below).
+
+The child's own job detail, logs, and artifacts are governed by the task
+owner's ACL, independently of the caller's. A caller without `View` on the
+task owner's task gets a `404` on the child's detail even though its own
+job succeeded; an admin, or anyone with `View` on the owner side, can open
+it.
+
+A chain of `type: task` calls across workspaces is bounded by the same
+maximum task depth (10) as any indirect recursion within one workspace.
+Ancestry-based cycle detection is deliberately not added: bounded indirect
+recursion guarded by a `when` condition is a legitimate pattern it would
+break.
+
+### The parent → child link
+
+The job detail's step view lists every child job ever created for a
+`type: task` step, newest first. This is **execution history, not attempt
+identity** — a step retry resets the row before its replacement child
+exists, and a duplicate dispatch (see the caveats below) can create two
+children for one attempt — so the list makes no claim about which entry is
+"current." Each entry links to `/jobs/{id}`, subject to the child's own
+ACL.
+
+### Caveats a cross-team caller must know
+
+These apply to every `type: task` child today, same-workspace or not, and
+are tracked as carried risks for a separate fix:
+
+- **Double dispatch.** Two concurrent settlement passes on the same job can
+  both see the same step ready and both create a child — the owner's task
+  runs twice.
+- **A stale dispatcher can fail a winner's step.** A dispatcher working
+  from a stale read that then hits a render or default-merge error fails
+  the step even though another dispatcher already succeeded and created a
+  child.
+- **Cancellation can miss a child** committed just after the cancellation's
+  enumeration snapshot, by a dispatcher working from an earlier readiness
+  read.
+- **A timed-out parent step does not cancel its child.** The child's later
+  completion is still written over the step; with a step retry, the stale
+  child can settle the *replacement* attempt instead.
+- **Removing a task that other workspaces call strands their running
+  jobs.** A job whose task is removed mid-run is not settled by its own
+  steps; absent a job timeout or an operator cancel, it stays `running`
+  and the caller's step waits indefinitely.
+- **A child whose first step is an approval fires no `on_suspended` hook**
+  — it waits silently until someone notices and approves it directly.
+- **Terminal delivery is not atomic.** A crash between a child's one-shot
+  terminal claim and the write to the parent step loses that delivery.
+
+### Errors calling a task
+
+`task: nope.deploy` (unknown workspace), `task: platform.nope` (no such
+task), and a task that references itself by qualified name are all `400`
+at submit; the task owner being temporarily unavailable is `500`. Only the
+submitted task's own steps are checked at submit time — a nested reference
+that fails resolves when its step is dispatched, and fails that step only.
+
 ## Errors
 
 An unresolvable action reference — either the named workspace doesn't exist, or the workspace exists but has no action by that name (for example a typo like `jobs.recalc-agg-session`, missing the trailing `s`) — returns `400 Bad Request` with a precise message, never a `500`. The same fix applies to a missing/misnamed local connection reference.
@@ -242,6 +377,5 @@ A step guarded by a `when` condition is not pre-checked at job creation at all �
 
 The following are deliberately out of scope for this release:
 
-- **Cross-workspace `type: task` actions.** A `task:` action referencing another workspace's task (`task: jobs.some-task`) is not yet resolved — only flow-step `action:` references are cross-workspace-aware today.
 - **Cross-workspace agent actions.** An `agent` step that is a cross-workspace reference still renders its prompt, system prompt, and MCP/task tools against the *caller's* workspace config, not the owner's — only script/docker/pod action bodies (and their connection-typed inputs) render in the owner context.
-- **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are.
+- **Cross-workspace hook actions.** `on_success`/`on_error`/`on_cancel`/`on_suspended` hook actions are not resolved cross-workspace — only flow-step `action:` references are. A `type: task` hook action naming another workspace's task is rejected by server-side validation and fails the hook job.

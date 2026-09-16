@@ -360,7 +360,7 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 
 ### Rules for task actions
 
-- Must have a `task` field referencing an existing task in the same workspace
+- Must have a `task` field referencing an existing task — in the same workspace, or, since 0.17, another workspace by `workspace.task` name (see [Calling tasks in other workspaces](/guides/cross-workspace-references/#calling-tasks-in-other-workspaces))
 - Cannot have `script`, `source`, `image`, or `runner` fields
 - No worker tags required — task steps are server-dispatched
 - Self-referencing tasks are rejected at validation time
@@ -373,6 +373,47 @@ When the `deploy` task's `cleanup` step becomes ready, the server creates a chil
 - When a child completes, the parent step is marked completed with the child's output
 - When a child fails, the parent step is marked as failed
 - The parent's orchestrator runs after child completion, promoting downstream steps
+- The job detail's step view lists every child job created for the step (`child_jobs`), newest first
+
+### Behaviour changes in 0.17
+
+Cross-workspace `type: task` actions (a `task:` field naming another
+workspace's task, directly or through a cross-workspace `action:` wrapper)
+changed several existing behaviours:
+
+1. `action: platform.run-deploy` (a cross-workspace `type: task` action) now
+   runs `platform`'s task. Before, it ran the **caller's** task of the same
+   bare name if one existed, else failed.
+2. A `type: task` action's own `input` defaults are taken from the action
+   definition persisted on the step at job creation, not re-read at
+   dispatch: editing the action no longer changes an in-flight job's child.
+   Secrets the defaults reference are still read live at dispatch, and the
+   referenced task definition is still resolved live.
+3. Connection-typed fields on a `type: task` **action's** schema are no
+   longer resolved against the action schema — at creation (literal
+   pre-check) or at dispatch. Resolution happens once, against the
+   **task's** schema. A field the action declares as a connection but the
+   task declares as a primitive now arrives as the name string, not the
+   resolved object.
+4. On a cross-workspace call, a non-string value in a connection-typed task
+   input is rejected. It is a `400` at submit only when the value is a
+   literal supplied by the caller's flow step, the step has no `when`, and
+   the caller is not the task's workspace; a templated value, a value on a
+   `when`-guarded step, or a foreign action default fails the step at
+   dispatch if the step is reached. Within one workspace an object is still
+   accepted as before.
+5. A `type: task` action referencing a task by qualified name is now
+   pre-checked at submit (`400` on unknown workspace / no such task /
+   self-reference); a hook action wrapping such a task is rejected by
+   server-side validation and fails the hook job with a clear message.
+6. The job detail step DTO carries `child_jobs` for `type: task` steps.
+
+A note on defaults that predates this release but is easy to miss: a
+default value in a `type: task` action's `input` is rendered once while
+merging defaults, then again by the general template renderer — so a
+default whose first render produces `{{ … }}` is interpreted a second time.
+`default: "{{ secret.X }}"` where secret `X`'s own value is itself the
+literal string `{{ secret.Y }}` resolves all the way to `Y`'s value.
 
 ## Pod manifest overrides
 
